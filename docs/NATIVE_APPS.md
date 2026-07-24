@@ -6,8 +6,12 @@ GI Hub ships as **one web codebase** (`frontend/`) wrapped three ways:
 |---|---|---|---|
 | Android | Capacitor | `.apk` / `.aab` | scaffolded — build locally (below) |
 | iOS | Capacitor | `.ipa` (Xcode) | scaffolded — build locally (below) |
-| Windows / macOS | Tauri v2 | `.exe` / `.dmg` | foundation documented (below) — init requires the Rust toolchain, which is not installed on this Mac, so the Tauri steps are **not yet build-verified** |
+| Windows / macOS | Tauri v2 | `.exe` / `.dmg` | **scaffolded** — `src-tauri/` is committed (tauri init done 2026-07-25); CI builds it on tag pushes. A LOCAL build still needs the Rust toolchain, and no Tauri build has run on this Mac yet |
 | Any browser / phone | PWA | installable, offline | LIVE today (USER_MANUAL §1.2) |
+
+> **Automated releases:** pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`)
+> builds ALL of the above on GitHub's runners and attaches the `.dmg`, `.exe`,
+> `.msi` and `.apk` to that tag's GitHub Release — see §6.
 
 Everything below runs from `frontend/` unless noted.
 
@@ -41,24 +45,20 @@ npm run cap:ios                # build + sync + open in Xcode → Product ▸ Ar
 ## 3. Windows (.exe) / macOS (.dmg) — Tauri v2 foundation
 
 Tauri compiles a tiny Rust shell around the same `dist/` build — outputs are
-~10 MB installers. **Requires the Rust toolchain** (`rustup`), which is not
-installed on the dev Mac yet — steps below are the documented foundation and
-have not been build-verified here:
+~10 MB installers. `src-tauri/` is **already initialized and committed**
+(`@tauri-apps/cli` is a devDependency; config: `src-tauri/tauri.conf.json`).
+The normal path is the automated release pipeline (§6); to build locally:
 
 ```bash
-# one-time
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust
-npm install -D @tauri-apps/cli
-npx tauri init      # answers: app name "GI Hub" · window title "GI Hub"
-                    #          frontend dist ../dist · dev server http://localhost:5173
+# one-time: the Rust toolchain (NOT installed on the dev Mac yet)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # every build
-npm run build && npx tauri build
-# → src-tauri/target/release/bundle/ (msi/exe on Windows, dmg/app on macOS)
+npx tauri build
+# → src-tauri/target/release/bundle/ (nsis .exe + .msi on Windows, dmg/app on macOS)
 ```
 
-`npx tauri init` generates `src-tauri/` (committed once created; its `target/`
-build dir is gitignored). Windows installers must be built ON Windows, dmg ON
-macOS — Tauri does not cross-compile.
+Windows installers must be built ON Windows, dmg ON macOS — Tauri does not
+cross-compile. (`target/` is gitignored.)
 
 ## 4. OTA updates — how deployed changes reach users
 
@@ -82,7 +82,37 @@ and link them from USER_MANUAL §1.2 — the manual already carries the
 placeholder links (`/downloads/gi-hub.apk`, `/downloads/GI-Hub-Setup.exe`,
 `/downloads/GI-Hub.dmg`).
 
-## 6. Sanity gates
+## 6. Automated release pipeline (GitHub Actions)
+
+Two workflows (adapted from the Bible-project reference pipeline) build and
+publish the installers as **GitHub Release assets**:
+
+| Workflow | Runners | Builds | Attaches |
+|---|---|---|---|
+| `.github/workflows/release-desktop.yml` | macos-14 + windows-latest | Tauri | `.dmg`, NSIS `.exe`, `.msi` |
+| `.github/workflows/release-android.yml` | ubuntu-latest (JDK 17; SDK preinstalled, `cap add android` regenerates the gitignored project) | Capacitor/Gradle | debug-signed `.apk` (sideload-ready) |
+
+**To cut a release:**
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Both workflows fire, build in parallel (~10–20 min), and attach every
+installer to the `v0.1.0` Release under Assets (auto-generated notes). A
+`workflow_dispatch` run from the Actions tab builds WITHOUT publishing —
+artifacts stay downloadable from the run page for 30 days (same shape as the
+reference pipeline; we deliberately dropped its build-on-every-main-push
+trigger — dual-CI guards main, and paid macOS/Windows minutes are saved for
+tags). Neither workflow overlaps `Postgres dual-CI` (branch/PR-scoped paths)
+or the manual Hetzner deploy workflows.
+
+Not yet wired (future): macOS notarization, a Play-Store release keystore
+(`assembleRelease`), and auto-linking the newest release into USER_MANUAL
+§1.2's download URLs.
+
+## 7. Sanity gates
 
 The wrappers never fork the web code: `npm run build && npx tsc --noEmit`
 stays the frontend gate, and `tools/diagnose_sync.py` (docs/DEBUGGING.md)
