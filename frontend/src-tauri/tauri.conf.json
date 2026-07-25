@@ -20,7 +20,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'self' blob:; connect-src 'self' https://gi.giinventory.com http://127.0.0.1:8000 http://localhost:8000",
+      "devCsp": "default-src * 'unsafe-inline' 'unsafe-eval' data: blob: ws: wss:"
     }
   },
   "bundle": {

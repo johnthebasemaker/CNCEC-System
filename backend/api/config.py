@@ -79,6 +79,7 @@ CORS_ORIGINS = (
         "tauri://localhost", "http://tauri.localhost",       # Tauri macOS/Linux · Windows
         "https://tauri.localhost",
         "capacitor://localhost", "https://localhost",        # Capacitor iOS · Android
+        "http://localhost",                                  # Capacitor androidScheme=http builds
     ]
 )
 

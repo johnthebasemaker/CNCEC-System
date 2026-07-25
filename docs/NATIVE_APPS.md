@@ -118,6 +118,38 @@ native shell origins (`tauri://localhost`, `capacitor://localhost`, … — see
 refresh cookie with `SameSite=None; Secure` so silent session refresh works
 cross-origin too.
 
+**Cloudflare Access and the native apps (READ THIS if login says "Server
+unreachable" in the app while the web portal works).** The domain sits
+behind Cloudflare Access (Zero Trust). A browser passes Access once via its
+SSO cookie — but the native shells make bare cross-origin XHR calls with
+**no Access session**, so Access answers `/api/...` with a 302 to its login
+page; the webview kills that cross-origin redirect and axios reports a
+plain network error → the app shows "Server unreachable" even though the
+server is fine. CSP/CORS are already configured (below); the remaining
+gate is an **Access policy change in the Cloudflare Zero Trust dashboard**
+(cannot be done from this repo):
+
+1. Zero Trust → Access → Applications → add an application for
+   `gi.giinventory.com/api/*` (more specific paths win over the site-wide app).
+2. Give it a **Bypass** policy (Everyone). This is safe: every `/api` route
+   enforces its own JWT auth, role gates and rate limits — Access was only
+   ever a second wall for the *HTML portal*, which stays protected.
+   (Alternative: a **Service Auth** policy + Access service token, but that
+   would mean shipping the token inside the installers — don't.)
+3. The in-app diagnostics confirm the state: the browser console of a
+   blocked native app prints `Possible Cloudflare Access block detected…`
+   (client.ts logs the exact status/headers of every network-level failure,
+   403 and 5xx).
+
+**Tauri CSP:** `src-tauri/tauri.conf.json` ships an explicit CSP whose
+`connect-src` allows `https://gi.giinventory.com` plus the local dev
+backends (`http://127.0.0.1:8000`, `http://localhost:8000`). If the API
+domain ever changes, update BOTH the workflow `VITE_API_URL` and this
+`connect-src` list, or the desktop app will block its own API calls.
+`devCsp` stays wide-open for `tauri dev` (HMR websockets). Webview
+`fetch`/XHR needs no Tauri capability entries — those only gate the
+`@tauri-apps/api` plugins, which we don't use for networking.
+
 Not yet wired (future): macOS notarization, a Play-Store release keystore
 (`assembleRelease`), and auto-linking the newest release into USER_MANUAL
 §1.2's download URLs.
@@ -130,9 +162,20 @@ USER_MANUAL §1.2.
 
 | OS | What it says | Bypass |
 |---|---|---|
-| macOS | **"GI Hub is damaged and can't be opened"** — Gatekeeper quarantines any unsigned internet download; the dmg is fine | `xattr -cr "/Applications/GI Hub.app"` (after copying to Applications), then open normally |
+| macOS | **"GI Hub is damaged and can't be opened"** — Gatekeeper quarantines any unsigned internet download; the dmg is fine | 3 steps (below) — quarantine strip alone is NOT enough on Apple Silicon |
 | Windows | SmartScreen: "Windows protected your PC" | **More info → Run anyway** |
 | Android | "Blocked by Play Protect" / unknown-source install | Allow from this source → **Install anyway** |
+
+**macOS — the full 3-step fix (verified on Apple Silicon 2026-07-25).**
+`xattr -cr` alone works on Intel Macs, but M-series hardware refuses to
+execute completely unsigned code — the app dies on launch until it carries
+at least an *ad-hoc* signature:
+
+```bash
+# 1. Drag "GI Hub.app" from the .dmg into /Applications, then:
+sudo xattr -cr "/Applications/GI Hub.app"          # 2. strip quarantine
+codesign --force --deep --sign - "/Applications/GI Hub.app"   # 3. ad-hoc sign (M-series: mandatory)
+```
 
 These go away permanently with signing: Apple Developer ID + notarization
 (macOS), an Authenticode certificate (Windows), and a release keystore /

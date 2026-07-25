@@ -64,13 +64,26 @@ code-signed):**
 
 - **macOS** shows a **fake "damaged" error**: *"GI Hub is damaged and can't
   be opened. You should move it to the Trash."* The app is NOT damaged —
-  macOS quarantines any unsigned app downloaded from the internet. Fix: drag
-  **GI Hub** into *Applications*, then run this once in Terminal and open
-  the app normally:
+  macOS quarantines any unsigned app downloaded from the internet, and on
+  **Apple Silicon (M-series) Macs the hardware additionally refuses to run
+  code with no signature at all**, so stripping quarantine alone is not
+  enough there. Run the full 3-step fix once in Terminal:
 
-  ```
-  xattr -cr "/Applications/GI Hub.app"
-  ```
+  1. Drag **GI Hub.app** from the `.dmg` into the **/Applications** folder.
+  2. Strip the quarantine flag:
+
+     ```
+     sudo xattr -cr "/Applications/GI Hub.app"
+     ```
+
+  3. Apply an ad-hoc signature (**mandatory on M-series Macs** — Intel Macs
+     can usually skip this step):
+
+     ```
+     codesign --force --deep --sign - "/Applications/GI Hub.app"
+     ```
+
+  Then open the app normally.
 
 - **Windows** shows a blue **SmartScreen** panel: *"Windows protected your
   PC."* Click **More info → Run anyway** — the installer then proceeds

@@ -100,6 +100,48 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
+// --- failure diagnostics --------------------------------------------------------
+// The "Server unreachable" toast is deliberately friendly — this logger is the
+// engineer-facing truth. For network errors, 403s and 5xx it prints the exact
+// axios message/code, HTTP status and response headers. Special case: when the
+// API lives behind Cloudflare Access, a native app (no Access SSO cookie) gets
+// a 302 to the Access login page; the browser/webview kills that cross-origin
+// redirect, axios sees a bare network error, and it masquerades as "server
+// down" even though the web app works fine. Flag both signatures.
+function logApiFailure(err: unknown) {
+  const e = err as {
+    message?: string; code?: string
+    config?: { url?: string; method?: string }
+    response?: { status?: number; headers?: Record<string, unknown> }
+  }
+  const res = e?.response
+  const headers = (res?.headers ?? {}) as Record<string, unknown>
+  console.error('[GI Hub] API request failed', {
+    url: `${API_BASE}${e?.config?.url ?? ''}`,
+    method: (e?.config?.method ?? 'get').toUpperCase(),
+    message: e?.message,
+    code: e?.code,
+    status: res?.status ?? '(no response — network error / blocked redirect)',
+    headers,
+  })
+  const serverHdr = String(headers['server'] ?? '').toLowerCase()
+  const cloudflareSeen =
+    'cf-ray' in headers || 'cf-mitigated' in headers || serverHdr.includes('cloudflare')
+  if (res?.status === 403 || cloudflareSeen) {
+    console.error(
+      '[GI Hub] Possible Cloudflare Access block detected on native API request. ' +
+        'The API path needs an Access Bypass/Service-Auth policy — see docs/NATIVE_APPS.md.',
+    )
+  } else if (!res && API_BASE.startsWith('http')) {
+    console.error(
+      '[GI Hub] No response on a cross-origin (native) request. If this domain is ' +
+        'behind Cloudflare Access, its login redirect is blocked by CORS and looks ' +
+        'exactly like this — possible Cloudflare Access block on native API request. ' +
+        'See docs/NATIVE_APPS.md ("Cloudflare Access and the native apps").',
+    )
+  }
+}
+
 // --- unreachable-backend detection --------------------------------------------
 // A request with NO response (network error) or a 502/503/504 from the dev
 // proxy means the API itself is down, not that the call was wrong. Log a
@@ -129,6 +171,12 @@ api.interceptors.response.use(
     const cfg = err?.config
     const url: string = cfg?.url ?? ''
     const status: number | undefined = err?.response?.status
+    // Deep diagnostics for the failure classes that are never "user error":
+    // network-level failures, 403 (Cloudflare Access / WAF) and 5xx. Routine
+    // 401/422/429 stay quiet — they have their own handlers below.
+    if (!err?.response || status === 403 || (status ?? 0) >= 500) {
+      logApiFailure(err)
+    }
     if (!err?.response || status === 502 || status === 503 || status === 504) {
       noteApiUnreachable(url, status)
     }
