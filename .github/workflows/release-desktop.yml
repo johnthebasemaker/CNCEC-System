@@ -57,8 +57,12 @@ jobs:
 
       # `tauri build` runs beforeBuildCommand (npm run build → vite dist/)
       # and then bundles: dmg+app on macOS, nsis .exe + .msi on Windows.
+      # VITE_API_URL points the standalone binaries at the hosted backend —
+      # inside a tauri://localhost shell, relative /api paths resolve nowhere.
       - name: Build installers
         working-directory: frontend
+        env:
+          VITE_API_URL: https://gi.giinventory.com/api
         run: npx tauri build
 
       - name: Upload macOS artifact

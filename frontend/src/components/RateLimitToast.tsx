@@ -7,6 +7,11 @@ import { App } from 'antd'
  * warning toast that counts down live ("try again in 42 s…") and clears
  * itself. New 429s while counting just extend/replace the countdown.
  * Renders nothing — it only owns the toast.
+ *
+ * Also owns the 'gi-api-unreachable' toast: the axios interceptor fires it
+ * (throttled to once per 30 s, and never while the device itself is offline)
+ * when requests get no response or a 502/503/504 from the dev proxy — i.e.
+ * the backend process is down, not the network.
  */
 export default function RateLimitToast() {
   const { message } = App.useApp()
@@ -39,9 +44,19 @@ export default function RateLimitToast() {
       tick()
       timer.current = window.setInterval(tick, 1000)
     }
+    const onUnreachable = () => {
+      message.open({
+        key: 'gi-api-unreachable', type: 'error', duration: 8,
+        content: import.meta.env.DEV
+          ? 'API server unreachable — ensure the Python backend is running (uvicorn backend.api.main:app --port 8000).'
+          : 'Server unreachable — please try again shortly or contact IT if it persists.',
+      })
+    }
     window.addEventListener('gi-rate-limited', onLimited)
+    window.addEventListener('gi-api-unreachable', onUnreachable)
     return () => {
       window.removeEventListener('gi-rate-limited', onLimited)
+      window.removeEventListener('gi-api-unreachable', onUnreachable)
       stop()
     }
   }, [message])

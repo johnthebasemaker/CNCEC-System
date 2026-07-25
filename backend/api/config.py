@@ -74,6 +74,11 @@ CORS_ORIGINS = (
     [o.strip() for o in _env_cors.split(",") if o.strip()] if _env_cors else [
         "http://localhost:5173", "http://127.0.0.1:5173",   # Vite default
         "http://localhost:3000", "http://127.0.0.1:3000",   # CRA / Next default
+        # Native app shells (built with VITE_API_URL → cross-origin calls).
+        # These are fixed webview origins, not attacker-choosable ones:
+        "tauri://localhost", "http://tauri.localhost",       # Tauri macOS/Linux · Windows
+        "https://tauri.localhost",
+        "capacitor://localhost", "https://localhost",        # Capacitor iOS · Android
     ]
 )
 

@@ -108,11 +108,39 @@ trigger — dual-CI guards main, and paid macOS/Windows minutes are saved for
 tags). Neither workflow overlaps `Postgres dual-CI` (branch/PR-scoped paths)
 or the manual Hetzner deploy workflows.
 
+**Production API routing:** both workflows inject
+`VITE_API_URL=https://gi.giinventory.com/api` into the web build, so the
+standalone binaries call the hosted backend directly (Sync, AI, WhatsApp all
+work). Web builds leave it unset and keep the relative `/api` prefix
+(`frontend/src/api/client.ts` → `API_BASE`). The backend already allows the
+native shell origins (`tauri://localhost`, `capacitor://localhost`, … — see
+`CORS_ORIGINS` in `backend/api/config.py`) and, in production, issues the
+refresh cookie with `SameSite=None; Secure` so silent session refresh works
+cross-origin too.
+
 Not yet wired (future): macOS notarization, a Play-Store release keystore
 (`assembleRelease`), and auto-linking the newest release into USER_MANUAL
 §1.2's download URLs.
 
-## 7. Sanity gates
+## 7. First-launch warnings — unsigned builds
+
+None of the CI artifacts are code-signed yet, so every OS shows a one-time
+scare prompt. All three are expected; exact end-user wording lives in
+USER_MANUAL §1.2.
+
+| OS | What it says | Bypass |
+|---|---|---|
+| macOS | **"GI Hub is damaged and can't be opened"** — Gatekeeper quarantines any unsigned internet download; the dmg is fine | `xattr -cr "/Applications/GI Hub.app"` (after copying to Applications), then open normally |
+| Windows | SmartScreen: "Windows protected your PC" | **More info → Run anyway** |
+| Android | "Blocked by Play Protect" / unknown-source install | Allow from this source → **Install anyway** |
+
+These go away permanently with signing: Apple Developer ID + notarization
+(macOS), an Authenticode certificate (Windows), and a release keystore /
+Play-Store listing (Android) — all on the future list above. The desktop
+binaries being ~10 MB is Tauri working as designed (native OS webview, no
+bundled Chromium); the app is complete and keeps the PWA offline queue.
+
+## 8. Sanity gates
 
 The wrappers never fork the web code: `npm run build && npx tsc --noEmit`
 stays the frontend gate, and `tools/diagnose_sync.py` (docs/DEBUGGING.md)

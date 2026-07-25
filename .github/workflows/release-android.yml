@@ -46,8 +46,13 @@ jobs:
         working-directory: frontend
         run: npm ci --no-audit --no-fund
 
+      # VITE_API_URL points the APK at the hosted backend — inside the
+      # Capacitor webview (origin https://localhost) relative /api paths
+      # resolve nowhere.
       - name: Build web assets
         working-directory: frontend
+        env:
+          VITE_API_URL: https://gi.giinventory.com/api
         run: npm run build
 
       - name: Generate the native Android project

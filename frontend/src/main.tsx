@@ -9,6 +9,7 @@ import App from './App.tsx'
 import { AuthProvider } from './auth/AuthContext'
 import ErrorBoundary from './components/ErrorBoundary'
 import { ThemeModeProvider, useThemeMode } from './theme/ThemeContext'
+import RateLimitToast from './components/RateLimitToast'
 import { darkTheme, lightTheme } from './theme/themes'
 import { registerSW } from 'virtual:pwa-register'
 import { initOfflineQueue } from './offline/queue'
@@ -41,6 +42,9 @@ function ThemedApp() {
   return (
     <ConfigProvider theme={mode === 'dark' ? darkTheme : lightTheme}>
       <AntApp>
+        {/* Global toasts (429 countdown + backend-unreachable) must exist on
+            the LOGIN page too — that's where a dev first meets a dead API. */}
+        <RateLimitToast />
         <BrowserRouter>
           <AuthProvider>
             <ErrorBoundary>

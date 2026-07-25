@@ -147,11 +147,19 @@ def _hash_refresh(raw: str) -> str:
 
 
 def _set_refresh_cookie(response: Response, raw: str) -> None:
+    # In production the native apps (Tauri/Capacitor, origin tauri://localhost
+    # etc.) hit the API cross-site, and browsers/webviews drop SameSite=lax
+    # cookies on cross-site fetches — silent refresh would break after 15 min.
+    # SameSite=none requires Secure, which production (HTTPS) already sets;
+    # dev stays lax (http). CSRF exposure is contained: /auth/refresh only
+    # returns a token in the response body, which CORS keeps unreadable to
+    # non-allowed origins.
+    production = os.environ.get("GI_ENV", "").lower() == "production"
     response.set_cookie(
         REFRESH_COOKIE, raw,
         max_age=int(REFRESH_TTL.total_seconds()),
-        httponly=True, samesite="lax",
-        secure=os.environ.get("GI_ENV", "").lower() == "production",
+        httponly=True, samesite="none" if production else "lax",
+        secure=production,
         path="/")
 
 

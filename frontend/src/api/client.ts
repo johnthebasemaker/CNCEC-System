@@ -1,7 +1,17 @@
 import axios from 'axios'
 
-// All calls go through the Vite dev proxy (/api -> uvicorn :8000).
-export const api = axios.create({ baseURL: '/api' })
+// API base URL. Web builds leave VITE_API_URL unset and use the relative
+// '/api' prefix (Vite dev proxy → uvicorn :8000; nginx in production). The
+// NATIVE builds (Tauri/Capacitor, see .github/workflows/release-*.yml) inject
+// VITE_API_URL=https://gi.giinventory.com/api so the standalone binaries talk
+// to the hosted backend — their origin is tauri://localhost etc., so relative
+// paths would otherwise resolve nowhere.
+export const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/+$/, '') || '/api'
+
+// withCredentials keeps the httpOnly refresh cookie flowing when API_BASE is
+// cross-origin (native apps); it is a no-op for same-origin web requests.
+export const api = axios.create({ baseURL: API_BASE, withCredentials: true })
 
 // --- auth token plumbing -----------------------------------------------------
 export const TOKEN_KEY = 'gi_token'
@@ -61,7 +71,9 @@ let _refreshing: Promise<string | null> | null = null
 async function refreshAccessToken(): Promise<string | null> {
   try {
     // Raw axios, not `api` — the interceptor below must not recurse.
-    const { data } = await axios.post('/api/auth/refresh')
+    const { data } = await axios.post(`${API_BASE}/auth/refresh`, null, {
+      withCredentials: true,
+    })
     const t = (data?.access_token as string) ?? null
     if (t) setAuthToken(t)
     return t
@@ -70,11 +82,38 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
+// --- unreachable-backend detection --------------------------------------------
+// A request with NO response (network error) or a 502/503/504 from the dev
+// proxy means the API itself is down, not that the call was wrong. Log a
+// clear, throttled hint (the classic dev trap is Vite up + uvicorn down →
+// every call 502s) and raise a window event so AppLayout can toast it.
+let _lastUnreachableLog = 0
+
+function noteApiUnreachable(url: string, status?: number) {
+  // Genuinely offline → the offline queue/badge owns that state; a "backend
+  // down" hint would be wrong.
+  if (!navigator.onLine) return
+  const now = Date.now()
+  if (now - _lastUnreachableLog < 30_000) return
+  _lastUnreachableLog = now
+  const where = status ? `${status} from the API proxy` : 'network error'
+  console.error(
+    `[GI Hub] API unreachable (${where}, ${API_BASE}${url}). ` +
+      'Ensure the Python backend is running: ' +
+      '.venv/bin/uvicorn backend.api.main:app --host 127.0.0.1 --port 8000',
+  )
+  window.dispatchEvent(new CustomEvent('gi-api-unreachable', { detail: { url, status } }))
+}
+
 api.interceptors.response.use(
   (r) => r,
   async (err) => {
     const cfg = err?.config
     const url: string = cfg?.url ?? ''
+    const status: number | undefined = err?.response?.status
+    if (!err?.response || status === 502 || status === 503 || status === 504) {
+      noteApiUnreachable(url, status)
+    }
     // Phase 8-2 — rate limited: surface a global countdown toast (handled in
     // AppLayout) with the server's Retry-After. The error still rejects so
     // each caller's own handler runs too.

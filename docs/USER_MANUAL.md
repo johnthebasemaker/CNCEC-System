@@ -59,6 +59,34 @@ for every platform are in [`docs/NATIVE_APPS.md`](NATIVE_APPS.md) —
 `npx cap add android && npm run cap:sync && ./gradlew assembleDebug` produces
 the Android APK in a few minutes.
 
+**⚠️ First-launch security warnings (normal — the installers are not yet
+code-signed):**
+
+- **macOS** shows a **fake "damaged" error**: *"GI Hub is damaged and can't
+  be opened. You should move it to the Trash."* The app is NOT damaged —
+  macOS quarantines any unsigned app downloaded from the internet. Fix: drag
+  **GI Hub** into *Applications*, then run this once in Terminal and open
+  the app normally:
+
+  ```
+  xattr -cr "/Applications/GI Hub.app"
+  ```
+
+- **Windows** shows a blue **SmartScreen** panel: *"Windows protected your
+  PC."* Click **More info → Run anyway** — the installer then proceeds
+  normally.
+- **Android** blocks sideloads by default: when you open the `.apk`, tap
+  **Settings → Allow from this source**, and if **Play Protect** asks to
+  scan the app, choose **Install anyway**.
+
+These prompts disappear once the installers are code-signed (Apple
+notarization / Windows certificate / Play-Store keystore — planned).
+
+💡 *Why is the desktop app so small (~10 MB)?* That's intentional: it is
+built with Tauri, which uses your operating system's own web engine instead
+of bundling a browser. Despite the tiny size it is the complete app and
+works offline with the same sync queue described in §1.3.
+
 ### 1.3 Working offline (Store Keepers)
 Read pages (stock, records, notifications) show the **last good copy** when
 the connection drops. The four material-entry forms (Issue / Receive /
