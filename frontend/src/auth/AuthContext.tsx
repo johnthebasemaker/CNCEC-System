@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { App } from 'antd'
-import { api, setAuthToken, TOKEN_KEY } from '../api/client'
+import { api, detectClientType, setAuthToken, TOKEN_KEY } from '../api/client'
 
 export interface User {
   username: string
@@ -55,7 +55,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [message])
 
   const login = async (username: string, password: string) => {
-    const { data } = await api.post('/auth/login', { username, password })
+    // client_type steers the refresh-family TTL server-side: 'native'
+    // (Tauri/Capacitor installs) = 90 days, 'web' = 7. On an MFA login the
+    // server carries it inside the signed mfa_token, so /login/2fa needs
+    // nothing extra.
+    const { data } = await api.post('/auth/login', {
+      username, password, client_type: detectClientType(),
+    })
     if (data.mfa_required) return { mfa: true, mfaToken: data.mfa_token as string }
     setAuthToken(data.access_token)
     setUser(data.user)

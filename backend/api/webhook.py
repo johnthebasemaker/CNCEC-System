@@ -56,7 +56,8 @@ log = logging.getLogger("gi.webhook")
 router = APIRouter(tags=["whatsapp webhook"])
 
 users_t = _MD.tables["users"]
-sessions_t = _MD.tables["auth_sessions"]
+sessions_t = _MD.tables["auth_sessions"]        # legacy pre-RTR rows
+refresh_t = _MD.tables["refresh_sessions"]      # RTR token families
 
 _TEMP_PW_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
 
@@ -159,6 +160,8 @@ async def _cmd_reset_password(session: AsyncSession, user: dict) -> str:
     # only the holder of the phone (this temp password) can sign in now.
     await session.execute(delete(sessions_t)
                           .where(sessions_t.c["username"] == user["username"]))
+    await session.execute(delete(refresh_t)
+                          .where(refresh_t.c["username"] == user["username"]))
     await _audit(session, user["username"], "PASSWORD_RESET_WHATSAPP",
                  "temporary password issued via WhatsApp self-service; all sessions revoked")
     return (f"Your GI Hub temporary password: {temp}\n"

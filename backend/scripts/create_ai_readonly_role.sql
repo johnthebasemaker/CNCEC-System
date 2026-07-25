@@ -34,4 +34,4 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO gi_ai_ro;
 
 -- Defense-in-depth: the safety gate already blocks these table names in SQL
 -- text; revoking makes the sensitive surfaces unreadable even on a bypass.
-REVOKE SELECT ON users, pending_users, auth_sessions, ai_jobs FROM gi_ai_ro;
+REVOKE SELECT ON users, pending_users, auth_sessions, refresh_sessions, ai_jobs FROM gi_ai_ro;

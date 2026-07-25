@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer,
-    LargeBinary, Numeric, Text, UniqueConstraint, text,
+    LargeBinary, Numeric, Text, UniqueConstraint, Uuid, text,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -567,11 +567,9 @@ class Users(Base):
     Location = Column(Text)  # free-text for unscoped roles (T4)
 
 class AuthSessions(Base):
-    """Refresh-token sessions for the FastAPI backend (NEW-STACK ONLY — no
-    SQLite counterpart; dual_ci leaves it empty on reset, which just means a
-    local re-login). Rows are revocable server-side: rotation marks the old
-    row revoked and links its successor; reuse of a revoked token nukes every
-    active session for that user (token-theft containment)."""
+    """LEGACY refresh-token sessions (superseded by RefreshSessions/RTR —
+    kept only so pre-RTR rows stay auditable until they expire; no code
+    writes here any more). NEW-STACK ONLY — no SQLite counterpart."""
     __tablename__ = "auth_sessions"
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(Text, nullable=False, index=True)
@@ -581,6 +579,32 @@ class AuthSessions(Base):
     revoked_at = Column(DateTime)
     revoke_reason = Column(Text)  # rotated | logout | reuse-detected | admin-reset | user-deleted
     replaced_by = Column(Integer)  # successor session id (rotation chain)
+
+class RefreshSessions(Base):
+    """Refresh Token Rotation (RTR) sessions (NEW-STACK ONLY — no SQLite
+    counterpart; dual_ci leaves it empty on reset → local re-login).
+    One row per refresh token; a login opens a new *family* and every
+    rotation appends a row to it (same family_id, new jti). Replaying a
+    revoked token is theft evidence → the WHOLE family is revoked, but other
+    families (the user's other devices) survive. client_type drives the TTL:
+    'web' 7 days, 'native' (Tauri/Capacitor) 90 days.
+    ⚠️ SECURITY: listed in the gi_ai_ro REVOKE set
+    (backend/scripts/create_ai_readonly_role.sql) — never expose to the AI
+    read-only role."""
+    __tablename__ = "refresh_sessions"
+    id = Column(Uuid, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    username = Column(Text, nullable=False, index=True)  # denormalized: cheap revoke-by-name
+    family_id = Column(Uuid, nullable=False, index=True)  # one login = one family
+    refresh_token_jti = Column(Text, nullable=False, unique=True)  # jti claim of the JWT
+    client_type = Column(Text, nullable=False, server_default=text("'web'"))  # web | native
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    expires_at = Column(DateTime, nullable=False)
+    is_revoked = Column(Boolean, nullable=False, server_default=text('FALSE'))
+    revoked_at = Column(DateTime)
+    revoke_reason = Column(Text)  # rotated | logout | reuse-detected | admin-revoked | user-deleted | expired
+    replaced_by = Column(Uuid)   # successor row id (rotation chain)
 
 class SlaDismissals(Base):
     """Admin 'Clear' actions on the Overdue Actions view (NEW-STACK ONLY — no

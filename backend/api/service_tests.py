@@ -358,12 +358,14 @@ async def test_token_refresh():
         new_refresh = r2.cookies.get("gi_refresh")
         check("refresh rotates the cookie", bool(new_refresh) and new_refresh != old_refresh)
 
-        # NB: manual cookie sets use a different jar key (domain) than
-        # response-set cookies — clear the jar first or requests carry BOTH
-        # gi_refresh cookies and the server reads the stale one.
+        # NB: clear the jar first or requests carry BOTH gi_refresh cookies
+        # and the server reads the stale one. Never pass domain= — httpx
+        # treats an explicit host-only domain as a mismatch and silently
+        # DROPS the cookie (suite AQ caught this: the replay checks here
+        # passed vacuously as "no refresh token" 401s for months).
         def use_cookie(tok):
             ac.cookies.clear()
-            ac.cookies.set("gi_refresh", tok, domain="svc")
+            ac.cookies.set("gi_refresh", tok)
 
         # Replaying the OLD (rotated) token must trip reuse detection…
         use_cookie(old_refresh)
@@ -6522,6 +6524,146 @@ async def test_bug_tracking_engine():
             await s.commit()
 
 
+async def test_rtr():
+    """Suite AQ — Refresh Token Rotation: per-client TTLs (web 7d / native
+    90d), rotation stays inside one token family, REPLAYING a rotated token
+    revokes the WHOLE family (breach detection) while the user's OTHER
+    families/devices survive, logout kills the current family, and the
+    breach leaves a SESSION_REUSE audit row."""
+    import datetime as _dt
+    import uuid as _uuid
+
+    import jwt as _jwt
+    from sqlalchemy import text as _sqt
+
+    from .auth import JWT_ALG, JWT_SECRET
+
+    def claims(tok: str) -> dict:
+        return _jwt.decode(tok, JWT_SECRET, algorithms=[JWT_ALG])
+
+    async def row_by_jti(jti: str):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(
+                "SELECT id, user_id, username, family_id, client_type, "
+                "expires_at, is_revoked, revoke_reason, replaced_by "
+                "FROM refresh_sessions WHERE refresh_token_jti = :j"),
+                {"j": jti})).first()
+
+    async def active_in_family(fam: _uuid.UUID) -> int:
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM refresh_sessions "
+                "WHERE family_id = :f AND NOT is_revoked"), {"f": fam})).scalar_one()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        _ip = {"X-Real-IP": "203.0.113.94"}  # isolated rate-limit bucket
+
+        def use_cookie(tok):
+            # clear first so requests never carry two gi_refresh cookies; no
+            # domain= — httpx silently drops host-only-domain cookies
+            ac.cookies.clear()
+            ac.cookies.set("gi_refresh", tok)
+
+        # --- client-typed TTLs ------------------------------------------------
+        r = await ac.post("/auth/login", headers=_ip, json={
+            "username": "worker", "password": "floor2026", "client_type": "native"})
+        tok_native = r.cookies.get("gi_refresh")
+        check("aq: native login → 200 + refresh cookie",
+              r.status_code == 200 and bool(tok_native), f"got {r.status_code}")
+        c = claims(tok_native)
+        check("aq: refresh token is a signed JWT with jti/fam/client claims",
+              c.get("scope") == "refresh" and c.get("client") == "native"
+              and bool(c.get("jti")) and bool(c.get("fam")), str(sorted(c)))
+        row = await row_by_jti(c["jti"])
+        days = ((row.expires_at - _dt.datetime.now(_dt.timezone.utc)
+                 .replace(tzinfo=None)).days if row else -1)
+        check("aq: native session row ≈ 90-day expiry, not revoked",
+              row is not None and row.client_type == "native"
+              and 89 <= days <= 90 and not row.is_revoked, f"days={days}")
+
+        ac.cookies.clear()
+        r = await ac.post("/auth/login", headers=_ip, json={
+            "username": "worker", "password": "floor2026"})
+        tok_a1 = r.cookies.get("gi_refresh")
+        c_a1 = claims(tok_a1)
+        row = await row_by_jti(c_a1["jti"])
+        days = ((row.expires_at - _dt.datetime.now(_dt.timezone.utc)
+                 .replace(tzinfo=None)).days if row else -1)
+        check("aq: client_type omitted → web family, ≈ 7-day expiry",
+              row is not None and row.client_type == "web" and 6 <= days <= 7,
+              f"days={days}")
+        fam_a = row.family_id
+        check("aq: a fresh login opens a NEW family (native ≠ web)",
+              _uuid.UUID(str(fam_a)) != _uuid.UUID(c["fam"]))
+
+        r = await ac.post("/auth/login", headers=_ip, json={
+            "username": "worker", "password": "floor2026", "client_type": "toaster"})
+        check("aq: unknown client_type → 422", r.status_code == 422,
+              f"got {r.status_code}")
+
+        # --- rotation: same family, old row revoked+linked --------------------
+        use_cookie(tok_a1)
+        r = await ac.post("/auth/refresh", headers=_ip)
+        tok_a2 = r.cookies.get("gi_refresh")
+        c_a2 = claims(tok_a2) if tok_a2 else {}
+        check("aq: refresh rotates → new jti, SAME family",
+              r.status_code == 200 and bool(tok_a2)
+              and c_a2.get("jti") != c_a1["jti"]
+              and _uuid.UUID(c_a2.get("fam", "0" * 32)) == _uuid.UUID(str(fam_a)),
+              f"got {r.status_code}")
+        old = await row_by_jti(c_a1["jti"])
+        check("aq: rotated row is_revoked + reason 'rotated' + successor link",
+              old is not None and old.is_revoked and old.revoke_reason == "rotated"
+              and old.replaced_by is not None, str(old))
+
+        # --- a second device (family B) must survive family A's breach --------
+        ac.cookies.clear()
+        r = await ac.post("/auth/login", headers=_ip, json={
+            "username": "worker", "password": "floor2026"})
+        tok_b1 = r.cookies.get("gi_refresh")
+        fam_b = (await row_by_jti(claims(tok_b1)["jti"])).family_id
+
+        # REPLAY the stolen (already-rotated) A1 token…
+        use_cookie(tok_a1)
+        r = await ac.post("/auth/refresh", headers=_ip)
+        check("aq: replaying a rotated token → 401 breach response",
+              r.status_code == 401 and "reuse" in str(r.json().get("detail", "")),
+              f"{r.status_code} {r.text[:80]}")
+        check("aq: breach revokes the ENTIRE family (successor included)",
+              await active_in_family(fam_a) == 0)
+        use_cookie(tok_a2)
+        r = await ac.post("/auth/refresh", headers=_ip)
+        check("aq: the live successor is dead over HTTP too", r.status_code == 401,
+              f"got {r.status_code}")
+        async with SessionLocal() as s:
+            n_audit = (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM system_audit_log WHERE username = 'worker' "
+                "AND action_type = 'SESSION_REUSE' AND details LIKE '%family%'"
+            ))).scalar_one()
+        check("aq: breach writes a SESSION_REUSE audit row", n_audit >= 1,
+              f"n={n_audit}")
+
+        # …while family B (the other device) is untouched and still rotates.
+        use_cookie(tok_b1)
+        r = await ac.post("/auth/refresh", headers=_ip)
+        check("aq: OTHER family survives the breach (isolation)",
+              r.status_code == 200, f"got {r.status_code}")
+        check("aq: family B still has exactly one active token",
+              await active_in_family(fam_b) == 1)
+
+        # --- logout revokes the whole current family ---------------------------
+        r = await ac.post("/auth/logout", headers=_ip)  # jar holds rotated B2
+        check("aq: logout → 200", r.status_code == 200, f"got {r.status_code}")
+        check("aq: logout revokes the whole family", await active_in_family(fam_b) == 0)
+
+        # cleanup: this suite's families (all revoked by now) — keep the mirror tidy
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                "DELETE FROM refresh_sessions WHERE username = 'worker'"))
+            await s.commit()
+
+
 async def _relax_entry_gates() -> None:
     """Parity A1 — require_entry_documents defaults ON in production. Switch
     it OFF for the functional suites (they submit entries without documents);
@@ -6626,6 +6768,8 @@ async def main() -> int:
     await test_bug_tracking_engine()
     print("\n AP. scan-to-dashboard material card (role-scoped stock + 30d trend)")
     await test_material_card()
+    print("\n AQ. refresh-token rotation (families, per-client TTL, replay breach)")
+    await test_rtr()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

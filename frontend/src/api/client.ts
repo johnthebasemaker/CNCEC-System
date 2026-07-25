@@ -13,6 +13,20 @@ export const API_BASE =
 // cross-origin (native apps); it is a no-op for same-origin web requests.
 export const api = axios.create({ baseURL: API_BASE, withCredentials: true })
 
+// RTR client identity: the backend issues a 90-day refresh-token family to
+// installed native apps ('native') and a 7-day one to browsers ('web').
+// Tauri v2 injects __TAURI_INTERNALS__ into its webview; Capacitor exposes
+// window.Capacitor and isNativePlatform() is false when the same bundle runs
+// in a plain browser. Sent with the login payload only — the server pins the
+// choice inside the signed token family afterwards.
+export function detectClientType(): 'web' | 'native' {
+  const w = window as unknown as Record<string, unknown>
+  if ('__TAURI_INTERNALS__' in w || '__TAURI__' in w) return 'native'
+  const cap = w.Capacitor as { isNativePlatform?: () => boolean } | undefined
+  if (cap?.isNativePlatform?.()) return 'native'
+  return 'web'
+}
+
 // --- auth token plumbing -----------------------------------------------------
 export const TOKEN_KEY = 'gi_token'
 let _token: string | null = localStorage.getItem(TOKEN_KEY)
@@ -71,6 +85,10 @@ let _refreshing: Promise<string | null> | null = null
 async function refreshAccessToken(): Promise<string | null> {
   try {
     // Raw axios, not `api` — the interceptor below must not recurse.
+    // RTR: this response also carries the ROTATED refresh token, but as an
+    // httpOnly Set-Cookie the JS never sees — the browser/webview stores the
+    // new cookie automatically (withCredentials covers the cross-origin
+    // native case). Only the short-lived access token lives in JS.
     const { data } = await axios.post(`${API_BASE}/auth/refresh`, null, {
       withCredentials: true,
     })

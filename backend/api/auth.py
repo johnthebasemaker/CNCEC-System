@@ -20,6 +20,8 @@ import hashlib
 import os
 import secrets
 import sys
+import uuid
+from typing import Literal
 
 import bcrypt
 import jwt
@@ -42,7 +44,8 @@ _MD = models.Base.metadata
 users_t = _MD.tables["users"]
 audit_t = _MD.tables["system_audit_log"]
 pending_users_t = _MD.tables["pending_users"]
-sessions_t = _MD.tables["auth_sessions"]
+sessions_t = _MD.tables["auth_sessions"]        # LEGACY (pre-RTR) — revoke-only, no new writes
+refresh_t = _MD.tables["refresh_sessions"]      # RTR: token families, per-client TTL
 app_settings_t = _MD.tables["app_settings"]
 sysset_t = _MD.tables["system_settings"]  # admin-created sites (category='Site')
 phone_otp_t = _MD.tables["phone_otp"]      # self-service phone-change OTP codes
@@ -58,12 +61,15 @@ async def maintenance_on(session: AsyncSession) -> bool:
 # Resolved once at import — in production a weak/absent key raises here (fail-fast).
 JWT_SECRET = jwt_secret()
 JWT_ALG = "HS256"
-# Short-lived access + long-lived rotating refresh (httpOnly cookie). The SPA
-# silently refreshes on 401, so a 15-minute access token never interrupts a
-# shift; revoking the refresh session (logout / admin reset / reuse detection)
-# ends the session server-side within one access-token lifetime.
+# Short-lived access + long-lived ROTATING refresh (RTR, httpOnly cookie).
+# The SPA silently refreshes on 401, so a 15-minute access token never
+# interrupts a shift; revoking the refresh family (logout / admin reset /
+# replay detection) ends the session server-side within one access-token
+# lifetime. The refresh TTL depends on the client: browsers get 7 days, the
+# installed native apps (Tauri/Capacitor) get 90 — a warehouse tablet
+# shouldn't demand a password every week.
 ACCESS_TTL = _dt.timedelta(minutes=15)
-REFRESH_TTL = _dt.timedelta(days=7)
+REFRESH_TTLS = {"web": _dt.timedelta(days=7), "native": _dt.timedelta(days=90)}
 REFRESH_COOKIE = "gi_refresh"
 MFA_TTL = _dt.timedelta(minutes=5)
 
@@ -110,11 +116,13 @@ def _verify_totp(secret: str | None, code: str) -> bool:
 
 
 def _make_token(sub: str, role: str, site_id: str, ttl: _dt.timedelta,
-                scope: str = "access", warehouse_id: str = "") -> str:
+                scope: str = "access", warehouse_id: str = "",
+                extra: dict | None = None) -> str:
     now = _dt.datetime.now(_dt.timezone.utc)
     payload = {"sub": sub, "role": role, "site_id": site_id or "",
                "warehouse_id": warehouse_id or "",
-               "scope": scope, "iat": now, "exp": now + ttl}
+               "scope": scope, "iat": now, "exp": now + ttl,
+               **(extra or {})}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 
@@ -146,7 +154,7 @@ def _hash_refresh(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _set_refresh_cookie(response: Response, raw: str) -> None:
+def _set_refresh_cookie(response: Response, raw: str, ttl: _dt.timedelta) -> None:
     # In production the native apps (Tauri/Capacitor, origin tauri://localhost
     # etc.) hit the API cross-site, and browsers/webviews drop SameSite=lax
     # cookies on cross-site fetches — silent refresh would break after 15 min.
@@ -157,7 +165,7 @@ def _set_refresh_cookie(response: Response, raw: str) -> None:
     production = os.environ.get("GI_ENV", "").lower() == "production"
     response.set_cookie(
         REFRESH_COOKIE, raw,
-        max_age=int(REFRESH_TTL.total_seconds()),
+        max_age=int(ttl.total_seconds()),
         httponly=True, samesite="none" if production else "lax",
         secure=production,
         path="/")
@@ -167,25 +175,58 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(REFRESH_COOKIE, path="/")
 
 
-async def _open_session(session: AsyncSession, username: str) -> str:
-    """Insert a session row; returns the RAW refresh token (only ever sent in
-    the httpOnly cookie — never in a JSON body, never stored raw)."""
-    raw = secrets.token_urlsafe(48)
-    await session.execute(insert(sessions_t).values(
-        username=username, refresh_hash=_hash_refresh(raw),
-        expires_at=_now() + REFRESH_TTL))
-    return raw
+async def _open_session(session: AsyncSession, username: str, user_id: int,
+                        client_type: str, family_id: uuid.UUID | None = None,
+                        replaces: uuid.UUID | None = None) -> tuple[str, uuid.UUID]:
+    """RTR: mint a refresh JWT (scope='refresh', unique jti, family claim) and
+    insert its tracking row. A fresh login opens a NEW family; a rotation
+    passes the existing family_id. Returns (raw_jwt, row_id) — the raw token
+    only ever travels in the httpOnly cookie, never a JSON body."""
+    ttl = REFRESH_TTLS[client_type]
+    jti = uuid.uuid4().hex
+    fam = family_id or uuid.uuid4()
+    row_id = uuid.uuid4()
+    raw = _make_token(username, "", "", ttl, scope="refresh",
+                      extra={"jti": jti, "fam": fam.hex, "client": client_type})
+    await session.execute(insert(refresh_t).values(
+        id=row_id, user_id=user_id, username=username, family_id=fam,
+        refresh_token_jti=jti, client_type=client_type,
+        expires_at=_now() + ttl, is_revoked=False))
+    if replaces is not None:
+        await session.execute(update(refresh_t)
+                              .where(refresh_t.c["id"] == replaces)
+                              .values(is_revoked=True, revoked_at=_now(),
+                                      revoke_reason="rotated", replaced_by=row_id))
+    return raw, row_id
+
+
+async def _revoke_family(session: AsyncSession, family_id: uuid.UUID, reason: str) -> int:
+    """Revoke every active token in one family (logout, replay detection).
+    Does NOT commit — the caller owns the transaction."""
+    res = await session.execute(
+        update(refresh_t)
+        .where(refresh_t.c["family_id"] == family_id,
+               refresh_t.c["is_revoked"].is_(False))
+        .values(is_revoked=True, revoked_at=_now(), revoke_reason=reason))
+    return res.rowcount or 0
 
 
 async def revoke_all_sessions(session: AsyncSession, username: str, reason: str) -> int:
-    """Revoke every active session for a user (password reset, user delete,
-    refresh-token reuse). Does NOT commit — the caller owns the transaction."""
+    """Revoke every active session for a user across ALL families/devices
+    (password reset, user delete, admin action). Covers the legacy
+    auth_sessions rows too until they age out. Does NOT commit — the caller
+    owns the transaction."""
     res = await session.execute(
+        update(refresh_t)
+        .where(refresh_t.c["username"] == username,
+               refresh_t.c["is_revoked"].is_(False))
+        .values(is_revoked=True, revoked_at=_now(), revoke_reason=reason))
+    legacy = await session.execute(
         update(sessions_t)
         .where(sessions_t.c["username"] == username,
                sessions_t.c["revoked_at"].is_(None))
         .values(revoked_at=_now(), revoke_reason=reason))
-    return res.rowcount or 0
+    return (res.rowcount or 0) + (legacy.rowcount or 0)
 
 
 async def get_current_user(
@@ -275,6 +316,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class LoginIn(BaseModel):
     username: str
     password: str
+    # 'native' (Tauri/Capacitor installs) buys a 90-day refresh family;
+    # browsers keep the 7-day default. Anything else is a 422.
+    client_type: Literal["web", "native"] = "web"
 
 
 class TwoFAIn(BaseModel):
@@ -294,6 +338,7 @@ class RegisterIn(BaseModel):
 
 async def _fetch_user(session: AsyncSession, username: str):
     return (await session.execute(select(
+        users_t.c["id"],
         users_t.c["username"], users_t.c["password_hash"], users_t.c["role"],
         users_t.c["Site_ID"], users_t.c["Warehouse_ID"],
         users_t.c["totp_secret"], users_t.c["totp_enabled"],
@@ -358,14 +403,17 @@ async def login(body: LoginIn, response: Response,
         raise HTTPException(503, "GI Hub is in maintenance mode — please try again later")
 
     if row.totp_enabled:
-        mfa = _make_token(row.username, row.role, row.Site_ID, MFA_TTL, scope="mfa")
+        # Carry client_type inside the signed MFA token so the 2FA completion
+        # opens the right refresh family (the client can't upgrade it later).
+        mfa = _make_token(row.username, row.role, row.Site_ID, MFA_TTL, scope="mfa",
+                          extra={"client": body.client_type})
         return {"mfa_required": True, "mfa_token": mfa}
 
     token = _make_token(row.username, row.role, row.Site_ID, ACCESS_TTL,
                         warehouse_id=row.Warehouse_ID)
-    raw_refresh = await _open_session(session, row.username)
-    await _audit(session, row.username, "LOGIN", "password")  # commits
-    _set_refresh_cookie(response, raw_refresh)
+    raw_refresh, _ = await _open_session(session, row.username, row.id, body.client_type)
+    await _audit(session, row.username, "LOGIN", f"password client={body.client_type}")  # commits
+    _set_refresh_cookie(response, raw_refresh, REFRESH_TTLS[body.client_type])
     return {"access_token": token, "token_type": "bearer",
             "user": _public(row.username, row.role, row.Site_ID, row.Warehouse_ID)}
 
@@ -383,35 +431,46 @@ async def login_2fa(body: TwoFAIn, response: Response,
         raise HTTPException(401, "invalid 2FA code")
     if row.role != "admin" and await maintenance_on(session):
         raise HTTPException(503, "GI Hub is in maintenance mode — please try again later")
+    client_type = p.get("client") if p.get("client") in REFRESH_TTLS else "web"
     token = _make_token(row.username, row.role, row.Site_ID, ACCESS_TTL,
                         warehouse_id=row.Warehouse_ID)
-    raw_refresh = await _open_session(session, row.username)
-    await _audit(session, row.username, "LOGIN", "password+2fa")  # commits
-    _set_refresh_cookie(response, raw_refresh)
+    raw_refresh, _ = await _open_session(session, row.username, row.id, client_type)
+    await _audit(session, row.username, "LOGIN", f"password+2fa client={client_type}")  # commits
+    _set_refresh_cookie(response, raw_refresh, REFRESH_TTLS[client_type])
     return {"access_token": token, "token_type": "bearer",
             "user": _public(row.username, row.role, row.Site_ID, row.Warehouse_ID)}
 
 
-@router.post("/refresh", summary="Rotate the refresh cookie → a fresh access token",
+@router.post("/refresh", summary="Rotate the refresh cookie → a fresh access token (RTR)",
              dependencies=[rate_limit(30, 60)])
 async def refresh(response: Response,
                   gi_refresh: str | None = Cookie(default=None, alias=REFRESH_COOKIE),
                   session: AsyncSession = Depends(get_session)):
     if not gi_refresh:
         raise HTTPException(401, "no refresh token")
-    row = (await session.execute(select(sessions_t).where(
-        sessions_t.c["refresh_hash"] == _hash_refresh(gi_refresh)))).first()
+    # The refresh token is a signed JWT (scope='refresh') carrying its own
+    # jti + family claims; a forged/expired/pre-RTR cookie dies right here.
+    try:
+        p = _decode(gi_refresh, "refresh")
+    except HTTPException:
+        _clear_refresh_cookie(response)
+        raise
+    row = (await session.execute(select(refresh_t).where(
+        refresh_t.c["refresh_token_jti"] == p.get("jti", "")))).first()
     if row is None:
         _clear_refresh_cookie(response)
         raise HTTPException(401, "invalid refresh token")
-    if row.revoked_at is not None:
-        # A rotated/revoked token came back — assume theft and kill every
-        # active session for this user (rotation reuse detection).
-        await revoke_all_sessions(session, row.username, "reuse-detected")
+    if row.is_revoked:
+        # REPLAY: a rotated/revoked token came back. Someone is holding a
+        # stale copy (theft evidence) — revoke the ENTIRE family, including
+        # the live successor, so both the thief and the stolen-from session
+        # die. Other families (the user's other devices) stay untouched.
+        n = await _revoke_family(session, row.family_id, "reuse-detected")
         await _audit(session, row.username, "SESSION_REUSE",
-                     "revoked all sessions (refresh-token replay)")  # commits
+                     f"refresh-token replay → revoked family "
+                     f"{row.family_id.hex[:8]}… ({n} tokens)")  # commits
         _clear_refresh_cookie(response)
-        raise HTTPException(401, "refresh token reuse detected — sessions revoked")
+        raise HTTPException(401, "refresh token reuse detected — session family revoked")
     if row.expires_at is not None and row.expires_at <= _now():
         _clear_refresh_cookie(response)
         raise HTTPException(401, "refresh token expired")
@@ -424,32 +483,40 @@ async def refresh(response: Response,
     if user_row.role != "admin" and await maintenance_on(session):
         raise HTTPException(503, "GI Hub is in maintenance mode — please try again later")
 
-    # Rotate: open the successor first, then revoke the old row pointing at it.
-    raw_new = secrets.token_urlsafe(48)
-    new_id = (await session.execute(insert(sessions_t).values(
-        username=row.username, refresh_hash=_hash_refresh(raw_new),
-        expires_at=_now() + REFRESH_TTL).returning(sessions_t.c["id"]))).scalar_one()
-    await session.execute(update(sessions_t).where(sessions_t.c["id"] == row.id)
-                          .values(revoked_at=_now(), revoke_reason="rotated",
-                                  replaced_by=new_id))
+    # Rotate: new jti in the SAME family, old row revoked pointing at it.
+    # The successor inherits the client_type, so a native session keeps its
+    # 90-day sliding window.
+    raw_new, _ = await _open_session(
+        session, row.username, row.user_id, row.client_type,
+        family_id=row.family_id, replaces=row.id)
     await session.commit()
-    _set_refresh_cookie(response, raw_new)
+    _set_refresh_cookie(response, raw_new, REFRESH_TTLS[row.client_type])
     token = _make_token(user_row.username, user_row.role, user_row.Site_ID, ACCESS_TTL,
                         warehouse_id=user_row.Warehouse_ID)
     return {"access_token": token, "token_type": "bearer",
             "user": _public(user_row.username, user_row.role, user_row.Site_ID, user_row.Warehouse_ID)}
 
 
-@router.post("/logout", summary="Revoke the current refresh session")
+@router.post("/logout", summary="Revoke the current refresh-token family")
 async def logout(response: Response,
                  gi_refresh: str | None = Cookie(default=None, alias=REFRESH_COOKIE),
                  session: AsyncSession = Depends(get_session)):
     if gi_refresh:
-        await session.execute(
-            update(sessions_t)
-            .where(sessions_t.c["refresh_hash"] == _hash_refresh(gi_refresh),
-                   sessions_t.c["revoked_at"].is_(None))
-            .values(revoked_at=_now(), revoke_reason="logout"))
+        try:
+            p = jwt.decode(gi_refresh, JWT_SECRET, algorithms=[JWT_ALG])
+            row = (await session.execute(select(refresh_t.c["family_id"]).where(
+                refresh_t.c["refresh_token_jti"] == p.get("jti", "")))).first()
+            if row is not None:
+                # The whole family: logout means THIS device's session chain
+                # ends, not just the newest token in it.
+                await _revoke_family(session, row.family_id, "logout")
+        except jwt.PyJWTError:
+            # Pre-RTR opaque cookie — best-effort revoke of the legacy row.
+            await session.execute(
+                update(sessions_t)
+                .where(sessions_t.c["refresh_hash"] == _hash_refresh(gi_refresh),
+                       sessions_t.c["revoked_at"].is_(None))
+                .values(revoked_at=_now(), revoke_reason="logout"))
         await session.commit()
     _clear_refresh_cookie(response)
     return {"logged_out": True}

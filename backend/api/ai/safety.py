@@ -29,7 +29,7 @@ FORBIDDEN_KEYWORDS = (
     "lock", "listen", "notify", "reset", "cluster", "checkpoint",
 )
 
-FORBIDDEN_TABLES = ("users", "pending_users", "auth_sessions")  # auth/PII
+FORBIDDEN_TABLES = ("users", "pending_users", "auth_sessions", "refresh_sessions")  # auth/PII
 
 DEFAULT_ROW_LIMIT = 500
 HARD_ROW_LIMIT = 2000

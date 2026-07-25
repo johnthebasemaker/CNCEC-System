@@ -24,6 +24,7 @@ import datetime as _dt
 import os
 import shutil
 import subprocess
+import uuid
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -49,7 +50,7 @@ XSITE_ESCALATION_QTY = 5
 
 settings_t = _MD.tables["app_settings"]
 sysset_t = _MD.tables["system_settings"]
-sessions_t = _MD.tables["auth_sessions"]
+sessions_t = _MD.tables["refresh_sessions"]  # RTR sessions (auth_sessions is legacy)
 requests_t = _MD.tables["requests"]
 bugs_t = _MD.tables["bug_reports"]
 lots_t = _MD.tables["lots"]
@@ -188,36 +189,45 @@ async def run_backup(user: dict = Depends(require_level(4)),
 
 
 # --- Access control: live sessions ----------------------------------------------
-@admin.get("/sessions", summary="Auth sessions (no token material)")
+@admin.get("/sessions", summary="Auth sessions (RTR — no token material)")
 async def list_sessions(username: Optional[str] = None, active: bool = True,
                         session: AsyncSession = Depends(get_session)):
     stmt = select(sessions_t.c["id"], sessions_t.c["username"],
+                  sessions_t.c["client_type"], sessions_t.c["family_id"],
                   sessions_t.c["created_at"], sessions_t.c["expires_at"],
-                  sessions_t.c["revoked_at"], sessions_t.c["revoke_reason"])
+                  sessions_t.c["is_revoked"], sessions_t.c["revoked_at"],
+                  sessions_t.c["revoke_reason"])
     if username:
         stmt = stmt.where(sessions_t.c["username"] == username)
     if active:
-        stmt = stmt.where(sessions_t.c["revoked_at"].is_(None),
+        stmt = stmt.where(sessions_t.c["is_revoked"].is_(False),
                           sessions_t.c["expires_at"] > _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None))
-    rows = (await session.execute(stmt.order_by(sessions_t.c["id"].desc()).limit(500))
-            ).mappings().all()
+    rows = (await session.execute(stmt.order_by(sessions_t.c["created_at"].desc())
+                                  .limit(500))).mappings().all()
     return {"items": [dict(r) for r in rows]}
 
 
-@admin.post("/sessions/{sid}/revoke", summary="Revoke one session")
-async def revoke_session(sid: int, user: dict = Depends(require_level(4)),
+@admin.post("/sessions/{sid}/revoke", summary="Revoke one session's whole family")
+async def revoke_session(sid: uuid.UUID, user: dict = Depends(require_level(4)),
                          session: AsyncSession = Depends(get_session)):
+    # Revoking just one row would leave its rotation successor alive — the
+    # device would silently refresh past the admin's action. Family or nothing.
+    fam = (await session.execute(select(sessions_t.c["family_id"])
+                                 .where(sessions_t.c["id"] == sid))).scalar_one_or_none()
+    if fam is None:
+        raise HTTPException(404, f"no session {sid}")
     res = await session.execute(update(sessions_t)
-                                .where(sessions_t.c["id"] == sid,
-                                       sessions_t.c["revoked_at"].is_(None))
-                                .values(revoked_at=_dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
+                                .where(sessions_t.c["family_id"] == fam,
+                                       sessions_t.c["is_revoked"].is_(False))
+                                .values(is_revoked=True,
+                                        revoked_at=_dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
                                         revoke_reason="admin-revoked"))
     if res.rowcount == 0:
         raise HTTPException(404, f"no active session {sid}")
-    await write_audit(session, user["username"], "SESSION_REVOKE", "auth_sessions",
-                      f"id={sid}")
+    await write_audit(session, user["username"], "SESSION_REVOKE", "refresh_sessions",
+                      f"family={fam.hex[:8]}… n={res.rowcount}")
     await session.commit()
-    return {"revoked": sid}
+    return {"revoked": str(sid), "family_tokens": res.rowcount}
 
 
 @admin.post("/sessions/revoke-user/{username}", summary="Revoke every session for a user")

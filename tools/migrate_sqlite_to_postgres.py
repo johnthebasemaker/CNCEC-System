@@ -233,10 +233,13 @@ def run_migration(
                 "dropped_columns": dropped, "coerced_to_null": coerced_to_null}
 
         # Fix Postgres sequences so new inserts continue past the copied max(id).
+        # Integer/serial PKs only — UUID PKs (e.g. refresh_sessions) have no
+        # sequence and MAX(uuid) doesn't even exist in Postgres.
         if is_pg:
             for table in models.Base.metadata.sorted_tables:
                 pk = list(table.primary_key.columns)
-                if len(pk) == 1 and pk[0].name == "id":
+                if (len(pk) == 1 and pk[0].name == "id"
+                        and isinstance(pk[0].type, Integer)):
                     conn.execute(text(
                         f"SELECT setval(pg_get_serial_sequence('{table.name}', "
                         f"'id'), COALESCE((SELECT MAX(id) FROM {table.name}), 1), "
