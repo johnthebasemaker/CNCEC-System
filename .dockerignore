@@ -36,6 +36,8 @@ UI_CRAWLER_REPORT.md
 
 # Secrets / env
 .env
+# Catches deploy/.env and any nested .env files
+**/.env
 .streamlit/secrets.toml
 
 # OS noise

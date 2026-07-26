@@ -11,6 +11,10 @@
 #        gi_database.db. See docs/POSTGRES_MIGRATION.md.
 #   2. .venv with deps installed (fastapi, uvicorn, sqlalchemy, asyncpg).
 #
+# Note: this script is dev-only and intentionally does NOT export GI_ENV=prod.
+# Production bare-metal deploys arm the JWT_SECRET guard via deploy/.env
+# (see deploy/.env.example). Compose deploys arm it via docker-compose.prod.yml.
+#
 # Usage:
 #   ./run_api.sh                 # defaults to local PG on 5433, db `gihub`
 #   DATABASE_URL=... ./run_api.sh

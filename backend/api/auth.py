@@ -31,7 +31,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import jwt_secret
+from .config import is_production, jwt_secret
 from .db import get_session
 from .ratelimit import check_bucket, client_ip, rate_limit, strict_limits_enabled
 
@@ -162,7 +162,7 @@ def _set_refresh_cookie(response: Response, raw: str, ttl: _dt.timedelta) -> Non
     # dev stays lax (http). CSRF exposure is contained: /auth/refresh only
     # returns a token in the response body, which CORS keeps unreadable to
     # non-allowed origins.
-    production = os.environ.get("GI_ENV", "").lower() == "production"
+    production = is_production()
     response.set_cookie(
         REFRESH_COOKIE, raw,
         max_age=int(ttl.total_seconds()),

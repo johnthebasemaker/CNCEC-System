@@ -25,6 +25,8 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # ---- Stage 2: runtime ------------------------------------------------------
 FROM python:3.12-slim AS runtime
+# Arms JWT_SECRET production guard; compose env can override for staging
+ENV GI_ENV=production
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PATH="/opt/venv/bin:$PATH"
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 tini \
     && rm -rf /var/lib/apt/lists/*
