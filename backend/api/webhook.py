@@ -6,9 +6,10 @@ BOTH /whatsapp/webhook and /api/v1/whatsapp/webhook):
 
   GET  /webhook — Meta's one-time subscription handshake: echoes hub.challenge
                   only when hub.verify_token matches WHATSAPP_WEBHOOK_VERIFY_TOKEN.
-  POST /webhook — message delivery. When WHATSAPP_APP_SECRET is set, the raw
-                  body MUST carry a valid X-Hub-Signature-256 HMAC (Meta signs
-                  every delivery with the App Secret) — invalid → 403.
+  POST /webhook — message delivery. The raw body MUST carry a valid
+                  X-Hub-Signature-256 HMAC signed with WHATSAPP_APP_SECRET
+                  (Meta signs every delivery with the App Secret) — an invalid
+                  signature OR an unconfigured secret → 403 (fail-closed).
 
 Sender resolution: the wa_id digits are canonicalised to +E.164 and matched
 against users.Phone_Number (the project-wide storage format). Numbers with no
@@ -87,7 +88,10 @@ async def verify_webhook(
 def _signature_ok(raw: bytes, header: str) -> bool:
     secret = _app_secret()
     if not secret:
-        return True  # not configured — local/testing mode
+        # Fail-closed: without the App Secret no signature can be verified.
+        log.warning("webhook signature check skipped: WHATSAPP_APP_SECRET not "
+                    "configured — rejecting POST as unauthenticated")
+        return False
     if not header.startswith("sha256="):
         return False
     digest = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
