@@ -71,8 +71,32 @@ jobs:
 
       # Phase B layout: the legacy app lives in legacy/ (bug_check is
       # self-rooted — it resolves every path from its own directory).
+      # This step has failed on EVERY recorded runner execution while passing
+      # locally (macOS) — on failure we re-emit the ❌ lines and log tail as
+      # ::error:: annotations (job logs need a signed-in session; annotations
+      # and the uploaded artifact don't). GitHub shows ≤10 annotations/step.
       - name: SQLite regression suite (legacy/bug_check.py)
-        run: python legacy/bug_check.py   # SQLite only (no DATABASE_URL here)
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! python legacy/bug_check.py 2>&1 | tee bugcheck_ci.log; then
+            grep -E "❌" bugcheck_ci.log | head -6 \
+              | while IFS= read -r line; do echo "::error title=bug_check::${line}"; done
+            tail -n 4 bugcheck_ci.log \
+              | while IFS= read -r line; do echo "::error title=bug_check (log tail)::${line}"; done
+            exit 1
+          fi
+
+      - name: Upload bug_check output (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bugcheck-ci-output
+          path: |
+            bugcheck_ci.log
+            legacy/BUG_REPORT.md
+          retention-days: 14
+          if-no-files-found: ignore
 
       # Data-layer migration to Postgres (tables + row parity + facade smoke).
       # Views + full Streamlit-on-PG behaviour are intentionally out of scope —

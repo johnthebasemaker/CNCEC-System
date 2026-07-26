@@ -18,7 +18,8 @@ Everything below runs from `frontend/` unless noted.
 ## 1. Android (.apk)
 
 Prerequisites (one-time): [Android Studio](https://developer.android.com/studio)
-with an SDK + JDK 17 (Studio bundles both).
+with an SDK + JDK 21 (Studio bundles both — Capacitor 8 compiles against
+Java 21; a JDK 17 build dies with "invalid source release: 21").
 
 ```bash
 npm install                    # brings @capacitor/{core,cli,android,ios}
@@ -90,7 +91,7 @@ publish the installers as **GitHub Release assets**:
 | Workflow | Runners | Builds | Attaches |
 |---|---|---|---|
 | `.github/workflows/release-desktop.yml` | macos-14 + windows-latest | Tauri | `.dmg`, NSIS `.exe`, `.msi` |
-| `.github/workflows/release-android.yml` | ubuntu-latest (JDK 17; SDK preinstalled, `cap add android` regenerates the gitignored project) | Capacitor/Gradle | debug-signed `.apk` (sideload-ready) |
+| `.github/workflows/release-android.yml` | ubuntu-latest (JDK 21 — Capacitor 8 requires it; SDK preinstalled, `cap add android` regenerates the gitignored project) | Capacitor/Gradle | debug-signed `.apk` (sideload-ready) |
 
 **To cut a release:**
 
