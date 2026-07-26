@@ -55,6 +55,7 @@ from .console import xsite as xsite_router  # noqa: E402
 from .documents import router as documents_router  # noqa: E402
 from .report_center import router as report_center_router  # noqa: E402
 from .report_center import scheduler_loop  # noqa: E402
+from .secret_diag import log_secret_diagnostic  # noqa: E402
 from .services.notifications import digest_loop, reset_delivery_preference, set_delivery_preference  # noqa: E402
 from .webhook import router as webhook_router  # noqa: E402
 from .reports import router as reports_router  # noqa: E402
@@ -95,6 +96,10 @@ ENTITIES = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Boot-time secret diagnostic (Theme D, A04-F2): the process reports which
+    # security-relevant variables are set/placeholder/unset — names only — so
+    # config state is self-reporting instead of tracked by hand in docs.
+    log_secret_diagnostic()
     # Report scheduler daemon — one asyncio task per worker; duplicate runs are
     # prevented by the atomic last_run claim in run_due_schedules(). Disable
     # with GI_SCHEDULER=0 (tests/CI import the app without running lifespan).
