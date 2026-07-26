@@ -7,9 +7,11 @@
 > highest-value tests and must always pass.
 >
 > **Last full sweep:** 2026-07-12 night shift (visual, isolated `gihub_e2e` DB).
-> **Automated gates (2026-07-18 final):** service_tests **750/0** (suites
-> A…AO) · Playwright **39/39** · legacy bug_check 599/0 · build+tsc ·
-> alembic single head `c7d4e8f19a25`. §14 lists the 2026-07-18 feature rows.
+> **Automated gates (2026-07-26):** service_tests **777/0** (suites
+> A…AQ) · Playwright **39/39** · legacy bug_check 599/0 · build+tsc ·
+> alembic single head `f1a7c9e83b52`. §14 lists the 2026-07-18 feature rows;
+> §15 the 2026-07-24…26 native-program rows (Send/Receive sync, QR
+> stickers/scan, RTR sessions, release pipeline).
 
 ---
 
@@ -238,6 +240,18 @@ Also verify: scoped HOD asking `?site_id=<other>` → 403; single foreign row �
 | Report scoping | Current Stock report has NO ledger totals; Consumption/Daily/Receipts/WBS/Burn-Rate carry the Material description | AN |
 | Sticky headers + smart decimals | long tables keep their header pinned under the app header (SME under its band); whole quantities render `5` not `5.00` | visual §13 |
 | Bug Tracking Engine | submit w/ title+severity; admin triage (severity/rollback/safety/analysis) persists + notifies; 📋 Prompt copies a self-contained prompt (report+gates+rollback); `.md` digest downloads; prompt endpoint admin-only | AO |
+
+## 15. 2026-07-24…26 native program (covered by suites AL/AP/AQ + release CI)
+
+| Area | Check | Automated by |
+|---|---|---|
+| Material stickers (`Documents → Material stickers`, HOD/admin) | PDF = 2×6 full-bleed A4 replica of the CNCEC sheet: name auto-shrinks, QR encodes the SAP, MAT `N/A` when blank; `sap_codes` repeats = copies; category filter; SK → 403 | AL |
+| Scan-to-dashboard (header 📷) | scanning/typing a SAP opens MaterialCardModal: current stock + 30-day Received/Consumed bars; SK/HOD/supervisor pinned to own site, admin global; unknown SAP 404, blank 422; whitespace-normalized match | AP |
+| RTR sessions | native login → ~90-day family, web → ~7-day; unknown client_type 422; refresh rotates in-family; replaying a rotated token 401s AND kills the whole family while a second login (other family) still works; logout kills the family; SESSION_REUSE audit row | AQ |
+| Send/Receive + sync settings | header Send/Receive flushes the offline queue then refetches every query; gear popover persists 1–120 min cap (localStorage `gi_sync_interval_min`); OTA: SW re-checks on refocus | visual §13 (queue mechanics: suite offline tests + Playwright) |
+| Backend-unreachable UX | with uvicorn down: console prints the exact uvicorn command + failure details (status/headers); login page shows the error toast; genuinely-offline devices do NOT get the toast (queue owns it) | visual (verified 2026-07-25) |
+| Release pipeline | `git tag vX.Y.Z && git push origin vX.Y.Z` → Release assets: `.dmg` + NSIS `.exe` + `.msi` (green since v0.1.0) and `GI-Hub-android.apk` (fixed 2026-07-26: JDK 21); gradle/bug_check failures surface as public annotations | GitHub Actions |
+| Native install bypasses | macOS Apple-Silicon 3-step (xattr + codesign ad-hoc), Windows SmartScreen, Android Play Protect — wording in USER_MANUAL §1.2 | manual (user-verified 2026-07-25) |
 
 ---
 

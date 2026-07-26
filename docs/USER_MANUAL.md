@@ -46,8 +46,12 @@ read pages for offline viewing. Updates are automatic: the app checks for a
 new version every 15 minutes and whenever you return to it — you never need
 to reinstall.
 
-**Native apps (Android / iOS / Windows / macOS).** Downloadable installers
-become available once the production server is live, at these links:
+**Native apps (Android / iOS / Windows / macOS).** Installers are built
+automatically for every release and published under **Assets** on the
+project's GitHub Releases page
+([github.com/johnthebasemaker/GI_Hub_Project/releases](https://github.com/johnthebasemaker/GI_Hub_Project/releases))
+— macOS `.dmg`, Windows `.exe`/`.msi`, Android `.apk`. Once the production
+server is live they will also be mirrored at these permanent links:
 
 - Android: [gi.giinventory.com/downloads/gi-hub.apk](https://gi.giinventory.com/downloads/gi-hub.apk)
 - Windows: [gi.giinventory.com/downloads/GI-Hub-Setup.exe](https://gi.giinventory.com/downloads/GI-Hub-Setup.exe)

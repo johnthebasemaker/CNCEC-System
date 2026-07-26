@@ -3,9 +3,12 @@
 > **Purpose:** a fresh AI instance (or engineer) reading ONLY this file plus
 > [`PROJECT_STATUS.md`](PROJECT_STATUS.md) must understand the exact state,
 > tech stack and rules of the project with no chat history. Written 2026-07-13;
-> **finalized 2026-07-18 (pre-deploy batch)** at gates `service_tests 750/0
-> (suites A…AO) · Playwright 39/39 · bug_check 599/0 · build+tsc ✅ · alembic
-> single head c7d4e8f19a25`. Only the Hetzner deployment itself remains.
+> finalized 2026-07-18 (pre-deploy batch); **updated 2026-07-26 (native-app
+> program: Capacitor/Tauri + release pipeline + RTR auth + Send/Receive sync
+> + QR ecosystem)** at gates `service_tests 777/0 (suites A…AQ) · Playwright
+> 39/39 · bug_check 599/0 · build+tsc ✅ · alembic single head f1a7c9e83b52`.
+> Only the Hetzner deployment itself remains (+ the one-time Cloudflare
+> Access bypass for `/api/*` — §9).
 
 ---
 
@@ -68,12 +71,12 @@ FastAPI app in `main.py` (lifespan starts 3 daemons — report scheduler,
 16:00 evening digest, **Friday 17:00 weekly exec PDF** — all disabled by
 `GI_SCHEDULER=0`). `models.py` (repo `backend/models.py`) is the single schema
 contract; alembic migrations in `backend/alembic/versions` (single head
-**`c7d4e8f19a25`** = `feedback_triage`; before it `b3f2a9c47d18` =
-SME SAP codes, `e7c31a9f24d5` = generated_reports). Modules:
+**`f1a7c9e83b52`** = `refresh_sessions_rtr`; before it `c7d4e8f19a25` =
+feedback_triage, `b3f2a9c47d18` = SME SAP codes). Modules:
 
 | Module | Owns |
 |---|---|
-| `auth.py` | bcrypt login, 15-min JWT access + rotating httpOnly refresh cookie (reuse ⇒ all sessions revoked), TOTP 2FA, role levels (SK 0 · warehouse/supervisor 1 · hod 2 · logistics 3 · admin 4; `require_roles` always admits admin; `site_scope` pins level <3), registration + admin approval, **dual-OTP phone change** (`phone_otp.stage` 'old'→'new'; commit only after the NEW number verifies) |
+| `auth.py` | bcrypt login, 15-min JWT access + **RTR refresh families in `refresh_sessions`** (signed refresh JWT; `client_type` web 7d / native 90d; replay ⇒ THAT family revoked, other devices survive — full model in §6), TOTP 2FA, role levels (SK 0 · warehouse/supervisor 1 · hod 2 · logistics 3 · admin 4; `require_roles` always admits admin; `site_scope` pins level <3), registration + admin approval, **dual-OTP phone change** (`phone_otp.stage` 'old'→'new'; commit only after the NEW number verifies) |
 | `entry.py` | SK staging: receipts/consumption/returns/adjustments + `/entry/bulk`. Guards: **MTC hard-block for `Category == "Surface Shields"`** (setting `mtc_required_category`; missing MTC also emails logistics), pack→base UoM conversion (`uom_conversions`), **WBS required when the site has active `wbs_master` rows**, **supporting-document gate** (below), return source-receipt gates, FEFO auto-pick w/ allow-and-log override alerts. **`GET /entry/lining-systems`** (2026-07-18): recipe SAP lists per system code + site Done/Pending SQM — powers the Surface-Shields system-first Issue workflow (UI enforces: shield SAP without a selected system is refused; the code travels as an `LS <code>` Remarks suffix) |
 | `bulk_import.py` | **Bulk Excel Import** (`POST /import/{kind}`; kinds `inventory`/`ledger` admin-only, `sme-*` {hod,admin}): dry-run→commit, upsert-only, header-name-driven, category canonicalisation, 3-tier ledger reconcile (exact-match / qty-correction / insert), Material_Code uniqueness resolution — the same plan/apply code `tools/excel_sync.py` drives |
 | `entry_docs.py` | **Entry document system (parity A1/A4)**: `entry_attachments` upload/list/download/delete, `require_entry_documents` gate, WBS config endpoints |
@@ -91,7 +94,9 @@ SME SAP codes, `e7c31a9f24d5` = generated_reports). Modules:
 | `webhook.py` | inbound Meta webhook (`/whatsapp/webhook` + `/api/v1/…`): verify-token handshake, **X-Hub-Signature-256 HMAC**, STOCK/RESET PASSWORD commands, session-text replies |
 | `ratelimit.py` | see §6 |
 | `console.py` | admin settings (whitelist incl. `maintenance_mode`, `require_entry_documents`, `mtc_required_category`), pg_dump backup, sessions revoke, outbox retries, lot lifecycle. **Bug Tracking Engine (2026-07-18)**: `bug_reports` + `title/severity/rollback_notes/safety_constraints/triage_notes`; admin triage drawer; **`GET /admin/feedback/{id}/prompt`** renders a self-contained coding-agent implementation prompt (report + triage + rollback plan + the project's non-negotiable gates) and `GET /admin/feedback-export.md` a batch digest — the portal never mutates code itself |
-| `service_tests.py` | the 750-check gate (suites A…AO), see §8 |
+| `documents.py` | SOP/manual downloads, QR label sheets, employee badges, **`GET /documents/material-stickers`** (2026-07-24, {hod,admin}): 2×6 full-bleed A4 rack stickers replicating the operator's CNCEC sheet — Material Name (auto-shrink 17→11pt), QR from `SAP_Code`, SAP/MAT lines, category; `sap_codes` repeats = copies, category filter, site-scoped |
+| `stock.py` | stock views + **`GET /stock/material-card?sap=`** (2026-07-24): the 📷 scan-to-dashboard payload — whitespace-normalized SAP match, `site_scope` pinning (''→403), all-time stock + 30-day gap-free receipt/consumption series |
+| `service_tests.py` | the 777-check gate (suites A…AQ), see §8 |
 
 ## 3. Database facts that bite
 
@@ -128,18 +133,37 @@ WBS requirement once a site has active WBS rows, UoM conversion.
 React Router routes in `App.tsx`; **`config/nav.tsx` is the single
 source of truth for nav + route guards** (exact-lock `anyRole` / `minLevel`;
 duplicate menu keys across groups are forbidden — use route aliases like
-`/logistics/lining-coverage`). API via axios `api` (`api/client.ts`): Vite
-proxies `/api` → `:8000` (`VITE_API_PROXY` overrides for E2E), token in
-localStorage `gi_token`, silent refresh on 401, **429 → `gi-rate-limited`
-event → RateLimitToast deadline countdown**. TanStack Query hooks in
-`api/hooks.ts`.
+`/logistics/lining-coverage`). API via axios `api` (`api/client.ts`):
+**`API_BASE` = `VITE_API_URL` (native builds; injected by release-*.yml as
+`https://gi.giinventory.com/api`) or relative `/api`** (web: Vite proxies →
+`:8000`; `VITE_API_PROXY` overrides for E2E); axios runs `withCredentials`
+(cross-origin refresh cookie for the native shells); token in localStorage
+`gi_token`, silent refresh on 401 (the rotated refresh token returns as an
+httpOnly Set-Cookie — no JS storage), `detectClientType()` sends
+`client_type` web|native at login (drives the RTR TTL), **429 →
+`gi-rate-limited` event → RateLimitToast deadline countdown**, backend
+unreachable → throttled console hint + `gi-api-unreachable` toast
+(RateLimitToast is mounted at the app ROOT so the login page shows it),
+`logApiFailure()` prints message/code/status/headers on network-err/403/5xx
+incl. a Cloudflare-Access-block note. TanStack Query hooks in `api/hooks.ts`.
 
 **PWA/offline:** vite-plugin-pwa autoUpdate SW (build-only; dev unaffected),
-NetworkFirst cache for read APIs. **Offline mutation queue**
+NetworkFirst cache for read APIs; **strict OTA** — `main.tsx` polls
+`reg.update()` every 15 min AND on tab refocus, so deployments reach every
+open client without a manual refresh. **Offline mutation queue**
 (`offline/queue.ts`, IndexedDB `gi-offline`): only entry-form POSTs opt in via
 `postWithOfflineFallback()` → `{queued:true}` + amber toast + header
 `OfflineSyncBadge`; replay on reconnect with `X-Offline-Replay: 1`; rejected
-rows are dropped+surfaced. **Entry documents:** `EntryDocsUpload` (file +
+rows are dropped+surfaced. **Send/Receive (Outlook-style):**
+`SyncControls.tsx` header button = flushQueue + invalidate ALL queries;
+gear popover sets the auto-sync cap (localStorage `gi_sync_interval_min`,
+1–120 min, default 1; re-armed live via the `gi-sync-interval` event).
+**Native shells:** Capacitor (`capacitor.config.ts`; `android/`/`ios/`
+GITIGNORED — regenerated by `npx cap add`) + Tauri v2 (`src-tauri/`
+COMMITTED; explicit CSP — update its `connect-src` if the API domain ever
+changes). **QR scan-to-dashboard:** header 📷 → `QrScanner` →
+`MaterialCardModal` (`GET /stock/material-card`: whitespace-normalized SAP,
+site-scope-pinned, 30-day gap-free 2-series Recharts trend). **Entry documents:** `EntryDocsUpload` (file +
 `capture="environment"` camera), `DocumentLibraryPage` (/hod/documents) with
 inline image/PDF preview reused by the ApprovalsPage 📎 drawer. **Draft
 recovery:** `lib/formDraft.ts` (localStorage, debounced) + DraftBanner on the
@@ -168,8 +192,25 @@ feedback triage drawer + 📋 Prompt copy.
 - `strict_limits_enabled()`: strict rules ON in production, **relaxed when
   `GI_DOTENV=0`** (hermetic tests), force-enabled by `GI_FORCE_STRICT_LIMITS=1`
   (suite AF).
-JWTs: 15-min access (`JWT_SECRET`), rotating refresh cookie, reuse-detection
-nukes the user's sessions. Secrets live ONLY in gitignored `deploy/.env`
+**Auth = RTR (Refresh Token Rotation, 2026-07-25, alembic `f1a7c9e83b52`):**
+15-min access JWTs + a **signed refresh JWT** (scope `refresh`, jti/fam/
+client claims) in the `gi_refresh` httpOnly cookie, tracked in
+**`refresh_sessions`** (UUID id, users.id FK, family_id, unique jti,
+client_type, is_revoked + forensic columns). One login = one **family**;
+`client_type` from the login body sets the TTL — **web 7 days, native
+(Tauri/Capacitor) 90 days** (on MFA logins it rides inside the signed
+mfa_token). Every `/auth/refresh` rotates in-family (old row → revoked/
+'rotated'/replaced_by). **Replaying a revoked token = breach: the WHOLE
+family is revoked (successor included) + SESSION_REUSE audit + 401 — the
+user's OTHER families/devices survive.** Logout and the admin console's
+single-session revoke are family-wide; `revoke_all_sessions()` (admin
+reset / user delete / WhatsApp RESET PASSWORD) spans all families + the
+legacy `auth_sessions` table (revoke-only now). Production sets the cookie
+`SameSite=None; Secure` so cross-origin native refresh works; CORS defaults
+include the fixed shell origins (`tauri://localhost`,
+`capacitor://localhost`, …). ⚠️ `refresh_sessions` must STAY in the
+`gi_ai_ro` REVOKE set (`create_ai_readonly_role.sql`) AND
+`ai/safety.py` FORBIDDEN_TABLES. Secrets live ONLY in gitignored `deploy/.env`
 (`config.py` dotenv-loads it on bare metal unless `GI_DOTENV=0` — that pin in
 service_tests must NEVER be removed). Secret-scan every push range for the Meta token prefix (`EAA…`) and the
 WhatsApp phone-number ID before pushing (the exact grep lives in the project
@@ -213,7 +254,7 @@ memory — deliberately not reproduced here).
 ## 8. Testing — the gates
 
 ```bash
-# 1. service tests (750 checks, suites A…AO) — CI mirror, hermetic
+# 1. service tests (777 checks, suites A…AQ) — CI mirror, hermetic
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
 JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 .venv/bin/python -u -m backend.api.service_tests
@@ -240,18 +281,35 @@ its models-parity check carries an allowlist for new-stack-only columns
 **AJ** bulk import · **AK** OCR doc assist + prompt pins · **AL** QR/
 returnables · **AM** handwritten-OCR stages + ask-data filters · **AN**
 Surface-Shields workflow + Smart Calculator + report scoping · **AO** Bug
-Tracking Engine. The NL round-trip check needs the `gi_ai_ro` role — CI
-provisions it in the workflow; locally re-run
+Tracking Engine. 2026-07-24…26: **AP** material-card scan dashboard
+(site-scope matrix) · **AQ** RTR (per-client TTLs, in-family rotation,
+replay → family revocation w/ other-family isolation, logout, audit).
+⚠️ Test-authoring trap suite AQ exposed: httpx
+`cookies.set(..., domain="host")` SILENTLY drops the cookie (host-only
+domain mismatch) — suite E's replay checks passed vacuously for months;
+never pass `domain=`. The NL round-trip check needs the `gi_ai_ro` role —
+CI provisions it in the workflow; locally re-run
 `backend/scripts/create_ai_readonly_role.sql` after any reload/DDL drift.
 Manual matrix: [automatic_test.md](automatic_test.md).
 
-**CI/CD (fixed 2026-07-18):** `postgres-dual-ci.yml` = bug_check + dual_ci +
-parity + **gi_ai_ro provisioning step** + service_tests (with
-`GI_AI_RO_URL`) + frontend build. `deploy.yml` (v1 Streamlit) is
-**manual-only** — it used to auto-fire on every push against the
-not-yet-provisioned Hetzner box (the perpetual "Deploy to Hetzner" failure).
-`deploy-v2.yml` (manual, gated) is the cutover pipeline — its gate now uses
-the post-restructure `tools/` paths + the same RO-role step.
+**CI/CD:** `postgres-dual-ci.yml` = bug_check + dual_ci + parity +
+**gi_ai_ro provisioning step** + service_tests (with `GI_AI_RO_URL`) +
+frontend build. ⚠️ **The dual-ci job has NEVER passed on the GitHub runner**
+(30/30 failures since 2026-07-07, always at the bug_check step) despite
+599/0 locally under every simulated CI condition (clean tree, latest deps,
+Linux package set, UTC, case-sensitive FS) — since 2026-07-26 the step
+re-emits failing ❌ checks as public `::error::` annotations + uploads
+`bugcheck_ci.log`/`BUG_REPORT.md` artifacts, so the next push names the
+culprit. `deploy.yml` (v1 Streamlit) is **manual-only**; `deploy-v2.yml`
+(manual, gated) is the cutover pipeline (post-restructure `tools/` paths +
+the RO-role step). **Release pipeline (tags `v*` or workflow_dispatch
+ONLY):** `release-desktop.yml` (macos-14 + windows-latest, `npx tauri
+build` → dmg/nsis-exe/msi — ✅ green on v0.1.0–v1.0.1) and
+`release-android.yml` (ubuntu + **JDK 21 — Capacitor 8 hardcodes Java 21;
+JDK 17 was the v0.1.0–v1.0.1 failure**; `cap add android` regenerates the
+gitignored project → debug APK); both inject
+`VITE_API_URL=https://gi.giinventory.com/api` and attach assets to the same
+tag Release via softprops/action-gh-release.
 
 ## 9. Operational notes
 
@@ -261,9 +319,20 @@ the post-restructure `tools/` paths + the same RO-role step.
 - Meta/WhatsApp is LIVE (templates approved, lang `en`); operator TODOs that
   remain: approve `gi_evening_summary`, set webhook env + subscribe URL,
   set `PUBLIC_BASE_URL`.
+- **Native apps + Cloudflare Access:** the domain sits behind Access; the
+  installed apps have NO Access SSO session, so `/api` calls die as
+  CORS-killed 302s ("Server unreachable" while the web portal works).
+  One-time Zero Trust dashboard fix: Access application for
+  `gi.giinventory.com/api/*` with a **Bypass (Everyone)** policy (the API
+  self-guards). Full walkthrough + Apple-Silicon install fix (`sudo xattr
+  -cr` **+ `codesign --force --deep --sign -`** — M-series refuses fully
+  unsigned code) + local JDK-21 path: `docs/NATIVE_APPS.md`;
+  troubleshooting: `docs/DEBUGGING.md` + `tools/diagnose_sync.py`.
 - Remaining program work: **ONLY the Hetzner production deployment**
   (runbook `tools/migration/README.md` — includes the post-load Excel
   re-sync + SME reseed). Everything else through the 2026-07-18 pre-deploy
-  batch is SHIPPED (C3 OCR doc assist landed 2026-07-13 PM; B2/B3/B4/B7
-  remain documented-optional). Ops handoff PDFs live in `docs/export/`
+  batch AND the 2026-07-24…26 native program (Capacitor/Tauri + release
+  pipeline + RTR + Send/Receive + QR stickers/scan) is SHIPPED
+  (B2/B3/B4/B7 remain documented-optional). Ops handoff PDFs live in
+  `docs/export/`
   (regenerate: `python tools/export_docs_pdf.py`).

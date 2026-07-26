@@ -65,6 +65,19 @@ around exactly these calls: flush the queue, then refetch every open query.
 
 ## 3. Known traps (bite in this order of frequency)
 
+- **502 on every `/api` call in dev = uvicorn isn't running** — the Vite proxy
+  target (`127.0.0.1:8000`) has never been the problem. The app now says so
+  itself: a throttled console error names the exact launch command and the
+  login page shows a "backend unreachable" toast. Launch config: the
+  `backend` entry in `.claude/launch.json`, or
+  `.venv/bin/uvicorn backend.api.main:app --host 127.0.0.1 --port 8000`.
+- **Native app says "Server unreachable" while the web portal works** →
+  almost certainly the Cloudflare Access wall, not the server: the webview
+  has no Access SSO session, so `/api` 302s to the Access login and CORS
+  kills it (a bare network error). `client.ts logApiFailure()` prints the
+  status/headers and a "Possible Cloudflare Access block" note on
+  network-err/403/5xx. Fix = the Access **Bypass** policy for
+  `gi.giinventory.com/api/*` (NATIVE_APPS.md §6).
 - **Vite binds `::1` only** → `curl 127.0.0.1:5173` refuses while `localhost:5173`
   works. The doctor's `web.vite` check says so.
 - **Preview/hidden browser tabs throttle rendering** — clicks/typing lag or go
@@ -76,3 +89,14 @@ around exactly these calls: flush the queue, then refetch every open query.
   `config.py` dotenv-loads `deploy/.env` on bare metal.
 - **PWA served stale after deploy** → check `pwa.build`, then hard-reload once;
   the service worker auto-updates on the next periodic check (15 min) or reload.
+- **httpx test cookies:** `client.cookies.set(..., domain="host")` with a
+  host-only domain SILENTLY drops the cookie — replay/reuse tests then pass
+  vacuously ("no refresh token" 401 looks like success). Never pass `domain=`
+  (bit suites E/AQ, fixed 2026-07-25).
+- **Android builds need JDK 21** (Capacitor 8 hardcodes Java 21). On this Mac:
+  `JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"`.
+- **CI job logs are unreadable without signing in** (public repo, anonymous
+  API 403s) — both `postgres-dual-ci.yml`'s bug_check step and
+  `release-android.yml`'s gradle step therefore re-emit failures as
+  `::error::` annotations (visible on the run page + anonymous check-runs
+  API); dual-CI also uploads `bugcheck_ci.log` + `BUG_REPORT.md` artifacts.
