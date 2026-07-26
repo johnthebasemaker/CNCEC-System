@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, require_roles, site_scope
+from .auth import get_current_user, require_roles, resolve_site_param, site_scope
 from .db import get_session
 from .services import supervisor as smr
 
@@ -56,7 +56,7 @@ def _guard(res: dict) -> dict:
 @router.post("", status_code=201, summary="Create a material request")
 async def create(body: CreateSMRIn = Body(...), user: dict = Depends(_SUPERVISOR),
                  session: AsyncSession = Depends(get_session)):
-    site = user["site_id"] or body.site_id
+    site = resolve_site_param(user, body.site_id)
     if not site:
         raise HTTPException(422, "site_id is required")
     try:
@@ -80,7 +80,9 @@ async def listing(mine: bool = False, site_id: Optional[str] = None, status: Opt
     # Sensible defaults per role: supervisor → own; store_keeper → site pending.
     if mine or user["role"] == "supervisor":
         return {"items": await smr.list_smr(session, requested_by=user["username"], status=status)}
-    scope = site_id or (user["site_id"] or None)
+    scope = resolve_site_param(user, site_id)
+    if scope == "":
+        return {"items": []}
     if user["role"] == "store_keeper" and status is None:
         status = "pending_sk"
     return {"items": await smr.list_smr(session, site_id=scope, status=status)}
@@ -115,6 +117,7 @@ async def cancel(request_id: int, user: dict = Depends(_SUPERVISOR),
     return _guard(res)
 
 
+# TODO(security): missing per-request scope check — Phase 2 Theme A, ref A02
 @router.get("/{request_id}/items", summary="Request line items")
 async def items(request_id: int, user: dict = Depends(get_current_user),
                 session: AsyncSession = Depends(get_session)):
