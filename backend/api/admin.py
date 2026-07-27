@@ -36,7 +36,7 @@ _SAP_REFS = [_MD.tables[t] for t in (
     "receipts", "consumption", "returns", "lots",
     "pending_receipts", "pending_issues", "pending_returns", "pr_master")]
 
-MIN_PW = 6  # minimum password length for create / reset
+MIN_PW = 12  # minimum password length for create / reset / self-registration
 
 router = APIRouter(prefix="/admin", tags=["admin"],
                    dependencies=[Depends(require_level(4))])
@@ -207,6 +207,18 @@ async def update_user(username: str, body: UpdateUserIn,
                                   .where(users_t.c["username"] == username).values(**values))
             await write_audit(session, actor["username"], "UPDATE_USER", "users",
                               f"username={username} " + " ".join(f"{k}={v}" for k, v in values.items()))
+            # Audit A03-F9: role/site/warehouse ride inside the access token and
+            # are read straight back out with no database lookup, so a demoted
+            # or re-pinned user kept their OLD authority for up to 15 minutes.
+            # Revoking forces an immediate re-login with the new bindings.
+            authz_changed = {k: v for k, v in values.items()
+                             if k in ("role", "Site_ID", "Warehouse_ID")
+                             and v != getattr(row, k, None)}
+            if authz_changed:
+                await revoke_all_sessions(session, username, "authz-changed")
+                await write_audit(session, actor["username"], "REVOKE_SESSIONS", "users",
+                                  f"username={username} reason=authz-changed "
+                                  f"fields={','.join(sorted(authz_changed))}")
     except HTTPException:
         raise
     except (IntegrityError, DataError) as e:

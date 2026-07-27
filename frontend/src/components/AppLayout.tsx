@@ -198,7 +198,7 @@ export default function AppLayout() {
             <span className="gi-health">
               <span className={`gi-health-dot ${health ? 'ok' : 'err'}`} />
               <Typography.Text type="secondary" className="gi-health-label" style={{ fontSize: 12 }}>
-                {health ? `${health.dialect} · ${health.database}` : 'API offline'}
+                {health ? 'API online' : 'API offline'}
               </Typography.Text>
             </span>
             <Tooltip title={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>

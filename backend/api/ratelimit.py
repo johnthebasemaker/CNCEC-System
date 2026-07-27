@@ -22,6 +22,7 @@ a single-box deploy; noted in the improvement backlog.
 """
 from __future__ import annotations
 
+import os
 import time
 from collections import defaultdict, deque
 
@@ -30,14 +31,34 @@ from fastapi import Depends, HTTPException, Request
 _hits: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
+# Peers whose forwarded-IP headers we believe (audit A03-F6). CF-Connecting-IP
+# and X-Real-IP are attacker-supplied on any request that reaches the origin
+# without traversing Cloudflare/nginx, and rotating one yields a fresh bucket
+# per request — defeating the login, register, OTP and PenaltyBox limiters at
+# once. Trust them only from a configured proxy peer. Empty (the default) keeps
+# the previous permissive behaviour, because the tunnel/nginx peer address
+# differs per deployment and silently keying every user on one IP would be its
+# own outage; set GI_TRUSTED_PROXIES on the deploy box.
+_TRUSTED_PROXIES = {p.strip() for p in
+                    os.environ.get("GI_TRUSTED_PROXIES", "").split(",") if p.strip()}
+
+
+def _peer_trusted(request: Request) -> bool:
+    if not _TRUSTED_PROXIES:
+        return True          # unconfigured → legacy behaviour, documented above
+    peer = request.client.host if request.client else ""
+    return peer in _TRUSTED_PROXIES
+
+
 def _client_ip(request: Request) -> str:
     # Cloudflare Tunnel first — otherwise all tunnelled testers key on one IP.
-    cf = request.headers.get("cf-connecting-ip")
-    if cf:
-        return cf.strip()
-    xri = request.headers.get("x-real-ip")
-    if xri:
-        return xri.strip()
+    if _peer_trusted(request):
+        cf = request.headers.get("cf-connecting-ip")
+        if cf:
+            return cf.strip()
+        xri = request.headers.get("x-real-ip")
+        if xri:
+            return xri.strip()
     return request.client.host if request.client else "unknown"
 
 

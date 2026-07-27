@@ -20,12 +20,14 @@ import hashlib
 import os
 import secrets
 import sys
+import time as _time
 import uuid
+from collections import defaultdict, deque
 from typing import Literal
 
 import bcrypt
 import jwt
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Body, Cookie, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import func, insert, select, update
@@ -328,8 +330,18 @@ def resolve_site_write(user: dict, requested: str | None) -> str | None:
 # --- Warehouse scoping (parallel to site scoping) ------------------------------
 def warehouse_scope(user: dict) -> str | None:
     """None → unrestricted (logistics/admin oversight). warehouse_user accounts
-    are pinned to their bound Warehouse_ID — '' (unbound) matches nothing."""
-    if user.get("role") != "warehouse_user":
+    are pinned to their bound Warehouse_ID — '' (unbound) matches nothing.
+
+    Audit A02-F9: this used to be a bare `role != "warehouse_user" → None`, so
+    ANY unrecognised role string returned unrestricted. Combined with _public()'s
+    unknown-role fallback (level 0), a typo in `users.role` — 'warehouse',
+    'Warehouse_User' — produced the worst possible pair: lowest privilege on the
+    level ladder AND global warehouse visibility. Unknown roles now fail closed.
+    """
+    role = user.get("role")
+    if role not in ROLE_META:
+        return ""                     # unknown role → matches nothing
+    if role != "warehouse_user":
         return None
     return (user.get("warehouse_id") or "").strip()
 
@@ -586,8 +598,13 @@ async def register(body: RegisterIn, session: AsyncSession = Depends(get_session
     uname = (body.username or "").strip()
     if not uname:
         raise HTTPException(422, "username is required")
-    if len(body.password or "") < 6:
-        raise HTTPException(422, "password must be at least 6 characters")
+    # One policy for every credential-setting path (audit A03-F11). Registration
+    # used to carry its own literal 6 while admin create/reset used MIN_PW, so
+    # the weakest door set the real floor. Existing passwords keep working —
+    # login has no length check; the policy binds new and reset credentials.
+    from .admin import MIN_PW
+    if len(body.password or "") < MIN_PW:
+        raise HTTPException(422, f"password must be at least {MIN_PW} characters")
     if body.role not in _REGISTERABLE_ROLES:
         raise HTTPException(422, f"role must be one of {sorted(_REGISTERABLE_ROLES)}")
 
@@ -645,6 +662,46 @@ class CodeIn(BaseModel):
     code: str
 
 
+class TwoFaEnrollIn(BaseModel):
+    password: str
+
+
+# --- 2FA guess budget (audit A03-F3) ------------------------------------------
+# A per-USERNAME failure counter sitting under the per-IP rate limit on the
+# /2fa/* routes. The IP limit alone is defeatable by rotating CF-Connecting-IP
+# (audit A03-F6); a username is not header-controllable, so this is the ceiling
+# that actually holds. Only FAILURES count — a correct code costs nothing and
+# clears the record. Per-process like the rest of ratelimit.py; a shared store
+# is the documented Phase 3 fix.
+_TOTP_MAX_ATTEMPTS = 5
+_TOTP_WINDOW_SECONDS = 900
+_totp_failures: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _totp_recent(username: str) -> deque[float]:
+    now = _time.time()
+    q = _totp_failures[username]
+    while q and now - q[0] > _TOTP_WINDOW_SECONDS:
+        q.popleft()
+    return q
+
+
+def _check_totp_attempts(username: str) -> None:
+    q = _totp_recent(username)
+    if len(q) >= _TOTP_MAX_ATTEMPTS:
+        retry = int(_TOTP_WINDOW_SECONDS - (_time.time() - q[0])) + 1
+        raise HTTPException(429, "too many invalid 2FA codes — try again later",
+                            headers={"Retry-After": str(retry)})
+
+
+def _burn_totp_attempt(username: str) -> None:
+    _totp_recent(username).append(_time.time())
+
+
+def _clear_totp_attempts(username: str) -> None:
+    _totp_failures.pop(username, None)
+
+
 def _qr_data_uri(uri: str) -> str:
     import base64
     import io
@@ -662,8 +719,10 @@ async def twofa_status(user: dict = Depends(get_current_user),
     return {"enabled": bool(row and row.totp_enabled)}
 
 
-@router.post("/2fa/enroll", summary="Begin 2FA enrollment → secret + QR (not enabled yet)")
-async def twofa_enroll(user: dict = Depends(get_current_user),
+@router.post("/2fa/enroll", summary="Begin 2FA enrollment → secret + QR (not enabled yet)",
+             dependencies=[rate_limit(5, 60)])
+async def twofa_enroll(body: TwoFaEnrollIn = Body(...),
+                       user: dict = Depends(get_current_user),
                        session: AsyncSession = Depends(get_session)):
     import pyotp
     row = await _fetch_user(session, user["username"])
@@ -671,6 +730,14 @@ async def twofa_enroll(user: dict = Depends(get_current_user),
         raise HTTPException(404, "user not found")
     if row.totp_enabled:
         raise HTTPException(409, "2FA is already enabled")
+    # Step-up (audit A03-F8): a bearer token alone used to be enough to bind a
+    # NEW authenticator to the account, so a stolen 15-minute access token could
+    # be converted into durable persistence the owner would only notice at their
+    # next login. Re-prove the password before writing a secret.
+    if not _verify_password(body.password, row.password_hash):
+        await _audit(session, user["username"], "2FA_ENROLL_DENIED",
+                     "step-up password check failed")
+        raise HTTPException(403, "password re-entry required to enroll 2FA")
     secret = pyotp.random_base32()
     uri = pyotp.TOTP(secret).provisioning_uri(name=user["username"], issuer_name="GI Hub")
     await session.execute(update(users_t).where(users_t.c["username"] == user["username"])
@@ -680,14 +747,18 @@ async def twofa_enroll(user: dict = Depends(get_current_user),
     return {"secret": secret, "otpauth_uri": uri, "qr": _qr_data_uri(uri)}
 
 
-@router.post("/2fa/verify", summary="Confirm a code to enable 2FA")
+@router.post("/2fa/verify", summary="Confirm a code to enable 2FA",
+             dependencies=[rate_limit(5, 60)])
 async def twofa_verify(body: CodeIn, user: dict = Depends(get_current_user),
                        session: AsyncSession = Depends(get_session)):
     row = await _fetch_user(session, user["username"])
     if row is None or not row.totp_secret:
         raise HTTPException(409, "no enrollment in progress — call /2fa/enroll first")
+    _check_totp_attempts(user["username"])
     if not _verify_totp(row.totp_secret, body.code):
+        _burn_totp_attempt(user["username"])
         raise HTTPException(400, "invalid 2FA code")
+    _clear_totp_attempts(user["username"])
     await session.execute(update(users_t).where(users_t.c["username"] == user["username"])
                           .values(totp_enabled=1))
     await session.commit()
@@ -695,14 +766,23 @@ async def twofa_verify(body: CodeIn, user: dict = Depends(get_current_user),
     return {"enabled": True}
 
 
-@router.post("/2fa/disable", summary="Disable 2FA (requires a valid current code)")
+@router.post("/2fa/disable", summary="Disable 2FA (requires a valid current code)",
+             dependencies=[rate_limit(5, 60)])
 async def twofa_disable(body: CodeIn, user: dict = Depends(get_current_user),
                         session: AsyncSession = Depends(get_session)):
     row = await _fetch_user(session, user["username"])
     if row is None or not row.totp_enabled:
         raise HTTPException(409, "2FA is not enabled")
+    # Per-user attempt budget on top of the per-IP rate limit: _verify_totp runs
+    # valid_window=1, so three 6-digit codes are acceptable at any instant, and
+    # an attacker rotating CF-Connecting-IP gets a fresh IP bucket per request.
+    # The username is not header-controllable, so this ceiling actually holds.
+    _check_totp_attempts(user["username"])
     if not _verify_totp(row.totp_secret, body.code):
+        _burn_totp_attempt(user["username"])
+        await _audit(session, user["username"], "2FA_DISABLE_FAILED", "invalid code")
         raise HTTPException(400, "invalid 2FA code")
+    _clear_totp_attempts(user["username"])
     await session.execute(update(users_t).where(users_t.c["username"] == user["username"])
                           .values(totp_secret=None, totp_enabled=0))
     await session.commit()

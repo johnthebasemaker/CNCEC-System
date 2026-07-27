@@ -261,11 +261,11 @@ async def test_auth_guards():
 
         # Registration + access requests (non-persisting: only failing paths + reads).
         r = await ac.post("/auth/register", json={"username": "svc_admin_wannabe",
-                          "password": "secret123", "role": "admin"})
+                          "password": "svc-secret-123456", "role": "admin"})
         check("register requesting admin role → 422 (no self-elevation)",
               r.status_code == 422, f"got {r.status_code}")
         r = await ac.post("/auth/register", json={"username": "admin",
-                          "password": "secret123", "role": "store_keeper"})
+                          "password": "svc-secret-123456", "role": "store_keeper"})
         check("register an existing username → 409", r.status_code == 409, f"got {r.status_code}")
         r = await ac.post("/auth/register", json={"username": "svc_x", "password": "no",
                           "role": "store_keeper"})
@@ -294,24 +294,24 @@ async def test_auth_guards():
         # pattern as the login rate-limit test below).
         _t4a, _t4b = {"X-Real-IP": "203.0.113.41"}, {"X-Real-IP": "203.0.113.42"}
         r = await ac.post("/auth/register", headers=_t4a, json={"username": "svc_t4_hod",
-                          "password": "secret123", "role": "hod"})
+                          "password": "svc-secret-123456", "role": "hod"})
         check("scoped role without a site → 422", r.status_code == 422, f"got {r.status_code}")
         r = await ac.post("/auth/register", headers=_t4a, json={"username": "svc_t4_hod",
-                          "password": "secret123", "role": "hod", "site_id": "NOT-A-SITE"})
+                          "password": "svc-secret-123456", "role": "hod", "site_id": "NOT-A-SITE"})
         check("scoped role with an unknown site → 422", r.status_code == 422, f"got {r.status_code}")
         r = await ac.post("/auth/register", headers=_t4a, json={"username": "svc_t4_log",
-                          "password": "secret123", "role": "logistics", "site_id": _site})
+                          "password": "svc-secret-123456", "role": "logistics", "site_id": _site})
         check("unscoped role WITH a site → 422 (global roles carry no site)",
               r.status_code == 422, f"got {r.status_code}")
 
         # Happy paths — register, verify surfaced fields, then reject (cleanup;
         # re-runs revive the rejected row instead of colliding).
         r = await ac.post("/auth/register", headers=_t4b, json={"username": "svc_t4_hod",
-                          "password": "secret123", "role": "hod", "site_id": _site})
+                          "password": "svc-secret-123456", "role": "hod", "site_id": _site})
         check("scoped role with an admin-created site → 201",
               r.status_code == 201, f"got {r.status_code}")
         r = await ac.post("/auth/register", headers=_t4b, json={"username": "svc_t4_log",
-                          "password": "secret123", "role": "logistics",
+                          "password": "svc-secret-123456", "role": "logistics",
                           "location": "Central Warehouse, Dammam"})
         check("unscoped role with a free-text location → 201",
               r.status_code == 201, f"got {r.status_code}")
@@ -6349,6 +6349,193 @@ async def test_sme_sk_upgrades():
             await s.commit()
 
 
+async def test_auth_surface_hardening():
+    """Suite AT — Theme C: the auth surface (audit A03-F3/F5/F6/F8/F9/F11,
+    A02-F9, A02-F11). Covers 2FA brute-force + step-up, unknown-role fail-open,
+    session revocation on an authorization change, the password floor, the
+    trusted-proxy gate and the /health payload."""
+    import bcrypt as _bc
+    from sqlalchemy import text as _sqt
+
+    from . import config as _cfg
+    from . import ratelimit as _rl
+    from .auth import ROLE_META, warehouse_scope
+
+    # --- A02-F9: unknown role must not mean "unrestricted warehouse" ---------
+    check("at-f9: warehouse_scope fails CLOSED for an unknown/typo role",
+          warehouse_scope({"role": "warehouse", "warehouse_id": ""}) == ""
+          and warehouse_scope({"role": "Warehouse_User", "warehouse_id": ""}) == ""
+          and warehouse_scope({"role": "", "warehouse_id": ""}) == "",
+          f"warehouse={warehouse_scope({'role': 'warehouse'})!r}")
+    check("at-f9: the real roles keep their documented scope",
+          warehouse_scope({"role": "warehouse_user", "warehouse_id": "WH-01"}) == "WH-01"
+          and warehouse_scope({"role": "admin"}) is None
+          and warehouse_scope({"role": "logistics"}) is None
+          and all(warehouse_scope({"role": r}) in (None, "") for r in ROLE_META),
+          "role ladder drifted")
+
+    # --- A03-F6: forwarded-IP headers are only trusted from a known peer -----
+    class _FakeClient:
+        host = "198.51.100.7"
+
+    class _FakeReq:
+        def __init__(self, headers):
+            self.headers = headers
+            self.client = _FakeClient()
+
+    spoof = _FakeReq({"cf-connecting-ip": "1.2.3.4"})
+    saved_proxies = _rl._TRUSTED_PROXIES
+    try:
+        _rl._TRUSTED_PROXIES = set()
+        legacy = _rl._client_ip(spoof)
+        _rl._TRUSTED_PROXIES = {"203.0.113.1"}
+        untrusted = _rl._client_ip(spoof)
+        _rl._TRUSTED_PROXIES = {"198.51.100.7"}
+        trusted = _rl._client_ip(spoof)
+    finally:
+        _rl._TRUSTED_PROXIES = saved_proxies
+    check("at-f6: an untrusted peer cannot forge its rate-limit bucket via "
+          "CF-Connecting-IP",
+          untrusted == "198.51.100.7" and trusted == "1.2.3.4" and legacy == "1.2.3.4",
+          f"legacy={legacy} untrusted={untrusted} trusted={trusted}")
+
+    # --- A03-F5: production CORS must not fall back to the dev localhost list -
+    import importlib
+    saved_env = os.environ.get("GI_ENV")
+    try:
+        os.environ["GI_ENV"] = "production"
+        os.environ.pop("CORS_ORIGINS", None)
+        prod_origins = importlib.reload(_cfg).CORS_ORIGINS
+        os.environ["GI_ENV"] = "dev"
+        dev_origins = importlib.reload(_cfg).CORS_ORIGINS
+    finally:
+        if saved_env is None:
+            os.environ.pop("GI_ENV", None)
+        else:
+            os.environ["GI_ENV"] = saved_env
+        importlib.reload(_cfg)
+    check("at-f5: unset CORS_ORIGINS in production yields NO credentialed "
+          "origins (dev keeps localhost)",
+          prod_origins == [] and "http://localhost:5173" in dev_origins,
+          f"prod={prod_origins} dev={len(dev_origins)}")
+
+    transport = ASGITransport(app=app)
+    PW = "svct-theme-c-password"
+    HASH = _bc.hashpw(PW.encode(), _bc.gensalt(rounds=4)).decode()
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCT-%'"))
+        await s.execute(_sqt(
+            'INSERT INTO users (username, password_hash, role, "Site_ID") '
+            "VALUES ('SVCT-sk', :h, 'store_keeper', 'CNCEC')"), {"h": HASH})
+        await s.commit()
+    try:
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            _ip = {"X-Real-IP": "203.0.113.96"}
+
+            async def token(u, p):
+                r = await ac.post("/auth/login", json={"username": u, "password": p},
+                                  headers=_ip)
+                return r.json().get("access_token")
+
+            def H(t):
+                return {"Authorization": f"Bearer {t}"}
+
+            sk_t = await token("SVCT-sk", PW)
+            admin_t = await token("admin", "admin2026")
+
+            # --- A02-F11: /health must not brief an anonymous caller ---------
+            r = await ac.get("/health")
+            j = r.json() if r.status_code == 200 else {}
+            check("at-f11: anonymous /health discloses no DB name, dialect or "
+                  "entity inventory",
+                  r.status_code == 200 and j.get("status") == "ok"
+                  and not {"database", "dialect", "entities"} & set(j),
+                  f"{r.status_code} keys={sorted(j)}")
+            r_anon = await ac.get("/health/detail")
+            r_sk = await ac.get("/health/detail", headers=H(sk_t))
+            r_adm = await ac.get("/health/detail", headers=H(admin_t))
+            check("at-f11: /health/detail is admin-only and still serves the "
+                  "diagnostics",
+                  r_anon.status_code in (401, 403) and r_sk.status_code == 403
+                  and r_adm.status_code == 200
+                  and "database" in r_adm.json()
+                  and r_adm.json().get("ai_readonly_wall", {}).get("ok") is True,
+                  f"anon={r_anon.status_code} sk={r_sk.status_code} adm={r_adm.status_code}")
+
+            # --- A03-F8: 2FA enrollment needs the password, not just a token --
+            r = await ac.post("/auth/2fa/enroll", headers=H(sk_t), json={})
+            check("at-f8: /2fa/enroll without a password → 422 (step-up is "
+                  "mandatory, not optional)",
+                  r.status_code == 422, f"{r.status_code} {r.text[:90]}")
+            r = await ac.post("/auth/2fa/enroll", headers=H(sk_t),
+                              json={"password": "not-the-password"})
+            check("at-f8: a stolen access token alone cannot bind a new "
+                  "authenticator",
+                  r.status_code == 403, f"{r.status_code} {r.text[:90]}")
+            async with SessionLocal() as s:
+                secret = (await s.execute(_sqt(
+                    "SELECT totp_secret FROM users WHERE username = 'SVCT-sk'"))
+                ).scalar()
+            check("at-f8: the refused enrollment wrote NO secret",
+                  secret is None, f"secret={secret!r}")
+            r = await ac.post("/auth/2fa/enroll", headers=H(sk_t),
+                              json={"password": PW})
+            check("at-f8: the real owner (correct password) still enrolls",
+                  r.status_code == 200 and r.json().get("secret"),
+                  f"{r.status_code} {r.text[:90]}")
+
+            # --- A03-F3: the TOTP guess budget is per-USERNAME ----------------
+            # Two limiters overlap here (per-IP rate_limit + the per-username
+            # budget), so assert the PROPERTY — guessing is bounded and never
+            # succeeds — rather than the exact index at which it cuts off.
+            codes = [(await ac.post("/auth/2fa/verify", headers=H(sk_t),
+                                    json={"code": f"00000{i}"})).status_code
+                     for i in range(10)]
+            check("at-f3: invalid 2FA codes are budgeted — refusals turn into "
+                  "429 and guessing never succeeds",
+                  set(codes) <= {400, 429} and 429 in codes
+                  and codes[-1] == 429 and codes.count(400) <= 5,
+                  f"codes={codes}")
+
+            # --- A03-F11: one password floor across every credential path -----
+            r_short = await ac.post("/auth/register", json={
+                "username": "SVCT-reg", "password": "secret123",
+                "role": "store_keeper"})
+            r_admin_short = await ac.post("/admin/users", headers=H(admin_t), json={
+                "username": "SVCT-reg2", "password": "secret123",
+                "role": "store_keeper"})
+            check("at-f11b: a 9-char password is refused by BOTH registration "
+                  "and admin create",
+                  r_short.status_code == 422 and r_admin_short.status_code == 422,
+                  f"register={r_short.status_code} admin={r_admin_short.status_code}")
+            check("at-f11b: existing short passwords still AUTHENTICATE "
+                  "(policy binds new credentials only)",
+                  bool(await token("worker", "floor2026")), "worker login broke")
+
+            # --- A03-F9: an authorization change kills outstanding tokens -----
+            r = await ac.get("/entry/receipt-meta/ANY", headers=H(sk_t))
+            before_ok = r.status_code != 401
+            r = await ac.patch("/admin/users/SVCT-sk", headers=H(admin_t),
+                               json={"site_id": "OTHERSITE"})
+            check("at-f9b: admin re-pins the user's site → 200",
+                  r.status_code == 200, f"{r.status_code} {r.text[:90]}")
+            async with SessionLocal() as s:
+                live = (await s.execute(_sqt(
+                    "SELECT COUNT(*) FROM refresh_sessions rs JOIN users u "
+                    "ON u.id = rs.user_id WHERE u.username = 'SVCT-sk' "
+                    "AND NOT rs.is_revoked"))).scalar_one()
+            check("at-f9b: changing site revokes every outstanding refresh "
+                  "family (no 15-min stale-authority window)",
+                  before_ok and live == 0, f"before_ok={before_ok} live={live}")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM refresh_sessions WHERE user_id IN "
+                                 "(SELECT id FROM users WHERE username LIKE 'SVCT-%')"))
+            await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCT-%'"))
+            await s.execute(_sqt("DELETE FROM pending_users WHERE username LIKE 'SVCT-%'"))
+            await s.commit()
+
+
 async def test_ai_lane_hardening():
     """Suite AS — Theme B: the AI NL→SQL lane's two walls (audit A01-F1/F2/F3/F5,
     A03-F10, A02-F6/F7).
@@ -7208,6 +7395,8 @@ async def main() -> int:
     await test_siteless_scope_fail_closed()
     print("\n AS. AI NL→SQL lane hardening (Theme B: both walls + lane IDOR/audit)")
     await test_ai_lane_hardening()
+    print("\n AT. auth surface hardening (Theme C: 2FA, CORS, proxy, revocation)")
+    await test_auth_surface_hardening()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

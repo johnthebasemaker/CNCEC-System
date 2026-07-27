@@ -69,9 +69,22 @@ def async_database_url() -> str:
 # the SPA and proxies /api → the API), CORS isn't needed at all. If you ever split
 # origins, set CORS_ORIGINS as a comma-separated env var; otherwise the dev
 # defaults (the Vite/CRA dev servers) apply.
+def _is_production_env() -> bool:
+    """Module-level twin of is_production() — CORS_ORIGINS is computed at import
+    time, before the function below is defined."""
+    return os.environ.get("GI_ENV", "dev").strip().lower() in ("prod", "production")
+
+
 _env_cors = os.environ.get("CORS_ORIGINS", "").strip()
+# Audit A03-F5: docker-compose passes CORS_ORIGINS as an EMPTY string when the
+# operator hasn't set it, which .strip() makes falsy — so the dev list below
+# applied in production, making http://localhost{,:3000,:5173} credentialed
+# origins against the live API. Behind the single-origin nginx proxy no CORS is
+# needed at all, so production defaults to nothing and must opt in explicitly
+# (the native shells' fixed origins go in CORS_ORIGINS on the deploy box).
 CORS_ORIGINS = (
-    [o.strip() for o in _env_cors.split(",") if o.strip()] if _env_cors else [
+    [o.strip() for o in _env_cors.split(",") if o.strip()] if _env_cors
+    else [] if _is_production_env() else [
         "http://localhost:5173", "http://127.0.0.1:5173",   # Vite default
         "http://localhost:3000", "http://127.0.0.1:3000",   # CRA / Next default
         # Native app shells (built with VITE_API_URL → cross-origin calls).
