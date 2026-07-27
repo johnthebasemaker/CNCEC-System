@@ -52,6 +52,38 @@ def ro_engine() -> AsyncEngine:
     return _RO_ENGINE
 
 
+# --- second-wall assertion (audit A01-F3) -------------------------------------
+# The GRANT allowlist in create_ai_readonly_role.sql is wiped by every dual_ci /
+# cutover reload and must be re-applied by hand. Nothing used to notice when it
+# wasn't — the wall simply stopped existing, silently. Probe it instead.
+RO_WALL_PROBE_TABLES = ("users", "phone_otp", "employees", "system_audit_log")
+
+
+async def ro_wall_status() -> dict:
+    """Assert the AI read-only login cannot read the sensitive tables. Returns
+    {"ok": bool, "detail": str}; never raises — an absent role or unreachable
+    database is reported as not-ok rather than thrown at a caller."""
+    leaked: list[str] = []
+    errors: list[str] = []
+    for table in RO_WALL_PROBE_TABLES:
+        try:
+            async with ro_engine().connect() as conn:
+                await conn.execute(text(f'SELECT 1 FROM {table} LIMIT 1'))
+            leaked.append(table)
+        except Exception as exc:  # noqa: BLE001 — any refusal is a pass
+            if "permission denied" not in str(exc).lower():
+                errors.append(f"{table}: {type(exc).__name__}")
+    if leaked:
+        return {"ok": False,
+                "detail": ("AI read-only role CAN READ " + ", ".join(leaked)
+                           + " — re-run backend/scripts/create_ai_readonly_role.sql")}
+    if errors:
+        return {"ok": False,
+                "detail": "AI read-only wall unverifiable (" + "; ".join(errors) + ")"}
+    return {"ok": True,
+            "detail": f"{len(RO_WALL_PROBE_TABLES)} sensitive tables confirmed unreadable"}
+
+
 # --- NL→SQL -----------------------------------------------------------------------
 # Hand-curated schema hint (PG spelling: quoted mixed-case identifiers; the
 # legacy hint pointed at SQLite views which don't exist in PG, so live-stock

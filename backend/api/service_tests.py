@@ -6349,6 +6349,198 @@ async def test_sme_sk_upgrades():
             await s.commit()
 
 
+async def test_ai_lane_hardening():
+    """Suite AS — Theme B: the AI NL→SQL lane's two walls (audit A01-F1/F2/F3/F5,
+    A03-F10, A02-F6/F7).
+
+    Wall 1 is the SQL-text gate; it anchored its forbidden-table regex on the
+    bare name right after FROM/JOIN, so a schema qualifier walked straight past
+    it. Wall 2 is the gi_ai_ro PG login; it granted SELECT on ALL tables minus a
+    five-name REVOKE, so phone_otp/employees/whatsapp_outbox/system_audit_log
+    were readable outright — no bypass needed. Both are asserted here."""
+    from sqlalchemy import text as _sqt
+
+    from .ai import analytics as _an
+    from .ai import safety as _sf
+
+    # --- Wall 1: the text gate ------------------------------------------------
+    # Every string below was verified (True, '') by the audit against the old gate.
+    bypasses = [
+        "SELECT * FROM public.users",
+        "SELECT * FROM ONLY users",
+        "SELECT * FROM  public . users",
+        "WITH u AS (SELECT * FROM public.users) SELECT * FROM u",
+        "SELECT * FROM public.refresh_sessions",
+        'SELECT * FROM "public"."users"',
+        "SELECT * FROM inventory i JOIN public.users u ON true",
+    ]
+    blocked = [q for q in bypasses if not _sf.is_safe_select(q)[0]]
+    check("as: schema-qualified / ONLY / quoted forbidden tables are all blocked",
+          len(blocked) == len(bypasses),
+          f"{len(blocked)}/{len(bypasses)} blocked")
+
+    newly_forbidden = ["phone_otp", "employees", "mh_employees", "whatsapp_outbox",
+                       "email_outbox", "app_notifications", "system_audit_log",
+                       "entry_attachments", "mtc_documents", "bug_reports", "ai_jobs"]
+    leaks = [t for t in newly_forbidden
+             if _sf.is_safe_select(f"SELECT * FROM {t}")[0]]
+    check("as: PII / audit / blob tables are in FORBIDDEN_TABLES",
+          not leaks, f"still allowed: {leaks}")
+
+    introspection = ["SELECT current_setting('is_superuser')", "SELECT version()",
+                     "SELECT current_user", "SELECT session_user",
+                     "SELECT current_database()", "SELECT inet_server_addr()"]
+    allowed_intro = [q for q in introspection if _sf.is_safe_select(q)[0]]
+    check("as: configuration/environment introspection is blocked (A01-F5)",
+          not allowed_intro, f"still allowed: {allowed_intro}")
+
+    # No false positives — the gate must not break legitimate ERP questions.
+    legit = [
+        'SELECT "Supplier", COUNT(*) AS orders FROM receipts GROUP BY "Supplier"',
+        'SELECT * FROM inventory WHERE "Category" ILIKE \'surface shield%\'',
+        'SELECT i."SAP_Code" FROM inventory i JOIN consumption c '
+        'ON c."SAP_Code" = i."SAP_Code"',
+        'WITH b AS (SELECT * FROM consumption) SELECT * FROM b',
+        'SELECT * FROM public.inventory',
+        'SELECT * FROM receipts WHERE "Supplier" = \'users\'',
+        'SELECT "Issued_To" AS user_name FROM consumption',
+    ]
+    rejected = [q for q, (ok, _) in ((q, _sf.is_safe_select(q)) for q in legit) if not ok]
+    check("as: legitimate ERP queries still pass the gate (no false positives)",
+          not rejected, f"wrongly rejected: {rejected}")
+
+    # --- Wall 2: the gi_ai_ro allowlist --------------------------------------
+    wall = await _an.ro_wall_status()
+    check("as: ro_wall_status() reports the second wall INTACT",
+          wall["ok"] is True, wall["detail"])
+
+    unreadable = []
+    for tbl in ("phone_otp", "employees", "whatsapp_outbox", "email_outbox",
+                "system_audit_log", "entry_attachments", "bug_reports"):
+        try:
+            async with _an.ro_engine().connect() as conn:
+                await conn.execute(_sqt(f"SELECT 1 FROM {tbl} LIMIT 1"))
+        except Exception as e:  # noqa: BLE001
+            if "permission denied" in str(e).lower():
+                unreadable.append(tbl)
+    check("as: gi_ai_ro is physically DENIED on every sensitive table "
+          "(allowlist grants)",
+          len(unreadable) == 7, f"denied on {unreadable}")
+
+    readable = False
+    try:
+        async with _an.ro_engine().connect() as conn:
+            readable = (await conn.execute(
+                _sqt("SELECT COUNT(*) FROM receipts"))).scalar_one() >= 0
+    except Exception as e:  # noqa: BLE001
+        readable = f"ERROR {e}"
+    check("as: gi_ai_ro can still read the allowlisted ERP tables (no breakage)",
+          readable is True, str(readable)[:90])
+
+    # --- AI-lane IDOR + audit trail ------------------------------------------
+    EMP_HOME, EMP_AWAY = "SVCS-EMP-HOME", "SVCS-EMP-AWAY"
+    EMP_NOSITE = "SVCS-EMP-NOSITE"
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO employees ("ID_Number", "Name", "Phone_Number", '
+            '"Department", status, "Site_ID") VALUES '
+            "(:h, 'SVCS Home Worker', '+966500000001', 'Ops', 'active', 'CNCEC'), "
+            "(:a, 'SVCS Away Worker', '+966500000002', 'Ops', 'active', 'OTHERSITE'), "
+            "(:n, 'SVCS Unassigned Worker', '+966500000003', 'Ops', 'active', NULL)"),
+            {"h": EMP_HOME, "a": EMP_AWAY, "n": EMP_NOSITE})
+        pid = (await s.execute(_sqt(
+            'INSERT INTO pending_issues ("Date", "SAP_Code", "Quantity", '
+            '"Issued_To", "Site_ID", status) VALUES '
+            "(CURRENT_DATE::text, 'SVCS-1', 4, 'SVCS Away Worker', 'OTHERSITE', "
+            "'pending_hod') RETURNING id"))).scalar_one()
+        await s.commit()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            _ip = {"X-Real-IP": "203.0.113.95"}
+
+            async def token(u, p):
+                r = await ac.post("/auth/login", json={"username": u, "password": p},
+                                  headers=_ip)
+                return r.json().get("access_token")
+
+            def H(t):
+                return {"Authorization": f"Bearer {t}"}
+
+            worker_t = await token("worker", "floor2026")    # store_keeper @ CNCEC
+            hod_t = await token("hod", "hod2026")            # hod @ CNCEC
+            admin_t = await token("admin", "admin2026")
+
+            # A02-F6 — badge lookup leaked staff name + personal phone cross-site.
+            r_home = await ac.get(f"/ai/badge/{EMP_HOME}", headers=H(worker_t))
+            r_away = await ac.get(f"/ai/badge/{EMP_AWAY}", headers=H(worker_t))
+            check("as-f6: /ai/badge — CNCEC SK reads their OWN site's badge",
+                  r_home.status_code == 200 and r_home.json().get("found") is True,
+                  f"{r_home.status_code} {r_home.text[:80]}")
+            check("as-f6: /ai/badge — another site's employee name+phone is NOT "
+                  "disclosed",
+                  r_away.status_code == 200
+                  and r_away.json().get("found") is False
+                  and "SVCS Away" not in r_away.text
+                  and "966500000002" not in r_away.text,
+                  f"{r_away.status_code} {r_away.text[:110]}")
+            r = await ac.get(f"/ai/badge/{EMP_AWAY}", headers=H(admin_t))
+            check("as-f6: admin (unscoped) still resolves any site's badge",
+                  r.status_code == 200 and r.json().get("found") is True,
+                  f"{r.status_code} {r.text[:80]}")
+            # Unassigned staff stay visible on purpose — employees."Site_ID" is
+            # nullable and postdates most rows, so denying blank would break
+            # badge scanning for records made before the column existed.
+            r = await ac.get(f"/ai/badge/{EMP_NOSITE}", headers=H(worker_t))
+            check("as-f6: an UNASSIGNED employee (blank Site_ID) is still "
+                  "scannable — no regression for pre-Site_ID records",
+                  r.status_code == 200 and r.json().get("found") is True,
+                  f"{r.status_code} {r.text[:80]}")
+
+            # A02-F7 — submission-summary had a level check but no row check.
+            r = await ac.get("/ai/submission-summary", headers=H(hod_t),
+                             params={"kind": "staged-issue", "ref_id": pid})
+            check("as-f7: /ai/submission-summary — CNCEC HOD cannot read another "
+                  "site's staged issue",
+                  r.status_code == 404 and "SVCS Away" not in r.text,
+                  f"{r.status_code} {r.text[:110]}")
+            r = await ac.get("/ai/submission-summary", headers=H(admin_t),
+                             params={"kind": "staged-issue", "ref_id": pid})
+            check("as-f7: admin still reads it (guard is scope-based, not a block)",
+                  r.status_code == 200, f"{r.status_code} {r.text[:90]}")
+
+            # A03-F10 — the AI lanes wrote no audit record at all.
+            async with SessionLocal() as s:
+                before = (await s.execute(_sqt(
+                    "SELECT COUNT(*) FROM system_audit_log "
+                    "WHERE action_type = 'AI_QUERY'"))).scalar_one()
+            r = await ac.post("/ai/query", headers=H(hod_t),
+                              json={"question": "how many receipts in the last 7 days"})
+            async with SessionLocal() as s:
+                after = (await s.execute(_sqt(
+                    "SELECT COUNT(*) FROM system_audit_log "
+                    "WHERE action_type = 'AI_QUERY'"))).scalar_one()
+                last = (await s.execute(_sqt(
+                    "SELECT username, details FROM system_audit_log "
+                    "WHERE action_type = 'AI_QUERY' ORDER BY id DESC LIMIT 1"))
+                ).mappings().first()
+            check("as-f10: /ai/query writes an AI_QUERY audit row naming the asker, "
+                  "the lane and the question",
+                  r.status_code == 200 and after == before + 1
+                  and last and last["username"] == "hod"
+                  and "lane=query/" in (last["details"] or "")
+                  and "receipts" in (last["details"] or ""),
+                  f"{r.status_code} {before}->{after} {dict(last or {})}")
+    finally:
+        async with SessionLocal() as s:  # cleanup (audit rows are never deleted)
+            await s.execute(_sqt('DELETE FROM pending_issues WHERE "Site_ID" '
+                                 "= 'OTHERSITE' AND \"SAP_Code\" = 'SVCS-1'"))
+            await s.execute(_sqt('DELETE FROM employees WHERE "ID_Number" LIKE '
+                                 "'SVCS-EMP-%'"))
+            await s.commit()
+
+
 async def test_siteless_scope_fail_closed():
     """Suite AR — Theme A regression guard for the `''` truthiness IDOR class
     (audit A02-F2 / A02-F8).
@@ -7014,6 +7206,8 @@ async def main() -> int:
     await test_rtr()
     print("\n AR. site-less scope fails closed (Theme A: the '' truthiness IDOR class)")
     await test_siteless_scope_fail_closed()
+    print("\n AS. AI NL→SQL lane hardening (Theme B: both walls + lane IDOR/audit)")
+    await test_ai_lane_hardening()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

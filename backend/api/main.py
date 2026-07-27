@@ -118,6 +118,16 @@ async def lifespan(app: FastAPI):
             print(f"[ai] failed {n} orphaned OCR job(s) from a previous run")
     except Exception as e:  # never block startup on the sweep
         print(f"[ai] orphan sweep skipped: {type(e).__name__}: {e}")
+    # Second-wall assertion (audit A01-F3): the gi_ai_ro GRANT allowlist is
+    # wiped by every mirror reload and re-applied by operator ritual. Say so at
+    # boot rather than discovering it during an incident. Never fatal — a dev
+    # box without the role must still start.
+    try:
+        from .ai.analytics import ro_wall_status
+        wall = await ro_wall_status()
+        print(f"[ai] read-only wall: {'OK' if wall['ok'] else 'DEGRADED'} — {wall['detail']}")
+    except Exception as e:
+        print(f"[ai] read-only wall check skipped: {type(e).__name__}: {e}")
     yield
     if task:
         task.cancel()
