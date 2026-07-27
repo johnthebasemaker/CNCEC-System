@@ -22,7 +22,7 @@ credentials-file: /Users/johnsonandrew/.cloudflared/8e2f8d9d-08f4-432e-9857-dee2
 
 ingress:
   # All app traffic → Vite dev server (SPA + /api proxy to :8000).
-  - hostname: gi.giinventory.com
+  - hostname: local.giinventory.com
     service: http://localhost:5173
   # Everything else is refused.
   - service: http_status:404
