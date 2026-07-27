@@ -16,8 +16,29 @@ env/
 
 # Ignore passwords/secrets
 .env
+# Every .env VARIANT (.env.local, .env.production, .env.staging …) — the
+# audit (A04-F5) found only the bare `.env` covered, and `.env.production` is
+# precisely the filename an operator creates while setting up the box.
+# `.env.example` is the tracked template, so it is negated back in.
+.env.*
+!.env.example
 .streamlit/secrets.toml
 ~$*.xlsx
+
+# Key / certificate material. None exists in the tree today — this is
+# preventive: certbot writes real private keys on the production host, and any
+# local TLS experiment would otherwise drop an unignored .pem/.key here.
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+
+# Loose backups and logs. `*.bak` is how data-archive/gi_database.*.bak came to
+# be tracked in the first place (audit A04-C1).
+*.bak
+*.log
 
 # Ignore Python cache clutter
 __pycache__/

@@ -62,13 +62,28 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # deploy/.env is read by compose for ${VAR} interpolation, but that does NOT
+    # put anything inside the container. Without this env_file the API received
+    # none of WHATSAPP_*, SMTP_*, EMAIL_LOGISTICS_TO, PUBLIC_BASE_URL or
+    # GI_TRUSTED_PROXIES: WhatsApp and email would degrade to "not configured"
+    # and the weekly-report links would point at localhost. Explicit
+    # `environment:` keys below still take precedence over the file.
+    env_file:
+      - .env
     environment:
       GI_ENV: production
       JWT_SECRET: ${JWT_SECRET}
       # asyncpg URL (config.async_database_url normalises psycopg2/plain forms too).
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      # Single-origin behind nginx → CORS unused; set only if you split origins.
+      # Blank in production = NO cross-origin access (Theme C). Browser-only
+      # deployments can leave it unset; the native shells need their webview
+      # origins listed in deploy/.env or every native API call fails.
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Trust forwarded client-IP headers only from this peer (audit A03-F6).
+      GI_TRUSTED_PROXIES: ${GI_TRUSTED_PROXIES:-}
+      # Base URL for outbound capability links; the API refuses to boot in
+      # production if this is unset or points at localhost (audit A04-F7).
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Intelligence layer (Phase AI-*): local Ollama service. Leave as-is;
       # the AI endpoints degrade to a friendly notice when it's unreachable.
       OLLAMA_HOST: http://ollama:11434

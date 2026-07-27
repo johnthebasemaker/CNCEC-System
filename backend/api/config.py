@@ -30,7 +30,24 @@ def _load_env_files() -> list[str]:
         if p.is_file():
             load_dotenv(p, override=False)
             loaded.append(str(p))
+            _warn_if_world_readable(p)
     return loaded
+
+
+def _warn_if_world_readable(path: "Path") -> None:
+    """Audit A04-F3: deploy/.env ships live Meta credentials and was mode 0644 —
+    readable by every account on the host, including the production box where it
+    sits alongside other services. `chmod 600` is an operator ritual nobody is
+    reminded of, so say it out loud at load time. Never fatal: a wrong mode must
+    not stop the app from serving.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            print(f"[config] WARNING: {path} is mode {mode:04o} — readable beyond "
+                  f"its owner. It holds live credentials; run: chmod 600 {path}")
+    except OSError:
+        pass
 
 
 # Runs at import time, BEFORE any os.environ reads below (and before the other
@@ -102,6 +119,21 @@ CORS_ORIGINS = (
 # about HMAC key length in local dev — but it is refused in production.
 _DEV_JWT_SECRET = "dev-insecure-change-me-not-for-production-use-0123456789"
 
+# Audit A04-F4: the production guard rejected a missing, short, or dev-default
+# secret — but the CI/test key is 43 chars and none of those, so it PASSED. That
+# string appears in five docs and two workflows and is the one every developer
+# copy-pastes, which makes it the value most likely to be pasted into a .env
+# "just to get the server up". Any published constant is refused in production
+# regardless of length; add new ones here rather than trusting the length check.
+_PUBLISHED_SECRETS = frozenset({
+    _DEV_JWT_SECRET,
+    "ci-only-service-test-secret-key-32bytes-min",   # docs §8 + CI workflows
+    "CHANGE_ME",                                     # deploy/.env placeholder
+    "CHANGE_ME_run_openssl_rand_hex_32",             # .env.example placeholder
+    "jwt_secret",
+    "changeme", "change-me", "secret", "password",
+})
+
 
 def is_production() -> bool:
     """True when GI_ENV names a production environment."""
@@ -112,15 +144,42 @@ def jwt_secret() -> str:
     """Resolve the JWT signing key.
 
     In production (GI_ENV=production) a strong secret is MANDATORY: a missing,
-    too-short (<32 chars), or the dev-default key raises at startup — the app
-    refuses to boot with an insecure signing key. In dev it falls back to a
-    long-but-obvious placeholder so local runs work without any setup.
+    too-short (<32 chars), publicly-published, or dev-default key raises at
+    startup — the app refuses to boot with an insecure signing key. In dev it
+    falls back to a long-but-obvious placeholder so local runs work without any
+    setup.
     """
     s = os.environ.get("JWT_SECRET", "").strip()
     if is_production():
-        if not s or s == _DEV_JWT_SECRET or len(s) < 32:
+        if not s or len(s) < 32:
             raise RuntimeError(
                 "JWT_SECRET must be set to a strong secret (≥32 chars) when "
                 "GI_ENV=production — refusing to start with an insecure signing key.")
+        if s in _PUBLISHED_SECRETS:
+            raise RuntimeError(
+                "JWT_SECRET is a publicly published placeholder/test value — "
+                "refusing to start. Generate a real one: openssl rand -hex 32")
         return s
     return s or _DEV_JWT_SECRET
+
+
+def public_base_url() -> str:
+    """Base URL for outbound links (weekly-report capability URLs, etc).
+
+    Audit A04-F7: this silently fell back to http://localhost:8000, so an unset
+    variable in production produced WhatsApp links that resolve to the
+    RECIPIENT'S own device — the link fails quietly and a 256-bit capability
+    token has been broadcast for nothing. Fail fast in production instead,
+    mirroring the JWT_SECRET pattern.
+    """
+    v = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if is_production():
+        if not v:
+            raise RuntimeError(
+                "PUBLIC_BASE_URL must be set when GI_ENV=production — outbound "
+                "report links would otherwise point at localhost.")
+        if "localhost" in v or "127.0.0.1" in v:
+            raise RuntimeError(
+                f"PUBLIC_BASE_URL={v!r} points at localhost — outbound links "
+                "must use the public hostname in production.")
+    return v or "http://localhost:8000"

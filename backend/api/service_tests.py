@@ -6349,6 +6349,202 @@ async def test_sme_sk_upgrades():
             await s.commit()
 
 
+def _dockerignore_excluded(patterns: list[str], path: str) -> bool:
+    """Does `path` get excluded from a Docker build context by `patterns`?
+
+    Reimplements moby/patternmatcher: patterns are matched against the path
+    relative to the context root, `*` does not cross `/`, `**` spans any number
+    of segments, a leading `!` re-includes, and the LAST matching pattern wins.
+    Also honours the rule that everything under an excluded directory is
+    excluded. Written out rather than shelled out because the Docker CLI is not
+    installed on every machine that runs this gate.
+    """
+    import re as _re
+
+    def to_regex(pat: str) -> "_re.Pattern":
+        parts, out = pat.strip("/").split("/"), []
+        for seg in parts:
+            if seg == "**":
+                out.append("(?:.*)")
+                continue
+            buf = ""
+            for ch in seg:
+                if ch == "*":
+                    buf += "[^/]*"
+                elif ch == "?":
+                    buf += "[^/]"
+                else:
+                    buf += _re.escape(ch)
+            out.append(buf)
+        # join, collapsing the '**' segments so they may match zero segments
+        joined = ""
+        for i, seg in enumerate(out):
+            if seg == "(?:.*)":
+                joined += "(?:[^/]+/)*" if i < len(out) - 1 else "(?:.*)"
+            else:
+                joined += seg + ("/" if i < len(out) - 1 else "")
+        return _re.compile("^" + joined + "$")
+
+    excluded = False
+    # every ancestor path, so a matched directory excludes its contents
+    segs = path.split("/")
+    candidates = ["/".join(segs[:i + 1]) for i in range(len(segs))]
+    for raw in patterns:
+        raw = raw.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        neg = raw.startswith("!")
+        pat = raw[1:].strip() if neg else raw
+        rx = to_regex(pat)
+        if any(rx.match(c) for c in candidates):
+            excluded = not neg
+    return excluded
+
+
+async def test_config_discipline():
+    """Suite AV — Theme D: config discipline (audit A04-F3, A04-F4, A04-F7)
+    plus the ignore-file coverage that keeps secrets out of git and out of the
+    production image.
+
+    These are boot-time and build-time controls, so they are asserted directly
+    against the real config functions and the real ignore files rather than over
+    HTTP."""
+    import subprocess
+    from pathlib import Path
+
+    from . import config as _cfg
+
+    root = Path(__file__).resolve().parents[2]
+    saved_env = os.environ.get("GI_ENV")
+    saved_jwt = os.environ.get("JWT_SECRET")
+    saved_pub = os.environ.get("PUBLIC_BASE_URL")
+
+    def _restore(k, v):
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+    try:
+        # --- A04-F4: published/placeholder secrets must not pass in production
+        os.environ["GI_ENV"] = "production"
+        os.environ["PUBLIC_BASE_URL"] = "https://gi.example.com"
+        published = [
+            "ci-only-service-test-secret-key-32bytes-min",   # the documented gate key
+            "dev-insecure-change-me-not-for-production-use-0123456789",
+            "CHANGE_ME_run_openssl_rand_hex_32",
+        ]
+        accepted = []
+        for val in published:
+            os.environ["JWT_SECRET"] = val
+            try:
+                _cfg.jwt_secret()
+                accepted.append(val[:18])
+            except RuntimeError:
+                pass
+        check("av-f4: every published/placeholder JWT_SECRET is refused in "
+              "production (length alone was not enough)",
+              not accepted, f"still accepted: {accepted}")
+
+        os.environ["JWT_SECRET"] = "x" * 20
+        short_ok = True
+        try:
+            _cfg.jwt_secret()
+        except RuntimeError:
+            short_ok = False
+        real = "b9f1" + "a3c7e05d" * 7          # 60 chars, not a published value
+        os.environ["JWT_SECRET"] = real
+        check("av-f4: a short secret is still refused and a real one is accepted "
+              "(no false rejection)",
+              not short_ok and _cfg.jwt_secret() == real, "guard drifted")
+
+        # --- A04-F7: PUBLIC_BASE_URL must be real in production ---------------
+        os.environ.pop("PUBLIC_BASE_URL", None)
+        unset_ok = True
+        try:
+            _cfg.public_base_url()
+        except RuntimeError:
+            unset_ok = False
+        os.environ["PUBLIC_BASE_URL"] = "http://localhost:8000"
+        local_ok = True
+        try:
+            _cfg.public_base_url()
+        except RuntimeError:
+            local_ok = False
+        os.environ["PUBLIC_BASE_URL"] = "https://gi.example.com/"
+        check("av-f7: production refuses an unset or localhost PUBLIC_BASE_URL "
+              "and accepts a real one (trailing slash trimmed)",
+              not unset_ok and not local_ok
+              and _cfg.public_base_url() == "https://gi.example.com",
+              f"unset_ok={unset_ok} local_ok={local_ok}")
+
+        os.environ["GI_ENV"] = "dev"
+        os.environ.pop("PUBLIC_BASE_URL", None)
+        check("av-f7: dev still falls back to localhost (no setup required)",
+              _cfg.public_base_url() == "http://localhost:8000",
+              _cfg.public_base_url())
+    finally:
+        _restore("GI_ENV", saved_env)
+        _restore("JWT_SECRET", saved_jwt)
+        _restore("PUBLIC_BASE_URL", saved_pub)
+
+    # --- A04-F3: the secrets file must not be readable beyond its owner -------
+    env_path = root / "deploy" / ".env"
+    if env_path.is_file():
+        mode = env_path.stat().st_mode & 0o777
+        check("av-f3: deploy/.env is owner-only (chmod 600) — it holds live "
+              "Meta/SMTP credentials",
+              not (mode & 0o077), f"mode={mode:04o}")
+    else:
+        check("av-f3: deploy/.env absent on this machine — permission check "
+              "skipped (CI has no secrets file)", True)
+
+    # --- ignore coverage: git ------------------------------------------------
+    must_ignore = [".env", "deploy/.env", ".env.local", ".env.production",
+                   "server.pem", "tls.key", "cert.crt", "store.p12", "store.pfx",
+                   "app.log", "data.bak", "gi_database.db"]
+    must_track = [".env.example", "deploy/.env.example"]
+    leaked = [p for p in must_ignore if subprocess.run(
+        ["git", "check-ignore", "-q", p], cwd=root).returncode != 0]
+    wrongly_ignored = [p for p in must_track if subprocess.run(
+        ["git", "check-ignore", "-q", p], cwd=root).returncode == 0]
+    check("av-git: every secret-bearing path is gitignored (env variants, keys, "
+          "certs, backups, logs, the legacy DB)",
+          not leaked, f"NOT ignored: {leaked}")
+    check("av-git: the .env.example templates stay TRACKED (negation works)",
+          not wrongly_ignored, f"wrongly ignored: {wrongly_ignored}")
+
+    # --- ignore coverage: docker build context -------------------------------
+    patterns = (root / ".dockerignore").read_text().splitlines()
+    must_exclude = [".env", "deploy/.env", ".env.production", "deploy/.env.local",
+                    "gi_database.db", "data-archive/gi_database.2026.bak",
+                    "server.pem", "tls.key", "deploy/certs/privkey.pem"]
+    must_include = ["backend/api/main.py", "deploy/.env.example",
+                    "USER_MANUAL.md", "frontend/src/main.tsx"]
+    baked = [p for p in must_exclude if not _dockerignore_excluded(patterns, p)]
+    dropped = [p for p in must_include if _dockerignore_excluded(patterns, p)]
+    check("av-docker: no .env variant, key or database file can enter the "
+          "production image layer",
+          not baked, f"would be BAKED IN: {baked}")
+    check("av-docker: application sources and the .env template still reach the "
+          "build context (no over-exclusion)",
+          not dropped, f"wrongly excluded: {dropped}")
+
+    # --- compose actually delivers the config to the container ---------------
+    compose = (root / "deploy" / "docker-compose.prod.yml").read_text()
+    import yaml as _yaml
+    api_svc = _yaml.safe_load(compose)["services"]["api"]
+    env_block = api_svc.get("environment", {})
+    check("av-compose: the api service loads deploy/.env AND names the "
+          "production-critical vars (they reached the container via neither before)",
+          ".env" in (api_svc.get("env_file") or [])
+          and env_block.get("GI_ENV") == "production"
+          and "PUBLIC_BASE_URL" in env_block
+          and "GI_TRUSTED_PROXIES" in env_block
+          and "CORS_ORIGINS" in env_block,
+          f"env_file={api_svc.get('env_file')} keys={sorted(env_block)}")
+
+
 async def test_byid_scope_mopup():
     """Suite AU — the three High IDORs the audit found but left out of the
     Theme fix queue (A02-F3, A02-F4, A02-F5).
@@ -7613,6 +7809,8 @@ async def main() -> int:
     await test_auth_surface_hardening()
     print("\n AU. by-id scope mop-up (A02-F3/F4/F5: list scoped, direct fetch not)")
     await test_byid_scope_mopup()
+    print("\n AV. config discipline (Theme D: secret guards + ignore coverage)")
+    await test_config_discipline()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

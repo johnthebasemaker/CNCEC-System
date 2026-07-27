@@ -14,10 +14,17 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Local database + backups (lives in the gi-data named volume at runtime)
+# Local database + backups (lives in the gi-data named volume at runtime).
+# `**/` because .dockerignore patterns are anchored at the context root, so a
+# bare `*.db` would miss a nested one. gi_database.db is named explicitly: it is
+# the live legacy system of record and must never enter an image layer.
 *.db
+**/*.db
+gi_database.db
 *.sqlite3
+**/*.sqlite3
 *.bak
+**/*.bak
 gi_database.*.bak
 
 # Mutable disk state (mounted as volumes at runtime)
@@ -38,7 +45,23 @@ UI_CRAWLER_REPORT.md
 .env
 # Catches deploy/.env and any nested .env files
 **/.env
+# …and every .env VARIANT (.env.local, .env.production, …). The bare patterns
+# above missed these, so an operator's .env.production would have been baked
+# into the image. .env.example is the tracked template and stays available.
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
 .streamlit/secrets.toml
+# Key / certificate material (certbot output, local TLS experiments)
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
 
 # OS noise
 .DS_Store
