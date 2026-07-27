@@ -15,7 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, resolve_site_param, site_scope
+from .auth import (get_current_user, resolve_site_param, site_row_visible,
+                   site_scope)
 from .db import get_session
 from .services import warehouse as wh
 
@@ -47,6 +48,15 @@ async def incoming_dns(site_id: Optional[str] = None,
 @router.get("/incoming-dns/{dn_number}/items", summary="DN line items")
 async def dn_items(dn_number: str, user: dict = Depends(get_current_user),
                    session: AsyncSession = Depends(get_session)):
+    # Authentication only was the whole gate (audit A02-F5), so ANY logged-in
+    # user — down to level 0 at another site — could read any DN's lines by
+    # guessing its number. 404 rather than 403: a direct fetch shouldn't confirm
+    # that the DN exists.
+    scope = site_scope(user)
+    if scope is not None:
+        dn_site = await wh.dn_site(session, dn_number)
+        if dn_site is not None and (scope == "" or not site_row_visible(scope, dn_site)):
+            raise HTTPException(404, "no such delivery note")
     return {"items": await wh.dn_lines(session, dn_number)}
 
 

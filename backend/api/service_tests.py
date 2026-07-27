@@ -6349,6 +6349,220 @@ async def test_sme_sk_upgrades():
             await s.commit()
 
 
+async def test_byid_scope_mopup():
+    """Suite AU — the three High IDORs the audit found but left out of the
+    Theme fix queue (A02-F3, A02-F4, A02-F5).
+
+    All three share one shape: the LIST endpoint is properly scoped, but the
+    sibling by-id route reached the row through the path parameter alone, so an
+    integer or a DN number was the only thing standing between a user and
+    another site's / warehouse's data. Every check below is an exploit that
+    succeeded before this branch."""
+    import bcrypt as _bc
+    from sqlalchemy import text as _sqt
+
+    users = ledger._MD.tables["users"]
+    PW = "svcu-mopup-password"
+    HASH = _bc.hashpw(PW.encode(), _bc.gensalt(rounds=4)).decode()
+    PO_A, PO_B = "PO-SVCU-A", "PO-SVCU-B"
+    DN_A, DN_B = "DN-SVCU-A", "DN-SVCU-B"
+    WH_A, WH_B = "WH-SVCU-A", "WH-SVCU-B"
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCU-%'"))
+        for uname, role, site, wh_id in (
+                ("SVCU-sk-home", "store_keeper", "CNCEC", ""),
+                ("SVCU-sk-away", "store_keeper", "OTHERSITE", ""),
+                ("SVCU-wh-a", "warehouse_user", "", WH_A),
+                ("SVCU-wh-b", "warehouse_user", "", WH_B)):
+            await s.execute(_sqt(
+                'INSERT INTO users (username, password_hash, role, "Site_ID", '
+                '"Warehouse_ID") VALUES (:u, :h, :r, :s, :w)'),
+                {"u": uname, "h": HASH, "r": role, "s": site, "w": wh_id})
+
+        # Two supervisor material requests — one per site, each with a line.
+        smr_home = (await s.execute(_sqt(
+            'INSERT INTO supervisor_material_requests (request_no, "Site_ID", '
+            '"Worker_ID", "Worker_Name", "Job_Tank_Place", "Old_PPE_Returned", '
+            "requested_by, status) VALUES ('SMR-SVCU-HOME', 'CNCEC', 'W1', "
+            "'SVCU Home Worker', 'Tank 1', 1, 'supervisor', 'pending_sk') "
+            "RETURNING id"))).scalar_one()
+        # TWO foreign requests: approve and reject are each exercised against a
+        # still-pending row, so neither result can be explained away by the
+        # other call having already changed the status.
+        smr_away = (await s.execute(_sqt(
+            'INSERT INTO supervisor_material_requests (request_no, "Site_ID", '
+            '"Worker_ID", "Worker_Name", "Job_Tank_Place", "Old_PPE_Returned", '
+            "requested_by, status) VALUES ('SMR-SVCU-AWAY', 'OTHERSITE', 'W2', "
+            "'SVCU Away Worker', 'Secret Tank 9', 1, 'supervisor', 'pending_sk') "
+            "RETURNING id"))).scalar_one()
+        smr_away2 = (await s.execute(_sqt(
+            'INSERT INTO supervisor_material_requests (request_no, "Site_ID", '
+            '"Worker_ID", "Worker_Name", "Job_Tank_Place", "Old_PPE_Returned", '
+            "requested_by, status) VALUES ('SMR-SVCU-AWAY2', 'OTHERSITE', 'W3', "
+            "'SVCU Away Worker 2', 'Secret Tank 10', 1, 'supervisor', 'pending_sk') "
+            "RETURNING id"))).scalar_one()
+        for rid, sap, note in ((smr_home, "SVCU-1", "home line"),
+                               (smr_away, "SVCU-2", "away line"),
+                               (smr_away2, "SVCU-3", "away line 2")):
+            await s.execute(_sqt(
+                'INSERT INTO supervisor_material_request_items (request_id, '
+                '"SAP_Code", "Equipment_Description", "Requested_Qty", "Notes") '
+                "VALUES (:r, :sap, 'SVCU Probe Material', 3, :n)"),
+                {"r": rid, "sap": sap, "n": note})
+
+        # Two warehouses' assignments + DNs.
+        for wh_id, po in ((WH_A, PO_A), (WH_B, PO_B)):
+            await s.execute(_sqt(
+                'INSERT INTO purchase_orders ("PO_Number", "PR_Number", '
+                '"Vendor_Name", "Site_ID", status, created_by) VALUES '
+                "(:po, 'PR-SVCU', 'SVCU Vendor', 'CNCEC', 'open', 'admin')"),
+                {"po": po})
+            await s.execute(_sqt(
+                'INSERT INTO po_items ("PO_Number", line_no, "Material_Code", '
+                '"Description", "Qty", "UOM") VALUES '
+                "(:po, 1, 'GI-SVCU', :d, 10, 'PCS')"),
+                {"po": po, "d": f"SVCU secret line for {wh_id}"})
+        asg_a = (await s.execute(_sqt(
+            'INSERT INTO po_assignments ("PO_Number", "Warehouse_ID", assigned_by) '
+            "VALUES (:po, :w, 'admin') RETURNING id"),
+            {"po": PO_A, "w": WH_A})).scalar_one()
+        asg_b = (await s.execute(_sqt(
+            'INSERT INTO po_assignments ("PO_Number", "Warehouse_ID", assigned_by) '
+            "VALUES (:po, :w, 'admin') RETURNING id"),
+            {"po": PO_B, "w": WH_B})).scalar_one()
+        for dn, wh_id, site in ((DN_A, WH_A, "CNCEC"), (DN_B, WH_B, "OTHERSITE")):
+            await s.execute(_sqt(
+                'INSERT INTO delivery_notes ("DN_Number", "PO_Number", '
+                '"Warehouse_ID", "Site_ID", status, created_by) VALUES '
+                "(:dn, :po, :w, :s, 'in_transit', 'admin')"),
+                {"dn": dn, "po": PO_A if wh_id == WH_A else PO_B, "w": wh_id, "s": site})
+            await s.execute(_sqt(
+                'INSERT INTO dn_items ("DN_Number", po_item_id, "Material_Code", '
+                '"Description", "Qty") VALUES (:dn, 1, \'GI-SVCU\', :d, 5)'),
+                {"dn": dn, "d": f"SVCU secret DN line for {wh_id}"})
+        await s.commit()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            _ip = {"X-Real-IP": "203.0.113.97"}
+
+            async def token(u, p):
+                r = await ac.post("/auth/login", json={"username": u, "password": p},
+                                  headers=_ip)
+                return r.json().get("access_token")
+
+            def H(t):
+                return {"Authorization": f"Bearer {t}"}
+
+            sk_home = await token("SVCU-sk-home", PW)
+            wh_a = await token("SVCU-wh-a", PW)
+            admin_t = await token("admin", "admin2026")
+
+            # --- A02-F3: request line items by id ----------------------------
+            r_own = await ac.get(f"/requests/{smr_home}/items", headers=H(sk_home))
+            r_away = await ac.get(f"/requests/{smr_away}/items", headers=H(sk_home))
+            check("au-f3: /requests/{id}/items — SK still reads their OWN site's "
+                  "request lines",
+                  r_own.status_code == 200 and len(r_own.json().get("items", [])) == 1,
+                  f"{r_own.status_code} {r_own.text[:90]}")
+            check("au-f3: /requests/{id}/items — another site's lines are NOT "
+                  "readable by incrementing the id",
+                  r_away.status_code == 404 and "away line" not in r_away.text,
+                  f"{r_away.status_code} {r_away.text[:110]}")
+            r = await ac.get(f"/requests/{smr_away}/items", headers=H(admin_t))
+            check("au-f3: admin (unscoped) still reads any site's request lines",
+                  r.status_code == 200 and len(r.json().get("items", [])) == 1,
+                  f"{r.status_code} {r.text[:90]}")
+
+            # --- A02-F4: SK approving / rejecting another site's request ------
+            r_rej = await ac.post(f"/requests/{smr_away}/reject", headers=H(sk_home),
+                                  json={"reason": "svcu cross-site reject"})
+            r_app = await ac.post(f"/requests/{smr_away2}/approve", headers=H(sk_home),
+                                  json={})
+            async with SessionLocal() as s:
+                sts = [r[0] for r in (await s.execute(_sqt(
+                    "SELECT status FROM supervisor_material_requests "
+                    "WHERE id IN (:a, :b) ORDER BY id"),
+                    {"a": smr_away, "b": smr_away2})).all()]
+                staged = (await s.execute(_sqt(
+                    "SELECT COUNT(*) FROM pending_issues WHERE \"SAP_Code\" "
+                    "IN ('SVCU-2', 'SVCU-3')"))).scalar_one()
+            check("au-f4: an SK cannot reject or approve another site's material "
+                  "request (each tested on a still-pending row)",
+                  r_rej.status_code == 403 and r_app.status_code == 403,
+                  f"reject={r_rej.status_code} approve={r_app.status_code}")
+            check("au-f4: both foreign requests are untouched — still pending_sk, "
+                  "nothing staged into the other site's ledger",
+                  sts == ["pending_sk", "pending_sk"] and staged == 0,
+                  f"statuses={sts} staged={staged}")
+            r = await ac.post(f"/requests/{smr_home}/approve", headers=H(sk_home),
+                              json={})
+            check("au-f4: the SK's OWN site's request still approves normally",
+                  r.status_code == 200 and r.json().get("approved") is True,
+                  f"{r.status_code} {r.text[:110]}")
+
+            # --- A02-F5: three by-id line-item endpoints ---------------------
+            r_own = await ac.get(f"/warehouse/assignments/{asg_a}/items", headers=H(wh_a))
+            r_away = await ac.get(f"/warehouse/assignments/{asg_b}/items", headers=H(wh_a))
+            check("au-f5: /warehouse/assignments/{id}/items — own warehouse still "
+                  "readable",
+                  r_own.status_code == 200 and len(r_own.json().get("items", [])) == 1,
+                  f"{r_own.status_code} {r_own.text[:90]}")
+            check("au-f5: /warehouse/assignments/{id}/items — another warehouse's "
+                  "PO contents are refused",
+                  r_away.status_code == 403 and WH_B not in r_away.text,
+                  f"{r_away.status_code} {r_away.text[:110]}")
+
+            r_own = await ac.get(f"/warehouse/dns/{DN_A}/items", headers=H(wh_a))
+            r_away = await ac.get(f"/warehouse/dns/{DN_B}/items", headers=H(wh_a))
+            check("au-f5: /warehouse/dns/{dn}/items — own warehouse still readable",
+                  r_own.status_code == 200 and len(r_own.json().get("items", [])) == 1,
+                  f"{r_own.status_code} {r_own.text[:90]}")
+            check("au-f5: /warehouse/dns/{dn}/items — another warehouse's DN lines "
+                  "are refused",
+                  r_away.status_code == 403 and WH_B not in r_away.text,
+                  f"{r_away.status_code} {r_away.text[:110]}")
+
+            r_own = await ac.get(f"/site/incoming-dns/{DN_A}/items", headers=H(sk_home))
+            r_away = await ac.get(f"/site/incoming-dns/{DN_B}/items", headers=H(sk_home))
+            check("au-f5: /site/incoming-dns/{dn}/items — own site's DN still "
+                  "readable",
+                  r_own.status_code == 200 and len(r_own.json().get("items", [])) == 1,
+                  f"{r_own.status_code} {r_own.text[:90]}")
+            check("au-f5: /site/incoming-dns/{dn}/items — any authenticated user "
+                  "can no longer read another site's DN by guessing its number",
+                  r_away.status_code == 404 and WH_B not in r_away.text,
+                  f"{r_away.status_code} {r_away.text[:110]}")
+            r = await ac.get(f"/site/incoming-dns/{DN_B}/items", headers=H(admin_t))
+            check("au-f5: admin (unscoped) still reads any site's DN lines",
+                  r.status_code == 200 and len(r.json().get("items", [])) == 1,
+                  f"{r.status_code} {r.text[:90]}")
+    finally:
+        async with SessionLocal() as s:  # cleanup
+            await s.execute(_sqt("DELETE FROM refresh_sessions WHERE user_id IN "
+                                 "(SELECT id FROM users WHERE username LIKE 'SVCU-%')"))
+            await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCU-%'"))
+            await s.execute(_sqt("DELETE FROM pending_issues WHERE \"SAP_Code\" "
+                                 "LIKE 'SVCU-%'"))
+            await s.execute(_sqt("DELETE FROM supervisor_material_request_items "
+                                 "WHERE \"SAP_Code\" LIKE 'SVCU-%'"))
+            await s.execute(_sqt("DELETE FROM supervisor_material_requests "
+                                 "WHERE request_no LIKE 'SMR-SVCU-%'"))
+            await s.execute(_sqt('DELETE FROM dn_items WHERE "DN_Number" LIKE '
+                                 "'DN-SVCU-%'"))
+            await s.execute(_sqt('DELETE FROM delivery_notes WHERE "DN_Number" '
+                                 "LIKE 'DN-SVCU-%'"))
+            await s.execute(_sqt('DELETE FROM po_assignments WHERE "PO_Number" '
+                                 "LIKE 'PO-SVCU-%'"))
+            await s.execute(_sqt('DELETE FROM po_items WHERE "PO_Number" LIKE '
+                                 "'PO-SVCU-%'"))
+            await s.execute(_sqt('DELETE FROM purchase_orders WHERE "PO_Number" '
+                                 "LIKE 'PO-SVCU-%'"))
+            await s.commit()
+
+
 async def test_auth_surface_hardening():
     """Suite AT — Theme C: the auth surface (audit A03-F3/F5/F6/F8/F9/F11,
     A02-F9, A02-F11). Covers 2FA brute-force + step-up, unknown-role fail-open,
@@ -7397,6 +7611,8 @@ async def main() -> int:
     await test_ai_lane_hardening()
     print("\n AT. auth surface hardening (Theme C: 2FA, CORS, proxy, revocation)")
     await test_auth_surface_hardening()
+    print("\n AU. by-id scope mop-up (A02-F3/F4/F5: list scoped, direct fetch not)")
+    await test_byid_scope_mopup()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

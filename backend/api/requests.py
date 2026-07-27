@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, require_roles, resolve_site_param, site_scope
+from .auth import (get_current_user, require_roles, resolve_site_param,
+                   site_row_visible, site_scope)
 from .db import get_session
 from .services import supervisor as smr
 
@@ -26,6 +27,30 @@ router = APIRouter(prefix="/requests", tags=["material requests"])
 
 _SUPERVISOR = require_roles("supervisor")
 _SK = require_roles("store_keeper")
+
+
+async def _guard_smr_site(session: AsyncSession, request_id: int, user: dict,
+                          *, code: int = 403) -> None:
+    """Refuse when a site-scoped caller touches another site's request.
+
+    The bulk list is scoped, but every by-id route reached the row through the
+    integer path parameter alone (audit A02-F3/A02-F4), so a store keeper at one
+    site could read — and approve or reject — any other site's request simply by
+    incrementing the id. Shaped like hod._guard_pending_site: unrestricted
+    callers pass, a missing row passes through so the service raises its own
+    not-found, and a site-less scoped caller matches nothing.
+
+    Reads pass code=404 so a direct fetch doesn't confirm the id exists;
+    mutations use 403, where the boundary should be visible to the actor.
+    """
+    scope = site_scope(user)
+    if scope is None:
+        return
+    row_site = await smr.smr_site(session, request_id)
+    if row_site is None:
+        return
+    if scope == "" or not site_row_visible(scope, row_site):
+        raise HTTPException(code, "this request belongs to another site")
 
 
 class SMRItemIn(BaseModel):
@@ -113,14 +138,18 @@ async def stock_check(sap_code: str, user: dict = Depends(_SUPERVISOR),
 async def cancel(request_id: int, user: dict = Depends(_SUPERVISOR),
                  session: AsyncSession = Depends(get_session)):
     async with session.begin():
+        # cancel_smr already enforces the stricter "must be YOUR request" rule;
+        # the site guard is belt-and-braces so every by-id route on this router
+        # carries the same check.
+        await _guard_smr_site(session, request_id, user)
         res = await smr.cancel_smr(session, supervisor=user["username"], request_id=request_id)
     return _guard(res)
 
 
-# TODO(security): missing per-request scope check — Phase 2 Theme A, ref A02
 @router.get("/{request_id}/items", summary="Request line items")
 async def items(request_id: int, user: dict = Depends(get_current_user),
                 session: AsyncSession = Depends(get_session)):
+    await _guard_smr_site(session, request_id, user, code=404)
     return {"items": await smr.smr_items(session, request_id)}
 
 
@@ -137,6 +166,7 @@ async def approve(request_id: int, body: ApproveIn = Body(default=ApproveIn()),
         raise HTTPException(422, "adjusted quantities must be ≥ 0 (0 withdraws the line)")
     try:
         async with session.begin():
+            await _guard_smr_site(session, request_id, user)
             res = await smr.approve_smr(session, sk_username=user["username"],
                                         request_id=request_id,
                                         qty_overrides=body.adjustments)
@@ -151,6 +181,7 @@ async def approve(request_id: int, body: ApproveIn = Body(default=ApproveIn()),
 async def reject(request_id: int, body: RejectIn = Body(default=RejectIn()),
                  user: dict = Depends(_SK), session: AsyncSession = Depends(get_session)):
     async with session.begin():
+        await _guard_smr_site(session, request_id, user)
         res = await smr.reject_smr(session, sk_username=user["username"],
                                    request_id=request_id, reason=body.reason or "")
     return _guard(res)

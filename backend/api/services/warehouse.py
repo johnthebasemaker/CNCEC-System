@@ -84,6 +84,13 @@ async def dns_for(session: AsyncSession, warehouse_id: str | None, status: str |
     return _rows(await session.execute(sql, params))
 
 
+async def dn_site(session: AsyncSession, dn_number: str) -> str | None:
+    """Destination Site_ID of one DN, or None when the DN doesn't exist — the
+    lookup the site-side scope guard needs before serving its lines."""
+    return (await session.execute(select(delivery_notes_t.c["Site_ID"])
+            .where(delivery_notes_t.c["DN_Number"] == dn_number))).scalar_one_or_none()
+
+
 async def dn_lines(session: AsyncSession, dn_number: str):
     stmt = select(
         dn_items_t.c["id"], dn_items_t.c["po_item_id"], dn_items_t.c["Material_Code"],
