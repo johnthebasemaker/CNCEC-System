@@ -2043,6 +2043,50 @@ def test_config_jwt():
                 os.environ[k] = v
 
 
+def test_secret_diag():
+    """Startup secret diagnostic (Theme D, A04-F2): correct state classification,
+    and — the property that matters — no secret value ever reaches the output."""
+    import contextlib
+    import io
+    import os
+    from . import secret_diag
+    from .secret_diag import log_secret_diagnostic, state_of
+
+    check("state_of: unset", state_of(None) == "unset")
+    check("state_of: empty", state_of("   ") == "empty")
+    check("state_of: CHANGE_ME placeholder", state_of("CHANGE_ME") == "placeholder")
+    check("state_of: published CI value is a placeholder",
+          state_of("ci-only-service-test-secret-key-32bytes-min") == "placeholder")
+    check("state_of: real value", state_of("a-real-secret") == "set")
+
+    keys = [k for k, _ in secret_diag.KEYS]
+    saved = {k: os.environ.get(k) for k in keys + ["GI_ENV"]}
+    sentinel = "s3ntinel-EF29-value-that-must-never-print"
+    try:
+        os.environ["GI_ENV"] = "production"
+        os.environ["JWT_SECRET"] = sentinel
+        os.environ["POSTGRES_PASSWORD"] = "CHANGE_ME"
+        os.environ["PUBLIC_BASE_URL"] = "http://localhost:8000"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            log_secret_diagnostic()
+        out = buf.getvalue()
+        check("diagnostic never prints values", sentinel not in out)
+        check("diagnostic lists every documented key",
+              all(k in out for k in keys))
+        check("diagnostic flags localhost PUBLIC_BASE_URL",
+              "set (localhost!)" in out)
+        check("diagnostic warns on placeholder production secrets",
+              "WARNING" in out and "POSTGRES_PASSWORD" in
+              out.split("WARNING")[-1])
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # --- Suite G: SME plan layer (Phase S1 — engine port + parity oracle) --------
 def _sme_deep_diff(a, b, path="", tol=1e-9) -> str:
     """First mismatch between two JSON-ish structures ('' if equal).
@@ -6686,6 +6730,7 @@ async def main() -> int:
     await test_submitter_resolution()
     await test_notification_visibility()
     test_config_jwt()
+    test_secret_diag()
     print("\n B. auth/role guards")
     await test_auth_guards()
     print("\n C. site scoping (multi-site isolation)")
