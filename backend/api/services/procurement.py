@@ -113,7 +113,7 @@ async def pr_lines(session: AsyncSession, pr_number: str, site_id: str | None):
         pr_master_t.c["Requested_Qty"], pr_master_t.c["UOM"], pr_master_t.c["Est_Cost_SAR"],
         pr_master_t.c["logistics_status"],
     ).where(pr_master_t.c["PR_Number"] == pr_number)
-    if site_id:
+    if site_id is not None:
         stmt = stmt.where(func.coalesce(pr_master_t.c["Site_ID"], "HQ") == site_id)
     return _rows(await session.execute(stmt.order_by(pr_master_t.c["id"])))
 

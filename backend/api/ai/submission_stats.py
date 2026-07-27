@@ -57,7 +57,7 @@ async def usage_stats(session: AsyncSession, sap_code: str, site_id: str | None,
     cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
     stmt = select(consumption_t.c["Date"], consumption_t.c["Quantity"]) \
         .where(consumption_t.c["SAP_Code"] == sap_code)
-    if site_id:
+    if site_id is not None:
         stmt = stmt.where(consumption_t.c["Site_ID"] == site_id)
     rows = [(r[0], _f(r[1])) for r in (await session.execute(stmt)).all()]
     recent = [(d, q) for d, q in ((_to_date(d), q) for d, q in rows)

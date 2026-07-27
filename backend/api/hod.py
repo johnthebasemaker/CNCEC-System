@@ -513,7 +513,7 @@ async def hod_pr_lines(pr_number: str, site_id: Optional[str] = None,
                        user: dict = Depends(require_level(2)),
                        session: AsyncSession = Depends(get_session)):
     site = resolve_site_param(user, site_id)
-    return {"items": await procurement.pr_lines(session, pr_number, site or None)}
+    return {"items": await procurement.pr_lines(session, pr_number, site)}
 
 
 @router.patch("/prs/lines/{line_id}", summary="Edit a draft PR line")

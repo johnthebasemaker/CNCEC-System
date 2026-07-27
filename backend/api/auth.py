@@ -290,6 +290,41 @@ def resolve_site_param(user: dict, requested: str | None) -> str | None:
     return scope
 
 
+# --- Consuming a resolved scope safely ----------------------------------------
+# A scoped user with no site of their own resolves to '', and '' is falsy, so
+# `if scope:` silently drops the site filter and hands back every site's rows.
+# That is not a corner case: registration forbids warehouse_user and logistics
+# accounts from carrying a site, so '' is the steady state for a whole role
+# class. Consume a scope through these three helpers rather than testing it.
+
+def site_filter_applies(scope: str | None) -> bool:
+    """True when a Site_ID predicate must be emitted. Only an unrestricted
+    caller (None) may query without one — '' still filters, and the bound
+    value of '' deliberately matches no row."""
+    return scope is not None
+
+
+def site_row_visible(scope: str | None, row_site: str | None) -> bool:
+    """Row-level counterpart for direct fetches by id: unrestricted callers see
+    every row, a scoped caller only their own site's, and a site-less scoped
+    caller none at all."""
+    if scope is None:
+        return True
+    return (row_site or "").strip() == scope
+
+
+def resolve_site_write(user: dict, requested: str | None) -> str | None:
+    """`resolve_site_param` for write paths. Same 403 on a foreign site, plus a
+    403 when a scoped caller has no site of their own — such a user must never
+    fall back to a client-supplied Site_ID, which would attribute the write to
+    a site they do not belong to."""
+    site = resolve_site_param(user, requested)
+    if site == "":
+        raise HTTPException(
+            403, "your account is not bound to a site — ask an admin to assign one")
+    return site
+
+
 # --- Warehouse scoping (parallel to site scoping) ------------------------------
 def warehouse_scope(user: dict) -> str | None:
     """None → unrestricted (logistics/admin oversight). warehouse_user accounts

@@ -385,8 +385,10 @@ async def stage_dn_receipt(session: AsyncSession, *, username: str, dn_number: s
     po_no, site_id, wh_id, status = dn
     if status != "in_transit":
         return {"error": f"DN status is {status} — only in_transit DNs can be received"}
-    # Site scoping: a site user can only receive DNs for their own site (admin any).
-    if actor_site and site_id != actor_site:
+    # Site scoping: a site user can only receive DNs for their own site (admin
+    # any). `is not None`, not truthiness — '' is a site-less scoped account,
+    # which must match no DN rather than skipping the check.
+    if actor_site is not None and site_id != actor_site:
         return {"error": f"DN is for site {site_id}, not your site ({actor_site})"}
 
     items = await dn_lines(session, dn_number)

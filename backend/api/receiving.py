@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, resolve_site_param
+from .auth import get_current_user, resolve_site_param, site_scope
 from .db import get_session
 from .services import warehouse as wh
 
@@ -23,8 +23,13 @@ router = APIRouter(prefix="/site", tags=["site receiving"])
 
 
 def _actor_site(user: dict) -> Optional[str]:
-    """A site-bound user's site ('' for global roles like admin -> None)."""
-    return user["site_id"] or None
+    """The only site this actor may receive DNs for, via the shared scope
+    helper: None for the unscoped roles (admin/logistics), otherwise their own
+    site — and '' for a scoped account bound to no site, which must receive
+    nothing. Reading `user["site_id"]` directly got both ends wrong: a blank
+    site disabled the check entirely, and a logistics user with a site set was
+    wrongly pinned to it."""
+    return site_scope(user)
 
 
 @router.get("/incoming-dns", summary="In-transit DNs headed to a site")
