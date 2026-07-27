@@ -9,6 +9,11 @@ env/
 *.db-wal
 *.db-shm
 
+# Explicit — do not rely on *.db glob for already-tracked files
+/gi_database.db
+/data-archive/gi_database.*.bak
+/data-archive/*.db
+
 # Ignore passwords/secrets
 .env
 .streamlit/secrets.toml

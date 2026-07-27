@@ -140,8 +140,8 @@ Follow `tools/migration/README.md` end-to-end. Highlights:
 3. Final data load: `cutover_migrate.py --strict --wipe` from
    `gi_database.db`, **then the Excel re-sync + SME reseed** (the runbook's
    exact commands — the injection lives only in PG).
-4. `deploy/.env` secrets (`JWT_SECRET`, `WHATSAPP_*` incl. webhook
-   verify-token/app-secret, `SMTP_*`, `EMAIL_LOGISTICS_TO`,
+4. `deploy/.env` secrets (`GI_ENV=production`, `JWT_SECRET`, `WHATSAPP_*`
+   incl. webhook verify-token/app-secret, `SMTP_*`, `EMAIL_LOGISTICS_TO`,
    `PUBLIC_BASE_URL`) — never in git.
 5. Smoke gates against production; point users at React; `deploy-v2.yml`
    (manual) thereafter.
@@ -155,9 +155,22 @@ Follow `tools/migration/README.md` end-to-end. Highlights:
    `downloads/` and real-link USER_MANUAL §1.2.
 
 **Operator TODOs still open (Meta side):** approve `gi_evening_summary`
-(2 body vars, lang `en`); set `WHATSAPP_WEBHOOK_VERIFY_TOKEN` +
-`WHATSAPP_APP_SECRET`; subscribe the webhook URL in Meta; set
-`PUBLIC_BASE_URL`. The other four templates are LIVE (lang `en`).
+(2 body vars, lang `en`); subscribe the webhook URL in Meta. The other
+four templates are LIVE (lang `en`).
+
+**Operator TODOs still open (server side):** generate strong `JWT_SECRET`
+and `POSTGRES_PASSWORD` — both currently `CHANGE_ME` in `deploy/.env`.
+`GI_ENV=production` must be set to arm the JWT boot guard (see item 4).
+
+**Secrets already populated in `deploy/.env`:**
+`WHATSAPP_WEBHOOK_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`,
+`PUBLIC_BASE_URL`, `SMTP_*`, `EMAIL_LOGISTICS_TO`. Verified 2026-07-26
+via Phase 1 Audit 04.
+
+`.env.example` git history verified clean of Meta credentials (single
+commit `f3d706b`, placeholders only) — Phase 1 Audit 04.
+
+_Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
 
 ## 4. Hard-won gotchas a fresh session must know
 
