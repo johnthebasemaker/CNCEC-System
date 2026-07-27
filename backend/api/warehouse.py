@@ -94,7 +94,12 @@ async def assignments(warehouse_id: str, status: Optional[str] = None,
 
 
 @router.get("/assignments/{assignment_id}/items", summary="PO items for an assignment")
-async def assignment_items(assignment_id: int, session: AsyncSession = Depends(get_session)):
+async def assignment_items(assignment_id: int, user: dict = Depends(_ROLE),
+                           session: AsyncSession = Depends(get_session)):
+    # The LIST above is warehouse-scoped, but this by-id fetch took no `user` at
+    # all, so warehouse_scope() could never be consulted and WH-A enumerated
+    # WH-B's PO contents by incrementing the id (audit A02-F5).
+    await _guard_row_warehouse(session, _po_assignments_t, "id", assignment_id, user)
     return {"items": await wh.assignment_items(session, assignment_id)}
 
 
@@ -156,7 +161,11 @@ async def dns(warehouse_id: Optional[str] = None, status: Optional[str] = None,
 
 
 @router.get("/dns/{dn_number}/items", summary="DN line items")
-async def dn_items(dn_number: str, session: AsyncSession = Depends(get_session)):
+async def dn_items(dn_number: str, user: dict = Depends(_ROLE),
+                   session: AsyncSession = Depends(get_session)):
+    # Same gap as assignment_items: scoped list, unscoped direct fetch — a DN
+    # number exposed another warehouse's materials, quantities, lots and expiry.
+    await _guard_row_warehouse(session, _delivery_notes_t, "DN_Number", dn_number, user)
     return {"items": await wh.dn_lines(session, dn_number)}
 
 

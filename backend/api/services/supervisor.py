@@ -92,6 +92,13 @@ async def list_smr(session: AsyncSession, *, site_id: str | None = None,
     return _rows(await session.execute(stmt.order_by(smr_t.c["id"].desc())))
 
 
+async def smr_site(session: AsyncSession, request_id: int) -> str | None:
+    """Site_ID of one request header, or None when the request doesn't exist —
+    the lookup the route-level scope guards need before touching a row by id."""
+    return (await session.execute(select(smr_t.c["Site_ID"])
+            .where(smr_t.c["id"] == request_id))).scalar_one_or_none()
+
+
 async def smr_items(session: AsyncSession, request_id: int):
     stmt = select(
         smr_items_t.c["id"], smr_items_t.c["SAP_Code"], smr_items_t.c["Equipment_Description"],
