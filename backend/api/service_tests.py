@@ -6349,6 +6349,248 @@ async def test_sme_sk_upgrades():
             await s.commit()
 
 
+async def test_siteless_scope_fail_closed():
+    """Suite AR — Theme A regression guard for the `''` truthiness IDOR class
+    (audit A02-F2 / A02-F8).
+
+    `site_scope()` returns '' for a scoped user bound to no site, and '' is
+    falsy — so `if site_id:` DROPPED the site filter and served every site's
+    rows. Registration forbids warehouse_user/logistics accounts from carrying
+    a site, so '' is a whole role class's steady state, not a corner case.
+
+    Every check below is an exploit that succeeded before the fix: each one
+    asserts the site-less caller now reads nothing and writes nowhere, and the
+    tail of the suite asserts the properly-scoped and unscoped roles are
+    unaffected (the fix must fail closed, not fail useless)."""
+    import bcrypt as _bc
+    from sqlalchemy import text as _sqt
+
+    from .ai import analytics as _an
+
+    users = ledger._MD.tables["users"]
+    PW = "svcr-theme-a-2026"
+    HASH = _bc.hashpw(PW.encode(), _bc.gensalt(rounds=4)).decode()
+    # Site-less variants of each role that can reach the affected endpoints.
+    FIXTURE_USERS = [
+        ("SVCR-wh", "warehouse_user"),   # level 1 → /dashboard/metrics
+        ("SVCR-sk", "store_keeper"),     # level 0 → entry surfaces
+        ("SVCR-hod", "hod"),             # level 2 → HOD/WBS surfaces
+    ]
+    SAP, PR, DN, WBS_N = "SVCR-1", "PR-SVCR-QA", "DN-SVCR-QA", "SVCR-WBS-1"
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt('DELETE FROM users WHERE username LIKE \'SVCR-%\''))
+        for uname, role in FIXTURE_USERS:
+            await s.execute(_sqt(
+                'INSERT INTO users (username, password_hash, role, "Site_ID") '
+                'VALUES (:u, :h, :r, \'\')'), {"u": uname, "h": HASH, "r": role})
+        # All fixture data lives at CNCEC — a site NONE of the users above owns.
+        await s.execute(_sqt(
+            'INSERT INTO inventory ("SAP_Code", "Equipment_Description", "Category", '
+            '"UOM", "Site_ID", "Minimum_Qty", "Unit_Cost") VALUES '
+            "(:sap, 'SVCR Scope Probe', 'Safety', 'PCS', 'CNCEC', 5, 10)"), {"sap": SAP})
+        await s.execute(_sqt(
+            'INSERT INTO receipts ("Date", "SAP_Code", "Quantity", "Site_ID") '
+            "VALUES (CURRENT_DATE::text, :sap, 100, 'CNCEC')"), {"sap": SAP})
+        await s.execute(_sqt(
+            'INSERT INTO consumption ("Date", "SAP_Code", "Quantity", "Site_ID") '
+            "VALUES (CURRENT_DATE::text, :sap, 10, 'CNCEC')"), {"sap": SAP})
+        await s.execute(_sqt(
+            'INSERT INTO pr_master ("PR_Number", "SAP_Code", "Material_Name", '
+            '"Requested_Qty", "Site_ID", status) VALUES '
+            "(:pr, :sap, 'SVCR Probe', 3, 'CNCEC', 'draft')"), {"pr": PR, "sap": SAP})
+        await s.execute(_sqt(
+            'INSERT INTO wbs_master ("WBS_Number", "Site_ID", status, created_by) '
+            "VALUES (:w, 'CNCEC', 'active', 'admin')"), {"w": WBS_N})
+        await s.execute(_sqt(
+            'INSERT INTO returnable_items (material_name, qty, borrower_name, '
+            'status, "Site_ID") VALUES '
+            "('SVCR Loaned Tool', 1, 'SVCR Borrower', 'borrowed', 'CNCEC')"))
+        await s.execute(_sqt(
+            'INSERT INTO delivery_notes ("DN_Number", "PO_Number", "Warehouse_ID", '
+            '"Site_ID", status, created_by) VALUES (:dn, \'PO-SVCR\', \'WH-01\', '
+            "'CNCEC', 'in_transit', 'admin')"), {"dn": DN})
+        await s.execute(_sqt(
+            'INSERT INTO dn_items ("DN_Number", po_item_id, "Material_Code", "Qty") '
+            "VALUES (:dn, 1, 'GI-SVCR-01', 5)"), {"dn": DN})
+        # A CNCEC-owned attachment + WBS row, used for the direct-fetch checks.
+        aid = (await s.execute(_sqt(
+            'INSERT INTO entry_attachments ("Site_ID", doc_type, doc_number, '
+            'file_name, mime_type, file_size, file_blob, uploaded_by) VALUES '
+            "('CNCEC', 'receipt', 'SVCR-DOC', 'svcr.txt', 'text/plain', 3, "
+            ":blob, 'worker') RETURNING id"), {"blob": b"svc"})).scalar_one()
+        rid = (await s.execute(_sqt(
+            "SELECT id FROM returnable_items WHERE material_name = 'SVCR Loaned Tool'"
+        ))).scalar_one()
+        wid = (await s.execute(_sqt(
+            'SELECT id FROM wbs_master WHERE "WBS_Number" = :w'), {"w": WBS_N})).scalar_one()
+        await s.commit()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            _ip = {"X-Real-IP": "203.0.113.94"}
+
+            async def token(u, p):
+                r = await ac.post("/auth/login", json={"username": u, "password": p},
+                                  headers=_ip)
+                return r.json().get("access_token")
+
+            def H(t):
+                return {"Authorization": f"Bearer {t}"}
+
+            wh_t = await token("SVCR-wh", PW)
+            sk_t = await token("SVCR-sk", PW)
+            hodless_t = await token("SVCR-hod", PW)
+            hod_t = await token("hod", "hod2026")        # real HOD @ CNCEC
+            admin_t = await token("admin", "admin2026")
+            check("ar: site-less fixture accounts authenticate (level ladder intact)",
+                  all([wh_t, sk_t, hodless_t, hod_t, admin_t]))
+
+            # (a) dashboard.py — was: global valuation + every site's charts.
+            r = await ac.get("/dashboard/metrics", headers=H(wh_t))
+            j = r.json() if r.status_code == 200 else {}
+            saps = {row.get("sap") for series in
+                    ("stock_vs_min", "top_consumed", "burn_forecast")
+                    for row in j.get(series, [])}
+            check("ar-a: /dashboard/metrics — site-less user gets NO cross-site "
+                  "valuation or chart rows",
+                  r.status_code == 200 and j.get("valuation_total") == 0.0
+                  and not saps,
+                  f"{r.status_code} valuation={j.get('valuation_total')} saps={len(saps)}")
+
+            # (b)/(c) ai/analytics — the clause helper the insight + EOD probes
+            # share. Unit-level so the check does not depend on a live Ollama.
+            check("ar-bc: analytics._site_clause emits a filter for '' and only "
+                  "omits it for None (unrestricted)",
+                  _an._site_clause("") != "" and _an._site_clause(None) == ""
+                  and ":site" in _an._site_clause(""),
+                  f"empty={_an._site_clause('')!r} none={_an._site_clause(None)!r}")
+
+            # (d) hod.py:515 — PR lines for ANY site.
+            r = await ac.get(f"/hod/prs/{PR}/lines", headers=H(hodless_t))
+            items = r.json().get("items", []) if r.status_code == 200 else []
+            check("ar-d: /hod/prs/{pr}/lines — site-less HOD sees no CNCEC PR lines",
+                  r.status_code == 200 and not items, f"{r.status_code} n={len(items)}")
+
+            # (e) entry.py:512 — snapshot stock + trend went global.
+            r = await ac.get(f"/entry/snapshot/{SAP}", headers=H(sk_t))
+            j = r.json() if r.status_code == 200 else {}
+            check("ar-e: /entry/snapshot — site-less SK sees 0 stock, not CNCEC's 90",
+                  r.status_code == 200 and float(j.get("current_stock") or 0) == 0.0,
+                  f"{r.status_code} stock={j.get('current_stock')}")
+
+            # (f) entry.py:806 — returnable-loan site check was skipped entirely.
+            r = await ac.post(f"/entry/returnables/{rid}/return", headers=H(sk_t))
+            check("ar-f: returnable return — site-less SK cannot close a CNCEC loan",
+                  r.status_code == 403, f"{r.status_code} {r.text[:90]}")
+
+            # (g) entry.py:405 — MTC upload fell back to the client's Site_ID via
+            # `resolve_site_param(...) or site_id`. Unlike (h) this route DID
+            # call the resolver, so naming another site was already a 403 and the
+            # `or` fallback was unreachable in practice; resolve_site_write makes
+            # the deny explicit rather than incidental. Boundary assertion only —
+            # this one is hardening, not a reproduced exploit.
+            r = await ac.post("/entry/mtc", headers=H(sk_t),
+                              files={"file": ("mtc.txt", b"svcr", "text/plain")},
+                              data={"sap_code": SAP, "site_id": "CNCEC",
+                                    "mtc_number": "SVCR-MTC"})
+            async with SessionLocal() as s:
+                n_mtc = (await s.execute(_sqt(
+                    'SELECT COUNT(*) FROM mtc_documents WHERE "SAP_Code" = :s'),
+                    {"s": SAP})).scalar_one()
+            check("ar-g: /entry/mtc — site-less SK is refused and writes no MTC row",
+                  r.status_code == 403 and n_mtc == 0,
+                  f"{r.status_code} rows={n_mtc}")
+
+            # (h) entry_docs.py:132 — attachment WROTE a client-chosen site.
+            r = await ac.post("/entry/attachments", headers=H(sk_t),
+                              files={"file": ("doc.png", b"\x89PNG\r\n\x1a\n svcr",
+                                              "image/png")},
+                              data={"doc_type": "receipt", "site_id": "CNCEC"})
+            check("ar-h: /entry/attachments — site-less SK cannot upload into CNCEC",
+                  r.status_code == 403, f"{r.status_code} {r.text[:90]}")
+
+            # (i) entry_docs.py:236 — WBS options read for any requested site.
+            r = await ac.get("/entry/wbs", headers=H(sk_t), params={"site_id": "CNCEC"})
+            j = r.json() if r.status_code == 200 else {}
+            check("ar-i: /entry/wbs — site-less SK gets no CNCEC WBS numbers",
+                  r.status_code == 200 and WBS_N not in (j.get("wbs") or []),
+                  f"{r.status_code} {j}")
+
+            # (j) entry_docs.py:250 — /hod/site-config/wbs listed ALL sites.
+            r = await ac.get("/hod/site-config/wbs", headers=H(hodless_t))
+            nums = {x.get("WBS_Number") for x in r.json().get("items", [])} \
+                if r.status_code == 200 else set()
+            check("ar-j: /hod/site-config/wbs — site-less HOD sees no other site's rows",
+                  r.status_code == 200 and WBS_N not in nums,
+                  f"{r.status_code} n={len(nums)}")
+
+            # (k) entry_docs.py:202 — attachment download site-check was skipped.
+            r = await ac.get(f"/entry/attachments/{aid}/download", headers=H(hodless_t))
+            check("ar-k: attachment download — site-less HOD cannot read a CNCEC doc",
+                  r.status_code == 403, f"{r.status_code}")
+
+            # (l) entry_docs.py:289 — cross-site WBS status MUTATION.
+            r = await ac.patch(f"/hod/site-config/wbs/{wid}", headers=H(hodless_t),
+                               params={"status": "closed"})
+            check("ar-l: WBS status patch — site-less HOD cannot mutate a CNCEC WBS",
+                  r.status_code == 403, f"{r.status_code} {r.text[:90]}")
+
+            # A02-F8 — receiving.py _actor_site: '' disabled the DN ownership check.
+            r = await ac.post(f"/site/dns/{DN}/receive", headers=H(sk_t))
+            check("ar-f8: DN receive — site-less SK cannot receive a CNCEC DN",
+                  r.status_code in (403, 409), f"{r.status_code} {r.text[:90]}")
+            async with SessionLocal() as s:
+                st = (await s.execute(_sqt(
+                    'SELECT status FROM delivery_notes WHERE "DN_Number" = :d'),
+                    {"d": DN})).scalar_one()
+            check("ar-f8: the DN itself is untouched (still in_transit)",
+                  st == "in_transit", f"status={st}")
+
+            # --- No breaking changes: legitimate access must still work ---------
+            r = await ac.get("/hod/site-config/wbs", headers=H(hod_t))
+            nums = {x.get("WBS_Number") for x in r.json().get("items", [])} \
+                if r.status_code == 200 else set()
+            check("ar-ok: a properly-scoped CNCEC HOD still sees their own WBS row",
+                  r.status_code == 200 and WBS_N in nums, f"{r.status_code} n={len(nums)}")
+
+            r = await ac.get(f"/hod/prs/{PR}/lines", headers=H(hod_t))
+            check("ar-ok: CNCEC HOD still reads their own PR lines",
+                  r.status_code == 200 and len(r.json().get("items", [])) == 1,
+                  f"{r.status_code} {r.text[:90]}")
+
+            r = await ac.get("/dashboard/metrics", headers=H(admin_t))
+            j = r.json() if r.status_code == 200 else {}
+            check("ar-ok: admin (unrestricted) still gets the GLOBAL valuation",
+                  r.status_code == 200 and float(j.get("valuation_total") or 0) > 0,
+                  f"{r.status_code} valuation={j.get('valuation_total')}")
+
+            r = await ac.get(f"/entry/snapshot/{SAP}", headers=H(admin_t))
+            check("ar-ok: admin still reads the material's real global stock (90)",
+                  r.status_code == 200
+                  and float(r.json().get("current_stock") or 0) == 90.0,
+                  f"{r.status_code} {r.text[:90]}")
+    finally:
+        async with SessionLocal() as s:  # cleanup
+            await s.execute(_sqt("DELETE FROM refresh_sessions WHERE user_id IN "
+                                 "(SELECT id FROM users WHERE username LIKE 'SVCR-%')"))
+            await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCR-%'"))
+            await s.execute(_sqt("DELETE FROM dn_items WHERE \"DN_Number\" = :d"), {"d": DN})
+            await s.execute(_sqt("DELETE FROM delivery_notes WHERE \"DN_Number\" = :d"),
+                            {"d": DN})
+            await s.execute(_sqt("DELETE FROM entry_attachments WHERE doc_number = 'SVCR-DOC'"))
+            await s.execute(_sqt("DELETE FROM mtc_documents WHERE \"SAP_Code\" = :s"), {"s": SAP})
+            await s.execute(_sqt("DELETE FROM returnable_items WHERE material_name "
+                                 "= 'SVCR Loaned Tool'"))
+            await s.execute(_sqt('DELETE FROM wbs_master WHERE "WBS_Number" = :w'), {"w": WBS_N})
+            await s.execute(_sqt('DELETE FROM pr_master WHERE "PR_Number" = :p'), {"p": PR})
+            await s.execute(_sqt('DELETE FROM consumption WHERE "SAP_Code" = :s'), {"s": SAP})
+            await s.execute(_sqt('DELETE FROM receipts WHERE "SAP_Code" = :s'), {"s": SAP})
+            await s.execute(_sqt('DELETE FROM inventory WHERE "SAP_Code" = :s'), {"s": SAP})
+            await s.commit()
+
+
 async def test_material_card():
     """Suite AP — GET /stock/material-card (the QR scan-to-dashboard modal):
     scoped roles read ONLY their site's ledger, admin reads globally, the
@@ -6770,6 +7012,8 @@ async def main() -> int:
     await test_material_card()
     print("\n AQ. refresh-token rotation (families, per-client TTL, replay breach)")
     await test_rtr()
+    print("\n AR. site-less scope fails closed (Theme A: the '' truthiness IDOR class)")
+    await test_siteless_scope_fail_closed()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

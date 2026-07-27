@@ -29,7 +29,9 @@ from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, require_roles, resolve_site_param, site_scope
+from .auth import (get_current_user, require_roles, resolve_site_param,
+                   resolve_site_write, site_filter_applies, site_row_visible,
+                   site_scope)
 from .db import get_session
 from .services.ledger import _MD, write_audit
 
@@ -129,8 +131,7 @@ async def upload_attachment(file: UploadFile = File(...),
         raise HTTPException(413, f"file exceeds {_MAX_FILE_MB} MB")
     if not blob:
         raise HTTPException(422, "empty file")
-    scope = site_scope(user)
-    site = scope if scope else site_id.strip()
+    site = resolve_site_write(user, site_id.strip())
     # legacy default doc number: DDMMYY of the submission date
     doc_no = (doc_number or "").strip() or _dt.date.today().strftime("%d%m%y")
     aid = (await session.execute(insert(attachments_t).values(
@@ -200,7 +201,7 @@ async def download_attachment(aid: int, inline: bool = Query(False),
     if user["level"] < 2 and row.uploaded_by != user["username"]:
         raise HTTPException(403, "not your document")
     scope = site_scope(user)
-    if scope is not None and scope and row.Site_ID != scope and row.uploaded_by != user["username"]:
+    if not site_row_visible(scope, row.Site_ID) and row.uploaded_by != user["username"]:
         raise HTTPException(403, "document belongs to another site")
     import io
     disp = "inline" if inline else "attachment"
@@ -232,8 +233,11 @@ async def delete_attachment(aid: int, user: dict = Depends(get_current_user),
 async def wbs_options(site_id: str = Query(...),
                       user: dict = Depends(get_current_user),
                       session: AsyncSession = Depends(get_session)):
-    scope = site_scope(user)
-    site = scope if scope else site_id
+    # A scoped user always reads their own site's WBS list; a site-less scoped
+    # user has no WBS numbers at all rather than the caller-named site's.
+    site = resolve_site_param(user, None)
+    if site is None:
+        site = site_id
     return {"site_id": site, "wbs": await active_wbs(session, site or "")}
 
 
@@ -249,7 +253,7 @@ async def wbs_all(site_id: Optional[str] = Query(None),
                   session: AsyncSession = Depends(get_session)):
     site = resolve_site_param(user, site_id)
     stmt = select(wbs_t)
-    if site:
+    if site_filter_applies(site):
         stmt = stmt.where(wbs_t.c["Site_ID"] == site)
     rows = (await session.execute(
         stmt.order_by(wbs_t.c["status"], wbs_t.c["WBS_Number"]))).mappings().all()
@@ -286,8 +290,7 @@ async def wbs_status(wid: int, status: str = Query(..., pattern="^(active|closed
     row = (await session.execute(select(wbs_t.c["Site_ID"]).where(wbs_t.c["id"] == wid))).first()
     if row is None:
         raise HTTPException(404, "no such WBS row")
-    scope = site_scope(user)
-    if scope is not None and scope and row.Site_ID != scope:
+    if not site_row_visible(site_scope(user), row.Site_ID):
         raise HTTPException(403, "WBS belongs to another site")
     await session.execute(update(wbs_t).where(wbs_t.c["id"] == wid).values(status=status))
     await write_audit(session, user["username"], "WBS_STATUS", "wbs_master", f"#{wid}→{status}")

@@ -213,7 +213,9 @@ def _plain(v: Any):
 
 # --- Insight probes (PG ports of legacy ai/insights.py) ---------------------------
 def _site_clause(site_id: Optional[str], col: str = '"Site_ID"') -> str:
-    return f" AND COALESCE({col},'HQ') = :site" if site_id else ""
+    # `is not None`, not truthiness: '' is a site-less scoped user, whose filter
+    # must still be emitted so it matches nothing (see auth.site_filter_applies).
+    return f" AND COALESCE({col},'HQ') = :site" if site_id is not None else ""
 
 
 async def _probe_consumption_spike(session, site_id):
@@ -239,7 +241,7 @@ async def _probe_consumption_spike(session, site_id):
                                AND (CURRENT_DATE - INTERVAL '31 days')::date::text
                                THEN c."Quantity" ELSE 0 END) / 3.0, 0)) DESC
         LIMIT 1'''
-    r = (await session.execute(text(sql), {"site": site_id} if site_id else {})
+    r = (await session.execute(text(sql), {"site": site_id} if site_id is not None else {})
          ).mappings().first()
     if not r:
         return None
@@ -274,7 +276,7 @@ async def _probe_projected_stockouts(session, site_id):
         FROM stock WHERE daily_burn > 0
           AND current_stock / NULLIF(daily_burn, 0) <= 14
         ORDER BY days_left'''
-    rows = (await session.execute(text(sql), {"site": site_id} if site_id else {})
+    rows = (await session.execute(text(sql), {"site": site_id} if site_id is not None else {})
             ).mappings().all()
     if not rows:
         return None
@@ -292,7 +294,7 @@ async def _probe_expired_lots(session, site_id):
         FROM inventory WHERE "Expiry_Date" IS NOT NULL AND "Expiry_Date" <> ''
           AND "Expiry_Date" < CURRENT_DATE::text
           {_site_clause(site_id)} LIMIT 50'''
-    rows = (await session.execute(text(sql), {"site": site_id} if site_id else {})
+    rows = (await session.execute(text(sql), {"site": site_id} if site_id is not None else {})
             ).mappings().all()
     if not rows:
         return None
@@ -320,13 +322,13 @@ async def _probe_supplier_consolidation(session, site_id):
 
 
 async def _probe_health_score(session, site_id):
-    p = {"site": site_id} if site_id else {}
-    sc_i = " WHERE COALESCE(\"Site_ID\",'HQ') = :site" if site_id else ""
+    p = {"site": site_id} if site_id is not None else {}
+    sc_i = " WHERE COALESCE(\"Site_ID\",'HQ') = :site" if site_id is not None else ""
     n_inv = (await session.execute(text(
         f'SELECT COUNT(*) FROM inventory{sc_i}'), p)).scalar_one() or 1
     sc_r = _site_clause(site_id, 'r."Site_ID"')
     sc_c = _site_clause(site_id, 'c."Site_ID"')
-    sc_and = " AND COALESCE(i.\"Site_ID\",'HQ') = :site" if site_id else ""
+    sc_and = " AND COALESCE(i.\"Site_ID\",'HQ') = :site" if site_id is not None else ""
     n_low = (await session.execute(text(f'''
         SELECT COUNT(*) FROM inventory i WHERE i."Minimum_Qty" IS NOT NULL
         AND COALESCE((SELECT SUM(r."Quantity") FROM receipts r
@@ -412,7 +414,7 @@ async def build_eod_context(session, report_date: str,
     stack scopes hods to their site)."""
     p: dict = {"d": report_date}
     sc = ""
-    if site_id:
+    if site_id is not None:
         p["site"] = site_id
         sc = " AND COALESCE(\"Site_ID\",'HQ') = :site"
     cons = (await session.execute(text(
@@ -442,7 +444,7 @@ async def build_eod_context(session, report_date: str,
                 - COALESCE((SELECT SUM(c."Quantity") FROM consumption c
                             WHERE c."SAP_Code" = i."SAP_Code"{sc_c}), 0)
                 - i."Minimum_Qty") ASC
-        LIMIT 10'''), {"site": site_id} if site_id else {})).mappings().all()
+        LIMIT 10'''), {"site": site_id} if site_id is not None else {})).mappings().all()
 
     total_n = sum(int(r["n"]) for r in cons)
     total_q = sum(float(r["qty"]) for r in cons)

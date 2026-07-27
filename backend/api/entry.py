@@ -23,7 +23,8 @@ from sqlalchemy import LargeBinary, insert, text
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, require_roles, resolve_site_param
+from .auth import (get_current_user, require_roles, resolve_site_param,
+                   resolve_site_write, site_filter_applies, site_row_visible)
 from .db import get_session
 from . import entry_docs
 from .services import emailer
@@ -402,7 +403,7 @@ async def upload_mtc(file: UploadFile = File(...), sap_code: str = Form(...),
                      user: dict = Depends(require_roles("store_keeper")),
                      session: AsyncSession = Depends(get_session)):
     blob = await file.read()
-    site = resolve_site_param(user, site_id) or site_id
+    site = resolve_site_write(user, site_id)
     async with session.begin():
         mid = (await session.execute(insert(_mtc_t).values(
             Site_ID=site, SAP_Code=sap_code.strip(), mtc_number=mtc_number,
@@ -510,11 +511,10 @@ async def item_snapshot(sap_code: str, site_id: Optional[str] = None,
                         session: AsyncSession = Depends(get_session)):
     from .ai.submission_stats import usage_stats  # local import (no cycle)
     site_id = resolve_site_param(user, site_id)
-    site_id = site_id or None
     sap = sap_code.strip()
 
     where, params = 's."SAP_Code" = :sap', {"sap": sap}
-    if site_id:
+    if site_filter_applies(site_id):
         where += ' AND s."Site_ID" = :site'
         params["site"] = site_id
     srow = (await session.execute(text(f'''
@@ -804,7 +804,7 @@ async def mark_returned(rid: int,
         if row is None:
             raise HTTPException(404, f"returnable {rid} not found")
         scope = resolve_site_param(user, None)
-        if scope and (row.Site_ID or "").strip() != scope:
+        if not site_row_visible(scope, row.Site_ID):
             raise HTTPException(403, "this loan belongs to another site")
         if row.status == "returned":
             raise HTTPException(409, "already returned")

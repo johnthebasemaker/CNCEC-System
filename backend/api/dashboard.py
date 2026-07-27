@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import require_level, resolve_site_param
+from .auth import require_level, resolve_site_param, site_filter_applies
 from .db import get_session
 from .stock import SQL_SITE_STOCK
 
@@ -29,10 +29,11 @@ def _cutoff(days: int) -> str:
 async def metrics(site_id: Optional[str] = None,
                   user: dict = Depends(require_level(1)),
                   session: AsyncSession = Depends(get_session)):
-    site_id = resolve_site_param(user, site_id) or None
-    sfilter = ' AND s."Site_ID" = :site' if site_id else ''
-    csite = ' AND COALESCE(c."Site_ID", \'HQ\') = :site' if site_id else ''
-    p: dict = {"site": site_id} if site_id else {}
+    site_id = resolve_site_param(user, site_id)
+    scoped = site_filter_applies(site_id)
+    sfilter = ' AND s."Site_ID" = :site' if scoped else ''
+    csite = ' AND COALESCE(c."Site_ID", \'HQ\') = :site' if scoped else ''
+    p: dict = {"site": site_id} if scoped else {}
     pc: dict = {**p, "cutoff": _cutoff(30)}
 
     async def rows(sql: str, params: dict):
