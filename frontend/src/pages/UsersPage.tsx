@@ -157,8 +157,8 @@ export default function UsersPage() {
               <Form.Item name="username" label="Username" rules={[{ required: true }]}>
                 <Input autoComplete="off" placeholder="e.g. jdoe" />
               </Form.Item>
-              <Form.Item name="password" label="Password" rules={[{ required: true, min: 6, message: 'At least 6 characters' }]}>
-                <Input.Password autoComplete="new-password" placeholder="min 6 characters" />
+              <Form.Item name="password" label="Password" rules={[{ required: true, min: 12, message: 'At least 12 characters' }]}>
+                <Input.Password autoComplete="new-password" placeholder="min 12 characters" />
               </Form.Item>
             </>
           )}
@@ -181,8 +181,8 @@ export default function UsersPage() {
             </>
           )}
           {mode === 'password' && (
-            <Form.Item name="password" label="New password" rules={[{ required: true, min: 6, message: 'At least 6 characters' }]}>
-              <Input.Password autoComplete="new-password" placeholder="min 6 characters" />
+            <Form.Item name="password" label="New password" rules={[{ required: true, min: 12, message: 'At least 12 characters' }]}>
+              <Input.Password autoComplete="new-password" placeholder="min 12 characters" />
             </Form.Item>
           )}
         </Form>

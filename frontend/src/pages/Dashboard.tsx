@@ -70,7 +70,7 @@ export default function Dashboard() {
         <Col xs={12} md={6}>
           <KpiCard
             title="Database"
-            value={health ? health.dialect : '—'}
+            value={health ? 'online' : '—'}
             icon={<CloudServerOutlined />}
             tint={status.ok}
           />

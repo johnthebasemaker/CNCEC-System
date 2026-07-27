@@ -227,11 +227,13 @@ export interface InventorySummary {
   by_category: { Category: string | null; count: number }[]
 }
 
+/** Anonymous /health is deliberately thin — the database name, driver dialect
+ *  and entity inventory moved behind /health/detail (admin only) because this
+ *  endpoint is unauthenticated and becomes internet-reachable once the
+ *  Cloudflare Access bypass for /api/* lands. */
 export interface Health {
   status: string
-  dialect: string
-  database: string
-  entities: string[]
+  maintenance?: boolean
 }
 
 export async function fetchList<T = Row>(

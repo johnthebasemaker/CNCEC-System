@@ -90,7 +90,10 @@ export default function LoginPage() {
               <Form.Item name="username" rules={[{ required: true, message: 'Username' }]}>
                 <Input prefix={<UserOutlined />} placeholder="Username" autoFocus />
               </Form.Item>
-              <Form.Item name="password" rules={[{ required: true, min: 6, message: 'At least 6 characters' }]}>
+              {/* No length rule on SIGN-IN: the 12-char policy binds new and
+                  reset credentials, and existing shorter passwords must still
+                  authenticate. Enforcing it here would lock those users out. */}
+              <Form.Item name="password" rules={[{ required: true, message: 'Password is required' }]}>
                 <Input.Password prefix={<LockOutlined />} placeholder="Password (min 6)" />
               </Form.Item>
               <Form.Item name="role" label="Requested role" rules={[{ required: true }]}>

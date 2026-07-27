@@ -277,7 +277,20 @@ async def root():
 
 @app.get("/health", tags=["meta"], summary="Liveness + DB connectivity")
 async def health(session: AsyncSession = Depends(get_session)):
+    """Anonymous liveness only. The database name, driver dialect and full
+    entity inventory used to be served to any unauthenticated caller — and once
+    the Cloudflare Access bypass for /api/* lands this endpoint is
+    internet-reachable (audit A02-F11). Diagnostics moved to /health/detail."""
     await session.execute(text("SELECT 1"))
+    from .auth import maintenance_on
+    return {"status": "ok", "maintenance": await maintenance_on(session)}
+
+
+@app.get("/health/detail", tags=["meta"], summary="Deployment diagnostics (admin)",
+         dependencies=[Depends(require_level(4))])
+async def health_detail(session: AsyncSession = Depends(get_session)):
+    await session.execute(text("SELECT 1"))
+    from .ai.analytics import ro_wall_status
     from .auth import maintenance_on
     return {
         "status": "ok",
@@ -285,6 +298,7 @@ async def health(session: AsyncSession = Depends(get_session)):
         "database": engine.url.database,
         "maintenance": await maintenance_on(session),
         "entities": [e["name"] for e in ENTITIES],
+        "ai_readonly_wall": await ro_wall_status(),
     }
 
 
