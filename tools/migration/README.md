@@ -60,7 +60,25 @@ Exit code `0` only when every blocking check passes.
      **`STOCK VERIFICATION: 429/429`** (or the current workbook row count).
    - `VACUUM ANALYZE;`,
    - confirm `deploy/.env` secrets on the server (`JWT_SECRET`, `WHATSAPP_*`,
-     `SMTP_*`, `EMAIL_LOGISTICS_TO`).
+     `SMTP_*`, `EMAIL_LOGISTICS_TO`) and that the file is **`chmod 600`** —
+     it holds live Meta credentials and the API prints a warning at boot if it
+     is readable beyond its owner.
+   - **`PUBLIC_BASE_URL`** must be set to the public origin and must NOT be
+     localhost — the API now refuses to boot otherwise (audit A04-F7), because
+     the weekly-report WhatsApp links are built from it.
+   - **`CORS_ORIGINS`** — blank in production means *no* cross-origin access.
+     Browser-only is fine blank; the **native Tauri/Capacitor apps need their
+     webview origins listed** or every native API call fails:
+     `tauri://localhost,http://tauri.localhost,https://tauri.localhost,capacitor://localhost,https://localhost`
+   - **`GI_TRUSTED_PROXIES`** — set to the peer address the API actually sees
+     (nginx container / cloudflared endpoint) so the rate limiter only trusts
+     `CF-Connecting-IP`/`X-Real-IP` from there; otherwise those headers are
+     spoofable and the login limiter is a no-op. **Leave blank if unsure** — a
+     wrong value keys every user onto one bucket. Firewall the origin to
+     Cloudflare's IP ranges as the companion control.
+   - re-run `backend/scripts/create_ai_readonly_role.sql` after the final load
+     (the AI read-only GRANTs are wiped by every reload); the API logs
+     `[ai] read-only wall: OK|DEGRADED` at boot so you can confirm it took.
 6. **Point the API at the target** (`DATABASE_URL` in `deploy/.env`), start the
    stack, and run the smoke gates against production:
 

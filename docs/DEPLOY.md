@@ -35,12 +35,35 @@ git clone https://github.com/johnthebasemaker/GI_Hub_Project.git gihub && cd gih
 cp .env.example .env
 # Fill in .env:
 #   DOMAIN, LETSENCRYPT_EMAIL
-#   POSTGRES_PASSWORD   →  openssl rand -base64 32
+#   POSTGRES_PASSWORD   →  openssl rand -base64 32   (alphanumeric only — a
+#                           '@' or '/' would corrupt the DATABASE_URL compose builds)
 #   JWT_SECRET          →  openssl rand -hex 32   (MANDATORY, >=32 chars)
+#   PUBLIC_BASE_URL     →  https://<DOMAIN>       (MANDATORY — see below)
+#   CORS_ORIGINS        →  native app origins, or blank for browser-only
+#   GI_TRUSTED_PROXIES  →  the peer the API sees, or blank
 nano .env
+chmod 600 .env          # holds live Meta/SMTP credentials — owner-only
 ```
-`GI_ENV=production` is set by compose, so the API **refuses to boot without a strong
-`JWT_SECRET`** — that's intentional.
+`GI_ENV=production` is set by compose, so the API **refuses to boot** unless both
+of these hold — that's intentional, and both are startup errors rather than
+silent degradation:
+
+- **`JWT_SECRET`** is ≥32 chars and is not one of the published placeholder /
+  CI values (the documented gate key `ci-only-…` is explicitly refused).
+- **`PUBLIC_BASE_URL`** is set and does not point at localhost. It builds the
+  72-hour tokenized weekly-report links sent over WhatsApp; pointing at
+  localhost means the recipient's own device resolves the link and a 256-bit
+  capability token was broadcast for nothing.
+
+Two more production-only settings that are easy to miss:
+
+| Variable | Why it matters |
+|---|---|
+| **`CORS_ORIGINS`** | In production an unset value now means **no cross-origin access at all** (it used to fall back to a dev list containing `http://localhost` as a *credentialed* origin). Browser-only deployments behind nginx can leave it blank. The **Tauri/Capacitor apps call the API cross-origin**, so their fixed webview origins must be listed or every native call fails: `tauri://localhost,http://tauri.localhost,https://tauri.localhost,capacitor://localhost,https://localhost` |
+| **`GI_TRUSTED_PROXIES`** | The rate limiter keys on `CF-Connecting-IP` / `X-Real-IP`. Those are attacker-supplied on any request that reaches the origin directly, so rotating one defeats the login, register, OTP and webhook-ban limiters. Set it to the peer address the API actually sees (nginx container / cloudflared endpoint) and the headers are trusted only from there. **Blank keeps the old always-trust behaviour** — that is the safe default, because a wrong value keys every user onto one bucket and locks the site out of `/auth/login`. Pair it with firewalling the origin to Cloudflare's ranges. |
+
+Everything in `deploy/.env` reaches the container via the api service's
+`env_file:` — if you add a new variable, it is passed automatically.
 
 ## 2. Issue the TLS certificate (once)
 DNS must already resolve to the box. Optionally set `LETSENCRYPT_STAGING=1` in `.env`

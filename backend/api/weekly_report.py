@@ -51,7 +51,11 @@ KIND = "weekly_exec"
 
 
 def _public_base() -> str:
-    return os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+    # Single definition of "where do outbound links point" — see
+    # config.public_base_url(), which fails fast in production rather than
+    # silently emitting localhost URLs into WhatsApp messages (audit A04-F7).
+    from .config import public_base_url
+    return public_base_url()
 
 
 def next_friday_1700(now: _dt.datetime) -> _dt.datetime:
