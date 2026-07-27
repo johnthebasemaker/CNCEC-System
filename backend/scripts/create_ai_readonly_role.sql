@@ -29,9 +29,33 @@ ALTER ROLE gi_ai_ro SET default_transaction_read_only = 'on';
 
 GRANT CONNECT ON DATABASE gihub TO gi_ai_ro;
 GRANT USAGE ON SCHEMA public TO gi_ai_ro;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO gi_ai_ro;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO gi_ai_ro;
 
--- Defense-in-depth: the safety gate already blocks these table names in SQL
--- text; revoking makes the sensitive surfaces unreadable even on a bypass.
-REVOKE SELECT ON users, pending_users, auth_sessions, refresh_sessions, ai_jobs FROM gi_ai_ro;
+-- ---------------------------------------------------------------------------
+-- ALLOWLIST (Phase 2 · Theme B, audit A01-F2 / A01-F3)
+--
+-- This used to be `GRANT SELECT ON ALL TABLES` + `ALTER DEFAULT PRIVILEGES …
+-- GRANT SELECT` minus a five-table REVOKE. That model failed open twice over:
+-- every table a future migration adds was readable automatically, and the
+-- REVOKE line silently omitted phone_otp, employees, whatsapp_outbox,
+-- email_outbox, app_notifications and system_audit_log — all of which the AI
+-- lane could read outright, no gate bypass required.
+--
+-- Inverted: nothing is readable unless it is named below. Keep this list in
+-- sync with SCHEMA_HINT in backend/api/ai/analytics.py (what the model is told
+-- it may query) and with FORBIDDEN_TABLES in backend/api/ai/safety.py (the
+-- text-level echo of this wall).
+-- ---------------------------------------------------------------------------
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM gi_ai_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM gi_ai_ro;
+
+GRANT SELECT ON
+    inventory,
+    receipts,
+    consumption,
+    returns,
+    pr_master,
+    purchase_orders,
+    sme_recipe,
+    sme_equipment,
+    sme_sqm_progress
+TO gi_ai_ro;

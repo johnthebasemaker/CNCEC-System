@@ -27,9 +27,10 @@ from sqlalchemy import func, select
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import get_current_user, require_level, require_roles, site_scope
+from ..auth import (get_current_user, require_level, require_roles, site_row_visible,
+                    site_scope)
 from ..db import SessionLocal, get_session
-from ..services.ledger import _MD
+from ..services.ledger import _MD, write_audit
 from ..services.procurement import classify_rl_bl_family
 from . import client as aic
 from . import handwritten as hw
@@ -410,9 +411,24 @@ async def verify_badge(id_number: str,
     emp_t = _MD.tables["employees"]
     row = (await session.execute(select(
         emp_t.c["ID_Number"], emp_t.c["Name"], emp_t.c["Phone_Number"],
-        emp_t.c["Department"], emp_t.c["status"])
+        emp_t.c["Department"], emp_t.c["status"], emp_t.c["Site_ID"])
         .where(func.trim(emp_t.c["ID_Number"]) == id_number.strip()).limit(1))
     ).first()
+    # Badge IDs are printed on physical badges and encoded in the QR sheets this
+    # same system generates, so an unscoped lookup hands every site's staff name
+    # and personal phone number to any store keeper. Hide employees positively
+    # assigned to a DIFFERENT site, answering exactly as for an unknown badge so
+    # the ID's existence isn't leaked either.
+    #
+    # Deliberately NOT `site_row_visible`: employees."Site_ID" is nullable and
+    # postdates most rows, so treating blank as "not yours" would break badge
+    # scanning for every employee recorded before the column existed. Blank
+    # means unassigned staff, not another site's.
+    scope = site_scope(user)
+    if row is not None and scope is not None:
+        row_site = (row.Site_ID or "").strip()
+        if row_site and row_site != scope:
+            row = None
     if row is None:
         return {"found": False,
                 "message": f"No employee with badge ID {id_number!r}."}
@@ -437,6 +453,30 @@ class NlSearchIn(BaseModel):
     question: str
 
 
+async def _audit_ai_query(session: AsyncSession, user: dict, *, lane: str,
+                          question: str, result: dict) -> None:
+    """Audit every AI data question (audit A03-F10).
+
+    The NL lane turns free text into SQL that runs against the database, and it
+    used to leave no trace at all — a refused exfiltration attempt and a routine
+    stock question were equally invisible. Record who asked what, which lane ran
+    it, whether it succeeded, and the SQL that was actually executed, so the
+    attempt is reconstructable afterwards.
+
+    Best-effort: an audit failure must never turn a working answer into a 500.
+    """
+    try:
+        sql = (result.get("sql") or "").strip().replace("\n", " ")
+        detail = (f"lane={lane} ok={bool(result.get('ok'))} "
+                  f"scope={site_scope(user)!r} q={question[:200]!r}")
+        if sql:
+            detail += f" sql={sql[:400]!r}"
+        await write_audit(session, user["username"], "AI_QUERY", "ai", detail)
+        await session.commit()
+    except Exception:  # noqa: BLE001 — never mask the answer
+        await session.rollback()
+
+
 @router.post("/nl-search", summary="Plain-English database query (logistics/admin)")
 async def nl_search(body: NlSearchIn = Body(...),
                     user: dict = Depends(require_level(3)),
@@ -446,7 +486,10 @@ async def nl_search(body: NlSearchIn = Body(...),
         raise HTTPException(503, "NL search is switched off in Settings.")
     if not body.question.strip():
         raise HTTPException(422, "ask a question")
-    return await analytics.run_nl_query(body.question.strip())
+    out = await analytics.run_nl_query(body.question.strip())
+    await _audit_ai_query(session, user, lane="nl-search",
+                          question=body.question.strip(), result=out)
+    return out
 
 
 # --- Phase C: "Chat with your data" ------------------------------------------------
@@ -482,12 +525,15 @@ async def data_query(body: DataQueryIn = Body(...),
 
     templ = await qr.run_query(session, q, site_scope=scope, known_sites=known_sites)
     if templ is not None:
+        await _audit_ai_query(session, user, lane="query/template",
+                              question=q, result=templ)
         return templ
 
     flags = await _flags(session)
     if scope is None and user["level"] >= 3 and flags["ai_enabled"] and flags["ai_nl_search_enabled"]:
         out = await analytics.run_nl_query(q)
         out["mode"] = "nl"
+        await _audit_ai_query(session, user, lane="query/nl", question=q, result=out)
         return out
 
     return {"ok": False, "mode": "template", "sql": "", "columns": [], "rows": [],
@@ -686,6 +732,16 @@ async def submission_summary(kind: str, ref_id: int,
     else:
         raise HTTPException(404, f"unknown submission kind {kind!r}")
     if feats is None:
+        raise HTTPException(404, f"{kind} {ref_id} not found")
+
+    # The level check above says "a reviewer", not "THIS row's reviewer" — so a
+    # scoped HOD could walk ref_id and read another site's staged-issue detail
+    # (material, qty, issued-to, 30/60-day usage) that hod.py guards carefully.
+    # A cross-site request legitimately has two parties, so either side may look.
+    scope = site_scope(user)
+    row_sites = ([feats.get("site")] if kind == "staged-issue"
+                 else [feats.get("target_site"), feats.get("requesting_site")])
+    if not any(site_row_visible(scope, s) for s in row_sites):
         raise HTTPException(404, f"{kind} {ref_id} not found")
 
     flags = await _flags(session)
