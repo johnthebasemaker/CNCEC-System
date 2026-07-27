@@ -1,20 +1,35 @@
 #!/usr/bin/env bash
 # ============================================================================
-# deploy/init-letsencrypt.sh — one-time TLS bootstrap for the new-stack deploy.
+# deploy/init-letsencrypt.sh — ⛔ OBSOLETE under the Cloudflare Tunnel topology.
 #
-# nginx can't start without a cert file, and certbot can't issue one without
-# nginx answering the ACME challenge. This breaks the cycle: seed a throwaway
-# self-signed cert → start nginx → swap in the real Let's Encrypt cert.
+# TLS is now terminated by CLOUDFLARE. The stack publishes no host ports, there
+# is no `certbot` service in docker-compose.prod.yml, and nginx serves plain
+# HTTP on an internal port only. A Let's Encrypt HTTP-01 challenge cannot even
+# reach this box, so this script cannot work — it would fail partway with a
+# confusing "no such service: certbot" instead of saying why.
 #
-# Run ONCE on the server, from deploy/, after DNS for $DOMAIN points at the box
-# and deploy/.env is filled in. Afterwards `docker compose -f
-# docker-compose.prod.yml up -d` just works; the certbot service auto-renews.
+# Kept in the tree (rather than deleted) so the history and the alternative
+# topology stay discoverable: if you ever move OFF the tunnel and publish
+# :80/:443 again, restore the `certbot` service and the TLS server block in
+# deploy/nginx.conf, then delete this guard.
 #
-#   TIP: set LETSENCRYPT_STAGING=1 in .env for a dry run first (avoids hitting
-#   Let's Encrypt rate limits while you shake out DNS / firewall issues).
+# Original purpose: seed a throwaway self-signed cert → start nginx → swap in
+# the real Let's Encrypt cert (breaking the nginx/certbot chicken-and-egg).
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
+
+cat >&2 <<'EOM'
+init-letsencrypt.sh is OBSOLETE — this deployment uses a Cloudflare Tunnel and
+Cloudflare terminates TLS. There is no certbot service and no public port to
+answer an ACME challenge on.
+
+  * Nothing to run: just `docker compose -f docker-compose.prod.yml up -d`.
+  * Set TUNNEL_TOKEN in deploy/.env and route the tunnel hostname to http://web:80.
+
+Refusing to run so a half-applied TLS bootstrap can't confuse the deploy.
+EOM
+exit 1
 
 COMPOSE="docker compose -f docker-compose.prod.yml"
 

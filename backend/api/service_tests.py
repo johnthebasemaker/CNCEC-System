@@ -6544,6 +6544,44 @@ async def test_config_discipline():
           and "CORS_ORIGINS" in env_block,
           f"env_file={api_svc.get('env_file')} keys={sorted(env_block)}")
 
+    # --- Cloudflare Tunnel topology: the box must publish NOTHING ------------
+    services = _yaml.safe_load(compose)["services"]
+    published = {n: s["ports"] for n, s in services.items() if s.get("ports")}
+    check("av-tunnel: NO service publishes a host port — the origin is reachable "
+          "only through cloudflared, so Zero Trust Access cannot be bypassed",
+          not published, f"publishing: {published}")
+
+    cf = services.get("cloudflared", {})
+    check("av-tunnel: the cloudflared connector is present, pinned to the "
+          "official image, and fails fast without TUNNEL_TOKEN",
+          cf.get("image", "").startswith("cloudflare/cloudflared")
+          and "tunnel" in str(cf.get("command", ""))
+          and "run" in str(cf.get("command", ""))
+          and "TUNNEL_TOKEN" in (cf.get("environment") or {})
+          and ":?" in str((cf.get("environment") or {}).get("TUNNEL_TOKEN", "")),
+          f"cloudflared={ {k: cf.get(k) for k in ('image', 'command')} }")
+    check("av-tunnel: certbot is gone and its volumes with it (Cloudflare owns "
+          "TLS now)",
+          "certbot" not in services
+          and not {"certbot-etc", "certbot-www"} & set(
+              _yaml.safe_load(compose).get("volumes") or {}),
+          f"services={sorted(services)}")
+
+    nginx = (root / "deploy" / "nginx.conf").read_text()
+    check("av-tunnel: nginx serves plain HTTP on :80 with no TLS/ACME leftovers "
+          "(a redirect here would loop behind the edge)",
+          "listen 80;" in nginx
+          and "ssl_certificate" not in nginx
+          and "listen 443" not in nginx
+          and "acme-challenge" not in nginx
+          and "return 301 https" not in nginx,
+          "TLS/ACME directives still present in nginx.conf")
+    check("av-tunnel: nginx forwards CF-Connecting-IP, without which every user "
+          "would share one rate-limit bucket keyed on the cloudflared container",
+          "proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;" in nginx
+          and "proxy_pass http://api:8000/;" in nginx,   # trailing slash strips /api
+          "CF-Connecting-IP not forwarded, or /api prefix no longer stripped")
+
 
 async def test_byid_scope_mopup():
     """Suite AU — the three High IDORs the audit found but left out of the
@@ -6802,12 +6840,21 @@ async def test_auth_surface_hardening():
         untrusted = _rl._client_ip(spoof)
         _rl._TRUSTED_PROXIES = {"198.51.100.7"}
         trusted = _rl._client_ip(spoof)
+        # "*" = explicitly trust any peer, the Cloudflare Tunnel setting. This
+        # MUST be handled as a wildcard: treated as a literal address it would
+        # match no peer, so every request would key on the proxy's own IP and
+        # the whole site would share ONE login bucket.
+        _rl._TRUSTED_PROXIES = {"*"}
+        wildcard = _rl._client_ip(spoof)
     finally:
         _rl._TRUSTED_PROXIES = saved_proxies
     check("at-f6: an untrusted peer cannot forge its rate-limit bucket via "
           "CF-Connecting-IP",
           untrusted == "198.51.100.7" and trusted == "1.2.3.4" and legacy == "1.2.3.4",
           f"legacy={legacy} untrusted={untrusted} trusted={trusted}")
+    check("at-f6: GI_TRUSTED_PROXIES='*' trusts the forwarded client IP rather "
+          "than collapsing every user onto the proxy's own bucket",
+          wildcard == "1.2.3.4", f"wildcard resolved to {wildcard!r}")
 
     # --- A03-F5: production CORS must not fall back to the dev localhost list -
     import importlib

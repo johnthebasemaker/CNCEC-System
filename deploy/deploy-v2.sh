@@ -71,10 +71,11 @@ for i in $(seq 1 30); do
 done
 $NEW run --rm api sh -c 'cd /app/backend && alembic upgrade head'
 
-echo "==> [5/7] PORT-HANDOVER — stopping v1 nginx (frees :80/:443), starting v2"
-# The v1 root nginx and v2 web both bind :80/:443 — only one can serve. This is
-# the deliberate cutover handover; rollback.sh reverses it on failure.
-$V1 stop nginx || echo "[deploy] (v1 nginx not running — nothing to stop)"
+echo "==> [5/7] Starting v2 (no port handover needed under the tunnel)"
+# Under the Cloudflare Tunnel the v2 stack publishes NO host ports, so it no
+# longer contends with the v1 root nginx on :80/:443 — both can run at once and
+# v1 is left alone here. Which stack the public hostname reaches is decided by
+# the TUNNEL ROUTE in the Zero Trust dashboard, not by who holds the port.
 $NEW up -d --remove-orphans
 
 echo "==> [6/7] Health check"
