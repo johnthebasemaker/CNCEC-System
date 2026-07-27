@@ -16,9 +16,12 @@ RUN npm run build          # tsc -b && vite build → /app/dist
 
 # ---- Stage 2: nginx runtime ------------------------------------------------
 FROM nginx:1.27-alpine AS runtime
-# Our server config (SPA fallback + /api proxy + TLS + ACME webroot).
+# Our server config (SPA fallback + /api proxy). No TLS and no ACME webroot:
+# Cloudflare's edge terminates TLS and cloudflared forwards plain HTTP here.
 COPY deploy/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 # nginx:alpine's entrypoint runs envsubst on /etc/nginx/templates/*.template →
-# /etc/nginx/conf.d/, so ${DOMAIN} in nginx.conf is filled from the env.
-EXPOSE 80 443
+# /etc/nginx/conf.d/ before starting.
+# :80 only, and it is NOT published to the host — compose gives `web` no
+# `ports:`, so only cloudflared (same Docker network) can reach it.
+EXPOSE 80

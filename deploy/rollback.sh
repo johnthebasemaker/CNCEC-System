@@ -26,11 +26,23 @@ PREV_SHA="${1:-}"
 
 echo "[rollback] === reverting v2 deploy (prev_sha='${PREV_SHA:-none}') ==="
 
-# 1. Port-handover revert — free :80/:443 for v1, restore known-good serving.
-echo "[rollback] stopping v2 web (releasing :80/:443)…"
-$NEW stop web || true
-echo "[rollback] restarting v1 nginx (reclaiming :80/:443)…"
+# 1. Pull v2 out of the tunnel. Under the Cloudflare Tunnel topology there are
+#    no host ports to hand back: cloudflared IS the ingress, so stopping it is
+#    what takes the broken v2 off the air.
+echo "[rollback] stopping v2 cloudflared + web (removing v2 from the tunnel)…"
+$NEW stop cloudflared web || true
+echo "[rollback] restarting v1 nginx…"
 $V1 up -d nginx || echo "[rollback] WARN — could not start v1 nginx; check the box manually"
+
+cat <<'EOM'
+[rollback] ⚠️  MANUAL STEP REQUIRED — this script cannot restore public access.
+[rollback] The public hostname resolves to the Cloudflare Tunnel, so with
+[rollback] cloudflared stopped the domain now returns a Cloudflare 502 rather
+[rollback] than falling back to v1. To put users back on the legacy app you must
+[rollback] repoint the tunnel's hostname route at the v1 origin in the Zero
+[rollback] Trust dashboard (Networks → Tunnels → Configure → Public hostname),
+[rollback] or re-point DNS. Until then v1 is reachable only from the box itself.
+EOM
 
 # 2. Optional image revert to the last known-good SHA.
 if [ -n "$PREV_SHA" ]; then
@@ -46,7 +58,10 @@ if [ -n "$PREV_SHA" ]; then
     # Bring the v2 stack (minus web, still stopped) back to prev images.
     # DB is left as-is on purpose: no schema downgrade.
     echo "[rollback] restoring v2 services (db/api/ollama/backup) at prev images…"
-    $NEW up -d db api ollama backup certbot || true
+    # NOTE: `web`/`cloudflared` are deliberately left stopped — bringing
+    # cloudflared back would re-expose the broken v2 through the tunnel.
+    # (There is no `certbot` service any more; Cloudflare owns TLS.)
+    $NEW up -d db api ollama backup || true
 else
     echo "[rollback] no PREV_SHA — left v2 web stopped; v1 is serving."
 fi

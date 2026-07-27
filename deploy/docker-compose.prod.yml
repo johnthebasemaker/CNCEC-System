@@ -6,12 +6,24 @@
 # Run it from THIS directory:  docker compose -f docker-compose.prod.yml ...
 # Build context is the repo root (`context: ..`).
 #
-# Services (only `web` binds host ports):
-#   db      postgres:16   internal          system of record
-#   api     FastAPI        internal :8000   async → Postgres
-#   web     nginx          :80 + :443       SPA + /api proxy + TLS
-#   certbot certbot        no ports          cert issuance + auto-renew
-#   ollama  ollama         internal :11434  local LLM (Intelligence layer)
+# TOPOLOGY: Cloudflare Tunnel — the box publishes NO host ports at all.
+# Inbound traffic arrives as an OUTBOUND connection from `cloudflared` to
+# Cloudflare's edge, which terminates TLS and enforces Zero Trust Access on the
+# HTML portal. Nothing here listens on the public internet, so the Hetzner
+# firewall can deny all inbound.
+#
+#   client → Cloudflare edge (TLS + Access) → tunnel → cloudflared → web:80 → api:8000
+#
+# Services (NONE bind host ports):
+#   db         postgres:16   internal          system of record
+#   api        FastAPI        internal :8000   async → Postgres
+#   web        nginx          internal :80     SPA + /api proxy (plain HTTP)
+#   cloudflared cloudflared   no ports          outbound tunnel to Cloudflare
+#   ollama     ollama         internal :11434  local LLM (Intelligence layer)
+#
+# There is deliberately no `certbot` service and no TLS in nginx: Cloudflare
+# owns the certificate. Do not re-add port bindings — that would expose the
+# origin directly and bypass Access.
 #
 # Secrets come from deploy/.env (copy .env.example → .env and fill it in).
 # ============================================================================
@@ -33,8 +45,6 @@ volumes:
                     #       type: cifs
                     #       o: "username=…,password=…,uid=10001,vers=3.0"
                     #       device: "//<box>.your-storagebox.de/backup"
-  certbot-etc:      # /etc/letsencrypt (certs + account)
-  certbot-www:      # ACME HTTP-01 webroot
   ollama-models:    # pulled model weights (llama3.1:8b ≈ 5 GB, qwen2.5vl:7b ≈ 5 GB)
 
 services:
@@ -110,12 +120,31 @@ services:
     depends_on: [api]
     environment:
       DOMAIN: ${DOMAIN}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - certbot-etc:/etc/letsencrypt:ro
-      - certbot-www:/var/www/certbot:ro
+    # NO `ports:` — nginx is reachable only from inside `gi-new`, via
+    # cloudflared. Publishing :80/:443 here would expose the origin directly and
+    # let anyone who knows the server IP bypass Cloudflare Access entirely.
+    networks: [gi-new]
+
+  # The ONLY ingress. cloudflared dials OUT to Cloudflare's edge and receives
+  # proxied requests over that connection, so no inbound port is opened and the
+  # host firewall can deny all inbound traffic.
+  #
+  # TUNNEL_TOKEN comes from the Zero Trust dashboard
+  # (Networks → Tunnels → your tunnel → Install connector — the token is the
+  # long string in the shown command). Put it in deploy/.env; it is a
+  # CREDENTIAL, so the file stays chmod 600 and gitignored.
+  #
+  # The tunnel's public hostname route must point at **http://web:80** (service
+  # name on this network), NOT localhost — cloudflared runs in its own
+  # container. Configure the route in the dashboard, or in the tunnel's remote
+  # config; do not split /api, because nginx already strips that prefix.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on: [web]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN must be set in deploy/.env — get it from Zero Trust → Networks → Tunnels}
     networks: [gi-new]
 
   # Local LLM host for the Intelligence layer (Hub Assistant now; OCR/NL-SQL in
@@ -139,16 +168,6 @@ services:
     volumes:
       - ollama-models:/root/.ollama
     networks: [gi-new]
-
-  # Cert issuance is bootstrapped by deploy/init-letsencrypt.sh; this service
-  # just renews every 12h and lets nginx pick it up on its own reload cycle.
-  certbot:
-    image: certbot/certbot
-    restart: unless-stopped
-    volumes:
-      - certbot-etc:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
-    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
 
   # Nightly pg_dump of pg-data-prod — the ONLY automated backup of the Postgres
   # system of record (the v1 SQLite `backup` service cannot cover Postgres).

@@ -3,7 +3,9 @@
 # deploy/health-check.sh — post-deploy health gate for the v2 stack.
 # Exits 0 only if ALL of:
 #   1. FastAPI /health returns 200 within 2s (checked inside the api container).
-#   2. The React SPA responds on the host (web publishes :80) with < 400.
+#   2. The React SPA responds in-network at http://web/ with < 400 (there is no
+#      host port under the Cloudflare Tunnel topology).
+#   2b. The cloudflared connector is running — it is the only ingress.
 #   3. Alembic is at head (no un-applied migrations).
 # Any failure exits non-zero → deploy-v2.sh triggers rollback.sh.
 #
@@ -28,10 +30,25 @@ except Exception as e:
     print(e, file=sys.stderr); sys.exit(1)
 " || fail "api /health did not return 200 within 2s"
 
-# 2. SPA reachable on the host. Accept any < 400 (200 or a TLS/redirect 3xx).
-echo "[health] web / (host :80)…"
-code="$(curl -fsS -o /dev/null -w '%{http_code}' -m 5 http://localhost/ 2>/dev/null || echo 000)"
-[ "$code" -lt 400 ] 2>/dev/null || fail "web / returned HTTP ${code}"
+# 2. SPA reachable. Under the Cloudflare Tunnel `web` publishes NO host port, so
+#    curl-ing http://localhost/ on the box would always fail. Fetch it from
+#    INSIDE the network instead (api has python), which is exactly the hop
+#    cloudflared makes.
+echo "[health] web / (in-network http://web/)…"
+$COMPOSE exec -T api python -c "
+import sys, urllib.request
+try:
+    r = urllib.request.urlopen('http://web/', timeout=5)
+    sys.exit(0 if r.status < 400 else 1)
+except Exception as e:
+    print(e, file=sys.stderr); sys.exit(1)
+" || fail "web / not reachable in-network"
+
+# 2b. The tunnel connector must actually be up, or the site is dark from the
+#     internet even though every other check passes.
+echo "[health] cloudflared connector…"
+$COMPOSE ps --status running --services 2>/dev/null | grep -qx cloudflared \
+    || fail "cloudflared is not running — the site has no ingress"
 
 # 3. Alembic at head — current revision must be in the set of heads.
 echo "[health] alembic at head…"

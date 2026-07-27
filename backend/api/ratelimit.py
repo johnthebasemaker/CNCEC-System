@@ -35,10 +35,26 @@ _hits: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 # and X-Real-IP are attacker-supplied on any request that reaches the origin
 # without traversing Cloudflare/nginx, and rotating one yields a fresh bucket
 # per request — defeating the login, register, OTP and PenaltyBox limiters at
-# once. Trust them only from a configured proxy peer. Empty (the default) keeps
-# the previous permissive behaviour, because the tunnel/nginx peer address
-# differs per deployment and silently keying every user on one IP would be its
-# own outage; set GI_TRUSTED_PROXIES on the deploy box.
+# once. Trust them only from a configured proxy peer.
+#
+# Accepted values:
+#   ""   (unset)  — trust the headers from any peer. The pre-Phase-2 behaviour,
+#                   kept as the default because the correct peer address differs
+#                   per deployment and a wrong one is an outage (see below).
+#   "*"           — EXPLICITLY trust any peer. Same effect as unset, but states
+#                   the intent. Correct for the Cloudflare Tunnel topology,
+#                   where the box publishes no host ports: the only route to the
+#                   API is edge → cloudflared → nginx, so there is no path for a
+#                   client to reach the origin directly and forge the header.
+#                   Do NOT use this if any port is ever published to the host.
+#   "a.b.c.d,…"   — trust only these peers.
+#
+# ⚠️ A non-empty value that never matches (e.g. a stale container IP) is the
+# dangerous case: every request then keys on the proxy's own address, so all
+# users share ONE bucket and /auth/login locks out globally at 10/min. That is
+# why `*` is a first-class value rather than something to approximate with a
+# guessed IP.
+_TRUSTED_PROXY_WILDCARD = "*"
 _TRUSTED_PROXIES = {p.strip() for p in
                     os.environ.get("GI_TRUSTED_PROXIES", "").split(",") if p.strip()}
 
@@ -46,6 +62,8 @@ _TRUSTED_PROXIES = {p.strip() for p in
 def _peer_trusted(request: Request) -> bool:
     if not _TRUSTED_PROXIES:
         return True          # unconfigured → legacy behaviour, documented above
+    if _TRUSTED_PROXY_WILDCARD in _TRUSTED_PROXIES:
+        return True          # explicit "trust any peer"
     peer = request.client.host if request.client else ""
     return peer in _TRUSTED_PROXIES
 

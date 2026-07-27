@@ -70,12 +70,17 @@ Exit code `0` only when every blocking check passes.
      Browser-only is fine blank; the **native Tauri/Capacitor apps need their
      webview origins listed** or every native API call fails:
      `tauri://localhost,http://tauri.localhost,https://tauri.localhost,capacitor://localhost,https://localhost`
-   - **`GI_TRUSTED_PROXIES`** — set to the peer address the API actually sees
-     (nginx container / cloudflared endpoint) so the rate limiter only trusts
-     `CF-Connecting-IP`/`X-Real-IP` from there; otherwise those headers are
-     spoofable and the login limiter is a no-op. **Leave blank if unsure** — a
-     wrong value keys every user onto one bucket. Firewall the origin to
-     Cloudflare's IP ranges as the companion control.
+   - **`GI_TRUSTED_PROXIES=*`** — under the Cloudflare Tunnel the box publishes
+     no host ports, so the only route in is edge → cloudflared → nginx → api and
+     no client can reach the origin to forge `CF-Connecting-IP`. `*` means
+     "trust any peer", which is correct here and avoids pinning a container IP
+     that changes on every recreate. ⚠️ Never set a *specific* address you are
+     unsure of: a non-matching value makes every request key on the proxy's own
+     IP, so all users share ONE bucket and `/auth/login` locks out globally.
+     If a host port is ever published again, narrow this to the real peer.
+   - **`TUNNEL_TOKEN`** — from Zero Trust → Networks → Tunnels → Install
+     connector. The stack refuses to start without it. Route the tunnel's public
+     hostname to `http://web:80` (the service name, not localhost).
    - re-run `backend/scripts/create_ai_readonly_role.sql` after the final load
      (the AI read-only GRANTs are wiped by every reload); the API logs
      `[ai] read-only wall: OK|DEGRADED` at boot so you can confirm it took.

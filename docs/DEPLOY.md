@@ -8,11 +8,11 @@ Everything lives in [`deploy/`](../deploy/):
 
 | File | What it is |
 |---|---|
-| `docker-compose.prod.yml` | db (Postgres 16) · api (FastAPI) · web (nginx: SPA + `/api` proxy + TLS) · certbot · **backup** (nightly pg_dump) |
+| `docker-compose.prod.yml` | db (Postgres 16) · api (FastAPI) · web (nginx: SPA + `/api` proxy) · **cloudflared** (the only ingress) · **backup** (nightly pg_dump) |
 | `Dockerfile.api` | FastAPI image (uvicorn, 4 workers, `GI_ENV=production`) |
 | `Dockerfile.web` | multi-stage: builds the Vite bundle → nginx serves it |
-| `nginx.conf` | SPA fallback + `/api/`→api proxy (strips prefix) + TLS + ACME |
-| `init-letsencrypt.sh` | one-time TLS bootstrap (dummy cert → real cert) |
+| `nginx.conf` | SPA fallback + `/api/`→api proxy (strips prefix), plain HTTP on an internal `:80` |
+| `init-letsencrypt.sh` | ⛔ obsolete — refuses to run (Cloudflare terminates TLS) |
 | `.env.example` | secrets template → copy to `deploy/.env` (gitignored) |
 | `backup/backup-pg.sh` | nightly `pg_dump -Fc` + 14-day retention + `.last_success`/`.last_failure` markers |
 | `deploy-v2.sh` · `health-check.sh` · `rollback.sh` | server-side manual-deploy orchestrator + health gate + automatic rollback (see §9) |
@@ -22,12 +22,40 @@ Everything lives in [`deploy/`](../deploy/):
 
 ---
 
-## 0. Prerequisites
+## 0. Topology — Cloudflare Tunnel, zero open ports
+
+Ingress is a **Cloudflare Tunnel**. `cloudflared` dials *out* to Cloudflare's
+edge and receives proxied requests over that connection, so the box never
+listens on the public internet:
+
+```
+client → Cloudflare edge (TLS + Zero Trust Access) → tunnel → cloudflared → web:80 → api:8000
+```
+
+Consequences, all of them deliberate:
+
+- **No service publishes a host port** — not even nginx. Publishing one would
+  expose the origin directly and let anyone with the server IP bypass Access.
+- **Cloudflare terminates TLS.** There is no `certbot` service, no ACME
+  challenge, and no TLS in `nginx.conf`. `init-letsencrypt.sh` is obsolete and
+  refuses to run.
+- **DNS is a CNAME to the tunnel**, not an A record to the box.
+- The v1 Streamlit stack can keep holding `:80`/`:443` — the two no longer
+  contend, so the cutover is a *tunnel route* change, not a port handover.
+
+### Prerequisites
 - A Linux VPS (the parked **Hetzner CPX42** per the workstream-C decisions), Ubuntu 22.04+.
 - **Docker Engine + Compose v2** installed (`docker --version`, `docker compose version`).
-- A **DNS A/AAAA record** for your domain pointing at the server's IP.
-- Firewall: inbound **80** and **443** open (Let's Encrypt + the app).
+- A **Cloudflare Tunnel** created in Zero Trust → Networks → Tunnels, with its
+  connector token to hand, and its public hostname routed to **`http://web:80`**
+  (the compose service name — *not* `localhost`; cloudflared runs in its own
+  container). Do not add a separate `/api` route: nginx already strips that prefix.
+- Firewall: **deny all inbound.** Only outbound 443 to Cloudflare is required.
 - A copy of the live **`gi_database.db`** (for the one-time data migration).
+
+> The Zero Trust Access policy protects the HTML portal. Keep the documented
+> **Bypass (Everyone)** policy on `/api/*` — the native apps and the WhatsApp
+> report links have no Access session (see `docs/NATIVE_APPS.md` §6).
 
 ## 1. Get the code + configure secrets
 ```bash
@@ -38,9 +66,10 @@ cp .env.example .env
 #   POSTGRES_PASSWORD   →  openssl rand -base64 32   (alphanumeric only — a
 #                           '@' or '/' would corrupt the DATABASE_URL compose builds)
 #   JWT_SECRET          →  openssl rand -hex 32   (MANDATORY, >=32 chars)
-#   PUBLIC_BASE_URL     →  https://<DOMAIN>       (MANDATORY — see below)
+#   PUBLIC_BASE_URL     →  https://<DOMAIN>/api   (MANDATORY — note the /api)
 #   CORS_ORIGINS        →  native app origins, or blank for browser-only
-#   GI_TRUSTED_PROXIES  →  the peer the API sees, or blank
+#   GI_TRUSTED_PROXIES  →  *                      (see the table below)
+#   TUNNEL_TOKEN        →  Zero Trust → Networks → Tunnels → Install connector
 nano .env
 chmod 600 .env          # holds live Meta/SMTP credentials — owner-only
 ```
@@ -60,19 +89,21 @@ Two more production-only settings that are easy to miss:
 | Variable | Why it matters |
 |---|---|
 | **`CORS_ORIGINS`** | In production an unset value now means **no cross-origin access at all** (it used to fall back to a dev list containing `http://localhost` as a *credentialed* origin). Browser-only deployments behind nginx can leave it blank. The **Tauri/Capacitor apps call the API cross-origin**, so their fixed webview origins must be listed or every native call fails: `tauri://localhost,http://tauri.localhost,https://tauri.localhost,capacitor://localhost,https://localhost` |
-| **`GI_TRUSTED_PROXIES`** | The rate limiter keys on `CF-Connecting-IP` / `X-Real-IP`. Those are attacker-supplied on any request that reaches the origin directly, so rotating one defeats the login, register, OTP and webhook-ban limiters. Set it to the peer address the API actually sees (nginx container / cloudflared endpoint) and the headers are trusted only from there. **Blank keeps the old always-trust behaviour** — that is the safe default, because a wrong value keys every user onto one bucket and locks the site out of `/auth/login`. Pair it with firewalling the origin to Cloudflare's ranges. |
+| **`GI_TRUSTED_PROXIES`** | The rate limiter keys on `CF-Connecting-IP` / `X-Real-IP`, which are attacker-supplied on any request reaching the origin *directly*. Under this topology nothing can: no host port is published, so the only path is edge → cloudflared → nginx → api. Set **`*`** ("trust any peer") — nginx forwards the real client address as `CF-Connecting-IP`. ⚠️ Do **not** pin a specific container IP: it changes on every recreate, and a non-matching value makes every request key on the proxy's own address, so all users share ONE bucket and `/auth/login` locks out globally at 10/min. If you ever publish a host port again, narrow this to the real peer — `*` would then let anyone hitting the origin spoof their key. |
+| **`TUNNEL_TOKEN`** | The cloudflared connector token (Zero Trust → Networks → Tunnels → Install connector). Compose **fails fast** if it is unset, since without it there is no ingress at all. Treat it as a credential: `deploy/.env` stays `chmod 600` and gitignored. |
 
 Everything in `deploy/.env` reaches the container via the api service's
 `env_file:` — if you add a new variable, it is passed automatically.
 
-## 2. Issue the TLS certificate (once)
-DNS must already resolve to the box. Optionally set `LETSENCRYPT_STAGING=1` in `.env`
-for a rate-limit-free dry run first, then flip to `0` and re-run.
-```bash
-./init-letsencrypt.sh
-```
-It builds the images, seeds a throwaway cert so nginx can start, then swaps in the
-real Let's Encrypt cert. The `certbot` service auto-renews every 12h thereafter.
+## 2. TLS — nothing to do
+Cloudflare terminates TLS at the edge, so there is no certificate to issue,
+install or renew on the box. `init-letsencrypt.sh` is kept only for the
+alternative (port-publishing) topology and refuses to run as-is.
+
+The one thing to verify is the **tunnel route**: Zero Trust → Networks →
+Tunnels → your tunnel → Public hostname → `gi.giinventory.com` →
+`http://web:80`. If it points at `localhost`, cloudflared resolves that inside
+its own container and every request 502s.
 
 ## 3. Bring the stack up
 ```bash
