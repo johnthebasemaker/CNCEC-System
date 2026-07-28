@@ -7754,6 +7754,279 @@ async def _relax_entry_gates() -> None:
         await s.commit()
 
 
+async def test_pg_excel_sync():
+    """Suite AW — tools/pg_excel_sync.py, the one-command Excel → PostgreSQL sync.
+
+    Proves the four properties the tool actually claims, rather than just that
+    it runs: PostgreSQL-only (the legacy SQLite file is unreachable), native
+    ON CONFLICT upserts that converge, non-destructive COALESCE semantics, and
+    ATOMICITY across all five kinds.
+
+    Hermetic: workbooks are built in memory under SVCW-/SVCX-/SVCY- keys,
+    written to a temp dir, and every committed row is cleaned up at the end.
+    """
+    import contextlib as _ctx
+    import io as _io
+    import shutil as _sh
+    import tempfile as _tmp
+
+    from sqlalchemy import text as _sqt
+
+    import tools.pg_excel_sync as pg
+
+    async def _scalar(sql: str, **params):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), params)).scalar()
+
+    # ── 1. PRIME DIRECTIVE: PostgreSQL only, gi_database.db unreachable ──────
+    def _refused(url: str) -> bool:
+        try:
+            pg.assert_postgres_target(url)
+            return False
+        except SystemExit:
+            return True
+
+    check("aw: a SQLite URL is refused — the tool can never open gi_database.db",
+          _refused("sqlite:///gi_database.db"))
+    check("aw: any bare .db path is refused",
+          _refused("sqlite+aiosqlite:///./scratch.db"))
+    check("aw: even a POSTGRES URL naming gi_database is refused",
+          _refused("postgresql+asyncpg://u@h/gi_database"))
+    check("aw: a non-Postgres dialect is refused", _refused("mysql://u:p@h/d"))
+    check("aw: a real Postgres URL is accepted (no false refusal)",
+          not _refused("postgresql+asyncpg://postgres@127.0.0.1:5433/gihub"))
+    check("aw: a Postgres HOST containing '.db' is not falsely refused — the "
+          "scheme decides, not a substring hunt",
+          not _refused("postgresql://u:p@db.example.com:5432/gihub"))
+    _red = pg._redact("postgresql://u:sekret@h:5432/gihub")
+    check("aw: the target URL is echoed with its password redacted",
+          "sekret" not in _red and "***" in _red, _red)
+
+    # ── 2. every ON CONFLICT target is a REAL constraint ─────────────────────
+    # Without this, a schema drift turns into a runtime "no unique or exclusion
+    # constraint matching the ON CONFLICT specification" on the operator's box.
+    for _kind, _cols in pg.CONFLICT_KEYS.items():
+        _t = _MD.tables[pg.AUDIT_ACTION[_kind][1]]
+        _pk = {c.name for c in _t.primary_key}
+        _uqs = [{c.name for c in con.columns} for con in _t.constraints
+                if con.__class__.__name__ == "UniqueConstraint"]
+        check(f"aw: {_kind} ON CONFLICT target matches a real PK/UNIQUE on "
+              f"{_t.name}", set(_cols) == _pk or set(_cols) in _uqs,
+              f"{_cols} vs pk={_pk} uq={_uqs}")
+
+    # The ledger deliberately has NO unique key: the same (date, SAP, qty) line
+    # is a legitimate repeat movement. If someone ever adds one, this fails and
+    # sends them back to the module docstring before they "fix" the tool.
+    for _tn in ("receipts", "consumption", "returns"):
+        _t = _MD.tables[_tn]
+        _uqs = [c for c in _t.constraints
+                if c.__class__.__name__ == "UniqueConstraint"]
+        check(f"aw: {_tn} still has no unique constraint — ON CONFLICT is "
+              f"correctly absent there, not forgotten",
+              not _uqs and {c.name for c in _t.primary_key} == {"id"},
+              f"uq={_uqs}")
+
+    # ── 3. load order is load-bearing ───────────────────────────────────────
+    _order = list(pg.WORKBOOKS)
+    check("aw: inventory is planned before the ledger (the ledger rejects any "
+          "SAP missing from the master)",
+          _order.index("inventory") < _order.index("ledger"))
+    check("aw: recipes load before equipment (equipment backfills a missing "
+          "Lining_System_Code from sme_recipe — an empty map skips those rows)",
+          _order.index("sme-recipes") < _order.index("sme-equipment"))
+
+    # ── 4. native_upsert: converges, and never blanks an absent column ───────
+    _inv = _MD.tables["inventory"]
+    async with SessionLocal() as s:
+        await pg.native_upsert(s, _inv, [{"SAP_Code": "SVCX-N1", "Site_ID": "CNCEC",
+                                          "Equipment_Description": "first",
+                                          "UOM": "EA", "Minimum_Qty": 4}],
+                               pg.CONFLICT_KEYS["inventory"])
+        await s.commit()
+    _raised = ""
+    try:
+        # SAME natural key. Minimum_Qty is PRESENT but None — that is the case
+        # COALESCE exists for; a bare `excluded.col` would overwrite the stored
+        # 4 with NULL. (A column merely absent from the dict never reaches the
+        # SET clause at all, so it proves nothing about this behaviour.)
+        async with SessionLocal() as s:
+            await pg.native_upsert(s, _inv, [{"SAP_Code": "SVCX-N1",
+                                              "Site_ID": "CNCEC",
+                                              "Equipment_Description": "second",
+                                              "Minimum_Qty": None}],
+                                   pg.CONFLICT_KEYS["inventory"])
+            await s.commit()
+    except Exception as e:  # noqa: BLE001 — the point is that nothing escapes
+        _raised = repr(e)
+    _desc = await _scalar('SELECT "Equipment_Description" FROM inventory '
+                          "WHERE \"SAP_Code\"='SVCX-N1'")
+    _mq = await _scalar('SELECT "Minimum_Qty" FROM inventory '
+                        "WHERE \"SAP_Code\"='SVCX-N1'")
+    check("aw: re-upserting an existing natural key raises nothing — a plain "
+          "INSERT would have died on the duplicate key", _raised == "", _raised)
+    check("aw: ON CONFLICT DO UPDATE applies the supplied column (first→second)",
+          _desc == "second", f"got {_desc}")
+    check("aw: a column the workbook leaves BLANK is preserved, not nulled out "
+          "(COALESCE(excluded.col, table.col))",
+          _mq is not None and abs(float(_mq) - 4) < 1e-9, f"got {_mq}")
+
+    # ── 5. end-to-end CLI: dry-run default → commit → re-commit is a no-op ───
+    _TITLE = ["CNCEC PROJECT Equipement and"]
+    _INV_H = ["Sl. No.", "SAP CODE", "Material Code", "Equipment Description",
+              "UOM", "Category", "Opening Stock", "Receipt", "Consumption",
+              "Return", "Current Stock", "Minimum Qty"]
+    _RCT_H = ["Date ", "SAP CODE", "Material Code", "Equipment Description",
+              "UOM", "Qty.", "Serial No.", "PR#", "WBS#", "Location",
+              "Vehicle No.", "Driver Name", "DN. No.", "Pallet No.",
+              "Mob. From", "Prepared by"]
+    _EQ_H = ["Sl. #", "Project", "WBS #", "Sub_Location", "Location", "Type",
+             "Substrate", "Equipment_Tag_No.", "Name", "Drawing #", "Design",
+             "Dia / L", "Ht. /W", "Equipment Total SQM", "Remaraks",
+             "Lining_System_Code", "Lining_System_Short_Name", "Lining_Type",
+             "Lining_System", "Material Spec.", "Lining_Area/location",
+             "Surface_Area_SQM"]
+    _REC_H = ["Sl. #", "Lining_System_Code", "Substrate", "Lining_System",
+              "System Key's", "Lining_Thicknes", "Lining_System_Short_Name",
+              "Lining_Type", "Material_Code", "SAP_Code", "Material_Description",
+              "Material_Name", "For_1_SQM", "UOM", "PACKAGE SIZE"]
+    _MAT_H = ["Item", "Vendor/supplying plant", "Purchasing Document",
+              "Document Date", "Material_Code", "SAP_Code", "Material_Name",
+              "Nature", "UOM", "Available_Qty", "Ordered_Qty"]
+
+    def _books(tag: str) -> dict[str, bytes]:
+        """The four root workbooks, miniaturised under a unique key prefix.
+        Opening 3 + receipt 5 = 8 = Current Stock, so verification reconciles."""
+        return {
+            "CNCEC_Inventory.xlsx": _xlsx({
+                "Inventory": [_TITLE, _INV_H,
+                              ["950", f"{tag}-1", f"GI-{tag}-1", "svc sync item",
+                               "EA", "Surface Shield", 3, 0, 0, 0, 8, 2]],
+                "Receipt Log": [_TITLE, _RCT_H,
+                                ["2026-07-20 00:00:00", f"{tag}-1", None, None,
+                                 "EA", 5, None, None, None, None, None, None,
+                                 f"{tag}-DN1", None, None, "svc"]]}),
+            "For_1_SQM.xlsx": _xlsx({"RECIPES": [
+                _REC_H,
+                ["1", "9907", "Steel", f"{tag} Lining", tag, "30 mm",
+                 f"{tag}30", "Brick", f"{tag}-MAT-1", f"{tag}-S1", "Primer",
+                 f"{tag} Primer", 2.5, "KG", "25"]]}),
+            "Equipment.xlsx": _xlsx({"Data Input": [
+                _EQ_H,
+                ["1", tag, None, None, "TRAIN J", "ME", "TANK", f"{tag}-T1",
+                 f"{tag} tank", None, None, None, None, 20, None, "9907",
+                 f"{tag}30", None, None, None, "Bottom", 20]]}),
+            "Materials_DetailsAvailable_Qty.xlsx": _xlsx({"Materials": [
+                _MAT_H,
+                ["1", f"{tag} Vendor", "4700000009", "2026-03-01",
+                 f"{tag}-MAT-1", f"{tag}-S1", f"{tag} Primer", "Liquid", "KG",
+                 100, 40]]}),
+        }
+
+    def _stage(tag: str, books: dict[str, bytes] | None = None) -> str:
+        d = _tmp.mkdtemp(prefix=f"{tag.lower()}-")
+        for name, blob in (books or _books(tag)).items():
+            with open(os.path.join(d, name), "wb") as fh:
+                fh.write(blob)
+        return d
+
+    async def _run(workdir: str, *argv):
+        """Drive the real CLI entry point, capturing its stdout."""
+        buf = _io.StringIO()
+        saved = sys.argv
+        sys.argv = ["pg_excel_sync.py", "--dir", workdir, "--site", "CNCEC",
+                    "--user", "svc-aw", *argv]
+        try:
+            with _ctx.redirect_stdout(buf):
+                rc = await pg.main()
+        finally:
+            sys.argv = saved
+        return rc, buf.getvalue()
+
+    _dir = _stage("SVCW")
+    _dirs = [_dir]
+
+    async def _svcw_counts() -> tuple:
+        return (
+            await _scalar("SELECT COUNT(*) FROM inventory WHERE \"SAP_Code\"='SVCW-1'"),
+            await _scalar("SELECT COUNT(*) FROM receipts WHERE \"DN_No\"='SVCW-DN1'"),
+            await _scalar("SELECT COUNT(*) FROM sme_recipe "
+                          "WHERE \"Material_Code\"='SVCW-MAT-1'"),
+            await _scalar("SELECT COUNT(*) FROM sme_equipment "
+                          "WHERE \"Equipment_Tag_No\"='SVCW-T1'"),
+            await _scalar("SELECT COUNT(*) FROM sme_inventory_seed "
+                          "WHERE \"Material_Code\"='SVCW-MAT-1'"))
+
+    rc, out = await _run(_dir)                      # no --commit
+    check("aw: the run is a DRY-RUN by default and writes nothing",
+          rc == 0 and await _svcw_counts() == (0, 0, 0, 0, 0),
+          f"rc={rc} counts={await _svcw_counts()}")
+    check("aw: the dry-run still reports what it would insert",
+          "+1 new" in out and "dry-run only" in out, out[-300:])
+
+    rc, out = await _run(_dir, "--commit")
+    _after = await _svcw_counts()
+    check("aw: --commit applies all five kinds in one pass",
+          rc == 0 and _after == (1, 1, 1, 1, 1), f"rc={rc} counts={_after}")
+    check("aw: a committed run reconciles stock against the workbook "
+          "(opening 3 + receipt 5 = the workbook's 8)",
+          "STOCK VERIFICATION: 1/1" in out, out[-300:])
+    check("aw: the SQM-progress baseline is seeded alongside the equipment row",
+          abs(float(await _scalar(
+              'SELECT "Original_SQM" FROM sme_sqm_progress '
+              "WHERE \"Equipment_Tag_No\"='SVCW-T1'") or 0) - 20) < 1e-9)
+
+    rc, out = await _run(_dir, "--commit")
+    check("aw: re-running --commit is a NO-OP — the sync is idempotent",
+          rc == 0 and await _svcw_counts() == (1, 1, 1, 1, 1)
+          and out.count("+0 new") >= 3 and "+0 new  ~0 corrected" in out,
+          f"rc={rc} counts={await _svcw_counts()}")
+
+    # ── 6. atomicity: a failure in the LAST kind rolls the earlier ones back ─
+    _bad = _books("SVCY")
+    _bad["Materials_DetailsAvailable_Qty.xlsx"] = _xlsx({"Materials": [
+        ["Item", "Vendor/supplying plant", "Material_Name"], ["1", "x", "y"]]})
+    _bdir = _stage("SVCY", _bad)
+    _dirs.append(_bdir)
+    _boom = ""
+    try:
+        await _run(_bdir, "--commit")
+    except Exception as e:  # noqa: BLE001 — any failure must roll everything back
+        _boom = type(e).__name__
+    _leaked = (
+        await _scalar("SELECT COUNT(*) FROM inventory WHERE \"SAP_Code\"='SVCY-1'"),
+        await _scalar("SELECT COUNT(*) FROM receipts WHERE \"DN_No\"='SVCY-DN1'"),
+        await _scalar("SELECT COUNT(*) FROM sme_recipe "
+                      "WHERE \"Material_Code\"='SVCY-MAT-1'"),
+        await _scalar("SELECT COUNT(*) FROM sme_equipment "
+                      "WHERE \"Equipment_Tag_No\"='SVCY-T1'"))
+    check("aw: a broken workbook in the LAST kind rolls back every earlier "
+          "kind — the whole sync is one transaction, never half-applied",
+          _boom != "" and _leaked == (0, 0, 0, 0),
+          f"raised={_boom or 'nothing'} leaked={_leaked}")
+
+    # ── 7. --commit and --dry-run cannot be combined ─────────────────────────
+    rc, _ = await _run(_dir, "--commit", "--dry-run")
+    check("aw: --commit with --dry-run is refused rather than silently picking one",
+          rc == 2, f"rc={rc}")
+
+    # cleanup — every SVCW-/SVCX-/SVCY- artifact (audit rows stay, append-only)
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM receipts WHERE \"DN_No\" LIKE 'SVC%-DN%'"))
+        await s.execute(_sqt("DELETE FROM inventory WHERE \"SAP_Code\" LIKE 'SVCW-%' "
+                             "OR \"SAP_Code\" LIKE 'SVCX-%' OR \"SAP_Code\" LIKE 'SVCY-%'"))
+        await s.execute(_sqt("DELETE FROM sme_sqm_progress "
+                             "WHERE \"Equipment_Tag_No\" LIKE 'SVC%-T1'"))
+        await s.execute(_sqt("DELETE FROM sme_equipment "
+                             "WHERE \"Equipment_Tag_No\" LIKE 'SVC%-T1'"))
+        await s.execute(_sqt("DELETE FROM sme_recipe "
+                             "WHERE \"Material_Code\" LIKE 'SVC%-MAT-%'"))
+        await s.execute(_sqt("DELETE FROM sme_inventory_seed "
+                             "WHERE \"Material_Code\" LIKE 'SVC%-MAT-%'"))
+        await s.commit()
+    for d in _dirs:
+        _sh.rmtree(d, ignore_errors=True)
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -7858,6 +8131,8 @@ async def main() -> int:
     await test_byid_scope_mopup()
     print("\n AV. config discipline (Theme D: secret guards + ignore coverage)")
     await test_config_discipline()
+    print("\n AW. pg_excel_sync (Excel → PostgreSQL: PG-only, idempotent, atomic)")
+    await test_pg_excel_sync()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "
