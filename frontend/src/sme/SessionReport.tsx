@@ -31,7 +31,9 @@ const secHdr: React.CSSProperties = {
 const nf = (v: number, d = 3) =>
   v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: d })
 
-function ExportButtons({ order, siteId }: { order: string[]; siteId?: string }) {
+/** Shared download driver — the server oracle renders every official document,
+ *  so both button groups POST the same current priority order. */
+function useSessionDownload(order: string[], siteId?: string) {
   const { message } = App.useApp()
   const [busy, setBusy] = useState<string | null>(null)
   const dl = async (key: string, format: string) => {
@@ -46,6 +48,27 @@ function ExportButtons({ order, siteId }: { order: string[]; siteId?: string }) 
       setBusy(null)
     }
   }
+  return { busy, dl }
+}
+
+/** Combined-procurement downloads. Same `session-full` document as the header
+ *  buttons — it now LEADS with the aggregated material demand (Excel: a
+ *  "Total Material Demand" first sheet; PDF: a "Material-Wise Summary" on the
+ *  first pages), which is exactly the table shown in this card. */
+function ProcurementExportButtons({ order, siteId }: { order: string[]; siteId?: string }) {
+  const { busy, dl } = useSessionDownload(order, siteId)
+  return (
+    <Space wrap>
+      <Button size="small" icon={<FilePdfOutlined />} loading={busy === 'session-full.pdf'}
+        onClick={() => dl('session-full', 'pdf')}>Download PDF</Button>
+      <Button size="small" icon={<FileExcelOutlined />} loading={busy === 'session-full.xlsx'}
+        onClick={() => dl('session-full', 'xlsx')}>Download Excel</Button>
+    </Space>
+  )
+}
+
+function ExportButtons({ order, siteId }: { order: string[]; siteId?: string }) {
+  const { busy, dl } = useSessionDownload(order, siteId)
   return (
     <Space wrap>
       <Button size="small" icon={<FileExcelOutlined />} loading={busy === 'session-full.xlsx'}
@@ -165,7 +188,8 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
 
       {/* Shortage stacked bar + combined procurement */}
       <Card size="small" style={{ marginTop: 16 }}
-        title={<span style={secHdr}>🛒 Combined procurement (SQM-weighted)</span>}>
+        title={<span style={secHdr}>🛒 Combined procurement (SQM-weighted)</span>}
+        extra={<ProcurementExportButtons order={scenario.order} siteId={siteId} />}>
         {shortOnly.length > 0 && (
           <ResponsiveContainer width="100%" height={Math.max(120, shortOnly.length * 30 + 60)}>
             <BarChart data={shortOnly} layout="vertical">

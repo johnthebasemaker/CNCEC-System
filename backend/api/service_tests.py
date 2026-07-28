@@ -8027,6 +8027,144 @@ async def test_pg_excel_sync():
         _sh.rmtree(d, ignore_errors=True)
 
 
+async def test_session_report_summary():
+    """Suite AX — the SME session report leads with aggregated material demand.
+
+    Excel gets a "Total Material Demand" FIRST sheet; the PDF gets a
+    "Material-Wise Summary" on its FIRST pages. The per-equipment breakdown is
+    unchanged and follows as the second section.
+    """
+    import io as _io
+    import re as _re
+    import zlib as _zlib
+
+    from . import sme as _sme
+    from .reports import to_pdf_sheets
+
+    def _streams(blob: bytes) -> list[bytes]:
+        out = []
+        for m in _re.finditer(rb"stream\r?\n(.*?)endstream", blob, _re.S):
+            try:
+                out.append(_zlib.decompress(m.group(1)))
+            except Exception:  # noqa: BLE001 — uncompressed stream
+                out.append(m.group(1))
+        return out
+
+    # ── aggregation: collapse, conservation, coverage, ordering ─────────────
+    fake = {"lines": [
+        {"Equipment_Tag_No": "T1", "Material_Code": "M-1", "Material_Name": "Primer",
+         "UOM": "KG", "Demand_Qty": 10.0, "Allocated_Qty": 4.0, "Shortfall_Qty": 6.0},
+        {"Equipment_Tag_No": "T2", "Material_Code": "M-1", "Material_Name": "Primer",
+         "UOM": "KG", "Demand_Qty": 30.0, "Allocated_Qty": 6.0, "Shortfall_Qty": 24.0},
+        {"Equipment_Tag_No": "T1", "Material_Code": "M-2", "Material_Name": "Adhesive",
+         "UOM": "KG", "Demand_Qty": 5.0, "Allocated_Qty": 5.0, "Shortfall_Qty": 0.0},
+    ]}
+    agg = _sme._material_demand_rows(fake)
+    check("ax: 3 equipment×material lines collapse to 2 material rows", len(agg) == 2,
+          f"got {len(agg)}")
+    m1 = next((r for r in agg if r["Material_Code"] == "M-1"), {})
+    check("ax: quantities sum across equipment (10+30 / 4+6 / 6+24)",
+          m1.get("Total_Needed") == 40.0 and m1.get("Allocated_Qty") == 10.0
+          and m1.get("Net_Demand") == 30.0, str(m1))
+    check("ax: coverage is recomputed on the TOTALS (10/40 = 25%), not averaged "
+          "across lines — averaging would report 30%",
+          m1.get("Fulfillment_Pct") == 25.0, str(m1.get("Fulfillment_Pct")))
+    check("ax: worst coverage sorts first and S_No is renumbered after sorting "
+          "(matches the on-screen combined-procurement table)",
+          [r["Material_Code"] for r in agg] == ["M-1", "M-2"]
+          and [r["S_No"] for r in agg] == [1, 2],
+          str([(r["Material_Code"], r["S_No"]) for r in agg]))
+    # A code carrying two different names/UOMs must split, not silently merge.
+    split = _sme._material_demand_rows({"lines": [
+        dict(fake["lines"][0]),
+        {**fake["lines"][0], "UOM": "L"},
+    ]})
+    check("ax: the same code under a different UOM stays a separate row",
+          len(split) == 2, f"got {len(split)}")
+
+    # ── end-to-end through the real endpoint ────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post("/auth/login", json={"username": "hod", "password": "hod2026"},
+                          headers={"X-Real-IP": "203.0.113.91"})
+        H = {"Authorization": f"Bearer {r.json().get('access_token')}"}
+        snap = (await ac.get("/sme/model-snapshot", headers=H)).json()
+        order = (snap.get("default_order") or [])[:8]
+        check("ax: the fixture site has equipment to build a session from",
+              len(order) > 0, f"got {len(order)}")
+
+        async def export(fmt: str, key: str = "session-full"):
+            return await ac.post("/sme/plan/export", headers=H, json={
+                "priority_order": order, "key": key, "format": fmt})
+
+        # Excel — summary sheet FIRST, detail second
+        rx = await export("xlsx")
+        import openpyxl as _px
+        wb = _px.load_workbook(_io.BytesIO(rx.content))
+        check("ax: session-full xlsx puts 'Total Material Demand' at the FRONT, "
+              "with the equipment breakdown kept as sheet 2",
+              rx.status_code == 200
+              and wb.sheetnames[:2] == ["Total Material Demand", "Equipment Breakdown"],
+              f"{rx.status_code} {wb.sheetnames}")
+        ws = wb[wb.sheetnames[0]]
+        check("ax: the summary sheet carries the documented columns",
+              [c.value for c in ws[1]] == _sme._MATERIAL_DEMAND_COLS,
+              str([c.value for c in ws[1]]))
+        check("ax: the summary sheet is an aggregate — strictly fewer rows than "
+              "the per-equipment detail it summarises",
+              1 < ws.max_row < wb["Equipment Breakdown"].max_row,
+              f"summary={ws.max_row} detail={wb['Equipment Breakdown'].max_row}")
+        # Conservation: the rollup must not invent or lose quantity.
+        cols = _sme._MATERIAL_DEMAND_COLS
+        s_need = sum(float(ws.cell(r, cols.index("Total_Needed") + 1).value or 0)
+                     for r in range(2, ws.max_row + 1))
+        wd = wb["Equipment Breakdown"]
+        dhdr = [c.value for c in wd[1]]
+        d_need = sum(float(wd.cell(r, dhdr.index("Demand_Qty") + 1).value or 0)
+                     for r in range(2, wd.max_row + 1))
+        check("ax: summed Total_Needed equals the detail's summed Demand_Qty "
+              "(the rollup conserves quantity)", abs(s_need - d_need) < 0.05,
+              f"summary={s_need} detail={d_need}")
+
+        # PDF — summary on the first page, detail starting on a later one
+        rp = await export("pdf")
+        st = _streams(rp.content)
+        i_sum = next((i for i, t in enumerate(st) if b"Material-Wise Summary" in t), -1)
+        i_det = next((i for i, t in enumerate(st) if b"Equipment Breakdown" in t), -1)
+        check("ax: session-full pdf leads with 'Material-Wise Summary' on page 1 "
+              "and starts the equipment breakdown on a LATER page",
+              rp.status_code == 200 and i_sum == 0 and i_det > i_sum,
+              f"{rp.status_code} summary_page={i_sum + 1} detail_page={i_det + 1}")
+
+        # CSV is deliberately untouched — one flat table, still the detail.
+        rc = await export("csv")
+        head = rc.text.splitlines()[0] if rc.text else ""
+        check("ax: csv stays a single flat detail table (welding two schemas "
+              "into one file would break downstream parsers)",
+              rc.status_code == 200 and "Equipment_Tag_No" in head
+              and "Total_Needed" not in head, f"{rc.status_code} {head[:90]}")
+
+        # Other export keys must not have grown a summary section.
+        ro = await export("xlsx", key="order-list")
+        wo = _px.load_workbook(_io.BytesIO(ro.content))
+        check("ax: the order-list export is unchanged (no summary sheet added)",
+              ro.status_code == 200
+              and "Total Material Demand" not in wo.sheetnames, str(wo.sheetnames))
+
+    # ── the shared sectioned-PDF helper stays backward compatible ───────────
+    _c, _r = ["A"], [[1]]
+    plain = to_pdf_sheets("T", [("One", _c, _r), ("Two", _c, _r)], "u")
+    broken = to_pdf_sheets("T", [("One", _c, _r), ("Two", _c, _r)], "u",
+                           page_break_between=True)
+    n_plain = len(_re.findall(rb"/Type\s*/Page[^s]", plain))
+    n_broken = len(_re.findall(rb"/Type\s*/Page[^s]", broken))
+    check("ax: to_pdf_sheets defaults to the old compact flow — two short "
+          "sections still share one page (existing callers unaffected)",
+          n_plain == 1, f"got {n_plain} pages")
+    check("ax: page_break_between=True is what forces the new section onto its "
+          "own page", n_broken == 2, f"got {n_broken} pages")
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -8133,6 +8271,8 @@ async def main() -> int:
     await test_config_discipline()
     print("\n AW. pg_excel_sync (Excel → PostgreSQL: PG-only, idempotent, atomic)")
     await test_pg_excel_sync()
+    print("\n AX. SME session report — aggregated material demand leads the doc")
+    await test_session_report_summary()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

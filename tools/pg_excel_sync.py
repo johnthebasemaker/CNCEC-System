@@ -130,6 +130,36 @@ AUDIT_ACTION = {
 }
 
 
+# ─── preflight: the right interpreter ────────────────────────────────────────
+def require_project_env() -> None:
+    """Fail with an actionable message when run outside the project venv.
+
+    The planners live in `backend/api/bulk_import.py`, which is FastAPI code, so
+    the system python dies with a bare `ModuleNotFoundError: No module named
+    'fastapi'` and a traceback pointing at bulk_import line 43 — which names the
+    symptom, not the cause (wrong interpreter). Say it plainly instead.
+
+    Dropping the FastAPI dependency is NOT the fix: it would mean forking the
+    column-mapping logic out of bulk_import, which is precisely the drift this
+    tool is built to avoid (see the module docstring). FastAPI is a declared
+    dependency in backend/requirements.txt; the venv already has it.
+    """
+    import importlib.util
+    missing = [m for m in ("fastapi", "sqlalchemy", "openpyxl", "asyncpg",
+                           "xlsxwriter")
+               if importlib.util.find_spec(m) is None]
+    if not missing:
+        return
+    venv = os.path.join(_ROOT, ".venv", "bin", "python")
+    hint = (f"{venv} tools/pg_excel_sync.py" if os.path.exists(venv)
+            else "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt")
+    raise SystemExit(
+        f"❌ wrong interpreter: {sys.executable}\n"
+        f"   missing module(s): {', '.join(missing)}\n\n"
+        f"   This script reuses the API's import planners, so it needs the "
+        f"project virtualenv.\n   Run it with:\n\n       {hint}\n")
+
+
 # ─── safety: PostgreSQL only, never the legacy SQLite file ───────────────────
 def _redact(url: str) -> str:
     """Hide any password before a URL reaches stdout or a log."""
@@ -399,6 +429,7 @@ async def main() -> int:
         print("❌ --commit and --dry-run are mutually exclusive.")
         return 2
 
+    require_project_env()   # before any backend import, so the error is useful
     from backend.api.config import async_database_url
     url = async_database_url()
     assert_postgres_target(url)
