@@ -8,7 +8,7 @@
  * to /sme/plan/export so the SERVER oracle renders the documents.
  */
 import { useMemo, useState } from 'react'
-import { Alert, App, Button, Card, Col, Collapse, Row, Skeleton, Space, Table } from 'antd'
+import { Alert, App, Button, Card, Col, Collapse, Progress, Row, Skeleton, Space, Table, Tag } from 'antd'
 import { FileExcelOutlined, FilePdfOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Bar, BarChart, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
@@ -20,6 +20,7 @@ import PriorityList, { FulfilPill, StatusDot } from './PriorityList'
 import { useScenario } from './ScenarioContext'
 import { tagStats, weightedProcurement } from './session'
 import type { WeightedProcurementRow } from './session'
+import type { SqmCodeRow } from './engine'
 import SuggestionPanel from './SuggestionPanel'
 import TagDetail from './TagDetail'
 
@@ -63,6 +64,20 @@ function ProcurementExportButtons({ order, siteId }: { order: string[]; siteId?:
         onClick={() => dl('session-full', 'pdf')}>Download PDF</Button>
       <Button size="small" icon={<FileExcelOutlined />} loading={busy === 'session-full.xlsx'}
         onClick={() => dl('session-full', 'xlsx')}>Download Excel</Button>
+    </Space>
+  )
+}
+
+/** Material-Wise Segregated Report downloads — the SQM-by-system-code rollup,
+ *  the blocking materials behind it, and the per-equipment detail. */
+function SegregatedExportButtons({ order, siteId }: { order: string[]; siteId?: string }) {
+  const { busy, dl } = useSessionDownload(order, siteId)
+  return (
+    <Space wrap>
+      <Button size="small" icon={<FilePdfOutlined />} loading={busy === 'segregated.pdf'}
+        onClick={() => dl('segregated', 'pdf')}>Download PDF</Button>
+      <Button size="small" icon={<FileExcelOutlined />} loading={busy === 'segregated.xlsx'}
+        onClick={() => dl('segregated', 'xlsx')}>Download Excel</Button>
     </Space>
   )
 }
@@ -116,7 +131,16 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
     { title: 'Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
     { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
     { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
-    { title: 'Allocated', dataIndex: 'Allocated_Qty', key: 'a', align: 'right', render: (v: number) => nf(v) },
+    {
+      title: 'Available', dataIndex: 'Available_Qty', key: 'av', align: 'right',
+      render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
+    },
+    {
+      title: 'On Order', dataIndex: 'Ordered_Qty', key: 'or', align: 'right',
+      render: (v: number) => (
+        <span style={{ opacity: v > 0 ? 1 : 0.4, color: v > 0 ? '#F59E0B' : undefined }}>{nf(v)}</span>
+      ),
+    },
     {
       title: 'To Order', dataIndex: 'Shortfall_Qty', key: 's', align: 'right',
       render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v)}</span>,
@@ -127,6 +151,52 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
     {
       title: 'Coverage', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 100,
       render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
+    },
+  ]
+
+  const sqmTot = plan.sqm_by_code.reduce(
+    (a, c) => ({
+      rem: a.rem + c.Remaining_SQM, now: a.now + c.SQM_Achievable_Now,
+      ord: a.ord + c.SQM_Achievable_With_Ordered, def: a.def + c.SQM_Deficit,
+    }), { rem: 0, now: 0, ord: 0, def: 0 })
+
+  const segregatedCols: ColumnsType<SqmCodeRow> = [
+    {
+      title: 'System', dataIndex: 'Lining_System_Code', key: 'c', width: 110, fixed: 'left',
+      render: (v: string, r) => (
+        <Space size={4}>
+          <b style={mono}>{v}</b>
+          {!r.Blocking_Materials.length && r.SQM_Deficit > 0 && <Tag color="default">no recipe</Tag>}
+        </Space>
+      ),
+    },
+    { title: 'Name', dataIndex: 'System_Name', key: 'n', ellipsis: true },
+    { title: 'Equip.', dataIndex: 'Equipment_Count', key: 'e', width: 70, align: 'right' },
+    { title: 'Remaining m²', dataIndex: 'Remaining_SQM', key: 'r', align: 'right', render: (v: number) => nf(v, 1) },
+    {
+      title: 'Achievable now', dataIndex: 'SQM_Achievable_Now', key: 'an', align: 'right',
+      render: (v: number) => <span style={{ color: '#10B981', fontWeight: 700 }}>{nf(v, 1)}</span>,
+    },
+    {
+      title: 'With ordered', dataIndex: 'SQM_Achievable_With_Ordered', key: 'ao', align: 'right',
+      render: (v: number, r) => (
+        <span style={{ color: v > r.SQM_Achievable_Now ? '#F59E0B' : undefined, opacity: v > r.SQM_Achievable_Now ? 1 : 0.5 }}>
+          {nf(v, 1)}
+        </span>
+      ),
+    },
+    {
+      title: 'Deficit m²', dataIndex: 'SQM_Deficit', key: 'd', align: 'right',
+      render: (v: number) => (
+        <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v, 1)}</span>
+      ),
+    },
+    {
+      title: 'Coverage', dataIndex: 'Coverage_Now_Pct', key: 'p', width: 130, align: 'right',
+      render: (v: number) => (
+        <Progress percent={v} size="small" strokeColor={fc(v)}
+          format={(pc) => <span style={{ ...mono, fontSize: '0.7rem' }}>{(pc ?? 0).toFixed(1)}%</span>} />
+      ),
     },
   ]
 
@@ -216,6 +286,56 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           <span>Total demand: <b style={mono}>{nf(totDemand)}</b></span>
           <span>To procure: <b style={{ ...mono, color: totShort > 0 ? '#EF4444' : undefined }}>{nf(totShort)}</b></span>
           <span style={{ marginLeft: 'auto' }}>Coverage: <FulfilPill pct={cov} /></span>
+        </div>
+      </Card>
+
+      {/* Material-Wise Segregated Report — reverse SQM per system code */}
+      <Card size="small" style={{ marginTop: 16 }}
+        title={<span style={secHdr}>📐 Material-wise segregated report (by system code)</span>}
+        extra={<SegregatedExportButtons order={scenario.order} siteId={siteId} />}>
+        <Alert type="info" showIcon style={{ marginBottom: 10, fontSize: '0.76rem' }}
+          message="Achievable SQM is limited by the scarcest material in each system's recipe — the bottleneck, not the average."
+          description={'"Now" counts physical stock on hand. "With ordered" adds stock already on purchase order (net of what has already been delivered). Deficit is measured against physical stock, because that is what procurement has to close.'} />
+        <Table<SqmCodeRow> size="small" rowKey="Lining_System_Code"
+          columns={segregatedCols} dataSource={plan.sqm_by_code}
+          pagination={{ pageSize: 10, showTotal: (t) => `${t} system codes` }}
+          scroll={{ x: 'max-content' }}
+          expandable={{
+            rowExpandable: (r) => r.Blocking_Materials.length > 0,
+            expandedRowRender: (r) => (
+              <Table size="small" rowKey="Material_Code" pagination={false}
+                dataSource={r.Blocking_Materials}
+                columns={[
+                  { title: 'Material', dataIndex: 'Material_Code', key: 'm', width: 130 },
+                  { title: 'Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
+                  { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
+                  { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
+                  {
+                    title: 'Available', dataIndex: 'Alloc_Available', key: 'av', align: 'right',
+                    render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
+                  },
+                  {
+                    title: 'On Order', dataIndex: 'Alloc_Ordered', key: 'or', align: 'right',
+                    render: (v: number) => <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v)}</span>,
+                  },
+                  {
+                    title: 'Still to buy', dataIndex: 'Shortfall_Qty', key: 's', align: 'right',
+                    render: (v: number) => (
+                      <span style={{ color: v > 0 ? '#EF4444' : '#10B981', fontWeight: v > 0 ? 700 : 400 }}>{nf(v)}</span>
+                    ),
+                  },
+                ]} />
+            ),
+          }} />
+        <div style={{
+          border: '1px solid rgba(212,175,55,.45)', background: 'rgba(212,175,55,.07)',
+          borderRadius: 8, padding: '8px 12px', display: 'flex', gap: 20, flexWrap: 'wrap',
+          alignItems: 'center', fontSize: '0.78rem', marginTop: 10,
+        }}>
+          <span>Remaining: <b style={mono}>{nf(sqmTot.rem, 1)}</b> m²</span>
+          <span>Achievable now: <b style={{ ...mono, color: '#10B981' }}>{nf(sqmTot.now, 1)}</b> m²</span>
+          <span>With ordered: <b style={{ ...mono, color: '#F59E0B' }}>{nf(sqmTot.ord, 1)}</b> m²</span>
+          <span>Deficit: <b style={{ ...mono, color: sqmTot.def > 0 ? '#EF4444' : undefined }}>{nf(sqmTot.def, 1)}</b> m²</span>
         </div>
       </Card>
 

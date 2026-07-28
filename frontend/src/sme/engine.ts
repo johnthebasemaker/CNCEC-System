@@ -36,6 +36,8 @@ export interface SnapshotMaterial {
   material_name?: string | null
   uom?: string | null
   available_qty?: number | string | null
+  ordered_qty?: number | string | null
+  received_qty?: number | string | null
 }
 export interface SnapshotProgress {
   Equipment_Tag_No: string
@@ -62,12 +64,19 @@ export interface AllocationLine {
   Material_Code: string
   Material_Name: string
   UOM: string
+  For_1_SQM: number
   Demand_Qty: number
+  Alloc_Available: number
+  Alloc_Ordered: number
   Allocated_Qty: number
+  Shortfall_Available_Qty: number
   Shortfall_Qty: number
   Pool_Before: number
   Pool_After: number
+  Ordered_Pool_Before: number
+  Ordered_Pool_After: number
   Fulfillment_Pct: number
+  Fulfillment_With_Ordered_Pct: number
 }
 export interface FeasibilityRow {
   Priority_Rank: number
@@ -75,7 +84,10 @@ export interface FeasibilityRow {
   Name: string
   Total_Demand_Qty: number
   Total_Allocated_Qty: number
+  Total_Alloc_Available: number
+  Total_Alloc_Ordered: number
   Total_Shortfall_Qty: number
+  Total_Net_Shortfall_Qty: number
   Completion_Pct: number
   Status: string
   Bottleneck_Material_Code: string
@@ -96,6 +108,8 @@ export interface ProcurementRow {
   Material_Name: string
   UOM: string
   Available_Qty: number
+  Ordered_Qty: number
+  Gross_Shortfall_Qty: number
   Shortage_Qty_To_Buy: number
 }
 export interface MaterialTotal {
@@ -104,7 +118,50 @@ export interface MaterialTotal {
   UOM: string
   Demand_Qty: number
   Allocated_Qty: number
+  Alloc_Available: number
+  Alloc_Ordered: number
+  Shortfall_Available_Qty: number
   Shortfall_Qty: number
+}
+
+/** Reverse-SQM rollup per (tag, system code) — see sme_engine.build_sqm_rollup. */
+export interface SqmUnitRow {
+  Equipment_Tag_No: string
+  Name: string
+  Lining_System_Code: string
+  System_Name: string
+  Total_SQM: number
+  Done_SQM: number
+  Remaining_SQM: number
+  SQM_Achievable_Now: number
+  SQM_Achievable_With_Ordered: number
+  SQM_Deficit: number
+  Coverage_Now_Pct: number
+  Has_Recipe: boolean
+}
+export interface BlockingMaterial {
+  Material_Code: string
+  Material_Name: string
+  UOM: string
+  Demand_Qty: number
+  Alloc_Available: number
+  Alloc_Ordered: number
+  Shortfall_Available_Qty: number
+  Shortfall_Qty: number
+}
+export interface SqmCodeRow {
+  Lining_System_Code: string
+  System_Name: string
+  Equipment_Count: number
+  Total_SQM: number
+  Done_SQM: number
+  Remaining_SQM: number
+  SQM_Achievable_Now: number
+  SQM_Achievable_With_Ordered: number
+  SQM_Deficit: number
+  Equipment_Tags: string
+  Coverage_Now_Pct: number
+  Blocking_Materials: BlockingMaterial[]
 }
 export interface PlanResult {
   order_used: string[]
@@ -112,6 +169,8 @@ export interface PlanResult {
   feasibility: FeasibilityRow[]
   totals: MaterialTotal[]
   procurement: ProcurementRow[]
+  sqm_units: SqmUnitRow[]
+  sqm_by_code: SqmCodeRow[]
 }
 export interface SuggestionResult {
   suggestions: SuggestionRow[]
@@ -124,6 +183,7 @@ export interface SmeModel {
   codesByTag: Map<string, string[]>
   recipesByCode: Map<string, { Material_Code: string; Material_Name: string; UOM: string; For_1_SQM: number }[]>
   poolInit: Map<string, number>
+  poolOrderedInit: Map<string, number>
   matMeta: Map<string, { Material_Name: string; UOM: string }>
   tagMeta: Map<string, { Name: string; Location: string; Type: string; Substrate: string }>
   defaultOrder: string[]
@@ -223,15 +283,22 @@ export function buildModel(
   for (const codes of codesByTag.values()) codes.sort(syscodeCompare)
 
   const poolInit = new Map<string, number>()
+  const poolOrderedInit = new Map<string, number>()
   const matMeta: SmeModel['matMeta'] = new Map()
   for (const m of materials) {
     const mat = s(m.material_code)
     poolInit.set(mat, num(m.available_qty))
+    // 2026-07-28 EFFECTIVE-ORDERED ruling (Q2a) — mirrors sme_engine.py.
+    // ordered_qty is a static workbook snapshot never decremented on delivery;
+    // arrivals land as receipts, which already inflate available_qty. Netting
+    // receipts off the order stops delivered stock being counted twice.
+    const effOrdered = num(m.ordered_qty) - num(m.received_qty)
+    poolOrderedInit.set(mat, effOrdered > 0 ? effOrdered : 0)
     matMeta.set(mat, { Material_Name: s(m.material_name), UOM: s(m.uom) })
   }
 
   return {
-    units, codesByTag, recipesByCode, poolInit, matMeta, tagMeta,
+    units, codesByTag, recipesByCode, poolInit, poolOrderedInit, matMeta, tagMeta,
     defaultOrder: [...codesByTag.keys()].sort(strCompare),
   }
 }
@@ -249,7 +316,11 @@ function dedupe(order: string[]): string[] {
 // ─── Cascade allocation (legacy cascade_allocate port) ───────────────────────
 export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLine[] {
   const pool = new Map(model.poolInit)
+  const poolOrdered = new Map(model.poolOrderedInit)
   const lines: AllocationLine[] = []
+  const raw: { demand: number; avail: number }[] = []
+  // ── pass 1: PHYSICAL stock, priority order (identical to the single-tier
+  //    cascade this replaces, so every historical field keeps its value) ────
   for (const tag of dedupe(order)) {
     for (const code of model.codesByTag.get(tag) ?? []) {
       const unit = model.units.get(ukey(tag, code))!
@@ -263,6 +334,7 @@ export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLin
         pool.set(mat, after)
         const d4 = roundN(demand, 4)
         const a4 = roundN(alloc, 4)
+        raw.push({ demand, avail: alloc })
         lines.push({
           Equipment_Tag_No: tag,
           Lining_System_Code: code,
@@ -271,15 +343,41 @@ export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLin
           Material_Code: mat,
           Material_Name: r.Material_Name || (model.matMeta.get(mat)?.Material_Name ?? ''),
           UOM: r.UOM,
+          For_1_SQM: r.For_1_SQM,
           Demand_Qty: d4,
+          Alloc_Available: a4,
+          Alloc_Ordered: 0,
           Allocated_Qty: a4,
+          Shortfall_Available_Qty: roundN(demand - alloc, 4),
           Shortfall_Qty: roundN(demand - alloc, 4),
           Pool_Before: roundN(before, 4),
           Pool_After: roundN(after, 4),
+          Ordered_Pool_Before: 0,
+          Ordered_Pool_After: 0,
           Fulfillment_Pct: d4 > 0 ? roundN(clip((a4 / d4) * 100, 0, 100), 2) : 100,
+          Fulfillment_With_Ordered_Pct: d4 > 0 ? roundN(clip((a4 / d4) * 100, 0, 100), 2) : 100,
         })
       }
     }
+  }
+  // ── pass 2: ON-ORDER stock against the remaining gap, same priority walk ─
+  for (let i = 0; i < lines.length; i += 1) {
+    const ln = lines[i]
+    const mat = ln.Material_Code
+    const gap = raw[i].demand - raw[i].avail
+    const before = poolOrdered.get(mat) ?? 0
+    const alloc = gap > 0 ? Math.min(gap, before) : 0
+    const after = Math.max(0, before - alloc)
+    poolOrdered.set(mat, after)
+    const total = raw[i].avail + alloc
+    const d4 = ln.Demand_Qty
+    const t4 = roundN(total, 4)
+    ln.Alloc_Ordered = roundN(alloc, 4)
+    ln.Allocated_Qty = t4
+    ln.Shortfall_Qty = roundN(raw[i].demand - total, 4)
+    ln.Ordered_Pool_Before = roundN(before, 4)
+    ln.Ordered_Pool_After = roundN(after, 4)
+    ln.Fulfillment_With_Ordered_Pct = d4 > 0 ? roundN(clip((t4 / d4) * 100, 0, 100), 2) : 100
   }
   return lines
 }
@@ -300,12 +398,22 @@ export function computeFeasibility(
     rank += 1
     const rows = byTag.get(tag)
     if (!rows || rows.length === 0) continue
-    let demand = 0, alloc = 0, short = 0
-    for (const r of rows) { demand += r.Demand_Qty; alloc += r.Allocated_Qty; short += r.Shortfall_Qty }
+    // "Ready to Build" is a PHYSICAL claim: stock still on order cannot be
+    // applied to a tank today, so feasibility judges tier 1 only (which also
+    // keeps every historical value intact). Mirrors sme_engine.py.
+    let demand = 0, alloc = 0, allocAv = 0, allocOr = 0, short = 0, shortNet = 0
+    for (const r of rows) {
+      demand += r.Demand_Qty
+      alloc += r.Allocated_Qty
+      allocAv += r.Alloc_Available
+      allocOr += r.Alloc_Ordered
+      short += r.Shortfall_Available_Qty
+      shortNet += r.Shortfall_Qty
+    }
     let minRate = 2
     let bottleneck: AllocationLine | null = null
     for (const r of rows) {
-      const rate = r.Demand_Qty > 0 ? clip(r.Allocated_Qty / r.Demand_Qty, 0, 1) : 1
+      const rate = r.Demand_Qty > 0 ? clip(r.Alloc_Available / r.Demand_Qty, 0, 1) : 1
       if (rate < minRate) { minRate = rate; bottleneck = r } // strict: first min wins ties
     }
     // 2026-07-07 STRICT BOTTLENECK ruling (mirrors sme_engine.py): coverage =
@@ -314,19 +422,22 @@ export function computeFeasibility(
     const status = short <= 0 ? STATUS_FULL
       : minRate === 0 ? STATUS_BLOCKED
         : `${STATUS_PARTIAL} (${completion.toFixed(1)}%)`
-    const hasBn = bottleneck !== null && bottleneck.Shortfall_Qty > 0
+    const hasBn = bottleneck !== null && bottleneck.Shortfall_Available_Qty > 0
     out.push({
       Priority_Rank: rank,
       Equipment_Tag_No: tag,
       Name: model.tagMeta.get(tag)?.Name ?? '',
       Total_Demand_Qty: roundN(demand, 4),
       Total_Allocated_Qty: roundN(alloc, 4),
+      Total_Alloc_Available: roundN(allocAv, 4),
+      Total_Alloc_Ordered: roundN(allocOr, 4),
       Total_Shortfall_Qty: roundN(short, 4),
+      Total_Net_Shortfall_Qty: roundN(shortNet, 4),
       Completion_Pct: completion,
       Status: status,
       Bottleneck_Material_Code: hasBn ? bottleneck!.Material_Code : '—',
       Bottleneck_Material_Name: hasBn ? bottleneck!.Material_Name : '—',
-      Bottleneck_Shortfall: hasBn ? bottleneck!.Shortfall_Qty : 0,
+      Bottleneck_Shortfall: hasBn ? bottleneck!.Shortfall_Available_Qty : 0,
     })
   }
   return out
@@ -378,8 +489,13 @@ export function runSuggestionEngine(model: SmeModel, orderIn: string[]): Suggest
 
 // ─── Procurement list + per-material totals ──────────────────────────────────
 export function buildProcurementList(model: SmeModel, lines: AllocationLine[]): ProcurementRow[] {
+  // Keyed on the NET shortfall, so stock already on order is not re-ordered.
   const shortage = new Map<string, number>()
-  for (const ln of lines) shortage.set(ln.Material_Code, (shortage.get(ln.Material_Code) ?? 0) + ln.Shortfall_Qty)
+  const gross = new Map<string, number>()
+  for (const ln of lines) {
+    shortage.set(ln.Material_Code, (shortage.get(ln.Material_Code) ?? 0) + ln.Shortfall_Qty)
+    gross.set(ln.Material_Code, (gross.get(ln.Material_Code) ?? 0) + ln.Shortfall_Available_Qty)
+  }
   const out: ProcurementRow[] = []
   for (const mat of [...shortage.keys()].sort(strCompare)) {
     const v = shortage.get(mat)!
@@ -390,6 +506,8 @@ export function buildProcurementList(model: SmeModel, lines: AllocationLine[]): 
       Material_Name: meta?.Material_Name ?? '',
       UOM: meta?.UOM ?? '',
       Available_Qty: model.poolInit.get(mat) ?? 0,
+      Ordered_Qty: model.poolOrderedInit.get(mat) ?? 0,
+      Gross_Shortfall_Qty: roundN(gross.get(mat) ?? 0, 3),
       Shortage_Qty_To_Buy: roundN(v, 3),
     })
   }
@@ -405,12 +523,16 @@ export function buildTotals(lines: AllocationLine[]): MaterialTotal[] {
     if (t === undefined) {
       t = {
         Material_Code: ln.Material_Code, Material_Name: ln.Material_Name, UOM: ln.UOM,
-        Demand_Qty: 0, Allocated_Qty: 0, Shortfall_Qty: 0,
+        Demand_Qty: 0, Allocated_Qty: 0, Alloc_Available: 0, Alloc_Ordered: 0,
+        Shortfall_Available_Qty: 0, Shortfall_Qty: 0,
       }
       totals.set(ln.Material_Code, t)
     }
     t.Demand_Qty += ln.Demand_Qty
     t.Allocated_Qty += ln.Allocated_Qty
+    t.Alloc_Available += ln.Alloc_Available
+    t.Alloc_Ordered += ln.Alloc_Ordered
+    t.Shortfall_Available_Qty += ln.Shortfall_Available_Qty
     t.Shortfall_Qty += ln.Shortfall_Qty
   }
   return [...totals.keys()].sort(strCompare).map((mat) => {
@@ -419,20 +541,150 @@ export function buildTotals(lines: AllocationLine[]): MaterialTotal[] {
       ...t,
       Demand_Qty: roundN(t.Demand_Qty, 3),
       Allocated_Qty: roundN(t.Allocated_Qty, 3),
+      Alloc_Available: roundN(t.Alloc_Available, 3),
+      Alloc_Ordered: roundN(t.Alloc_Ordered, 3),
+      Shortfall_Available_Qty: roundN(t.Shortfall_Available_Qty, 3),
       Shortfall_Qty: roundN(t.Shortfall_Qty, 3),
     }
   })
+}
+
+// ─── Reverse SQM: bottleneck-limited achievable area (2026-07-28) ────────────
+/** Mirrors sme_engine._achievable — see there for the full ruling rationale. */
+function achievable(unitLines: AllocationLine[], field: 'Alloc_Available' | 'Allocated_Qty',
+                    remaining: number): number {
+  const rates = unitLines.filter((ln) => ln.For_1_SQM > 0)
+  if (rates.length === 0) return 0   // ruling Q5: unmodelled is never 100%
+  let best = Infinity
+  for (const ln of rates) {
+    const v = ln[field] / ln.For_1_SQM
+    if (v < best) best = v
+  }
+  return clip(best, 0, remaining)
+}
+
+/** Mirrors sme_engine.build_sqm_rollup. Units come from codesByTag, not from
+ *  `lines`, so a code with no recipe still appears (with 0 achievable). */
+export function buildSqmRollup(
+  model: SmeModel, lines: AllocationLine[], order: string[],
+): SqmUnitRow[] {
+  const byUnit = new Map<string, AllocationLine[]>()
+  for (const ln of lines) {
+    const k = ukey(ln.Equipment_Tag_No, ln.Lining_System_Code)
+    if (!byUnit.has(k)) byUnit.set(k, [])
+    byUnit.get(k)!.push(ln)
+  }
+  const out: SqmUnitRow[] = []
+  for (const tag of dedupe(order)) {
+    for (const code of model.codesByTag.get(tag) ?? []) {
+      const unit = model.units.get(ukey(tag, code))
+      if (unit === undefined) continue
+      const remaining = unit.remaining
+      const ul = byUnit.get(ukey(tag, code)) ?? []
+      const now = achievable(ul, 'Alloc_Available', remaining)
+      const withOrd = achievable(ul, 'Allocated_Qty', remaining)
+      out.push({
+        Equipment_Tag_No: tag,
+        Name: model.tagMeta.get(tag)?.Name ?? '',
+        Lining_System_Code: code,
+        System_Name: unit.short_name,
+        Total_SQM: roundN(unit.total_original, 2),
+        Done_SQM: roundN(unit.done, 2),
+        Remaining_SQM: roundN(remaining, 2),
+        SQM_Achievable_Now: roundN(now, 2),
+        SQM_Achievable_With_Ordered: roundN(withOrd, 2),
+        SQM_Deficit: roundN(remaining - now, 2),
+        Coverage_Now_Pct: remaining > 0 ? roundN(clip((now / remaining) * 100, 0, 100), 2) : 100,
+        Has_Recipe: ul.length > 0,
+      })
+    }
+  }
+  return out
+}
+
+/** Mirrors sme_engine.build_sqm_by_code. SQM is ADDITIVE across equipment —
+ *  never average the coverage rates. */
+export function buildSqmByCode(
+  lines: AllocationLine[], rollup: SqmUnitRow[],
+): SqmCodeRow[] {
+  const SUM = ['Total_SQM', 'Done_SQM', 'Remaining_SQM', 'SQM_Achievable_Now',
+    'SQM_Achievable_With_Ordered', 'SQM_Deficit'] as const
+  const agg = new Map<string, SqmCodeRow & { _tags: string[] }>()
+  for (const r of rollup) {
+    let a = agg.get(r.Lining_System_Code)
+    if (a === undefined) {
+      a = {
+        Lining_System_Code: r.Lining_System_Code, System_Name: r.System_Name,
+        Equipment_Count: 0, Total_SQM: 0, Done_SQM: 0, Remaining_SQM: 0,
+        SQM_Achievable_Now: 0, SQM_Achievable_With_Ordered: 0, SQM_Deficit: 0,
+        Equipment_Tags: '', Coverage_Now_Pct: 0, Blocking_Materials: [], _tags: [],
+      }
+      agg.set(r.Lining_System_Code, a)
+    }
+    a.Equipment_Count += 1
+    a._tags.push(r.Equipment_Tag_No)
+    for (const f of SUM) a[f] += r[f]
+  }
+  const block = new Map<string, Map<string, BlockingMaterial>>()
+  const BSUM = ['Demand_Qty', 'Alloc_Available', 'Alloc_Ordered',
+    'Shortfall_Available_Qty', 'Shortfall_Qty'] as const
+  for (const ln of lines) {
+    if (!block.has(ln.Lining_System_Code)) block.set(ln.Lining_System_Code, new Map())
+    const m = block.get(ln.Lining_System_Code)!
+    let b = m.get(ln.Material_Code)
+    if (b === undefined) {
+      b = {
+        Material_Code: ln.Material_Code, Material_Name: ln.Material_Name, UOM: ln.UOM,
+        Demand_Qty: 0, Alloc_Available: 0, Alloc_Ordered: 0,
+        Shortfall_Available_Qty: 0, Shortfall_Qty: 0,
+      }
+      m.set(ln.Material_Code, b)
+    }
+    for (const f of BSUM) b[f] += ln[f]
+  }
+  const out: SqmCodeRow[] = []
+  for (const code of [...agg.keys()].sort(syscodeCompare)) {
+    const a = agg.get(code)!
+    const rem = a.Remaining_SQM
+    const mats = [...(block.get(code)?.values() ?? [])]
+      .filter((m) => m.Shortfall_Available_Qty > 0)
+      .map((m) => {
+        const o = { ...m }
+        for (const f of BSUM) o[f] = roundN(o[f], 4)
+        return o
+      })
+    mats.sort((x, y) => y.Shortfall_Qty - x.Shortfall_Qty
+      || strCompare(x.Material_Code, y.Material_Code))
+    const row: SqmCodeRow = {
+      Lining_System_Code: a.Lining_System_Code, System_Name: a.System_Name,
+      Equipment_Count: a.Equipment_Count,
+      Total_SQM: roundN(a.Total_SQM, 2), Done_SQM: roundN(a.Done_SQM, 2),
+      Remaining_SQM: roundN(a.Remaining_SQM, 2),
+      SQM_Achievable_Now: roundN(a.SQM_Achievable_Now, 2),
+      SQM_Achievable_With_Ordered: roundN(a.SQM_Achievable_With_Ordered, 2),
+      SQM_Deficit: roundN(a.SQM_Deficit, 2),
+      Equipment_Tags: a._tags.join(', '),
+      Coverage_Now_Pct: rem > 0
+        ? roundN(clip((a.SQM_Achievable_Now / rem) * 100, 0, 100), 2) : 100,
+      Blocking_Materials: mats,
+    }
+    out.push(row)
+  }
+  return out
 }
 
 /** One-shot plan: cascade + feasibility + totals + procurement. */
 export function runPlan(model: SmeModel, orderIn: string[]): PlanResult {
   const order = dedupe(orderIn)
   const lines = cascadeAllocate(model, order)
+  const rollup = buildSqmRollup(model, lines, order)
   return {
     order_used: order,
     lines,
     feasibility: computeFeasibility(model, lines, order),
     totals: buildTotals(lines),
     procurement: buildProcurementList(model, lines),
+    sqm_units: rollup,
+    sqm_by_code: buildSqmByCode(lines, rollup),
   }
 }

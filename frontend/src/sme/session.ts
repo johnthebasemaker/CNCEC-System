@@ -117,6 +117,8 @@ export interface WeightedProcurementRow {
   Material_Name: string
   UOM: string
   Demand_Qty: number
+  Available_Qty: number
+  Ordered_Qty: number
   Allocated_Qty: number
   Shortfall_Qty: number
   Fulfillment_Pct: number
@@ -133,12 +135,15 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
     if (!r) {
       r = {
         Material_Code: ln.Material_Code, Material_Name: ln.Material_Name, UOM: ln.UOM,
-        Demand_Qty: 0, Allocated_Qty: 0, Shortfall_Qty: 0, Fulfillment_Pct: 100,
+        Demand_Qty: 0, Available_Qty: 0, Ordered_Qty: 0,
+        Allocated_Qty: 0, Shortfall_Qty: 0, Fulfillment_Pct: 100,
         SQM_Total: 0, SQM_Done: 0, SQM_Deficit: 0,
       }
       acc.set(ln.Material_Code, r)
     }
     r.Demand_Qty += ln.Demand_Qty
+    r.Available_Qty += ln.Alloc_Available
+    r.Ordered_Qty += ln.Alloc_Ordered
     r.Allocated_Qty += ln.Allocated_Qty
     r.Shortfall_Qty += ln.Shortfall_Qty
     r.SQM_Total += ln.Total_SQM
@@ -147,10 +152,14 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
   const rows = [...acc.values()].map((r) => ({
     ...r,
     Demand_Qty: roundN(r.Demand_Qty, 3),
+    Available_Qty: roundN(r.Available_Qty, 3),
+    Ordered_Qty: roundN(r.Ordered_Qty, 3),
     Allocated_Qty: roundN(r.Allocated_Qty, 3),
     Shortfall_Qty: roundN(r.Shortfall_Qty, 3),
+    // Coverage stays on PHYSICAL stock (mirrors computeFeasibility): on-order
+    // units cannot be applied to a tank today.
     Fulfillment_Pct: roundN(r.Demand_Qty > 0
-      ? Math.min(100, (r.Allocated_Qty / r.Demand_Qty) * 100) : 100, 1),
+      ? Math.min(100, (r.Available_Qty / r.Demand_Qty) * 100) : 100, 1),
     SQM_Total: roundN(r.SQM_Total, 2),
     SQM_Done: roundN(r.SQM_Done, 2),
     SQM_Deficit: roundN(r.SQM_Total - r.SQM_Done, 2),
