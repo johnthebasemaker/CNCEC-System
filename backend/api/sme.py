@@ -488,6 +488,55 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
     return out
 
 
+# Columns of the "Total Material Demand" lead summary. Named explicitly rather
+# than derived from dict order so a future field addition can't silently
+# reshuffle an operator-facing procurement document.
+#
+# NOTE on naming: the brief glossed Allocated_Qty as "Ordered". It is kept as
+# Allocated_Qty here — it is the quantity the cascade could allocate from
+# EXISTING stock, not a quantity on order. Labelling it "Ordered" in a
+# procurement document invites double-ordering. Net_Demand (= Shortfall_Qty) is
+# the figure to actually raise a PR against.
+_MATERIAL_DEMAND_COLS = ["S_No", "Material_Code", "Material_Name", "UOM",
+                         "Total_Needed", "Allocated_Qty", "Net_Demand",
+                         "Fulfillment_Pct"]
+
+
+def _material_demand_rows(plan: dict) -> list[dict]:
+    """Session-wide material rollup: the per-(equipment × material) cascade
+    lines collapsed to ONE row per (Material_Code, Material_Name, UOM).
+
+    Presentation aggregation, deliberately outside the parity-locked engine —
+    same contract as _overview_rows. Mirrors the on-screen combined-procurement
+    table (frontend/src/sme/session.ts weightedProcurement), including its
+    worst-coverage-first ordering, so the exported document and the UI agree.
+    That table groups by Material_Code alone; grouping by the triple here is
+    equivalent as long as a code carries one name/UOM (verified 20/20 against
+    live CNCEC data) and splits correctly if it ever does not.
+    """
+    acc: dict[tuple[str, str, str], dict] = {}
+    for ln in plan["lines"]:
+        key = (str(ln["Material_Code"]), str(ln.get("Material_Name") or ""),
+               str(ln.get("UOM") or ""))
+        a = acc.setdefault(key, {"demand": 0.0, "alloc": 0.0, "short": 0.0})
+        a["demand"] += ln["Demand_Qty"]
+        a["alloc"] += ln["Allocated_Qty"]
+        a["short"] += ln["Shortfall_Qty"]
+    out = []
+    for (code, name, uom), a in acc.items():
+        pct = (min(100.0, a["alloc"] / a["demand"] * 100.0)
+               if a["demand"] > 0 else 100.0)
+        out.append({"S_No": 0, "Material_Code": code, "Material_Name": name,
+                    "UOM": uom, "Total_Needed": round(a["demand"], 3),
+                    "Allocated_Qty": round(a["alloc"], 3),
+                    "Net_Demand": round(a["short"], 3),
+                    "Fulfillment_Pct": round(pct, 1)})
+    out.sort(key=lambda r: (r["Fulfillment_Pct"], r["Material_Code"]))
+    for i, r in enumerate(out, 1):
+        r["S_No"] = i
+    return out
+
+
 class PlanExportBody(CascadeBody):
     key: str = "session-full"
     format: str = "xlsx"
@@ -572,6 +621,28 @@ async def plan_export(body: PlanExportBody,
         items = plan[part]
     if body.title and body.title.strip():
         title = body.title.strip()
+
+    # The session report LEADS with the aggregated material demand: procurement
+    # reads "what do we buy, in total" first, and only then drills into which
+    # equipment drove it. The per-equipment breakdown is unchanged and follows
+    # as the second section. CSV is untouched — it is a single flat table, and
+    # welding two different column schemas into one file would break every
+    # downstream parser.
+    if body.key == "session-full" and fmt in ("xlsx", "pdf"):
+        from .reports import to_pdf_sheets, to_xlsx_sheets
+        summary = _material_demand_rows(plan)
+        lead = "Total Material Demand" if fmt == "xlsx" else "Material-Wise Summary"
+        sections = [
+            (lead, _MATERIAL_DEMAND_COLS,
+             [[r.get(c) for c in _MATERIAL_DEMAND_COLS] for r in summary]),
+            ("Equipment Breakdown", *_tabular(items)),
+        ]
+        data = (to_xlsx_sheets(sections, uname) if fmt == "xlsx" else
+                to_pdf_sheets(title, sections, uname, page_break_between=True))
+        return StreamingResponse(io.BytesIO(data), media_type=_FORMATS[fmt][1],
+                                 headers={"Content-Disposition":
+                                          f'attachment; filename="{fname}"'})
+
     columns = list(items[0].keys()) if items else []
     rows = [[r.get(c) for c in columns] for r in items]
     render, media = _FORMATS[fmt]
