@@ -374,8 +374,12 @@ async def _snapshot_rows(session: AsyncSession, site_id: str | None) -> dict:
                r.c["Material_Code"], r.c["Material_Name"], r.c["UOM"],
                r.c["For_1_SQM"]).order_by(r.c["id"])))
 
+    # received_qty rides along for the engine's EFFECTIVE-ORDERED netting
+    # (ruling Q2a): Initial_Ordered_Qty is never decremented on delivery, so
+    # the engine subtracts receipts to avoid counting arrived stock twice.
     materials = [{k: m[k] for k in ("material_code", "material_name", "nature",
-                                    "uom", "available_qty", "ordered_qty")}
+                                    "uom", "available_qty", "ordered_qty",
+                                    "received_qty")}
                  for m in _rows(await session.execute(
                      text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code"')))]
 
@@ -442,6 +446,9 @@ _PLAN_EXPORT_KEYS = {
     # Legacy Tab 3 "Location Report": alloc lines (optionally one location) in
     # the legacy workbook layout — main table + 3 summary blocks (T3).
     "location-report": ("SME Location Report", "_location"),
+    # 2026-07-28: SQM-achievable vs deficit per system code + the exact
+    # material shortfalls blocking them. Multi-section (see _segregated_sections).
+    "segregated": ("SME Material-Wise Segregated Report", "_segregated"),
 }
 
 
@@ -453,13 +460,19 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
     for ln in plan["lines"]:
         k = (ln["Equipment_Tag_No"], ln["Lining_System_Code"])
         a = acc.setdefault(k, {"demand": 0.0, "alloc": 0.0, "short": 0.0,
+                               "avail": 0.0, "ordered": 0.0, "net": 0.0,
                                "min_rate": 1.0})
         a["demand"] += ln["Demand_Qty"]
         a["alloc"] += ln["Allocated_Qty"]
-        a["short"] += ln["Shortfall_Qty"]
+        a["avail"] += ln["Alloc_Available"]
+        a["ordered"] += ln["Alloc_Ordered"]
+        a["short"] += ln["Shortfall_Available_Qty"]
+        a["net"] += ln["Shortfall_Qty"]
         # 2026-07-07 STRICT BOTTLENECK ruling: the unit's coverage is its
-        # least-available material, never the alloc/demand average.
-        rate = (min(1.0, ln["Allocated_Qty"] / ln["Demand_Qty"])
+        # least-available material, never the alloc/demand average. 2026-07-28:
+        # measured on PHYSICAL stock, matching compute_feasibility — on-order
+        # stock cannot be applied to a tank today.
+        rate = (min(1.0, ln["Alloc_Available"] / ln["Demand_Qty"])
                 if ln["Demand_Qty"] > 0 else 1.0)
         if rate < a["min_rate"]:
             a["min_rate"] = rate
@@ -469,6 +482,7 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
         for code in model["codes_by_tag"].get(tag, []):
             u = model["units"][(tag, code)]
             a = acc.get((tag, code), {"demand": 0.0, "alloc": 0.0, "short": 0.0,
+                                      "avail": 0.0, "ordered": 0.0, "net": 0.0,
                                       "min_rate": 1.0})
             pct = a["min_rate"] * 100.0 if a["demand"] > 0 else 100.0
             sno += 1
@@ -482,7 +496,10 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
                 "Remaining_SQM": round(u["remaining"], 2),
                 "Total_Demand": round(a["demand"], 3),
                 "Allocated": round(a["alloc"], 3),
+                "Available_Qty": round(a["avail"], 3),
+                "Ordered_Qty": round(a["ordered"], 3),
                 "Shortfall_Qty": round(a["short"], 3),
+                "Net_Shortfall_Qty": round(a["net"], 3),
                 "Fulfillment_Pct": round(pct, 1),
             })
     return out
@@ -498,8 +515,51 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
 # procurement document invites double-ordering. Net_Demand (= Shortfall_Qty) is
 # the figure to actually raise a PR against.
 _MATERIAL_DEMAND_COLS = ["S_No", "Material_Code", "Material_Name", "UOM",
-                         "Total_Needed", "Allocated_Qty", "Net_Demand",
-                         "Fulfillment_Pct"]
+                         "Total_Needed", "Available_Qty", "Ordered_Qty",
+                         "Allocated_Qty", "Net_Demand", "Fulfillment_Pct"]
+
+# Material-Wise Segregated Report (2026-07-28), grouped by system code.
+_SEGREGATED_CODE_COLS = ["Lining_System_Code", "System_Name", "Equipment_Count",
+                         "Total_SQM", "Done_SQM", "Remaining_SQM",
+                         "SQM_Achievable_Now", "SQM_Achievable_With_Ordered",
+                         "SQM_Deficit", "Coverage_Now_Pct", "Equipment_Tags"]
+_SEGREGATED_BLOCK_COLS = ["Lining_System_Code", "System_Name", "Material_Code",
+                          "Material_Name", "UOM", "Demand_Qty", "Available_Qty",
+                          "Ordered_Qty", "Shortfall_Qty", "Net_Shortfall_Qty"]
+_SEGREGATED_UNIT_COLS = ["Equipment_Tag_No", "Name", "Lining_System_Code",
+                         "System_Name", "Remaining_SQM", "SQM_Achievable_Now",
+                         "SQM_Achievable_With_Ordered", "SQM_Deficit",
+                         "Coverage_Now_Pct", "Has_Recipe"]
+
+
+def _segregated_sections(plan: dict) -> list[tuple[str, list[str], list[list]]]:
+    """The three tables of the Material-Wise Segregated Report, in the order
+    they appear in both the workbook and the PDF: the system-code SQM rollup
+    first (what can we actually build), then the exact material shortfalls
+    blocking those codes, then the per-equipment detail behind the rollup."""
+    codes = plan.get("sqm_by_code") or []
+    blocking: list[dict] = []
+    for c in codes:
+        for m in c.get("Blocking_Materials") or []:
+            blocking.append({
+                "Lining_System_Code": c["Lining_System_Code"],
+                "System_Name": c["System_Name"],
+                "Material_Code": m["Material_Code"],
+                "Material_Name": m["Material_Name"], "UOM": m["UOM"],
+                "Demand_Qty": m["Demand_Qty"],
+                "Available_Qty": m["Alloc_Available"],
+                "Ordered_Qty": m["Alloc_Ordered"],
+                "Shortfall_Qty": m["Shortfall_Available_Qty"],
+                "Net_Shortfall_Qty": m["Shortfall_Qty"]})
+    return [
+        ("SQM by System Code", _SEGREGATED_CODE_COLS,
+         [[c.get(k) for k in _SEGREGATED_CODE_COLS] for c in codes]),
+        ("Blocking Materials", _SEGREGATED_BLOCK_COLS,
+         [[b.get(k) for k in _SEGREGATED_BLOCK_COLS] for b in blocking]),
+        ("Equipment Detail", _SEGREGATED_UNIT_COLS,
+         [[u.get(k) for k in _SEGREGATED_UNIT_COLS]
+          for u in (plan.get("sqm_units") or [])]),
+    ]
 
 
 def _material_demand_rows(plan: dict) -> list[dict]:
@@ -518,16 +578,23 @@ def _material_demand_rows(plan: dict) -> list[dict]:
     for ln in plan["lines"]:
         key = (str(ln["Material_Code"]), str(ln.get("Material_Name") or ""),
                str(ln.get("UOM") or ""))
-        a = acc.setdefault(key, {"demand": 0.0, "alloc": 0.0, "short": 0.0})
+        a = acc.setdefault(key, {"demand": 0.0, "alloc": 0.0, "short": 0.0,
+                                 "avail": 0.0, "ordered": 0.0})
         a["demand"] += ln["Demand_Qty"]
         a["alloc"] += ln["Allocated_Qty"]
+        a["avail"] += ln["Alloc_Available"]
+        a["ordered"] += ln["Alloc_Ordered"]
         a["short"] += ln["Shortfall_Qty"]
     out = []
     for (code, name, uom), a in acc.items():
-        pct = (min(100.0, a["alloc"] / a["demand"] * 100.0)
+        # Coverage stays on PHYSICAL stock, matching feasibility and the
+        # segregated report — on-order units cannot be applied today.
+        pct = (min(100.0, a["avail"] / a["demand"] * 100.0)
                if a["demand"] > 0 else 100.0)
         out.append({"S_No": 0, "Material_Code": code, "Material_Name": name,
                     "UOM": uom, "Total_Needed": round(a["demand"], 3),
+                    "Available_Qty": round(a["avail"], 3),
+                    "Ordered_Qty": round(a["ordered"], 3),
                     "Allocated_Qty": round(a["alloc"], 3),
                     "Net_Demand": round(a["short"], 3),
                     "Fulfillment_Pct": round(pct, 1)})
@@ -580,9 +647,27 @@ async def plan_export(body: PlanExportBody,
     title, part = _PLAN_EXPORT_KEYS[body.key]
     # Legacy filename stems per report (convention: {stem}_{user}_{date}.{ext}).
     _STEMS = {"session-full": "session_full_report", "order-list": "order_list",
-              "feasibility": "session_feasibility", "overview": "total_overview"}
+              "feasibility": "session_feasibility", "overview": "total_overview",
+              "segregated": "material_wise_segregated"}
     fname = legacy_filename(_STEMS.get(body.key, body.key), uname, fmt)
-    if part == "_overview":
+    if part == "_segregated":
+        # Three tables, always in the same order, for both xlsx and pdf. CSV
+        # cannot carry three schemas, so it falls back to the code rollup —
+        # the section a spreadsheet-driven procurement flow actually needs.
+        if fmt == "csv":
+            items = plan.get("sqm_by_code") or []
+            items = [{k: r.get(k) for k in _SEGREGATED_CODE_COLS} for r in items]
+        else:
+            from .reports import to_pdf_sheets, to_xlsx_sheets
+            sections = _segregated_sections(plan)
+            data = (to_xlsx_sheets(sections, uname) if fmt == "xlsx" else
+                    to_pdf_sheets(body.title or title, sections, uname,
+                                  page_break_between=True))
+            return StreamingResponse(io.BytesIO(data),
+                                     media_type=_FORMATS[fmt][1],
+                                     headers={"Content-Disposition":
+                                              f'attachment; filename="{fname}"'})
+    elif part == "_overview":
         items = _overview_rows(model, plan)
     elif part == "_execution":
         tag = (body.equipment_tag or "").strip()

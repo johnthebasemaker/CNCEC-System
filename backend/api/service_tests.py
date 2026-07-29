@@ -2164,7 +2164,8 @@ async def test_sme_plan_layer():
                           json={"priority_order": order})
         body = r.json() if r.status_code == 200 else {}
         d = _sme_deep_diff({k: body.get(k) for k in
-                            ("order_used", "lines", "feasibility", "totals", "procurement")},
+                            ("order_used", "lines", "feasibility", "totals",
+                             "procurement", "sqm_units", "sqm_by_code")},
                            expected)
         check("cascade endpoint ≡ pure engine on the live snapshot",
               r.status_code == 200 and d == "", d or f"got {r.status_code}")
@@ -8051,23 +8052,32 @@ async def test_session_report_summary():
         return out
 
     # ── aggregation: collapse, conservation, coverage, ordering ─────────────
+    # Line schema carries the 2026-07-28 two-tier split: M-1 draws 10 from
+    # physical stock and 9 from on-order, leaving 21 genuinely to buy.
     fake = {"lines": [
         {"Equipment_Tag_No": "T1", "Material_Code": "M-1", "Material_Name": "Primer",
-         "UOM": "KG", "Demand_Qty": 10.0, "Allocated_Qty": 4.0, "Shortfall_Qty": 6.0},
+         "UOM": "KG", "Demand_Qty": 10.0, "Alloc_Available": 4.0,
+         "Alloc_Ordered": 0.0, "Allocated_Qty": 4.0, "Shortfall_Qty": 6.0},
         {"Equipment_Tag_No": "T2", "Material_Code": "M-1", "Material_Name": "Primer",
-         "UOM": "KG", "Demand_Qty": 30.0, "Allocated_Qty": 6.0, "Shortfall_Qty": 24.0},
+         "UOM": "KG", "Demand_Qty": 30.0, "Alloc_Available": 6.0,
+         "Alloc_Ordered": 9.0, "Allocated_Qty": 15.0, "Shortfall_Qty": 15.0},
         {"Equipment_Tag_No": "T1", "Material_Code": "M-2", "Material_Name": "Adhesive",
-         "UOM": "KG", "Demand_Qty": 5.0, "Allocated_Qty": 5.0, "Shortfall_Qty": 0.0},
+         "UOM": "KG", "Demand_Qty": 5.0, "Alloc_Available": 5.0,
+         "Alloc_Ordered": 0.0, "Allocated_Qty": 5.0, "Shortfall_Qty": 0.0},
     ]}
     agg = _sme._material_demand_rows(fake)
     check("ax: 3 equipment×material lines collapse to 2 material rows", len(agg) == 2,
           f"got {len(agg)}")
     m1 = next((r for r in agg if r["Material_Code"] == "M-1"), {})
-    check("ax: quantities sum across equipment (10+30 / 4+6 / 6+24)",
-          m1.get("Total_Needed") == 40.0 and m1.get("Allocated_Qty") == 10.0
-          and m1.get("Net_Demand") == 30.0, str(m1))
-    check("ax: coverage is recomputed on the TOTALS (10/40 = 25%), not averaged "
-          "across lines — averaging would report 30%",
+    check("ax: quantities sum across equipment (10+30 demand, 4+6 on hand, "
+          "0+9 on order)",
+          m1.get("Total_Needed") == 40.0 and m1.get("Available_Qty") == 10.0
+          and m1.get("Ordered_Qty") == 9.0, str(m1))
+    check("ax: Allocated_Qty stays the derived sum of both tiers (10 + 9) and "
+          "Net_Demand is what is genuinely left to buy (6 + 15)",
+          m1.get("Allocated_Qty") == 19.0 and m1.get("Net_Demand") == 21.0, str(m1))
+    check("ax: coverage is recomputed on the TOTALS of PHYSICAL stock "
+          "(10/40 = 25%), not averaged across lines — averaging would give 30%",
           m1.get("Fulfillment_Pct") == 25.0, str(m1.get("Fulfillment_Pct")))
     check("ax: worst coverage sorts first and S_No is renumbered after sorting "
           "(matches the on-screen combined-procurement table)",
@@ -8163,6 +8173,206 @@ async def test_session_report_summary():
           n_plain == 1, f"got {n_plain} pages")
     check("ax: page_break_between=True is what forces the new section onto its "
           "own page", n_broken == 2, f"got {n_broken} pages")
+
+
+async def test_sqm_bottleneck():
+    """Suite AY — two-tier allocation (Available vs Ordered) + reverse SQM.
+
+    Pins the 2026-07-28 rulings: Q1 two-tier cascade, Q2a effective-ordered
+    netting, Q3 deficit measured against physical stock, Q4 same priority order
+    for both tiers, Q5 unmodelled system codes score 0, Q6 Allocated_Qty stays
+    the derived sum.
+    """
+    import io as _io
+
+    from . import sme as _sme
+    from . import sme_engine as E
+
+    def mk(available, ordered=None, received=None):
+        """One tag, one code, 10 m² remaining, two materials at 2 and 1 per m²
+        → demand 20 and 10."""
+        mats = []
+        for code, av in available.items():
+            m = {"material_code": code, "material_name": code, "uom": "KG",
+                 "available_qty": av}
+            if ordered and code in ordered:
+                m["ordered_qty"] = ordered[code]
+            if received and code in received:
+                m["received_qty"] = received[code]
+            mats.append(m)
+        return E.build_model(
+            [{"Equipment_Tag_No": "T1", "Name": "Tank 1", "Lining_System_Code": "1",
+              "Surface_Area_SQM": 10}],
+            [{"Lining_System_Code": "1", "Lining_System_Name": "Sys", "Material_Code": "A",
+              "Material_Name": "A", "UOM": "KG", "For_1_SQM": 2.0},
+             {"Lining_System_Code": "1", "Lining_System_Name": "Sys", "Material_Code": "B",
+              "Material_Name": "B", "UOM": "KG", "For_1_SQM": 1.0}],
+            mats, [])
+
+    # ── Q2a: effective ordered = ordered − received, clamped at zero ─────────
+    m = mk({"A": 0, "B": 0}, ordered={"A": 100, "B": 10}, received={"A": 40, "B": 25})
+    check("ay-q2a: effective ordered nets delivered stock off the order "
+          "(100 ordered − 40 received = 60) — the double-count fix",
+          m["pool_ordered_init"]["A"] == 60.0, str(m["pool_ordered_init"]))
+    check("ay-q2a: over-delivery clamps at zero, never negative "
+          "(10 ordered − 25 received → 0)",
+          m["pool_ordered_init"]["B"] == 0.0, str(m["pool_ordered_init"]))
+
+    # ── Q1/Q6: two-tier cascade + conservation ──────────────────────────────
+    m = mk({"A": 5, "B": 10}, ordered={"A": 20})       # A: 5 on hand, 15 usable on order
+    plan = E.run_plan(m, ["T1"])
+    la = next(l for l in plan["lines"] if l["Material_Code"] == "A")
+    check("ay-q1: tier 1 takes physical stock first (5 of 20 demanded)",
+          la["Alloc_Available"] == 5.0, str(la))
+    check("ay-q1: tier 2 then draws on-order stock for the remaining gap (15)",
+          la["Alloc_Ordered"] == 15.0, str(la))
+    check("ay-q6: Allocated_Qty stays the derived SUM of both tiers",
+          la["Allocated_Qty"] == la["Alloc_Available"] + la["Alloc_Ordered"], str(la))
+    check("ay: Demand = Allocated + Shortfall is conserved",
+          abs(la["Demand_Qty"] - (la["Allocated_Qty"] + la["Shortfall_Qty"])) < 1e-9,
+          str(la))
+    check("ay: the PHYSICAL gap is kept separately from the NET gap "
+          "(15 short on hand, 0 left to buy)",
+          la["Shortfall_Available_Qty"] == 15.0 and la["Shortfall_Qty"] == 0.0, str(la))
+
+    # ── Feasibility judges PHYSICAL stock: on-order never says "ready" ───────
+    f = plan["feasibility"][0]
+    check("ay: on-order stock does NOT flip a tag to 'Ready to Build' — you "
+          "cannot line a tank with stock that is still on a truck",
+          f["Status"] != E.STATUS_FULL and f["Completion_Pct"] == 25.0, str(f))
+    check("ay: feasibility reports both tiers separately",
+          f["Total_Alloc_Available"] == 15.0 and f["Total_Alloc_Ordered"] == 15.0,
+          str(f))
+
+    # ── Q3: SQM achievable is the BOTTLENECK, not the average ───────────────
+    u = plan["sqm_units"][0]
+    # A: 5/2 = 2.5 m² · B: 10/1 = 10 m² → bottleneck 2.5, NOT the 6.25 average.
+    check("ay-q3: SQM_Achievable_Now = the scarcest material's ceiling "
+          "(A 5/2 = 2.5 m²), not the 6.25 m² average of both materials",
+          u["SQM_Achievable_Now"] == 2.5, str(u))
+    check("ay-q3: with on-order stock A supports 20/2 = 10 m²",
+          u["SQM_Achievable_With_Ordered"] == 10.0, str(u))
+    check("ay-q3: deficit is measured against PHYSICAL stock (10 − 2.5)",
+          u["SQM_Deficit"] == 7.5, str(u))
+    check("ay-q3: achievable never exceeds the remaining area",
+          u["SQM_Achievable_With_Ordered"] <= u["Remaining_SQM"], str(u))
+
+    # ── Q5: an unmodelled system code scores 0, never a silent 100% ─────────
+    m0 = E.build_model(
+        [{"Equipment_Tag_No": "T9", "Lining_System_Code": "404", "Surface_Area_SQM": 12}],
+        [], [], [])
+    p0 = E.run_plan(m0, ["T9"])
+    u0 = p0["sqm_units"][0]
+    check("ay-q5: a system code with NO recipe rows scores 0 achievable and is "
+          "flagged Has_Recipe=false — never a silent 100% 'ready'",
+          u0["SQM_Achievable_Now"] == 0.0 and u0["SQM_Deficit"] == 12.0
+          and u0["Has_Recipe"] is False, str(u0))
+    check("ay-q5: the unmodelled unit still APPEARS in the rollup (enumerated "
+          "from the model, not from allocation lines, so it cannot vanish)",
+          len(p0["sqm_units"]) == 1 and p0["lines"] == [], str(p0["sqm_units"]))
+
+    # ── zero-rate recipe lines impose no ceiling ────────────────────────────
+    mz = E.build_model(
+        [{"Equipment_Tag_No": "T1", "Lining_System_Code": "1", "Surface_Area_SQM": 10}],
+        [{"Lining_System_Code": "1", "Material_Code": "A", "For_1_SQM": 2.0},
+         {"Lining_System_Code": "1", "Material_Code": "Z", "For_1_SQM": 0.0}],
+        [{"material_code": "A", "available_qty": 20},
+         {"material_code": "Z", "available_qty": 0}], [])
+    uz = E.run_plan(mz, ["T1"])["sqm_units"][0]
+    check("ay: a zero-rate recipe line consumes nothing and imposes no SQM "
+          "ceiling (it would otherwise divide by zero or force 0)",
+          uz["SQM_Achievable_Now"] == 10.0, str(uz))
+
+    # ── system-code rollup is ADDITIVE across equipment ──────────────────────
+    mm = E.build_model(
+        [{"Equipment_Tag_No": "T1", "Lining_System_Code": "1", "Surface_Area_SQM": 10},
+         {"Equipment_Tag_No": "T2", "Lining_System_Code": "1", "Surface_Area_SQM": 10}],
+        [{"Lining_System_Code": "1", "Material_Code": "A", "For_1_SQM": 1.0}],
+        [{"material_code": "A", "available_qty": 12}], [])
+    pm = E.run_plan(mm, ["T1", "T2"])
+    c = pm["sqm_by_code"][0]
+    # Priority: T1 takes 10 (full), T2 gets the leftover 2 → 10 + 2 = 12 m².
+    check("ay: a code's achievable SQM is the SUM of its units' achievable "
+          "areas (T1 10 + T2 2 = 12), never an average of their coverage rates",
+          c["SQM_Achievable_Now"] == 12.0 and c["Equipment_Count"] == 2
+          and c["Remaining_SQM"] == 20.0, str(c))
+    check("ay-q4: the second tier walks the SAME priority order — T1 is served "
+          "before T2 in both passes",
+          [u["Equipment_Tag_No"] for u in pm["sqm_units"]] == ["T1", "T2"],
+          str([u["Equipment_Tag_No"] for u in pm["sqm_units"]]))
+
+    # ── procurement is net of on-order: never re-order what is coming ───────
+    mp = mk({"A": 5, "B": 10}, ordered={"A": 20})
+    pp = E.run_plan(mp, ["T1"])
+    pa = [r for r in pp["procurement"] if r["Material_Code"] == "A"]
+    check("ay: a material fully covered by an existing order drops OFF the "
+          "buy list — the double-ordering this split exists to prevent",
+          pa == [], str(pp["procurement"]))
+    mp2 = mk({"A": 5, "B": 10}, ordered={"A": 5})
+    pa2 = next(r for r in E.run_plan(mp2, ["T1"])["procurement"]
+               if r["Material_Code"] == "A")
+    check("ay: a partly-covered material still lists the NET quantity to buy "
+          "(20 demand − 5 stock − 5 on order = 10) beside the gross 15",
+          pa2["Shortage_Qty_To_Buy"] == 10.0 and pa2["Gross_Shortfall_Qty"] == 15.0,
+          str(pa2))
+
+    # ── the segregated export ───────────────────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post("/auth/login", json={"username": "hod", "password": "hod2026"},
+                          headers={"X-Real-IP": "203.0.113.92"})
+        H = {"Authorization": f"Bearer {r.json().get('access_token')}"}
+        snap = (await ac.get("/sme/model-snapshot", headers=H)).json()
+        order = (snap.get("default_order") or [])[:8]
+
+        async def exp(fmt):
+            return await ac.post("/sme/plan/export", headers=H, json={
+                "priority_order": order, "key": "segregated", "format": fmt})
+
+        rx = await exp("xlsx")
+        import openpyxl as _px
+        wb = _px.load_workbook(_io.BytesIO(rx.content))
+        check("ay: the segregated xlsx carries all three tables, code rollup first",
+              rx.status_code == 200
+              and wb.sheetnames == ["SQM by System Code", "Blocking Materials",
+                                    "Equipment Detail"], f"{rx.status_code} {wb.sheetnames}")
+        check("ay: the rollup sheet exposes both achievable figures and the deficit",
+              [c.value for c in wb["SQM by System Code"][1]] == _sme._SEGREGATED_CODE_COLS,
+              str([c.value for c in wb["SQM by System Code"][1]]))
+        rp = await exp("pdf")
+        # fpdf compresses its content streams, so the section titles have to be
+        # inflated before they can be searched (same approach as suite AX).
+        import re as _re
+        import zlib as _zlib
+        pages = []
+        for _m in _re.finditer(rb"stream\r?\n(.*?)endstream", rp.content, _re.S):
+            try:
+                pages.append(_zlib.decompress(_m.group(1)))
+            except Exception:  # noqa: BLE001 — uncompressed stream
+                pages.append(_m.group(1))
+        i_code = next((i for i, t in enumerate(pages) if b"SQM by System Code" in t), -1)
+        i_block = next((i for i, t in enumerate(pages) if b"Blocking Materials" in t), -1)
+        check("ay: the segregated pdf leads with the SQM-by-system-code rollup "
+              "on page 1 and puts the blocking materials on a later page",
+              rp.status_code == 200 and rp.content[:4] == b"%PDF"
+              and i_code == 0 and i_block > i_code,
+              f"{rp.status_code} rollup_page={i_code + 1} blocking_page={i_block + 1}")
+        rc = await exp("csv")
+        head = rc.text.splitlines()[0] if rc.text else ""
+        check("ay: csv falls back to the single code-rollup table (one file "
+              "cannot carry three schemas)",
+              rc.status_code == 200 and "SQM_Achievable_Now" in head
+              and "SQM_Deficit" in head, f"{rc.status_code} {head[:80]}")
+
+        # The pre-existing session report must still carry the new split.
+        rs = await ac.post("/sme/plan/export", headers=H, json={
+            "priority_order": order, "key": "session-full", "format": "xlsx"})
+        wbs = _px.load_workbook(_io.BytesIO(rs.content))
+        hdr = [c.value for c in wbs["Total Material Demand"][1]]
+        check("ay: the Total Material Demand sheet now segregates Available "
+              "from On-Order while keeping Allocated_Qty",
+              "Available_Qty" in hdr and "Ordered_Qty" in hdr
+              and "Allocated_Qty" in hdr, str(hdr))
 
 
 async def main() -> int:
@@ -8273,6 +8483,8 @@ async def main() -> int:
     await test_pg_excel_sync()
     print("\n AX. SME session report — aggregated material demand leads the doc")
     await test_session_report_summary()
+    print("\n AY. two-tier allocation (Available vs Ordered) + reverse SQM")
+    await test_sqm_bottleneck()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "
