@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, App, Badge, Button, Form, Input, InputNumber, Modal, Popconfirm, Select,
-  Space, Table, Tabs, Typography,
+  Alert, App, Badge, Button, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Tabs,
+  Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import { EditOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import {

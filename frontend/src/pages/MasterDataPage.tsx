@@ -1,18 +1,9 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
-  App,
-  Button,
-  Empty,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Table,
-  Typography,
+  App, Button, Empty, Form, Input, Modal, Popconfirm, Select, Space, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { FileExcelOutlined, PlusOutlined } from '@ant-design/icons'
 import { downloadDocument, useCreate, useDelete, useList, useUpdate } from '../api/hooks'

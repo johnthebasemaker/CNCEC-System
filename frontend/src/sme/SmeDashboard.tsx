@@ -11,7 +11,8 @@
  *   · Material Balance grid with the legacy 4-tier row tinting
  */
 import { useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, Collapse, Row, Segmented, Select, Skeleton, Space, Table } from 'antd'
+import { Alert, Button, Card, Col, Collapse, Row, Segmented, Select, Skeleton, Space } from 'antd'
+import { Table } from '../lib/smartTable'
 import { DownloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import {

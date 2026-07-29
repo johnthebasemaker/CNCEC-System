@@ -4,7 +4,8 @@
  * opens a real AntD modal with the underlying rows.
  */
 import { useMemo, useState } from 'react'
-import { Card, Modal, Table, Typography } from 'antd'
+import { Card, Modal, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 
 export type DrillRow = Record<string, string | number | null | undefined>

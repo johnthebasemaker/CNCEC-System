@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { App, Button, InputNumber, Modal, Popconfirm, Table, Tag, Typography } from 'antd'
+import { App, Button, InputNumber, Modal, Popconfirm, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useSmrDecision, useSmrItems, useSmrList } from '../api/hooks'
 import type { Row } from '../api/client'

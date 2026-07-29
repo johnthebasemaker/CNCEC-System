@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { App, Button, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Table, Tag, Typography, Upload } from 'antd'
+import { App, Button, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Tag, Typography, Upload } from 'antd'
+import { Table } from '../lib/smartTable'
 import { CameraOutlined, QrcodeOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'

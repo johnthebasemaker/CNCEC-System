@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { App, Button, Select, Space, Table, Typography } from 'antd'
+import { App, Button, Select, Space, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import { FileAddOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useNavigate } from 'react-router-dom'

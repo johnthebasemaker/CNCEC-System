@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { Alert, Input, Select, Skeleton, Space, Table } from 'antd'
+import { Alert, Input, Select, Skeleton, Space } from 'antd'
+import { Table } from '../lib/smartTable'
 import { useCategories, useList, useSites } from '../api/hooks'
 import type { ListParams } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'

@@ -7,7 +7,8 @@
  *            user (exact T2 template, server-side + audited).
  *   Clear  — dismisses the row from the tracker (sla_dismissals, audited).
  */
-import { App, Alert, Button, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { App, Alert, Button, Popconfirm, Space, Tag, Tooltip, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import { BellOutlined, CheckOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useClearOverdue, useNotifyOverdue, useOverdueActions } from '../api/hooks'

@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { App, Card, Collapse, Empty, Input, Space, Statistic, Table, Tag, Typography } from 'antd'
+import { App, Card, Collapse, Empty, Input, Space, Statistic, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import { SearchOutlined, ThunderboltOutlined, RobotOutlined } from '@ant-design/icons'
 import { api } from '../api/client'
 

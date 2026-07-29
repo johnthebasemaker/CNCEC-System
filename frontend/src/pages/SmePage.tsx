@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { App, Button, Select, Space, Table, Tabs, Typography, theme } from 'antd'
+import { App, Button, Select, Space, Tabs, Typography, theme } from 'antd'
+import { Table } from '../lib/smartTable'
 import { FileExcelOutlined } from '@ant-design/icons'
 import {
   downloadDocument, useSites, useSmeComparison, useSmeDemandMatrix, useSmeEquipment,

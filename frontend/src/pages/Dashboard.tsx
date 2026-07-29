@@ -1,4 +1,5 @@
-import { Card, Col, Empty, Row, Table, Typography } from 'antd'
+import { Card, Col, Empty, Row, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import { CloudServerOutlined, DollarOutlined, EnvironmentOutlined, InboxOutlined, WarningOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis } from 'recharts'

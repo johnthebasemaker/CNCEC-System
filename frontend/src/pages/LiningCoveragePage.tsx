@@ -1,4 +1,5 @@
-import { Alert, Card, Col, Empty, Progress, Row, Select, Space, Statistic, Table, Tag, Typography } from 'antd'
+import { Alert, Card, Col, Empty, Progress, Row, Select, Space, Statistic, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { ExperimentOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'

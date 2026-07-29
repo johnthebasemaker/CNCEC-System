@@ -5,7 +5,8 @@
  * (pending_hod). Approve advances the DN; reject (with a reason) sends it back.
  */
 import { useState } from 'react'
-import { App, Button, Input, Modal, Popconfirm, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Input, Modal, Popconfirm, Space, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useDnDecide, useDnQueue, useScopedDnItems } from '../api/hooks'
 import type { Row } from '../api/client'

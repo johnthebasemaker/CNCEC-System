@@ -8,9 +8,9 @@
  */
 import { useState } from 'react'
 import {
-  Alert, App, Button, Card, Descriptions, Popconfirm, Select,
-  Space, Table, Typography, Upload,
+  Alert, App, Button, Card, Descriptions, Popconfirm, Select, Space, Typography, Upload,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import { FileExcelOutlined, InboxOutlined } from '@ant-design/icons'
 import { api } from '../api/client'
 import { useAuth } from '../auth/AuthContext'

@@ -10,7 +10,8 @@
  * system-code-report) — server-side document authority.
  */
 import { useMemo, useState } from 'react'
-import { Alert, App, Button, Card, Col, Collapse, Row, Skeleton, Space, Table } from 'antd'
+import { Alert, App, Button, Card, Col, Collapse, Row, Skeleton, Space } from 'antd'
+import { Table } from '../lib/smartTable'
 import { FileExcelOutlined, FilePdfOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { downloadDocument, useSmeSnapshot } from '../api/hooks'

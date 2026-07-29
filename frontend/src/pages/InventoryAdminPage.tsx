@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import {
-  App, Button, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Typography,
+  App, Button, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { PlusOutlined } from '@ant-design/icons'
 import {

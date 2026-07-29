@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Alert, App, Button, Card, Collapse, Descriptions, InputNumber, Radio, Select, Space, Table, Tag, Typography } from 'antd'
+import { Alert, App, Button, Card, Collapse, Descriptions, InputNumber, Radio, Select, Space, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { CalculatorOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'

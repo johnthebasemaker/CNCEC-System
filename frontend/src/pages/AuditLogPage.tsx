@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Button, Input, Select, Space, Table, Tag, Typography } from 'antd'
+import { Button, Input, Select, Space, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useAuditLog, useAuditMeta } from '../api/hooks'

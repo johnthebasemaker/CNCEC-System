@@ -1,4 +1,5 @@
-import { App, Button, Card, Col, Form, Input, InputNumber, Popconfirm, Row, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd'
+import { App, Button, Card, Col, Form, Input, InputNumber, Popconfirm, Row, Select, Space, Switch, Tabs, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import type { FormInstance } from 'antd'
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons'

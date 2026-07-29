@@ -7,7 +7,8 @@
  * expanders, and an oracle-rendered export (POST /sme/plan/export overview).
  */
 import { useMemo, useState } from 'react'
-import { Alert, App, Button, Card, Col, Collapse, Row, Select, Skeleton, Space, Table } from 'antd'
+import { Alert, App, Button, Card, Col, Collapse, Row, Select, Skeleton, Space } from 'antd'
+import { Table } from '../lib/smartTable'
 import { FileExcelOutlined, FilePdfOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { postDownloadDocument, useSmeSnapshot } from '../api/hooks'

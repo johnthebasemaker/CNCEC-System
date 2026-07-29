@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { App, Button, Form, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Form, Modal, Popconfirm, Select, Space, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useApprovePending, useList, usePendingUsers, useRejectPending } from '../api/hooks'
 import type { Row } from '../api/client'

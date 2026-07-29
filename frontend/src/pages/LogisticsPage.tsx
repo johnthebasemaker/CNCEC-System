@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import {
-  App, Button, Card, Col, DatePicker, Descriptions, Form, Input, InputNumber, Modal,
-  Popconfirm, Row as ARow, Select, Space, Table, Tabs, Tag, Typography, Upload,
+  App, Button, Card, Col, DatePicker, Descriptions, Form, Input, InputNumber, Modal, Popconfirm,
+  Row as ARow, Select, Space, Tabs, Tag, Typography, Upload,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'

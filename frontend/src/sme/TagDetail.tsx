@@ -5,7 +5,8 @@
  * material table → amber grand-total box. All values come straight from the
  * client cascade lines, so they update live as priorities shift.
  */
-import { Table, Typography } from 'antd'
+import { Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import type { AllocationLine } from './engine'
 import { syscodeCompare } from './engine'

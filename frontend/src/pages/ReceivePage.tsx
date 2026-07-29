@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import {
-  App, Button, Card, Col, DatePicker, Form, Input, InputNumber, Popconfirm, Row,
-  Select, Space, Table, Tag, Typography, Upload,
+  App, Button, Card, Col, DatePicker, Form, Input, InputNumber, Popconfirm, Row, Select, Space,
+  Tag, Typography, Upload,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { BarcodeOutlined, DeleteOutlined, EditOutlined, PaperClipOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'

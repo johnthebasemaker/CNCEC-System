@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import {
-  App, Button, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography,
+  App, Button, Form, Input, Modal, Popconfirm, Select, Space, Tag, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { PlusOutlined } from '@ant-design/icons'
 import { useAuth } from '../auth/AuthContext'
@@ -100,6 +101,11 @@ export default function UsersPage() {
     { title: 'Username', dataIndex: 'username', key: 'username' },
     {
       title: 'Role', dataIndex: 'role', key: 'role',
+      // Explicit filters: the cell renders the friendly label, so leaving
+      // smartTable to derive options from the raw field would list `hod` /
+      // `store_keeper` in a dropdown above rows reading "Head of Department".
+      filters: roleOptions.map((o) => ({ text: o.label, value: o.value })),
+      onFilter: (v, r) => String(r.role) === String(v),
       render: (v: string, r) => <Tag color={ROLE_COLOR[v] ?? 'default'}>{String(r.label ?? v)}</Tag>,
     },
     { title: 'Site', dataIndex: 'Site_ID', key: 'Site_ID', render: (v) => v || <Typography.Text type="secondary">global</Typography.Text> },
