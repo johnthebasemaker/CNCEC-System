@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react'
 import {
-  App, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Popconfirm,
-  Row as AntRow, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography,
+  App, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Row as AntRow,
+  Select, Space, Spin, Switch, Tabs, Tag, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import { DownloadOutlined, FileExcelOutlined, FilePdfOutlined, FileTextOutlined, InboxOutlined, PlayCircleOutlined, RobotOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs, { Dayjs } from 'dayjs'

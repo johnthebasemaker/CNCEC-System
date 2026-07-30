@@ -10,9 +10,10 @@
  */
 import { useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Col, Form, Input, InputNumber, List, Modal,
-  Popconfirm, Row as GridRow, Space, Table, Tabs, Typography,
+  Alert, App, Button, Card, Col, Form, Input, InputNumber, List, Modal, Popconfirm,
+  Row as GridRow, Space, Tabs, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import type { Row } from '../api/client'

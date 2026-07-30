@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Button, Card, DatePicker, Drawer, Input, Space, Table, Tabs, Tag, Typography } from 'antd'
+import { Button, Card, DatePicker, Drawer, Input, Space, Tabs, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { DownloadOutlined, EyeOutlined, FolderOpenOutlined } from '@ant-design/icons'
 import type { Dayjs } from 'dayjs'

@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { InputNumber, Select, Space, Table, Typography } from 'antd'
+import { InputNumber, Select, Space, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useBurnRate, useSites } from '../api/hooks'
 import type { Row } from '../api/client'

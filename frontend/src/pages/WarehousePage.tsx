@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import {
-  App, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, Typography,
+  App, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Tabs, Tag, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import type { Dayjs } from 'dayjs'
 import {

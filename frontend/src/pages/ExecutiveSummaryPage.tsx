@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, Button, Card, Col, DatePicker, Descriptions, Empty, Progress, Row,
-  Select, Space, Spin, Statistic, Table, Tag, Typography,
+  Alert, Button, Card, Col, DatePicker, Descriptions, Empty, Progress, Row, Select, Space, Spin,
+  Statistic, Tag, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import {
   ArrowDownOutlined, ArrowUpOutlined, DownloadOutlined, FileExcelOutlined,
   FilePdfOutlined, FundProjectionScreenOutlined, ReloadOutlined,

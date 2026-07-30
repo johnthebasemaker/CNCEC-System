@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react'
 import type { Key } from 'react'
 import {
-  App, Button, Card, Checkbox, Col, DatePicker, Form, Input, InputNumber, Modal,
-  Popconfirm, Radio, Row, Select, Space, Statistic, Table, Tabs, Tag, Typography,
-  Upload,
+  App, Button, Card, Checkbox, Col, DatePicker, Form, Input, InputNumber, Modal, Popconfirm,
+  Radio, Row, Select, Space, Statistic, Tabs, Tag, Typography, Upload,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import { InboxOutlined, DownloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'

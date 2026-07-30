@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { App, Button, InputNumber, Select, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, InputNumber, Select, Space, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useCountSheet, useSubmitCount } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'

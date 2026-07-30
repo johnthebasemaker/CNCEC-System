@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import {
-  Alert, App, Button, Card, Col, Form, Input, InputNumber, Modal, Popconfirm, Row, Select,
-  Space, Switch, Table, Tabs, Tag, Typography,
+  Alert, App, Button, Card, Col, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space,
+  Switch, Tabs, Tag, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import { CloudDownloadOutlined, DatabaseOutlined, DollarOutlined, SwapOutlined, TeamOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'

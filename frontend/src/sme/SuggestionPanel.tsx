@@ -7,7 +7,8 @@
  * reversible React-native upgrade over the legacy display-only panel.
  */
 import { useMemo } from 'react'
-import { Button, Card, Collapse, Table, Tag, Typography } from 'antd'
+import { Button, Card, Collapse, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import { BulbOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { runSuggestionEngine } from './engine'

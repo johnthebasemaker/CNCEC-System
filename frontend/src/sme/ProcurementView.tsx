@@ -6,7 +6,8 @@
  * material balance table — and the grand-total strip. Same dashboard
  * semantics as insights.ts (per-material cap, no cascade), all client-side.
  */
-import { Card, Collapse, Space, Table } from 'antd'
+import { Card, Collapse, Space } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import type { SmeModel, SnapshotMaterial } from './engine'
 import { syscodeCompare } from './engine'

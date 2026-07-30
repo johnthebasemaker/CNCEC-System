@@ -1,4 +1,5 @@
-import { App, Button, Popconfirm, Table, Tag, Typography } from 'antd'
+import { App, Button, Popconfirm, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useIncomingDns, useReceiveDn, useSiteDnItems } from '../api/hooks'
 import type { Row } from '../api/client'

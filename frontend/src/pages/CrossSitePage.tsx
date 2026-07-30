@@ -1,6 +1,7 @@
 import {
-  App, Button, Card, Form, Input, InputNumber, Popconfirm, Select, Space, Table, Tag, Typography,
+  App, Button, Card, Form, Input, InputNumber, Popconfirm, Select, Space, Tag, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'

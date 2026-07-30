@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Col, DatePicker, Form, Input, InputNumber, Popconfirm, Row,
-  Select, Space, Table, Tag, Typography,
+  Alert, App, Button, Card, Col, DatePicker, Form, Input, InputNumber, Popconfirm, Row, Select,
+  Space, Tag, Typography,
 } from 'antd'
+import { Table } from '../lib/smartTable'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { ColumnsType } from 'antd/es/table'

@@ -1,4 +1,5 @@
-import { App, Button, Card, Form, Input, Select, Table, Tag, Typography } from 'antd'
+import { App, Button, Card, Form, Input, Select, Tag, Typography } from 'antd'
+import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
