@@ -66,6 +66,12 @@ def _sqlite_view_rows(src: sqlite3.Connection, view: str):
     return [dict(r) for r in src.execute(f'SELECT * FROM "{view}"').fetchall()]
 
 
+def _sqlite_sql_rows(src: sqlite3.Connection, sql: str):
+    """READ-ONLY. Used when a spec supplies its own legacy-side projection."""
+    src.row_factory = sqlite3.Row
+    return [dict(r) for r in src.execute(sql).fetchall()]
+
+
 def run(source_path: str, target_url: str) -> dict:
     # normalise to a sync driver for the checker (independent of the async API).
     if target_url.startswith("postgresql+asyncpg://"):
@@ -77,14 +83,21 @@ def run(source_path: str, target_url: str) -> dict:
         with engine.connect() as tconn:
             for key, spec in _ALL_DERIVED.items():
                 view = spec["view"]
+                # A port whose grain deliberately diverges from its legacy view
+                # (sme_materials, per-component since 2026-07-30) supplies both
+                # sides explicitly, so parity is asserted on the invariant the
+                # divergence must still respect rather than row-for-row.
+                src_sql = spec.get("parity_source_sql")
                 try:
-                    s_rows = _sqlite_view_rows(src, view)
+                    s_rows = (_sqlite_sql_rows(src, src_sql) if src_sql
+                              else _sqlite_view_rows(src, view))
                 except Exception as e:  # noqa: BLE001
                     results[key] = {"ok": False, "error": f"sqlite: {type(e).__name__}: {e}"}
                     ok_all = False
                     continue
                 try:
-                    t_rows = tconn.execute(text(spec["sql"])).mappings().all()
+                    t_rows = tconn.execute(
+                        text(spec.get("parity_sql") or spec["sql"])).mappings().all()
                 except Exception as e:  # noqa: BLE001
                     results[key] = {"ok": False, "error": f"pg: {type(e).__name__}: {e}"}
                     ok_all = False

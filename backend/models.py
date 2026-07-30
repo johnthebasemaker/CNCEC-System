@@ -806,6 +806,12 @@ class SmeEquipment(Base):
 
 class SmeInventorySeed(Base):
     __tablename__ = "sme_inventory_seed"
+    # 2026-07-30 COMPONENT IDENTITY: (Material_Code, SAP_Code) — one row per
+    # PHYSICAL component. A multi-part system lists one Material_Code as several
+    # distinct drums (GI-8005765 → Comp-A/B/C/D at SAPs 1041 / 1041-1 / -2 / -3)
+    # and each holds its own stock. Keying on Material_Code alone summed four
+    # unlike things into one bucket and wrecked the bottleneck ratio. SAP_Code
+    # is whitespace-normalized on write (the ERP writes "1043 - 2").
     Material_Code = Column(Text, primary_key=True)
     Material_Name = Column(Text)
     Item = Column(Text)
@@ -816,9 +822,13 @@ class SmeInventorySeed(Base):
     UOM = Column(Text)
     Initial_Available_Qty = Column(Float, server_default=text('0'))
     Initial_Ordered_Qty = Column(Float, server_default=text('0'))
-    # Comma-joined distinct ERP SAP codes this material maps to (a material
-    # can span variant SAPs, e.g. GI-8005765 → 1041, 1041-1, 1041-2, 1041-3).
-    SAP_Code = Column(Text)
+    # The ONE variant SAP this component is. Part of the primary key as of the
+    # 2026-07-30 ruling — it used to hold a comma-joined list of every SAP the
+    # Material_Code spanned ("1041, 1041-1, 1041-2, 1041-3"), which is exactly
+    # what collapsed four physical components into one stock row.
+    # Whitespace-normalized on write (the ERP writes "1043 - 2" for "1043-2").
+    SAP_Code = Column(Text, primary_key=True, nullable=False,
+                      server_default=text("''"))
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 

@@ -14,14 +14,15 @@ import { fc } from './insights'
 import { FulfilPill, StatusDot } from './PriorityList'
 import { codeStats } from './session'
 import type { TagStat } from './session'
+import { materialCodeCol, materialNameCol } from './materialCols'
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
 const nf = (v: number, d = 3) =>
   v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: d })
 
 const matColumns: ColumnsType<AllocationLine> = [
-  { title: 'Material', dataIndex: 'Material_Code', key: 'c', width: 120 },
-  { title: 'Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
+  materialCodeCol<AllocationLine>({ width: 150 }),
+  materialNameCol<AllocationLine>({ title: 'Name', width: 240 }),
   { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 64 },
   { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
   { title: 'Allocated', dataIndex: 'Allocated_Qty', key: 'a', align: 'right', render: (v: number) => nf(v) },
@@ -73,7 +74,7 @@ export default function TagDetail({ lines, stat, preview }: {
             </span>
             <FulfilPill pct={cs.fulfillPct} />
           </div>
-          <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Code}`}
+          <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Key}`}
             columns={matColumns} pagination={false} scroll={{ x: 'max-content' }}
             dataSource={lines.filter((l) => l.Lining_System_Code === cs.code)} />
         </div>

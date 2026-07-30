@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared SME engine parity fixture (Phase S1). Consumed by BOTH backend/api/service_tests.py (Python engine) and frontend/scripts/sme_parity.mjs (TypeScript engine); each side must reproduce sme_parity_golden.json exactly. Edge cases pinned: duplicate (tag,code) rows summed; Done_SQM_staged folded into done; remaining clipped at 0 (TK-A/102); progress fallback to Surface_Area_SQM (TK-C); zero-demand tag (TK-D); material missing from inventory (M5 -> pool 0); stock-only material ignored (M4); negative pool passthrough (M6, legacy min() behavior); non-numeric system code sorted after numeric ones (X9); suggestion-engine tie stability. 2026-07-28 two-tier ruling: materials carry ordered_qty/received_qty so the gate exercises effective-ordered netting (M1 partly delivered), tier-2 fill of a hard physical block (M3, which must STAY 'Blocked by Shortages' because feasibility judges physical stock only), and the over-delivery clamp (M6, receipts exceed the order \u2192 0).",
+  "_comment": "Shared SME engine parity fixture (Phase S1). Consumed by BOTH backend/api/service_tests.py (Python engine) and frontend/scripts/sme_parity.mjs (TypeScript engine); each side must reproduce sme_parity_golden.json exactly. Edge cases pinned: duplicate (tag,code) rows summed; Done_SQM_staged folded into done; remaining clipped at 0 (TK-A/102); progress fallback to Surface_Area_SQM (TK-C); zero-demand tag (TK-D); material missing from inventory (M5 -> pool 0); stock-only material ignored (M4); negative pool passthrough (M6, legacy min() behavior); non-numeric system code sorted after numeric ones (X9); suggestion-engine tie stability. 2026-07-28 two-tier ruling: materials carry ordered_qty/received_qty so the gate exercises effective-ordered netting (M1 partly delivered), tier-2 fill of a hard physical block (M3, which must STAY 'Blocked by Shortages' because feasibility judges physical stock only), and the over-delivery clamp (M6, receipts exceed the order -> 0). 2026-07-30 COMPONENT IDENTITY ruling: every material now carries a SAP_Code and the pool is keyed (Material_Code, SAP_Code). System code 8 on TK-E is a four-component PU system where ALL FOUR recipe rows share Material_Code M7 and the SAME generic recipe name -- exactly like For_1_SQM.xlsx -- and are separated only by variant SAP (77 / 77-1 / 77-2 / 77-3). Component C is the bottleneck (20/1.0 = 20 SQM of the 100 remaining) while A, B and D could each support far more; under the old Material_Code pooling the four lines shared one 130-unit bucket drained in recipe order, D got nothing and achievable collapsed to 0. C's stock row also writes its SAP DIRTY as '77 - 2', pinning the whitespace normalization, and its component-specific stock names ('PU MF 300 (3MM) A'..'D') pin the ruling that the stock master's name beats the recipe's generic one.",
   "model": {
     "equipment": [
       {
@@ -73,6 +73,15 @@
         "Substrate": "Steel",
         "Lining_System_Code": "999",
         "Surface_Area_SQM": 12
+      },
+      {
+        "Equipment_Tag_No": "TK-E",
+        "Name": "Tank E",
+        "Location": "TRAIN K",
+        "Type": "Floor",
+        "Substrate": "Concrete",
+        "Lining_System_Code": "8",
+        "Surface_Area_SQM": 100
       }
     ],
     "recipes": [
@@ -82,7 +91,8 @@
         "Material_Code": "M1",
         "Material_Name": "Epoxy Resin",
         "UOM": "KG",
-        "For_1_SQM": 2.0
+        "For_1_SQM": 2.0,
+        "SAP_Code": "S1"
       },
       {
         "Lining_System_Code": "101",
@@ -90,7 +100,8 @@
         "Material_Code": "M2",
         "Material_Name": "Hardener",
         "UOM": "KG",
-        "For_1_SQM": 1.0
+        "For_1_SQM": 1.0,
+        "SAP_Code": "S2"
       },
       {
         "Lining_System_Code": "102",
@@ -98,7 +109,8 @@
         "Material_Code": "M1",
         "Material_Name": "Epoxy Resin",
         "UOM": "KG",
-        "For_1_SQM": 1.5
+        "For_1_SQM": 1.5,
+        "SAP_Code": "S1"
       },
       {
         "Lining_System_Code": "102",
@@ -106,7 +118,8 @@
         "Material_Code": "M3",
         "Material_Name": "Primer",
         "UOM": "L",
-        "For_1_SQM": 0.5
+        "For_1_SQM": 0.5,
+        "SAP_Code": "S3"
       },
       {
         "Lining_System_Code": "7",
@@ -114,7 +127,8 @@
         "Material_Code": "M5",
         "Material_Name": "Rubber Sheet",
         "UOM": "SQM",
-        "For_1_SQM": 1.0
+        "For_1_SQM": 1.0,
+        "SAP_Code": "S5"
       },
       {
         "Lining_System_Code": "X9",
@@ -122,7 +136,8 @@
         "Material_Code": "M2",
         "Material_Name": "Hardener",
         "UOM": "KG",
-        "For_1_SQM": 0.5
+        "For_1_SQM": 0.5,
+        "SAP_Code": "S2"
       },
       {
         "Lining_System_Code": "X9",
@@ -130,7 +145,44 @@
         "Material_Code": "M6",
         "Material_Name": "Additive",
         "UOM": "KG",
-        "For_1_SQM": 0.25
+        "For_1_SQM": 0.25,
+        "SAP_Code": "S6"
+      },
+      {
+        "Lining_System_Code": "8",
+        "Lining_System_Name": "PU MF",
+        "Material_Code": "M7",
+        "SAP_Code": "77",
+        "Material_Name": "PU MF 300 - 3mm",
+        "UOM": "KG",
+        "For_1_SQM": 0.5
+      },
+      {
+        "Lining_System_Code": "8",
+        "Lining_System_Name": "PU MF",
+        "Material_Code": "M7",
+        "SAP_Code": "77-1",
+        "Material_Name": "PU MF 300 - 3mm",
+        "UOM": "KG",
+        "For_1_SQM": 0.5
+      },
+      {
+        "Lining_System_Code": "8",
+        "Lining_System_Name": "PU MF",
+        "Material_Code": "M7",
+        "SAP_Code": "77-2",
+        "Material_Name": "PU MF 300 - 3mm",
+        "UOM": "KG",
+        "For_1_SQM": 1.0
+      },
+      {
+        "Lining_System_Code": "8",
+        "Lining_System_Name": "PU MF",
+        "Material_Code": "M7",
+        "SAP_Code": "77-3",
+        "Material_Name": "PU MF 300 - 3mm",
+        "UOM": "KG",
+        "For_1_SQM": 0.1
       }
     ],
     "materials": [
@@ -140,7 +192,8 @@
         "uom": "KG",
         "available_qty": 100,
         "ordered_qty": 100,
-        "received_qty": 40
+        "received_qty": 40,
+        "sap_code": "S1"
       },
       {
         "material_code": "M2",
@@ -148,7 +201,8 @@
         "uom": "KG",
         "available_qty": 20,
         "ordered_qty": 40,
-        "received_qty": 15
+        "received_qty": 15,
+        "sap_code": "S2"
       },
       {
         "material_code": "M3",
@@ -156,13 +210,15 @@
         "uom": "L",
         "available_qty": 0,
         "ordered_qty": 30,
-        "received_qty": 0
+        "received_qty": 0,
+        "sap_code": "S3"
       },
       {
         "material_code": "M4",
         "material_name": "Stock Only Grease",
         "uom": "KG",
-        "available_qty": 50
+        "available_qty": 50,
+        "sap_code": "S4"
       },
       {
         "material_code": "M6",
@@ -170,7 +226,44 @@
         "uom": "KG",
         "available_qty": -5,
         "ordered_qty": 10,
-        "received_qty": 25
+        "received_qty": 25,
+        "sap_code": "S6"
+      },
+      {
+        "material_code": "M7",
+        "sap_code": "77",
+        "material_name": "PU MF 300 (3MM) A",
+        "uom": "KG",
+        "available_qty": 40,
+        "ordered_qty": 0,
+        "received_qty": 0
+      },
+      {
+        "material_code": "M7",
+        "sap_code": "77-1",
+        "material_name": "PU MF 300 (3MM) B",
+        "uom": "KG",
+        "available_qty": 40,
+        "ordered_qty": 0,
+        "received_qty": 0
+      },
+      {
+        "material_code": "M7",
+        "sap_code": "77 - 2",
+        "material_name": "PU MF 300 (3MM) C",
+        "uom": "KG",
+        "available_qty": 20,
+        "ordered_qty": 30,
+        "received_qty": 0
+      },
+      {
+        "material_code": "M7",
+        "sap_code": "77-3",
+        "material_name": "PU MF 300 (3MM) D",
+        "uom": "KG",
+        "available_qty": 30,
+        "ordered_qty": 0,
+        "received_qty": 0
       }
     ],
     "progress": [
@@ -204,7 +297,8 @@
         "TK-A",
         "TK-B",
         "TK-C",
-        "TK-D"
+        "TK-D",
+        "TK-E"
       ]
     },
     {

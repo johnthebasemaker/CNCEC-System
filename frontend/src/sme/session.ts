@@ -114,6 +114,10 @@ export function tagStats(model: SmeModel, lines: AllocationLine[]): Map<string, 
 
 export interface WeightedProcurementRow {
   Material_Code: string
+  /** Variant SAP — the component discriminator (2026-07-30 ruling). */
+  SAP_Code: string
+  /** `${Material_Code}|${SAP_Code}` — stable React row key and group key. */
+  Material_Key: string
   Material_Name: string
   UOM: string
   Demand_Qty: number
@@ -131,15 +135,20 @@ export interface WeightedProcurementRow {
 export function weightedProcurement(lines: AllocationLine[]): WeightedProcurementRow[] {
   const acc = new Map<string, WeightedProcurementRow>()
   for (const ln of lines) {
-    let r = acc.get(ln.Material_Code)
+    // 2026-07-30 COMPONENT IDENTITY: group per PHYSICAL component. Grouping by
+    // Material_Code merged the Comp-A/B/C/D drums of a multi-part system into
+    // one procurement row, hiding three of the four things you have to buy.
+    let r = acc.get(ln.Material_Key)
     if (!r) {
       r = {
-        Material_Code: ln.Material_Code, Material_Name: ln.Material_Name, UOM: ln.UOM,
+        Material_Code: ln.Material_Code, SAP_Code: ln.SAP_Code,
+        Material_Key: ln.Material_Key,
+        Material_Name: ln.Material_Name, UOM: ln.UOM,
         Demand_Qty: 0, Available_Qty: 0, Ordered_Qty: 0,
         Allocated_Qty: 0, Shortfall_Qty: 0, Fulfillment_Pct: 100,
         SQM_Total: 0, SQM_Done: 0, SQM_Deficit: 0,
       }
-      acc.set(ln.Material_Code, r)
+      acc.set(ln.Material_Key, r)
     }
     r.Demand_Qty += ln.Demand_Qty
     r.Available_Qty += ln.Alloc_Available
@@ -165,6 +174,6 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
     SQM_Deficit: roundN(r.SQM_Total - r.SQM_Done, 2),
   }))
   rows.sort((a, b) => a.Fulfillment_Pct - b.Fulfillment_Pct
-    || (a.Material_Code < b.Material_Code ? -1 : a.Material_Code > b.Material_Code ? 1 : 0))
+    || (a.Material_Key < b.Material_Key ? -1 : a.Material_Key > b.Material_Key ? 1 : 0))
   return rows
 }

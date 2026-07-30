@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -58,6 +58,13 @@ progress_t = _MD.tables["sme_sqm_progress"]
 settings_t = _MD.tables["system_settings"]
 
 _SETTING_KINDS = {"locations": "sme_location", "types": "sme_equipment_type"}
+
+
+def _sap(v: str | None) -> str:
+    """Whitespace-stripped SAP code — the ERP writes "1043 - 2" for "1043-2".
+    Mirrors sme_engine.sap_norm so a hand-entered row lands in the same
+    component pool the workbook loader would have created."""
+    return "".join((v or "").split())
 
 
 def _write_site(user: dict, site_id: Optional[str]) -> str:
@@ -367,6 +374,11 @@ async def delete_recipe(rec_id: int,
 # ─── Materials — sme_inventory_seed ONLY (Canon Rule 2) ──────────────────────
 class MaterialUpsert(BaseModel):
     Material_Code: str = Field(min_length=1, max_length=80)
+    # 2026-07-30 COMPONENT IDENTITY: (Material_Code, SAP_Code) is the row key.
+    # A multi-part system is four rows sharing one Material_Code, so the SAP is
+    # what says WHICH drum this is. Blank is legal for a single-component
+    # material that predates the workbook's SAP column.
+    SAP_Code: str = Field(default="", max_length=80)
     Material_Name: Optional[str] = None
     Item: Optional[str] = None
     Vendor: Optional[str] = None
@@ -379,8 +391,9 @@ class MaterialUpsert(BaseModel):
 
 
 class MaterialPatch(BaseModel):
-    # Material_Code is the PK and deliberately not patchable (legacy dropped it
-    # from SET so a cell-edit could never silently rename the baseline row).
+    # Material_Code and SAP_Code are the PK and deliberately not patchable
+    # (legacy dropped Material_Code from SET so a cell-edit could never silently
+    # rename the baseline row; the same reasoning covers the SAP).
     Material_Name: Optional[str] = None
     Item: Optional[str] = None
     Vendor: Optional[str] = None
@@ -395,42 +408,55 @@ class MaterialPatch(BaseModel):
 @router.get("/materials", summary="Seed rows + derived availability (grid source)")
 async def list_materials(session: AsyncSession = Depends(get_session)):
     return {"items": _rows(await session.execute(
-        text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code"')))}
+        text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code", s."SAP_Code"')))}
 
 
 @router.post("/materials", status_code=201,
-             summary="Create or re-baseline a material seed (upsert on Material_Code)")
+             summary="Create or re-baseline a material seed "
+                     "(upsert on Material_Code + SAP_Code)")
 async def upsert_material(body: MaterialUpsert,
                           user: dict = Depends(require_roles("hod")),
                           session: AsyncSession = Depends(get_session)):
     values = body.model_dump()
     values["Material_Code"] = body.Material_Code.strip()
+    values["SAP_Code"] = _sap(body.SAP_Code)
+    keys = ("Material_Code", "SAP_Code")
     stmt = pg_insert(seed_t).values(**values, updated_at=func.now())
     stmt = stmt.on_conflict_do_update(
-        index_elements=["Material_Code"],
-        set_={**{k: stmt.excluded[k] for k in values if k != "Material_Code"},
+        index_elements=list(keys),
+        set_={**{k: stmt.excluded[k] for k in values if k not in keys},
               "updated_at": func.now()})
     await session.execute(stmt)
     await write_audit(session, user["username"], "SME_UPSERT_MATERIAL",
-                      "sme_inventory_seed", values["Material_Code"])
+                      "sme_inventory_seed",
+                      f'{values["Material_Code"]}/{values["SAP_Code"] or "—"}')
     await session.commit()
-    return {"created": True, "Material_Code": values["Material_Code"]}
+    return {"created": True, "Material_Code": values["Material_Code"],
+            "SAP_Code": values["SAP_Code"]}
 
 
 @router.patch("/materials/{material_code}", summary="Edit a material seed row")
 async def update_material(material_code: str, body: MaterialPatch,
+                          sap_code: str = Query(
+                              ..., description="Variant SAP identifying WHICH "
+                              "component of this Material_Code to edit"),
                           user: dict = Depends(require_roles("hod")),
                           session: AsyncSession = Depends(get_session)):
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(422, "no fields to update")
+    # sap_code is REQUIRED: one Material_Code can be four physical components,
+    # and a code-only WHERE would rewrite all four with one component's figures.
     res = await session.execute(
-        update(seed_t).where(seed_t.c["Material_Code"] == material_code.strip())
+        update(seed_t).where(seed_t.c["Material_Code"] == material_code.strip(),
+                             seed_t.c["SAP_Code"] == _sap(sap_code))
         .values(**changes, updated_at=func.now()))
     if res.rowcount != 1:
         raise HTTPException(404, "material seed row not found")
     await write_audit(session, user["username"], "SME_UPDATE_MATERIAL",
-                      "sme_inventory_seed", f"{material_code} fields={sorted(changes)}")
+                      "sme_inventory_seed",
+                      f"{material_code}/{_sap(sap_code) or '—'} "
+                      f"fields={sorted(changes)}")
     await session.commit()
     return {"updated": True}
 
@@ -438,14 +464,19 @@ async def update_material(material_code: str, body: MaterialPatch,
 @router.delete("/materials/{material_code}",
                summary="Delete a material seed row (ERP ledger untouched)")
 async def delete_material(material_code: str,
+                          sap_code: str = Query(
+                              ..., description="Variant SAP identifying WHICH "
+                              "component of this Material_Code to delete"),
                           user: dict = Depends(require_roles("hod")),
                           session: AsyncSession = Depends(get_session)):
     res = await session.execute(
-        delete(seed_t).where(seed_t.c["Material_Code"] == material_code.strip()))
+        delete(seed_t).where(seed_t.c["Material_Code"] == material_code.strip(),
+                             seed_t.c["SAP_Code"] == _sap(sap_code)))
     if res.rowcount != 1:
         raise HTTPException(404, "material seed row not found")
     await write_audit(session, user["username"], "SME_DELETE_MATERIAL",
-                      "sme_inventory_seed", material_code.strip())
+                      "sme_inventory_seed",
+                      f"{material_code.strip()}/{_sap(sap_code) or '—'}")
     await session.commit()
     return {"deleted": True}
 

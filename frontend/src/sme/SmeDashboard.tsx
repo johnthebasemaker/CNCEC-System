@@ -31,6 +31,7 @@ import {
 import type { BalanceRow, DashFilters } from './insights'
 import ProcurementView from './ProcurementView'
 import { RowsExportButtons } from './rowsExport'
+import { materialCodeCol, materialNameCol } from './materialCols'
 
 // Legacy dashboard_material_balance export columns (same frame as the CSV).
 const balanceExportCols = ['Code', 'Material Name', 'UOM', 'Available', 'On Order',
@@ -120,8 +121,8 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
   // ── Material balance table ─────────────────────────────────────────────────
   const balanceSorted = [...balance.rows].sort((a, b) => a.Coverage_Pct - b.Coverage_Pct)
   const balanceCols: ColumnsType<BalanceRow> = [
-    { title: 'Code', dataIndex: 'Material_Code', key: 'code', width: 120, fixed: 'left' },
-    { title: 'Material Name', dataIndex: 'Material_Name', key: 'name', ellipsis: true },
+    materialCodeCol<BalanceRow>({ title: 'Code', width: 150, fixed: 'left' }),
+    materialNameCol<BalanceRow>({ width: 260 }),
     { title: 'UOM', dataIndex: 'UOM', key: 'uom', width: 70 },
     { title: 'Available', dataIndex: 'Available_Qty', key: 'avail', align: 'right', render: (v: number) => nf(v, 3) },
     { title: 'On Order', dataIndex: 'Ordered_Qty', key: 'ord', align: 'right', render: (v: number) => nf(v, 3) },
@@ -339,7 +340,7 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
           </Space>
         )}>
         <Table<BalanceRow> sticky={{ offsetHeader: 64 }} size="small" columns={balanceCols} dataSource={balanceSorted}
-          rowKey="Material_Code" pagination={{ pageSize: 20, showTotal: (t) => `${t} materials` }}
+          rowKey={(r) => `${r.Material_Code}|${r.SAP_Code ?? ''}`} pagination={{ pageSize: 20, showTotal: (t) => `${t} materials` }}
           scroll={{ x: 'max-content' }}
           onRow={(r) => ({ style: { background: fcBg(r.Coverage_Pct) } })} />
       </Card>
@@ -350,11 +351,11 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
           key: 'stock-only',
           label: `📦 Stock-Only Materials (No Demand in Any System Code) — ${stockOnly.length}`,
           children: (
-            <Table sticky={{ offsetHeader: 64 }} size="small" rowKey="Material_Code" pagination={false}
+            <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Material_Code}|${r.SAP_Code ?? ''}`} pagination={false}
               scroll={{ x: 'max-content' }}
               columns={[
-                { title: 'Code', dataIndex: 'Material_Code', key: 'c' },
-                { title: 'Material Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
+                materialCodeCol({ title: 'Code', width: 150 }),
+                materialNameCol({ width: 240 }),
                 { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 70 },
                 { title: 'Available', dataIndex: 'Available_Qty', key: 'a', align: 'right', render: (v: number) => nf(v, 3) },
                 { title: 'On Order', dataIndex: 'Ordered_Qty', key: 'o', align: 'right', render: (v: number) => nf(v, 3) },

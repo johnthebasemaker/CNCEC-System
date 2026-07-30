@@ -24,6 +24,7 @@ import type { WeightedProcurementRow } from './session'
 import type { SqmCodeRow } from './engine'
 import SuggestionPanel from './SuggestionPanel'
 import TagDetail from './TagDetail'
+import { materialCodeCol, materialNameCol } from './materialCols'
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
 const secHdr: React.CSSProperties = {
@@ -128,8 +129,8 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
   const sessionTags = scenario.order.filter((t) => stats.has(t))
 
   const combinedCols: ColumnsType<WeightedProcurementRow> = [
-    { title: 'Material', dataIndex: 'Material_Code', key: 'c', width: 120, fixed: 'left' },
-    { title: 'Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
+    materialCodeCol<WeightedProcurementRow>({ width: 150, fixed: 'left' }),
+    materialNameCol<WeightedProcurementRow>({ title: 'Name', width: 240 }),
     { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
     { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
     {
@@ -274,7 +275,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
             </BarChart>
           </ResponsiveContainer>
         )}
-        <Table<WeightedProcurementRow> sticky={{ offsetHeader: 64 }} size="small" rowKey="Material_Code" columns={combinedCols}
+        <Table<WeightedProcurementRow> sticky={{ offsetHeader: 64 }} size="small" rowKey="Material_Key" columns={combinedCols}
           dataSource={combined} pagination={{ pageSize: 15, showTotal: (t) => `${t} materials` }}
           scroll={{ x: 'max-content' }} style={{ marginTop: 8 }} />
         <div style={{
@@ -304,11 +305,12 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           expandable={{
             rowExpandable: (r) => r.Blocking_Materials.length > 0,
             expandedRowRender: (r) => (
-              <Table size="small" rowKey="Material_Code" pagination={false}
+              <Table size="small" rowKey={(r) => `${r.Material_Code}|${r.SAP_Code ?? ''}`}
+                pagination={false}
                 dataSource={r.Blocking_Materials}
                 columns={[
-                  { title: 'Material', dataIndex: 'Material_Code', key: 'm', width: 130 },
-                  { title: 'Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
+                  materialCodeCol({ width: 150 }),
+                  materialNameCol({ title: 'Name', width: 220 }),
                   { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
                   { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
                   {

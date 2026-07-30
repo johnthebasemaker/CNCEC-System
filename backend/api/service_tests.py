@@ -703,8 +703,14 @@ async def test_site_scoping():
                   for l in dm.get("lines", [])))
         line_sum = sum(l["Demand_Qty"] for l in dm.get("lines", []))
         tot_sum = sum(t["Demand_Qty"] for t in dm.get("totals", []))
-        check("demand totals reconcile with the lines",
-              abs(line_sum - tot_sum) < 1e-3, f"{line_sum} vs {tot_sum}")
+        # Each total is published at 3 dp, so summing N of them can differ from
+        # the 4-dp line sum by up to N × 5e-4. The old flat 1e-3 was not a
+        # tolerance so much as a bet on the row count; it came due when the
+        # component split raised CNCEC from 20 material totals to 32.
+        tol = max(1e-3, len(dm.get("totals", [])) * 5e-4)
+        check("demand totals reconcile with the lines (within the 3-dp bound)",
+              abs(line_sum - tot_sum) < tol,
+              f"{line_sum} vs {tot_sum} (tol {tol})")
         r = await ac.get("/sme/export/demand-totals", params={"format": "xlsx"}, headers=H(hod_t))
         check("SME export → 200 + spreadsheet",
               r.status_code == 200 and "spreadsheet" in r.headers.get("content-type", ""),
@@ -5392,13 +5398,53 @@ async def test_sme_master_crud():
         check("s6: materials grid derives availability for the seed",
               mat is not None and abs(float(mat["available_qty"]) - 130) < 1e-9,
               f"row={mat}")
+        # 2026-07-30 COMPONENT IDENTITY: one Material_Code can be four physical
+        # components, so PATCH/DELETE take the variant SAP too. Editing by code
+        # alone would rewrite all four rows with one component's figures — the
+        # param is REQUIRED rather than defaulted so that can never happen by
+        # omission.
+        r = await ac.post("/sme/master/materials", headers=H(hod_t), json={
+            "Material_Code": "SVC6-MAT-1", "SAP_Code": "SVC6 - 9",
+            "Material_Name": "S6 resin comp B", "UOM": "KG",
+            "Initial_Available_Qty": 7})
+        comps = None
+        async with SessionLocal() as s:
+            comps = (await s.execute(_sqt(
+                'SELECT "SAP_Code", "Initial_Available_Qty" FROM sme_inventory_seed '
+                'WHERE "Material_Code"=\'SVC6-MAT-1\' ORDER BY "SAP_Code"'))).all()
+        check("s6: a second SAP is a SECOND component row, SAP whitespace-stripped",
+              r.status_code == 201 and len(comps) == 2
+              and [x[0] for x in comps] == ["", "SVC6-9"]
+              and abs(float(comps[1][1]) - 7) < 1e-9,
+              f"{r.status_code} comps={[tuple(x) for x in comps or []]}")
+
         r = await ac.patch("/sme/master/materials/SVC6-MAT-1", headers=H(hod_t),
                            json={"Vendor": "S6 Vendor"})
-        check("s6: material patch → 200", r.status_code == 200, f"got {r.status_code}")
+        check("s6: material patch without sap_code → 422 (never a blind 4-row edit)",
+              r.status_code == 422, f"got {r.status_code}")
+        r = await ac.patch("/sme/master/materials/SVC6-MAT-1", headers=H(hod_t),
+                           params={"sap_code": "SVC6-9"}, json={"Vendor": "S6 Vendor"})
+        vend = await _scalar(
+            'SELECT "Vendor" FROM sme_inventory_seed '
+            'WHERE "Material_Code"=\'SVC6-MAT-1\' AND "SAP_Code"=\'SVC6-9\'')
+        sib = await _scalar(
+            'SELECT "Vendor" FROM sme_inventory_seed '
+            'WHERE "Material_Code"=\'SVC6-MAT-1\' AND "SAP_Code"=\'\'')
+        check("s6: material patch → 200 and touches ONLY that component",
+              r.status_code == 200 and vend == "S6 Vendor" and sib is None,
+              f"{r.status_code} target={vend!r} sibling={sib!r}")
         r = await ac.patch("/sme/master/materials/SVC6-NOPE", headers=H(hod_t),
-                           json={"Vendor": "x"})
+                           params={"sap_code": ""}, json={"Vendor": "x"})
         check("s6: patch on a missing material → 404", r.status_code == 404, f"got {r.status_code}")
-        r = await ac.delete("/sme/master/materials/SVC6-MAT-1", headers=H(hod_t))
+        r = await ac.delete("/sme/master/materials/SVC6-MAT-1", headers=H(hod_t),
+                            params={"sap_code": "SVC6-9"})
+        left = await _scalar(
+            'SELECT COUNT(*) FROM sme_inventory_seed '
+            'WHERE "Material_Code"=\'SVC6-MAT-1\'')
+        check("s6: delete removes ONE component, the sibling survives",
+              r.status_code == 200 and left == 1, f"{r.status_code} left={left}")
+        r = await ac.delete("/sme/master/materials/SVC6-MAT-1", headers=H(hod_t),
+                            params={"sap_code": ""})
         inv_after = await _scalar("SELECT COUNT(*) FROM inventory")
         check("s6: material delete → 200; ERP inventory untouched throughout",
               r.status_code == 200 and inv_before == inv_after,
@@ -5782,12 +5828,23 @@ async def test_bulk_import():
         ]})
         r = await ac.post("/import/sme-materials", headers=H(hod_t), files=up(mat_wb2),
                           params={"commit": "true"})
-        sap_join = await _scalar(
-            "SELECT \"SAP_Code\" FROM sme_inventory_seed "
-            "WHERE \"Material_Code\"='SVCJ-MAT-2'")
-        check("aj: materials seed records the distinct variant SAP list",
-              r.status_code == 200 and sap_join == "SVCJ-S1, SVCJ-S1-1",
-              f"{r.status_code} sap={sap_join}")
+        # 2026-07-30 COMPONENT IDENTITY: two variant SAPs of one Material_Code
+        # are two PHYSICAL components → two seed rows, each holding its OWN
+        # quantities. This used to be ONE row whose SAP_Code was the comma list
+        # "SVCJ-S1, SVCJ-S1-1" and whose Initial_Available_Qty was the SUM (14).
+        comp_rows = None
+        async with SessionLocal() as s:
+            comp_rows = (await s.execute(_sqt(
+                'SELECT "SAP_Code", "Initial_Available_Qty", "Initial_Ordered_Qty" '
+                'FROM sme_inventory_seed WHERE "Material_Code"=\'SVCJ-MAT-2\' '
+                'ORDER BY "SAP_Code"'))).all()
+        check("aj: variant SAPs land as SEPARATE component rows, never a comma list",
+              r.status_code == 200 and len(comp_rows) == 2
+              and [x[0] for x in comp_rows] == ["SVCJ-S1", "SVCJ-S1-1"],
+              f"{r.status_code} rows={[tuple(x) for x in comp_rows or []]}")
+        check("aj: each component keeps its OWN quantities (no summing across SAPs)",
+              [(float(a), float(b)) for _, a, b in comp_rows] == [(10.0, 5.0), (4.0, 0.0)],
+              f"rows={[tuple(x) for x in comp_rows or []]}")
 
         audits = await _scalar(
             "SELECT COUNT(DISTINCT action_type) FROM system_audit_log "
@@ -8052,25 +8109,33 @@ async def test_session_report_summary():
         return out
 
     # ── aggregation: collapse, conservation, coverage, ordering ─────────────
-    # Line schema carries the 2026-07-28 two-tier split: M-1 draws 10 from
-    # physical stock and 9 from on-order, leaving 21 genuinely to buy.
+    # Line schema carries the 2026-07-28 two-tier split (M-1/S1 draws 10 from
+    # physical stock and 9 from on-order, leaving 21 genuinely to buy) AND the
+    # 2026-07-30 component identity: M-1 is TWO physical components sharing one
+    # Material_Code, name and UOM — the exact shape that used to collapse.
+    def _ln(tag, code, sap, name, dem, av, od, short):
+        return {"Equipment_Tag_No": tag, "Material_Code": code, "SAP_Code": sap,
+                "Material_Key": f"{code}|{sap}", "Material_Name": name,
+                "UOM": "KG", "Demand_Qty": dem, "Alloc_Available": av,
+                "Alloc_Ordered": od, "Allocated_Qty": av + od,
+                "Shortfall_Qty": short}
+
     fake = {"lines": [
-        {"Equipment_Tag_No": "T1", "Material_Code": "M-1", "Material_Name": "Primer",
-         "UOM": "KG", "Demand_Qty": 10.0, "Alloc_Available": 4.0,
-         "Alloc_Ordered": 0.0, "Allocated_Qty": 4.0, "Shortfall_Qty": 6.0},
-        {"Equipment_Tag_No": "T2", "Material_Code": "M-1", "Material_Name": "Primer",
-         "UOM": "KG", "Demand_Qty": 30.0, "Alloc_Available": 6.0,
-         "Alloc_Ordered": 9.0, "Allocated_Qty": 15.0, "Shortfall_Qty": 15.0},
-        {"Equipment_Tag_No": "T1", "Material_Code": "M-2", "Material_Name": "Adhesive",
-         "UOM": "KG", "Demand_Qty": 5.0, "Alloc_Available": 5.0,
-         "Alloc_Ordered": 0.0, "Allocated_Qty": 5.0, "Shortfall_Qty": 0.0},
+        _ln("T1", "M-1", "S1", "Primer", 10.0, 4.0, 0.0, 6.0),
+        _ln("T2", "M-1", "S1", "Primer", 30.0, 6.0, 9.0, 15.0),
+        _ln("T1", "M-1", "S1-1", "Primer", 8.0, 1.0, 0.0, 7.0),
+        _ln("T1", "M-2", "S2", "Adhesive", 5.0, 5.0, 0.0, 0.0),
     ]}
     agg = _sme._material_demand_rows(fake)
-    check("ax: 3 equipment×material lines collapse to 2 material rows", len(agg) == 2,
-          f"got {len(agg)}")
-    m1 = next((r for r in agg if r["Material_Code"] == "M-1"), {})
+    check("ax: lines collapse per COMPONENT — 4 lines → 3 rows, and the two "
+          "M-1 components stay apart despite identical code, name and UOM",
+          len(agg) == 3
+          and sorted((r["Material_Code"], r["SAP_Code"]) for r in agg)
+          == [("M-1", "S1"), ("M-1", "S1-1"), ("M-2", "S2")],
+          f'got {[(r["Material_Code"], r["SAP_Code"]) for r in agg]}')
+    m1 = next((r for r in agg if r["SAP_Code"] == "S1"), {})
     check("ax: quantities sum across equipment (10+30 demand, 4+6 on hand, "
-          "0+9 on order)",
+          "0+9 on order) — and do NOT absorb the sibling component's 8",
           m1.get("Total_Needed") == 40.0 and m1.get("Available_Qty") == 10.0
           and m1.get("Ordered_Qty") == 9.0, str(m1))
     check("ax: Allocated_Qty stays the derived sum of both tiers (10 + 9) and "
@@ -8081,15 +8146,26 @@ async def test_session_report_summary():
           m1.get("Fulfillment_Pct") == 25.0, str(m1.get("Fulfillment_Pct")))
     check("ax: worst coverage sorts first and S_No is renumbered after sorting "
           "(matches the on-screen combined-procurement table)",
-          [r["Material_Code"] for r in agg] == ["M-1", "M-2"]
-          and [r["S_No"] for r in agg] == [1, 2],
-          str([(r["Material_Code"], r["S_No"]) for r in agg]))
-    # A code carrying two different names/UOMs must split, not silently merge.
-    split = _sme._material_demand_rows({"lines": [
+          [(r["Material_Code"], r["SAP_Code"]) for r in agg]
+          == [("M-1", "S1-1"), ("M-1", "S1"), ("M-2", "S2")]
+          and [r["S_No"] for r in agg] == [1, 2, 3],
+          str([(r["Material_Code"], r["SAP_Code"], r["S_No"]) for r in agg]))
+    # 2026-07-30: the group key is (code, SAP) — deliberately NOT name+UOM.
+    # Ruling Q2 makes the stock UOM display-only (the recipe rates and the stock
+    # figures are both taken to be in the recipe's unit), so a UOM disagreement
+    # on ONE component must not fork it into two procurement rows.
+    same = _sme._material_demand_rows({"lines": [
         dict(fake["lines"][0]),
         {**fake["lines"][0], "UOM": "L"},
     ]})
-    check("ax: the same code under a different UOM stays a separate row",
+    check("ax: one component under two UOM labels stays ONE row — the stock "
+          "UOM is display-only (ruling Q2), not part of the identity",
+          len(same) == 1 and same[0]["Total_Needed"] == 20.0, str(same))
+    split = _sme._material_demand_rows({"lines": [
+        dict(fake["lines"][0]),
+        {**fake["lines"][0], "SAP_Code": "S1-9", "Material_Key": "M-1|S1-9"},
+    ]})
+    check("ax: a different variant SAP DOES fork it — that is a different drum",
           len(split) == 2, f"got {len(split)}")
 
     # ── end-to-end through the real endpoint ────────────────────────────────
@@ -8193,8 +8269,8 @@ async def test_sqm_bottleneck():
         → demand 20 and 10."""
         mats = []
         for code, av in available.items():
-            m = {"material_code": code, "material_name": code, "uom": "KG",
-                 "available_qty": av}
+            m = {"material_code": code, "sap_code": f"S{code}",
+                 "material_name": code, "uom": "KG", "available_qty": av}
             if ordered and code in ordered:
                 m["ordered_qty"] = ordered[code]
             if received and code in received:
@@ -8204,19 +8280,21 @@ async def test_sqm_bottleneck():
             [{"Equipment_Tag_No": "T1", "Name": "Tank 1", "Lining_System_Code": "1",
               "Surface_Area_SQM": 10}],
             [{"Lining_System_Code": "1", "Lining_System_Name": "Sys", "Material_Code": "A",
-              "Material_Name": "A", "UOM": "KG", "For_1_SQM": 2.0},
+              "SAP_Code": "SA", "Material_Name": "A", "UOM": "KG", "For_1_SQM": 2.0},
              {"Lining_System_Code": "1", "Lining_System_Name": "Sys", "Material_Code": "B",
-              "Material_Name": "B", "UOM": "KG", "For_1_SQM": 1.0}],
+              "SAP_Code": "SB", "Material_Name": "B", "UOM": "KG", "For_1_SQM": 1.0}],
             mats, [])
 
     # ── Q2a: effective ordered = ordered − received, clamped at zero ─────────
     m = mk({"A": 0, "B": 0}, ordered={"A": 100, "B": 10}, received={"A": 40, "B": 25})
     check("ay-q2a: effective ordered nets delivered stock off the order "
           "(100 ordered − 40 received = 60) — the double-count fix",
-          m["pool_ordered_init"]["A"] == 60.0, str(m["pool_ordered_init"]))
+          m["pool_ordered_init"][E.mat_key("A", "SA")] == 60.0,
+          str(m["pool_ordered_init"]))
     check("ay-q2a: over-delivery clamps at zero, never negative "
           "(10 ordered − 25 received → 0)",
-          m["pool_ordered_init"]["B"] == 0.0, str(m["pool_ordered_init"]))
+          m["pool_ordered_init"][E.mat_key("B", "SB")] == 0.0,
+          str(m["pool_ordered_init"]))
 
     # ── Q1/Q6: two-tier cascade + conservation ──────────────────────────────
     m = mk({"A": 5, "B": 10}, ordered={"A": 20})       # A: 5 on hand, 15 usable on order
@@ -8375,6 +8453,298 @@ async def test_sqm_bottleneck():
               and "Allocated_Qty" in hdr, str(hdr))
 
 
+async def test_component_identity():
+    """Suite AZ — 2026-07-30 COMPONENT IDENTITY, overturning the 2026-07-18
+    Material_Code pooling rule.
+
+    A multi-part chemical system lists ONE Material_Code as several distinct
+    physical components, separated only by the variant SAP (GI-8005765 →
+    Comp-A/B/C/D at 1041 / 1041-1 / 1041-2 / 1041-3). Pooling them summed four
+    unlike drums into one bucket, so earlier recipe lines drained stock belonging
+    to later ones and the bottleneck ratio was meaningless. These checks pin the
+    new grain end to end: pools, names, shortfalls, report rows, and the
+    whitespace normalization the ERP forces on us.
+    """
+    from . import sme_engine as E
+
+    # One tag, 100 m² remaining, ONE Material_Code as four components whose
+    # recipe rows all carry the SAME generic name — exactly as For_1_SQM.xlsx
+    # writes them. Rates make component C the scarcest.
+    RATES = (("77", 0.5), ("77-1", 0.5), ("77-2", 1.0), ("77-3", 0.1))
+    STOCK = (("77", "A", 40, 0), ("77-1", "B", 40, 0),
+             ("77 - 2", "C", 20, 30), ("77-3", "D", 30, 0))   # note the dirty SAP
+
+    def mk(*, pooled: bool):
+        recipes = [{"Lining_System_Code": "8", "Lining_System_Name": "PU MF",
+                    "Material_Code": "M7", "SAP_Code": "" if pooled else sap,
+                    "Material_Name": "PU MF 300 - 3mm", "UOM": "KG",
+                    "For_1_SQM": rate} for sap, rate in RATES]
+        if pooled:      # the pre-ruling grain: one seed row carrying the SUM
+            mats = [{"material_code": "M7", "sap_code": "",
+                     "material_name": "PU MF 300 (3MM) A", "uom": "KG",
+                     "available_qty": sum(s[2] for s in STOCK),
+                     "ordered_qty": sum(s[3] for s in STOCK), "received_qty": 0}]
+        else:
+            mats = [{"material_code": "M7", "sap_code": sap,
+                     "material_name": f"PU MF 300 (3MM) {part}", "uom": "KG",
+                     "available_qty": av, "ordered_qty": od, "received_qty": 0}
+                    for sap, part, av, od in STOCK]
+        return E.build_model(
+            [{"Equipment_Tag_No": "TK-E", "Name": "Tank E",
+              "Lining_System_Code": "8", "Surface_Area_SQM": 100}],
+            recipes, mats, [])
+
+    m = mk(pooled=False)
+    plan = E.run_plan(m, ["TK-E"])
+
+    # ── the pool is per component ────────────────────────────────────────────
+    check("az: one pool per (Material_Code, SAP_Code) — four, not one",
+          sorted(m["pool_init"]) == ["M7|77", "M7|77-1", "M7|77-2", "M7|77-3"],
+          str(sorted(m["pool_init"])))
+    check("az: each component pool holds its OWN stock, never the sum of four",
+          [m["pool_init"][f"M7|{s}"] for s in ("77", "77-1", "77-2", "77-3")]
+          == [40.0, 40.0, 20.0, 30.0], str(m["pool_init"]))
+    check("az: a DIRTY ERP SAP ('77 - 2') normalizes onto the recipe's '77-2' "
+          "instead of silently creating an orphan pool",
+          m["pool_init"].get("M7|77-2") == 20.0
+          and not any(" " in k for k in m["pool_init"]), str(m["pool_init"]))
+    check("az: sap_norm / mat_key strip whitespace identically",
+          E.sap_norm("1043 - 2") == "1043-2"
+          and E.mat_key("GI-1", " 1041 - 3 ") == "GI-1|1041-3",
+          f'{E.sap_norm("1043 - 2")} {E.mat_key("GI-1", " 1041 - 3 ")}')
+
+    # ── the components are individually identifiable ─────────────────────────
+    by_sap = {ln["SAP_Code"]: ln for ln in plan["lines"]}
+    check("az: four separate allocation lines, one per component",
+          len(plan["lines"]) == 4 and len(by_sap) == 4, str(len(plan["lines"])))
+    check("az: the STOCK master's component name beats the recipe's generic one "
+          "(four rows reading 'PU MF 300 - 3mm' are unusable in the UI)",
+          [by_sap[s]["Material_Name"] for s in ("77", "77-1", "77-2", "77-3")]
+          == ["PU MF 300 (3MM) A", "PU MF 300 (3MM) B",
+              "PU MF 300 (3MM) C", "PU MF 300 (3MM) D"],
+          str([ln["Material_Name"] for ln in plan["lines"]]))
+    check("az: totals and procurement are per component too, so the buy list "
+          "names the drum to order",
+          len(plan["totals"]) == 4
+          and [t["SAP_Code"] for t in plan["totals"]] == ["77", "77-1", "77-2", "77-3"]
+          and {p["SAP_Code"] for p in plan["procurement"]} == {"77", "77-1", "77-2"},
+          f'totals={[t["SAP_Code"] for t in plan["totals"]]} '
+          f'proc={[p["SAP_Code"] for p in plan["procurement"]]}')
+
+    # ── the shortfalls are now truthful ──────────────────────────────────────
+    check("az: shortfall is per component — A and B are each 10 short of their "
+          "own 50, C is 50 short net of its order, D is fully stocked",
+          [by_sap[s]["Shortfall_Qty"] for s in ("77", "77-1", "77-2", "77-3")]
+          == [10.0, 10.0, 50.0, 0.0],
+          str([(s, by_sap[s]["Shortfall_Qty"]) for s in by_sap]))
+    check("az: conservation holds per component (demand = allocated + shortfall)",
+          all(abs(ln["Demand_Qty"] - (ln["Allocated_Qty"] + ln["Shortfall_Qty"])) < 1e-9
+              for ln in plan["lines"]), str(plan["lines"]))
+
+    # ── the bottleneck ratio is the whole point ──────────────────────────────
+    unit = plan["sqm_units"][0]
+    check("az: SQM achievable is the SCARCEST component's rate — C at 20/1.0 = 20 "
+          "of the 100 m² remaining, not A's or D's much larger ceiling",
+          unit["SQM_Achievable_Now"] == 20.0 and unit["SQM_Deficit"] == 80.0,
+          str(unit))
+    check("az: C's inbound order lifts achievable to 50 without claiming it is "
+          "buildable today",
+          unit["SQM_Achievable_With_Ordered"] == 50.0, str(unit))
+    feas = plan["feasibility"][0]
+    check("az: the bottleneck is reported as a specific drum (code + SAP + name)",
+          feas["Bottleneck_Material_Code"] == "M7"
+          and feas["Bottleneck_SAP_Code"] == "77-2"
+          and feas["Bottleneck_Material_Name"] == "PU MF 300 (3MM) C", str(feas))
+
+    # ── the ruling has teeth: the OLD grain got all of this wrong ────────────
+    old = E.run_plan(mk(pooled=True), ["TK-E"])
+    old_by_rate = {ln["For_1_SQM"]: ln for ln in old["lines"]}
+    check("az-revert: pooling by Material_Code reports A and B as FULLY covered "
+          "while both are really 10 short — earlier lines eat the shared bucket",
+          old_by_rate[0.5]["Shortfall_Qty"] == 0.0
+          and by_sap["77"]["Shortfall_Qty"] == 10.0,
+          f'old={old_by_rate[0.5]["Shortfall_Qty"]} new={by_sap["77"]["Shortfall_Qty"]}')
+    check("az-revert: pooling reports D as 10 SHORT when it holds 30 for a "
+          "demand of 10 — the shortfall is not merely imprecise, it is inverted",
+          old_by_rate[0.1]["Shortfall_Qty"] == 10.0
+          and by_sap["77-3"]["Shortfall_Qty"] == 0.0,
+          f'old={old_by_rate[0.1]["Shortfall_Qty"]} new={by_sap["77-3"]["Shortfall_Qty"]}')
+    check("az-revert: pooling collapses SQM achievable to 0 (now AND with the "
+          "order) against a true 20 / 50",
+          old["sqm_units"][0]["SQM_Achievable_Now"] == 0.0
+          and old["sqm_units"][0]["SQM_Achievable_With_Ordered"] == 0.0,
+          str(old["sqm_units"][0]))
+    check("az-revert: pooling renders one row named after component A, so the "
+          "other three drums are invisible in every report",
+          len(old["lines"]) == 4
+          and {ln["Material_Name"] for ln in old["lines"]} == {"PU MF 300 (3MM) A"}
+          and len(old["totals"]) == 1,
+          str({ln["Material_Name"] for ln in old["lines"]}))
+
+    # ── the derived-availability SQL, per component ──────────────────────────
+    # SQL_SME_MATERIALS now reaches the ledger through the component's OWN SAP
+    # instead of through inventory.Material_Code (which summed every variant SAP
+    # of the material into all four component rows at once). The derived-view
+    # PARITY gate cannot prove this: every SME material in the legacy data has
+    # received_qty = consumed_qty = 0, so both sides agree vacuously on exactly
+    # the columns this rewrite touches. Hence a direct test.
+    from sqlalchemy import text as _azt
+
+    from . import sme as _azsme
+
+    async def _exec(sql, **kw):
+        async with SessionLocal() as s:
+            await s.execute(_azt(sql), kw)
+            await s.commit()
+
+    async def _derived():
+        async with SessionLocal() as s:
+            rows = (await s.execute(_azt(
+                _azsme.SQL_SME_MATERIALS
+                + ' WHERE s."Material_Code" = \'SVCZ-MAT\''))).mappings().all()
+        return {r["sap_code"]: dict(r) for r in rows}
+
+    try:
+        for sap in ("SVCZ-1", "SVCZ-2"):
+            await _exec('INSERT INTO inventory ("SAP_Code", "Site_ID", '
+                        '"Equipment_Description", "UOM") VALUES (:s, \'CNCEC\', '
+                        '\'SVCZ component\', \'KG\')', s=sap)
+            await _exec('INSERT INTO sme_inventory_seed ("Material_Code", '
+                        '"SAP_Code", "Material_Name", "UOM", '
+                        '"Initial_Available_Qty", "Initial_Ordered_Qty") '
+                        'VALUES (\'SVCZ-MAT\', :s, :n, \'KG\', 100, 0)',
+                        s=sap, n=f"SVCZ comp {sap[-1]}")
+        # a receipt for component 1 only, plus a DIRTY-SAP receipt for component 2
+        await _exec('INSERT INTO receipts ("Date", "SAP_Code", "Quantity", '
+                    '"Site_ID", "DN_No") VALUES (\'2026-07-30\', \'SVCZ-1\', 25, '
+                    '\'CNCEC\', \'SVCZ-DN\')')
+        await _exec('INSERT INTO receipts ("Date", "SAP_Code", "Quantity", '
+                    '"Site_ID", "DN_No") VALUES (\'2026-07-30\', \'SVCZ - 2\', 7, '
+                    '\'CNCEC\', \'SVCZ-DN\')')
+        d = await _derived()
+        check("az-sql: a receipt raises ONLY its own component's derived "
+              "availability (comp 1 → 125), leaving the sibling at 100 + its own 7",
+              len(d) == 2 and d["SVCZ-1"]["available_qty"] == 125.0
+              and d["SVCZ-1"]["received_qty"] == 25.0
+              and d["SVCZ-2"]["available_qty"] == 107.0,
+              str({k: (v["received_qty"], v["available_qty"]) for k, v in d.items()}))
+        check("az-sql: a receipt whose ERP SAP is written 'SVCZ - 2' still lands "
+              "on component SVCZ-2 — normalized on both sides of the join",
+              d["SVCZ-2"]["received_qty"] == 7.0, str(d.get("SVCZ-2")))
+        # consumption is the mirror case
+        await _exec('INSERT INTO consumption ("Date", "SAP_Code", "Quantity", '
+                    '"Site_ID") VALUES (\'2026-07-30\', \'SVCZ-1\', 10, \'CNCEC\')')
+        d = await _derived()
+        check("az-sql: consumption likewise debits only its own component "
+              "(125 − 10 = 115; the sibling is untouched at 107)",
+              d["SVCZ-1"]["available_qty"] == 115.0
+              and d["SVCZ-1"]["consumed_qty"] == 10.0
+              and d["SVCZ-2"]["available_qty"] == 107.0,
+              str({k: (v["consumed_qty"], v["available_qty"]) for k, v in d.items()}))
+        # the CONSERVATION invariant the parity gate asserts, on live-shaped data
+        rolled = None
+        async with SessionLocal() as s:
+            rolled = (await s.execute(_azt(
+                _azsme.SQL_SME_MATERIALS_ROLLUP.replace(
+                    "GROUP BY material_code",
+                    "WHERE material_code = 'SVCZ-MAT' GROUP BY material_code")
+            ))).mappings().all()
+        check("az-sql: rolled back up to Material_Code the components conserve "
+              "exactly (200 seeded + 32 received − 10 consumed = 222)",
+              len(rolled) == 1 and rolled[0]["available_qty"] == 222.0
+              and rolled[0]["received_qty"] == 32.0
+              and rolled[0]["consumed_qty"] == 10.0, str(dict(rolled[0])))
+    finally:
+        await _exec('DELETE FROM receipts WHERE "DN_No" = \'SVCZ-DN\'')
+        await _exec('DELETE FROM consumption WHERE "SAP_Code" LIKE \'SVCZ%\'')
+        await _exec('DELETE FROM sme_inventory_seed WHERE "Material_Code" = \'SVCZ-MAT\'')
+        await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCZ%\'')
+
+    # ── the cutover → sync path must CONVERGE, not accumulate ────────────────
+    # The frozen legacy SQLite seed has no SAP_Code column at all, so a cutover
+    # lands every material as one row with SAP_Code = ''. Without retiring those
+    # placeholders the first workbook sync leaves them beside the real component
+    # rows — a phantom material carrying the whole pre-split quantity, double
+    # counting the stock its own components now hold.
+    from . import bulk_import as _azbi
+
+    hdr = ["Item", "Vendor/supplying plant", "Purchasing Document",
+           "Document Date", "Material_Code", "SAP_Code", "Material_Name",
+           "Nature", "UOM", "Available_Qty", "Ordered_Qty"]
+    wb = _xlsx({"Materials": [
+        hdr,
+        ["1", "V", "PO1", "2026-03-01", "SVCZ-P", "SVCZ-A", "P comp A",
+         "Liquid", "KG", 11, 0],
+        ["2", "V", "PO1", "2026-03-01", "SVCZ-P", "SVCZ-B", "P comp B",
+         "Liquid", "KG", 22, 0],
+        # a material the workbook genuinely lists with NO SAP must keep its row
+        ["3", "V", "PO1", "2026-03-01", "SVCZ-Q", None, "Q single",
+         "Liquid", "KG", 5, 0],
+        # SVCZ-R is split by the workbook BUT a SAP-less legacy recipe line
+        # still references it, so its pooled row must be HELD, not retired.
+        ["4", "V", "PO1", "2026-03-01", "SVCZ-R", "SVCZ-R1", "R comp 1",
+         "Liquid", "KG", 8, 0],
+    ]})
+    try:
+        await _exec('INSERT INTO sme_recipe ("Lining_System_Code", '
+                    '"Material_Code", "SAP_Code", "Material_Name", "UOM", '
+                    '"For_1_SQM") VALUES (\'901\', \'SVCZ-R\', NULL, '
+                    '\'R legacy line\', \'KG\', 1.0)')
+        # simulate the post-cutover state: blank-SAP placeholders holding the sum
+        for code, qty in (("SVCZ-P", 33), ("SVCZ-Q", 5), ("SVCZ-R", 8)):
+            await _exec('INSERT INTO sme_inventory_seed ("Material_Code", '
+                        '"SAP_Code", "Material_Name", "UOM", '
+                        '"Initial_Available_Qty", "Initial_Ordered_Qty") '
+                        'VALUES (:c, \'\', \'pooled placeholder\', \'KG\', :q, 0)',
+                        c=code, q=qty)
+        async with SessionLocal() as s:
+            plan = await _azbi.plan_sme_materials(s, wb)
+            stale = {(x["Material_Code"], x["SAP_Code"]) for x in plan.get("stale", [])}
+            check("az-cutover: the blank-SAP placeholder of a SPLIT material is "
+                  "marked stale, while a genuinely SAP-less material keeps its row",
+                  stale == {("SVCZ-P", "")},
+                  f'stale={sorted(stale)} warnings={plan.get("warnings")}')
+            check("az-cutover: a pooled row is HELD (not retired) while a SAP-LESS "
+                  "RECIPE line still draws on it — deleting it would leave that "
+                  "line with a zero pool and read as a total shortage",
+                  ("SVCZ-R", "") not in stale
+                  and any("KEPT because SAP-less recipe" in w
+                          for w in plan.get("warnings", [])),
+                  f'stale={sorted(stale)} warnings={plan.get("warnings")}')
+            check("az-cutover: the dry-run SAYS it will remove them rather than "
+                  "deleting rows the operator never saw coming",
+                  any("placeholder" in w for w in plan.get("warnings", []))
+                  and _azbi._summary(plan).get("stale_removed") == 1,
+                  str(plan.get("warnings")))
+            await _azbi.apply_sme_materials(s, plan, "svc")
+            await s.commit()
+        rows = None
+        async with SessionLocal() as s:
+            rows = (await s.execute(_azt(
+                'SELECT "Material_Code", "SAP_Code", "Initial_Available_Qty" '
+                'FROM sme_inventory_seed WHERE "Material_Code" LIKE \'SVCZ-%\' '
+                'ORDER BY 1, 2'))).all()
+        check("az-cutover: cutover-then-sync CONVERGES — 2 component rows plus "
+              "the SAP-less material, and no leftover pooled phantom",
+              [(r[0], r[1], float(r[2])) for r in rows]
+              == [("SVCZ-P", "SVCZ-A", 11.0), ("SVCZ-P", "SVCZ-B", 22.0),
+                  ("SVCZ-Q", "", 5.0), ("SVCZ-R", "", 8.0),
+                  ("SVCZ-R", "SVCZ-R1", 8.0)],
+              str([(r[0], r[1], float(r[2])) for r in rows]))
+        # re-running must be a no-op: nothing left to insert, nothing left stale
+        async with SessionLocal() as s:
+            again = await _azbi.plan_sme_materials(s, wb)
+        check("az-cutover: the second sync is a no-op (idempotent — no repeat "
+              "inserts and nothing still flagged stale)",
+              not again["inserts"] and not again["updates"]
+              and not again.get("stale") and again["unchanged"] == 4,
+              str(_azbi._summary(again)))
+    finally:
+        await _exec('DELETE FROM sme_recipe WHERE "Material_Code" LIKE \'SVCZ-%\'')
+        await _exec('DELETE FROM sme_inventory_seed '
+                    'WHERE "Material_Code" LIKE \'SVCZ-%\'')
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -8485,6 +8855,8 @@ async def main() -> int:
     await test_session_report_summary()
     print("\n AY. two-tier allocation (Available vs Ordered) + reverse SQM")
     await test_sqm_bottleneck()
+    print("\n AZ. component identity — (Material_Code, SAP_Code) stock pools")
+    await test_component_identity()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

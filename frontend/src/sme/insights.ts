@@ -14,7 +14,7 @@
  *   coverable SQM    = scope SQM × min(1, coverage/100)
  *   4-tier colors    = ≥100 green · ≥90 orange · ≥80 yellow · <80 red (_fc)
  */
-import { roundN, syscodeCompare, unitKey } from './engine'
+import { matKey, roundN, sapNorm, syscodeCompare, unitKey } from './engine'
 import type { SmeModel, SnapshotMaterial } from './engine'
 
 export interface DashFilters {
@@ -105,6 +105,10 @@ export function filterOptions(model: SmeModel, f: DashFilters) {
 // ─── Material balance (legacy f_demand) ──────────────────────────────────────
 export interface BalanceRow {
   Material_Code: string
+  /** Variant SAP — the component discriminator (2026-07-30 ruling). */
+  SAP_Code: string
+  /** `${Material_Code}|${SAP_Code}` — stable row key and group key. */
+  Material_Key: string
   Material_Name: string
   UOM: string
   Available_Qty: number
@@ -127,10 +131,15 @@ function materialMaps(materials: SnapshotMaterial[]) {
   const ordered = new Map<string, number>()
   const meta = new Map<string, { name: string; uom: string }>()
   for (const m of materials) {
-    const code = String(m.material_code ?? '').trim()
-    avail.set(code, Number(m.available_qty ?? 0) || 0)
-    ordered.set(code, Number((m as { ordered_qty?: number | null }).ordered_qty ?? 0) || 0)
-    meta.set(code, { name: String(m.material_name ?? ''), uom: String(m.uom ?? '') })
+    // 2026-07-30 COMPONENT IDENTITY: keyed per (Material_Code, SAP_Code).
+    // Keying on the code alone did not pool the four components of a
+    // multi-part system so much as DISCARD three of them — each `set` on the
+    // same key overwrote the last, leaving one component's stock standing in
+    // for all four.
+    const key = matKey(m.material_code, m.sap_code)
+    avail.set(key, Number(m.available_qty ?? 0) || 0)
+    ordered.set(key, Number((m as { ordered_qty?: number | null }).ordered_qty ?? 0) || 0)
+    meta.set(key, { name: String(m.material_name ?? ''), uom: String(m.uom ?? '') })
   }
   return { avail, ordered, meta }
 }
@@ -138,12 +147,15 @@ function materialMaps(materials: SnapshotMaterial[]) {
 /** Aggregate demand per material over the given units (raw, unrounded). */
 export function demandByMaterial(model: SmeModel, units: UnitRef[]) {
   const demand = new Map<string, number>()
-  const names = new Map<string, { name: string; uom: string }>()
+  const names = new Map<string, { name: string; uom: string; code: string; sap: string }>()
   for (const u of units) {
     for (const r of model.recipesByCode.get(u.code) ?? []) {
-      demand.set(r.Material_Code, (demand.get(r.Material_Code) ?? 0) + r.For_1_SQM * u.remaining)
-      if (!names.has(r.Material_Code)) {
-        names.set(r.Material_Code, { name: r.Material_Name, uom: r.UOM })
+      demand.set(r.Material_Key, (demand.get(r.Material_Key) ?? 0) + r.For_1_SQM * u.remaining)
+      if (!names.has(r.Material_Key)) {
+        names.set(r.Material_Key, {
+          name: r.Material_Name, uom: r.UOM,
+          code: r.Material_Code, sap: r.SAP_Code,
+        })
       }
     }
   }
@@ -201,8 +213,12 @@ export function materialBalance(
     tShort += short
     tNet += net
     rows.push({
-      Material_Code: mat,
-      Material_Name: names.get(mat)?.name || meta.get(mat)?.name || '',
+      Material_Code: names.get(mat)?.code ?? mat,
+      SAP_Code: names.get(mat)?.sap ?? '',
+      Material_Key: mat,
+      // The stock master names the component ("… (3MM) C"); the recipe repeats
+      // one generic name across all four rows of a multi-part system.
+      Material_Name: meta.get(mat)?.name || names.get(mat)?.name || '',
       UOM: names.get(mat)?.uom || meta.get(mat)?.uom || '',
       Available_Qty: a,
       Ordered_Qty: o,
@@ -323,19 +339,21 @@ export function systemCodeRows(
 // ─── Stock-only materials (legacy R20.1: recipe-member ∧ no current demand) ──
 export function stockOnlyRows(
   model: SmeModel, units: UnitRef[], materials: SnapshotMaterial[],
-): { Material_Code: string; Material_Name: string; UOM: string; Available_Qty: number; Ordered_Qty: number }[] {
+): { Material_Code: string; SAP_Code: string; Material_Name: string; UOM: string;
+     Available_Qty: number; Ordered_Qty: number }[] {
   const { demand } = demandByMaterial(model, units)
   const recipeMats = new Set<string>()
   for (const rows of model.recipesByCode.values()) {
-    for (const r of rows) recipeMats.add(r.Material_Code)
+    for (const r of rows) recipeMats.add(r.Material_Key)
   }
   return materials
     .filter((m) => {
-      const code = String(m.material_code ?? '').trim()
-      return recipeMats.has(code) && !demand.has(code)
+      const key = matKey(m.material_code, m.sap_code)
+      return recipeMats.has(key) && !demand.has(key)
     })
     .map((m) => ({
       Material_Code: String(m.material_code ?? ''),
+      SAP_Code: sapNorm(m.sap_code),
       Material_Name: String(m.material_name ?? ''),
       UOM: String(m.uom ?? ''),
       Available_Qty: Number(m.available_qty ?? 0) || 0,
