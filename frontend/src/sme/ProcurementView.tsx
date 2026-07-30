@@ -15,6 +15,7 @@ import { fc, fcBg, fcDot, locColor, materialBalance, scopeCoverage, systemCodeRo
 import type { BalanceRow, UnitRef } from './insights'
 import { FulfilPill } from './PriorityList'
 import { RowsExportButtons } from './rowsExport'
+import { materialCodeCol, materialNameCol } from './materialCols'
 
 const procCols = ['Material', 'Name', 'UOM', 'Demand', 'Available', 'On Order',
   'Shortfall', 'Net Shortfall', 'Coverage %']
@@ -28,8 +29,8 @@ const nf = (v: number, d = 3) =>
   v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: d })
 
 const balanceCols: ColumnsType<BalanceRow> = [
-  { title: 'Material', dataIndex: 'Material_Code', key: 'c', width: 120 },
-  { title: 'Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
+  materialCodeCol<BalanceRow>({ width: 150 }),
+  materialNameCol<BalanceRow>({ title: 'Name', width: 240 }),
   { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
   { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
   { title: 'Available', dataIndex: 'Available_Qty', key: 'a', align: 'right', render: (v: number) => nf(v) },
@@ -112,7 +113,7 @@ export default function ProcurementView({ model, units, materials }: {
                       <Chip label="Coverage SQM" value={nf(cs.canSqm, 1)} />
                       <Chip label="SQM Deficit" value={nf(cs.shortSqm, 1)} />
                     </div>
-                    <Table<BalanceRow> sticky={{ offsetHeader: 64 }} size="small" rowKey="Material_Code"
+                    <Table<BalanceRow> sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Material_Code}|${r.SAP_Code ?? ''}`}
                       columns={balanceCols} pagination={false}
                       scroll={{ x: 'max-content' }}
                       dataSource={[...bal.rows].sort((a, b) => a.Coverage_Pct - b.Coverage_Pct)}

@@ -113,12 +113,15 @@ WORKBOOKS: dict[str, str] = {
 #   inventory          PK  (SAP_Code)                       + UQ (Material_Code)
 #   sme_equipment      UQ  (Site_ID, Equipment_Tag_No, Lining_System_Code)
 #   sme_recipe         UQ  (Lining_System_Code, Material_Code, SAP_Code)
-#   sme_inventory_seed PK  (Material_Code)
+#   sme_inventory_seed PK  (Material_Code, SAP_Code)
 CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "inventory": ("SAP_Code",),
     "sme-equipment": ("Site_ID", "Equipment_Tag_No", "Lining_System_Code"),
     "sme-recipes": ("Lining_System_Code", "Material_Code", "SAP_Code"),
-    "sme-materials": ("Material_Code",),
+    # 2026-07-30 COMPONENT IDENTITY: one seed row per PHYSICAL component. Was
+    # ("Material_Code",), which made the four Comp-A/B/C/D drums of a PU system
+    # collide onto one row and overwrite each other.
+    "sme-materials": ("Material_Code", "SAP_Code"),
 }
 
 LEDGER_KINDS = ("ledger",)
@@ -244,6 +247,8 @@ async def apply_master(session, kind: str, plan: dict, username: str,
                        site: str | None = None) -> dict:
     """Apply one master-data plan with native upserts. Returns write counts."""
     from sqlalchemy import update as sa_update
+    from sqlalchemy import and_ as sa_and
+    from sqlalchemy import delete as sa_delete
     from sqlalchemy import func
 
     import backend.api.bulk_import as bi
@@ -270,13 +275,24 @@ async def apply_master(session, kind: str, plan: dict, username: str,
         "inventory": lambda u: table.c["SAP_Code"] == u["SAP_Code"],
         "sme-equipment": lambda u: table.c["id"] == u["id"],
         "sme-recipes": lambda u: table.c["id"] == u["id"],
-        "sme-materials": lambda u: table.c["Material_Code"] == u["Material_Code"],
+        "sme-materials": lambda u: sa_and(
+            table.c["Material_Code"] == u["Material_Code"],
+            table.c["SAP_Code"] == u["SAP_Code"]),
     }[kind]
     for u in plan["updates"]:
         vals = dict(u["diff"])
         if "updated_at" in table.c:
             vals["updated_at"] = func.now()
         await session.execute(sa_update(table).where(where_for(u)).values(**vals))
+
+    # sme-materials only: retire SAP-less placeholder seed rows the workbook has
+    # superseded with real per-component rows. The frozen legacy SQLite seed has
+    # no SAP_Code column, so a cutover lands every material as one blank-SAP row;
+    # left behind it would double-count the stock its components now carry.
+    for s in plan.get("stale", []):
+        await session.execute(sa_delete(table).where(
+            table.c["Material_Code"] == s["Material_Code"],
+            table.c["SAP_Code"] == s["SAP_Code"]))
 
     # Equipment carries a second table: re-seed the SQM baseline. done_sqm=None
     # PRESERVES recorded progress (legacy sme_bootstrap contract).
@@ -296,7 +312,10 @@ async def apply_master(session, kind: str, plan: dict, username: str,
                       f"pg_excel_sync: +{len(plan['inserts'])} "
                       f"~{len(plan['updates'])} ={plan['unchanged']} "
                       f"rejected={len(plan['rejects'])}")
-    return {"upserted": inserted, "updated": len(plan["updates"])}
+    out = {"upserted": inserted, "updated": len(plan["updates"])}
+    if plan.get("stale"):
+        out["retired"] = len(plan["stale"])
+    return out
 
 
 async def apply_ledger(session, plan: dict, username: str) -> dict:

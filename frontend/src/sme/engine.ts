@@ -10,6 +10,13 @@
  *
  * All functions are pure: the model comes from GET /sme/model-snapshot and
  * every recalculation (drag-reorder, what-if) runs entirely in the browser.
+ *
+ * 2026-07-30 COMPONENT IDENTITY ruling (overturns the 2026-07-18 Material_Code
+ * pooling rule) — full rationale in sme_engine.py's module docstring. In short:
+ * a material is (Material_Code, SAP_Code), not Material_Code. GI-8005765 is
+ * four distinct drums (Comp-A/B/C/D at SAPs 1041/-1/-2/-3), so each gets its own
+ * pool, its own shortfall and its own report row. `Material_Key` (see matKey) is
+ * the grouping key everywhere a material used to be keyed by code.
  */
 
 // ─── Snapshot types (GET /sme/model-snapshot) ────────────────────────────────
@@ -27,12 +34,14 @@ export interface SnapshotRecipe {
   Lining_System_Code: string | number
   Lining_System_Name?: string | null
   Material_Code: string
+  SAP_Code?: string | null
   Material_Name?: string | null
   UOM?: string | null
   For_1_SQM?: number | string | null
 }
 export interface SnapshotMaterial {
   material_code: string
+  sap_code?: string | null
   material_name?: string | null
   uom?: string | null
   available_qty?: number | string | null
@@ -62,6 +71,8 @@ export interface AllocationLine {
   Lining_System_Short_Name: string
   Total_SQM: number
   Material_Code: string
+  SAP_Code: string
+  Material_Key: string
   Material_Name: string
   UOM: string
   For_1_SQM: number
@@ -91,6 +102,7 @@ export interface FeasibilityRow {
   Completion_Pct: number
   Status: string
   Bottleneck_Material_Code: string
+  Bottleneck_SAP_Code: string
   Bottleneck_Material_Name: string
   Bottleneck_Shortfall: number
 }
@@ -105,6 +117,7 @@ export interface SuggestionRow {
 }
 export interface ProcurementRow {
   Material_Code: string
+  SAP_Code: string
   Material_Name: string
   UOM: string
   Available_Qty: number
@@ -114,6 +127,7 @@ export interface ProcurementRow {
 }
 export interface MaterialTotal {
   Material_Code: string
+  SAP_Code: string
   Material_Name: string
   UOM: string
   Demand_Qty: number
@@ -141,6 +155,7 @@ export interface SqmUnitRow {
 }
 export interface BlockingMaterial {
   Material_Code: string
+  SAP_Code: string
   Material_Name: string
   UOM: string
   Demand_Qty: number
@@ -181,10 +196,12 @@ interface Unit { total_original: number; remaining: number; done: number; short_
 export interface SmeModel {
   units: Map<string, Unit> // key `${tag}\u0000${code}`
   codesByTag: Map<string, string[]>
-  recipesByCode: Map<string, { Material_Code: string; Material_Name: string; UOM: string; For_1_SQM: number }[]>
+  recipesByCode: Map<string, { Material_Code: string; SAP_Code: string; Material_Key: string;
+    Material_Name: string; UOM: string; For_1_SQM: number }[]>
+  /** Keyed by matKey() — one pool per COMPONENT, not per Material_Code. */
   poolInit: Map<string, number>
   poolOrderedInit: Map<string, number>
-  matMeta: Map<string, { Material_Name: string; UOM: string }>
+  matMeta: Map<string, { Material_Code: string; SAP_Code: string; Material_Name: string; UOM: string }>
   tagMeta: Map<string, { Name: string; Location: string; Type: string; Substrate: string }>
   defaultOrder: string[]
 }
@@ -208,6 +225,17 @@ function num(v: unknown): number {
 }
 
 const s = (v: unknown): string => (v === null || v === undefined ? '' : String(v).trim())
+
+/** Whitespace-stripped SAP code. The ERP writes the same variant as "1043-2"
+ *  and "1043 - 2"; both must land in the same component pool. */
+export const sapNorm = (v: unknown): string =>
+  (v === null || v === undefined ? '' : String(v).replace(/\s+/g, ''))
+
+/** The component identity used as a pool / grouping / sort key. Sorting this
+ *  string groups components under their material and orders them A→D by variant
+ *  SAP ("M7|77" < "M7|77-1" < …). `|` never occurs in a code. */
+export const matKey = (materialCode: unknown, sapCode: unknown): string =>
+  `${s(materialCode)}|${sapNorm(sapCode)}`
 
 const ukey = (tag: string, code: string) => `${tag}\u0000${code}`
 
@@ -236,7 +264,9 @@ export function buildModel(
   for (const r of recipes) {
     const code = s(r.Lining_System_Code)
     const row = {
-      Material_Code: s(r.Material_Code), Material_Name: s(r.Material_Name),
+      Material_Code: s(r.Material_Code), SAP_Code: sapNorm(r.SAP_Code),
+      Material_Key: matKey(r.Material_Code, r.SAP_Code),
+      Material_Name: s(r.Material_Name),
       UOM: s(r.UOM), For_1_SQM: num(r.For_1_SQM),
     }
     if (!recipesByCode.has(code)) recipesByCode.set(code, [])
@@ -286,7 +316,8 @@ export function buildModel(
   const poolOrderedInit = new Map<string, number>()
   const matMeta: SmeModel['matMeta'] = new Map()
   for (const m of materials) {
-    const mat = s(m.material_code)
+    // 2026-07-30 COMPONENT IDENTITY: one pool per (code, SAP), not per code.
+    const mat = matKey(m.material_code, m.sap_code)
     poolInit.set(mat, num(m.available_qty))
     // 2026-07-28 EFFECTIVE-ORDERED ruling (Q2a) — mirrors sme_engine.py.
     // ordered_qty is a static workbook snapshot never decremented on delivery;
@@ -294,7 +325,10 @@ export function buildModel(
     // receipts off the order stops delivered stock being counted twice.
     const effOrdered = num(m.ordered_qty) - num(m.received_qty)
     poolOrderedInit.set(mat, effOrdered > 0 ? effOrdered : 0)
-    matMeta.set(mat, { Material_Name: s(m.material_name), UOM: s(m.uom) })
+    matMeta.set(mat, {
+      Material_Code: s(m.material_code), SAP_Code: sapNorm(m.sap_code),
+      Material_Name: s(m.material_name), UOM: s(m.uom),
+    })
   }
 
   return {
@@ -326,7 +360,8 @@ export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLin
       const unit = model.units.get(ukey(tag, code))!
       const remaining = unit.remaining
       for (const r of model.recipesByCode.get(code) ?? []) {
-        const mat = r.Material_Code
+        const mat = r.Material_Key
+        const meta = model.matMeta.get(mat)
         const demand = r.For_1_SQM * remaining
         const before = pool.get(mat) ?? 0
         const alloc = Math.min(demand, before)
@@ -340,8 +375,14 @@ export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLin
           Lining_System_Code: code,
           Lining_System_Short_Name: unit.short_name,
           Total_SQM: roundN(remaining, 2),
-          Material_Code: mat,
-          Material_Name: r.Material_Name || (model.matMeta.get(mat)?.Material_Name ?? ''),
+          Material_Code: r.Material_Code,
+          SAP_Code: r.SAP_Code,
+          Material_Key: mat,
+          // The STOCK master's name wins: the recipe repeats one generic name
+          // on all four component lines of a multi-part system, while the stock
+          // master names the actual component ("… (3MM) A"). Recipe name is the
+          // fallback for a SAP with no stock row. (Mirrors sme_engine.py.)
+          Material_Name: meta?.Material_Name || r.Material_Name,
           UOM: r.UOM,
           For_1_SQM: r.For_1_SQM,
           Demand_Qty: d4,
@@ -363,7 +404,7 @@ export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLin
   // ── pass 2: ON-ORDER stock against the remaining gap, same priority walk ─
   for (let i = 0; i < lines.length; i += 1) {
     const ln = lines[i]
-    const mat = ln.Material_Code
+    const mat = ln.Material_Key
     const gap = raw[i].demand - raw[i].avail
     const before = poolOrdered.get(mat) ?? 0
     const alloc = gap > 0 ? Math.min(gap, before) : 0
@@ -436,6 +477,7 @@ export function computeFeasibility(
       Completion_Pct: completion,
       Status: status,
       Bottleneck_Material_Code: hasBn ? bottleneck!.Material_Code : '—',
+      Bottleneck_SAP_Code: hasBn ? bottleneck!.SAP_Code : '—',
       Bottleneck_Material_Name: hasBn ? bottleneck!.Material_Name : '—',
       Bottleneck_Shortfall: hasBn ? bottleneck!.Shortfall_Available_Qty : 0,
     })
@@ -492,19 +534,23 @@ export function buildProcurementList(model: SmeModel, lines: AllocationLine[]): 
   // Keyed on the NET shortfall, so stock already on order is not re-ordered.
   const shortage = new Map<string, number>()
   const gross = new Map<string, number>()
+  const ident = new Map<string, AllocationLine>()
   for (const ln of lines) {
-    shortage.set(ln.Material_Code, (shortage.get(ln.Material_Code) ?? 0) + ln.Shortfall_Qty)
-    gross.set(ln.Material_Code, (gross.get(ln.Material_Code) ?? 0) + ln.Shortfall_Available_Qty)
+    shortage.set(ln.Material_Key, (shortage.get(ln.Material_Key) ?? 0) + ln.Shortfall_Qty)
+    gross.set(ln.Material_Key, (gross.get(ln.Material_Key) ?? 0) + ln.Shortfall_Available_Qty)
+    if (!ident.has(ln.Material_Key)) ident.set(ln.Material_Key, ln)
   }
   const out: ProcurementRow[] = []
   for (const mat of [...shortage.keys()].sort(strCompare)) {
     const v = shortage.get(mat)!
     if (v <= 0) continue
     const meta = model.matMeta.get(mat)
+    const ln = ident.get(mat)!
     out.push({
-      Material_Code: mat,
-      Material_Name: meta?.Material_Name ?? '',
-      UOM: meta?.UOM ?? '',
+      Material_Code: ln.Material_Code,
+      SAP_Code: ln.SAP_Code,
+      Material_Name: meta?.Material_Name || ln.Material_Name,
+      UOM: meta?.UOM || ln.UOM,
       Available_Qty: model.poolInit.get(mat) ?? 0,
       Ordered_Qty: model.poolOrderedInit.get(mat) ?? 0,
       Gross_Shortfall_Qty: roundN(gross.get(mat) ?? 0, 3),
@@ -512,21 +558,23 @@ export function buildProcurementList(model: SmeModel, lines: AllocationLine[]): 
     })
   }
   out.sort((a, b) => b.Shortage_Qty_To_Buy - a.Shortage_Qty_To_Buy
-    || strCompare(a.Material_Code, b.Material_Code))
+    || strCompare(a.Material_Code, b.Material_Code)
+    || strCompare(a.SAP_Code, b.SAP_Code))
   return out
 }
 
 export function buildTotals(lines: AllocationLine[]): MaterialTotal[] {
   const totals = new Map<string, MaterialTotal>()
   for (const ln of lines) {
-    let t = totals.get(ln.Material_Code)
+    let t = totals.get(ln.Material_Key)
     if (t === undefined) {
       t = {
-        Material_Code: ln.Material_Code, Material_Name: ln.Material_Name, UOM: ln.UOM,
+        Material_Code: ln.Material_Code, SAP_Code: ln.SAP_Code,
+        Material_Name: ln.Material_Name, UOM: ln.UOM,
         Demand_Qty: 0, Allocated_Qty: 0, Alloc_Available: 0, Alloc_Ordered: 0,
         Shortfall_Available_Qty: 0, Shortfall_Qty: 0,
       }
-      totals.set(ln.Material_Code, t)
+      totals.set(ln.Material_Key, t)
     }
     t.Demand_Qty += ln.Demand_Qty
     t.Allocated_Qty += ln.Allocated_Qty
@@ -631,14 +679,15 @@ export function buildSqmByCode(
   for (const ln of lines) {
     if (!block.has(ln.Lining_System_Code)) block.set(ln.Lining_System_Code, new Map())
     const m = block.get(ln.Lining_System_Code)!
-    let b = m.get(ln.Material_Code)
+    let b = m.get(ln.Material_Key)
     if (b === undefined) {
       b = {
-        Material_Code: ln.Material_Code, Material_Name: ln.Material_Name, UOM: ln.UOM,
+        Material_Code: ln.Material_Code, SAP_Code: ln.SAP_Code,
+        Material_Name: ln.Material_Name, UOM: ln.UOM,
         Demand_Qty: 0, Alloc_Available: 0, Alloc_Ordered: 0,
         Shortfall_Available_Qty: 0, Shortfall_Qty: 0,
       }
-      m.set(ln.Material_Code, b)
+      m.set(ln.Material_Key, b)
     }
     for (const f of BSUM) b[f] += ln[f]
   }
@@ -654,7 +703,8 @@ export function buildSqmByCode(
         return o
       })
     mats.sort((x, y) => y.Shortfall_Qty - x.Shortfall_Qty
-      || strCompare(x.Material_Code, y.Material_Code))
+      || strCompare(x.Material_Code, y.Material_Code)
+      || strCompare(x.SAP_Code, y.SAP_Code))
     const row: SqmCodeRow = {
       Lining_System_Code: a.Lining_System_Code, System_Name: a.System_Name,
       Equipment_Count: a.Equipment_Count,

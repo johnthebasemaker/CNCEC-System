@@ -85,6 +85,9 @@ const RECIPE_FIELDS: FieldDef[] = [
 // seed's PascalCase columns. `from` maps grid row → form value on edit.
 const MATERIAL_FIELDS: FieldDef[] = [
   { name: 'Material_Code', label: 'Material Code', required: true, from: 'material_code' },
+  // 2026-07-30 COMPONENT IDENTITY: part of the row key. A multi-part system is
+  // four rows sharing one Material_Code; the variant SAP says which drum.
+  { name: 'SAP_Code', label: 'SAP Code (component variant)', from: 'sap_code' },
   { name: 'Material_Name', label: 'Material Name', from: 'material_name' },
   { name: 'Item', label: 'Item', from: 'item' },
   { name: 'Vendor', label: 'Vendor', from: 'vendor' },
@@ -126,10 +129,12 @@ interface CrudTabProps {
   deleteWarning?: string
   // materials: PK is immutable on edit; create is an upsert on the PK.
   lockOnEdit?: string[]
+  /** Extra query params identifying the row (materials: the variant SAP). */
+  rowParams?: (r: Row) => Record<string, string>
 }
 
 function CrudTab({ kind, fields, idKey, siteId, needsSite, siteMissing,
-                   deleteWarning, lockOnEdit }: CrudTabProps) {
+                   deleteWarning, lockOnEdit, rowParams }: CrudTabProps) {
   const { message } = App.useApp()
   const list = useSmeMasterList(kind, siteId)
   const create = useSmeMasterCreate(kind)
@@ -162,7 +167,8 @@ function CrudTab({ kind, fields, idKey, siteId, needsSite, siteMissing,
     try {
       if (editing) {
         for (const locked of lockOnEdit ?? []) delete body[locked]
-        await patch.mutateAsync({ id: editing[idKey] as string | number, body })
+        await patch.mutateAsync({ id: editing[idKey] as string | number, body,
+                                  params: rowParams?.(editing) })
         message.success('Updated')
       } else {
         await create.mutateAsync(body)
@@ -176,7 +182,8 @@ function CrudTab({ kind, fields, idKey, siteId, needsSite, siteMissing,
 
   const remove = async (r: Row) => {
     try {
-      await del.mutateAsync(r[idKey] as string | number)
+      await del.mutateAsync({ id: r[idKey] as string | number,
+                              params: rowParams?.(r) })
       message.success('Deleted')
     } catch (e) {
       message.error(errMsg(e))
@@ -425,9 +432,10 @@ export default function MasterData({ siteId }: { siteId?: string }) {
           {
             key: 'materials', label: 'Materials seed',
             children: <CrudTab kind="materials" fields={MATERIAL_FIELDS}
+              rowParams={(r) => ({ sap_code: String(r.sap_code ?? '') })}
               idKey="material_code" siteId={siteId} needsSite={false} siteMissing={false}
               deleteWarning="Delete this seed row? ERP receipts/consumption history is preserved."
-              lockOnEdit={['Material_Code']} />,
+              lockOnEdit={['Material_Code', 'SAP_Code']} />,
           },
           {
             key: 'progress', label: 'SQM Progress',

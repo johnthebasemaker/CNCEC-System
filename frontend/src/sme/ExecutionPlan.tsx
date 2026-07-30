@@ -25,6 +25,7 @@ import KpiDrill from './KpiDrill'
 import { FulfilPill } from './PriorityList'
 import { useScenario } from './ScenarioContext'
 import { codeStats } from './session'
+import { materialCodeCol, materialNameCol } from './materialCols'
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
 const nf = (v: number, d = 3) =>
@@ -38,8 +39,8 @@ const CodePill = ({ code }: { code: string }) => (
 )
 
 const shortageCols: ColumnsType<AllocationLine> = [
-  { title: 'Material', dataIndex: 'Material_Code', key: 'c', width: 120 },
-  { title: 'Name', dataIndex: 'Material_Name', key: 'n', ellipsis: true },
+  materialCodeCol<AllocationLine>({ width: 150 }),
+  materialNameCol<AllocationLine>({ title: 'Name', width: 240 }),
   { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
   { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
   { title: 'Allocated', dataIndex: 'Allocated_Qty', key: 'a', align: 'right', render: (v: number) => nf(v) },
@@ -146,7 +147,7 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
         {critLines.length === 0 ? (
           <Alert type="success" showIcon title="No shortages — fully covered ✅" />
         ) : (
-          <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Code}`}
+          <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Key}`}
             columns={shortageCols} dataSource={critLines} pagination={false}
             scroll={{ x: 'max-content' }} />
         )}
@@ -169,7 +170,7 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
             {ls.length === 0 ? (
               <Alert type="success" showIcon title="No shortages — fully covered ✅" />
             ) : (
-              <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Code}`}
+              <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Key}`}
                 columns={shortageCols} dataSource={ls} pagination={false}
                 scroll={{ x: 'max-content' }} />
             )}
@@ -311,6 +312,8 @@ function ProgressList({ model, snap, siteId }: { model: SmeModel; snap: SmeSnaps
                   <div style={{ ...mono, fontSize: '0.75rem', fontWeight: 700, marginBottom: 4 }}>
                     {date} — {nf(d.sqm, 2)} SQM done
                   </div>
+                  {/* Consumption LOG rows are historical ledger entries, not
+                      allocation output — they carry no SAP_Code. */}
                   <Table sticky={{ offsetHeader: 64 }} size="small" rowKey="Material_Code" pagination={false}
                     scroll={{ x: 'max-content' }}
                     columns={[

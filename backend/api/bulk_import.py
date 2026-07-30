@@ -27,8 +27,14 @@ full plan and a COMMIT mode that applies it in one transaction + audits:
                  aggregation with SQM summing, Location canonicalisation).
   sme-recipes    For_1_SQM.xlsx → sme_recipe upsert on (code, material).
   sme-materials  Materials_DetailsAvailable_Qty.xlsx → sme_inventory_seed
-                 upsert on Material_Code (ports _clean_inventory_seed: one
-                 row per code, quantities summed across PO lines).
+                 upsert on (Material_Code, SAP_Code) — one row per PHYSICAL
+                 component, quantities summed across that component's PO
+                 lines. A multi-part system lists one Material_Code as four
+                 Comp-A/B/C/D drums at variant SAPs (2026-07-30 ruling);
+                 keying on the code alone summed all four into one figure.
+                 SAP-less placeholder rows left by a cutover (the frozen
+                 legacy SQLite seed has no SAP_Code column) are retired once
+                 the workbook supplies real SAPs for that code.
 
 Roles: SME kinds are the Master-Data exact-lock {hod, admin}; `inventory` and
 `ledger` are admin-only. HOD site pinning follows sme_master._write_site.
@@ -698,7 +704,13 @@ async def plan_sme_materials(session: AsyncSession, data: bytes) -> dict:
     mat_i = _col(headers, "Material_Code")
     if mat_i is None:
         raise HTTPException(422, "Material_Code column missing")
-    agg: dict[str, dict] = {}
+    # 2026-07-30 COMPONENT IDENTITY: aggregate per (Material_Code, SAP_Code).
+    # This used to key on Material_Code alone, which SUMMED the four Comp-A/B/C/D
+    # rows of a PU system into one stock figure and joined their SAPs into a
+    # comma list — four distinct drums recorded as one bucket. Repeat rows for
+    # the SAME component (several purchase documents for one SAP) still sum,
+    # which is the aggregation that was always intended.
+    agg: dict[tuple[str, str], dict] = {}
     for row in rows:
         mat = _s(row[mat_i]) if mat_i < len(row) else None
         if not mat:
@@ -707,61 +719,106 @@ async def plan_sme_materials(session: AsyncSession, data: bytes) -> dict:
         def cell(key):
             i = ix[key]
             return row[i] if i is not None and i < len(row) else None
-        a = agg.setdefault(mat, {"Initial_Available_Qty": 0.0,
-                                 "Initial_Ordered_Qty": 0.0})
+        # The ERP writes the same variant as "1043-2" and "1043 - 2".
+        sap = "".join((_s(cell("sap")) or "").split())
+        a = agg.setdefault((mat, sap), {"Initial_Available_Qty": 0.0,
+                                        "Initial_Ordered_Qty": 0.0})
         a["Initial_Available_Qty"] += _f(cell("avail")) or 0.0
         a["Initial_Ordered_Qty"] += _f(cell("ordered")) or 0.0
         dd = cell("Document_Date")
         dd = (_iso(dd) or "")[:10] or None
         if dd and dd > (a.get("Document_Date") or ""):
             a["Document_Date"] = dd  # most recent PO date wins
-        sap = _s(cell("sap"))
-        if sap is not None:  # one material can span variant SAPs (1041-1 …)
-            saps = a.setdefault("_saps", [])
-            if sap not in saps:
-                saps.append(sap)
         for field in ("Item", "Vendor", "Purchasing_Document",
                       "Material_Name", "Nature", "UOM"):
             v = _s(cell(field))
             if v is not None and field not in a:
                 a[field] = v
-    existing = {r["Material_Code"]: dict(r) for r in
-                (await session.execute(select(seed_t))).mappings().all()}
+    existing = {(r["Material_Code"], _s(r.get("SAP_Code")) or ""): dict(r)
+                for r in (await session.execute(select(seed_t))).mappings().all()}
     inserts, updates, unchanged = [], [], 0
-    for mat, a in agg.items():
-        saps = a.pop("_saps", None)
-        if saps:
-            a["SAP_Code"] = ", ".join(saps)
+    for (mat, sap), a in agg.items():
         a["Initial_Available_Qty"] = round(a["Initial_Available_Qty"], 4)
         a["Initial_Ordered_Qty"] = round(a["Initial_Ordered_Qty"], 4)
-        cur = existing.get(mat)
+        cur = existing.get((mat, sap))
         if cur is None:
-            inserts.append({"Material_Code": mat, **a})
+            inserts.append({"Material_Code": mat, "SAP_Code": sap, **a})
         else:
             diff = {k: v for k, v in a.items() if cur.get(k) != v}
             if diff:
-                updates.append({"Material_Code": mat, "diff": diff})
+                updates.append({"Material_Code": mat, "SAP_Code": sap, "diff": diff})
             else:
                 unchanged += 1
+    # ── retire SAP-less placeholder rows the workbook has superseded ─────────
+    # The FROZEN legacy SQLite seed has no SAP_Code column at all, so a cutover
+    # lands every material as one row with SAP_Code = ''. The first workbook sync
+    # then inserts the real per-component rows beside it, and without this the
+    # placeholder lingers forever — a phantom material carrying the whole
+    # pre-split quantity, double-counting the stock it was replaced by.
+    #
+    # Scoped tightly, on TWO conditions:
+    #   1. the workbook supplied at least one real SAP for that Material_Code
+    #      (a material the workbook genuinely lists without one keeps its row);
+    #   2. no SAP-LESS RECIPE line still references that material. The frozen
+    #      legacy DB carries 86 pre-workbook recipe rows with no SAP at all, and
+    #      those lines can only draw on a blank-SAP seed row — retiring it would
+    #      leave them with a zero pool and read as a total shortage. When this
+    #      guard holds a row back, the fix is the documented SME reseed
+    #      (`pg_excel_sync --sme-reseed`), which replaces both sides from the
+    #      workbook, NOT deleting live stock rows out from under a live recipe.
+    coded = {mat for (mat, sap) in agg if sap}
+    sapless_recipe_mats = {
+        r[0] for r in (await session.execute(
+            select(recipe_t.c["Material_Code"])
+            .where(func.coalesce(func.trim(recipe_t.c["SAP_Code"]), "") == ""))).all()}
+    stale = [{"Material_Code": mat, "SAP_Code": sap}
+             for (mat, sap) in existing
+             if mat in coded and not sap and (mat, sap) not in agg
+             and mat not in sapless_recipe_mats]
+    held = sorted({mat for (mat, sap) in existing
+                   if mat in coded and not sap and (mat, sap) not in agg
+                   and mat in sapless_recipe_mats})
+    warnings = []
+    if stale:
+        warnings.append(
+            f"{len(stale)} SAP-less placeholder row(s) superseded by the "
+            f"workbook's per-component rows will be removed "
+            f"({', '.join(sorted(s['Material_Code'] for s in stale)[:5])}"
+            f"{'…' if len(stale) > 5 else ''})")
+    if held:
+        warnings.append(
+            f"{len(held)} pooled seed row(s) KEPT because SAP-less recipe lines "
+            f"still reference them — the stock would otherwise vanish from under "
+            f"a live recipe. Run an SME reseed (--sme-reseed) to replace both "
+            f"sides from the workbook: "
+            f"{', '.join(held[:5])}{'…' if len(held) > 5 else ''}")
     return {"inserts": inserts, "updates": updates, "unchanged": unchanged,
-            "rejects": [], "warnings": []}
+            "rejects": [], "warnings": warnings, "stale": stale}
 
 
 async def apply_sme_materials(session: AsyncSession, plan: dict, username: str) -> None:
+    keys = ("Material_Code", "SAP_Code")
     for row in plan["inserts"]:
         stmt = pg_insert(seed_t).values(**row, updated_at=func.now())
         stmt = stmt.on_conflict_do_update(
-            index_elements=["Material_Code"],
-            set_={**{k: stmt.excluded[k] for k in row if k != "Material_Code"},
+            index_elements=list(keys),
+            set_={**{k: stmt.excluded[k] for k in row if k not in keys},
                   "updated_at": func.now()})
         await session.execute(stmt)
     for u in plan["updates"]:
         await session.execute(update(seed_t)
-                              .where(seed_t.c["Material_Code"] == u["Material_Code"])
+                              .where(seed_t.c["Material_Code"] == u["Material_Code"],
+                                     seed_t.c["SAP_Code"] == u["SAP_Code"])
                               .values(**u["diff"], updated_at=func.now()))
+    stale = plan.get("stale") or []
+    for s in stale:
+        await session.execute(delete(seed_t).where(
+            seed_t.c["Material_Code"] == s["Material_Code"],
+            seed_t.c["SAP_Code"] == s["SAP_Code"]))
     await write_audit(session, username, "BULK_IMPORT_SME_MATERIALS",
                       "sme_inventory_seed",
-                      f"+{len(plan['inserts'])} ~{len(plan['updates'])}")
+                      f"+{len(plan['inserts'])} ~{len(plan['updates'])} "
+                      f"-{len(stale)}")
 
 
 # ─── endpoints ────────────────────────────────────────────────────────────────
@@ -772,8 +829,11 @@ def _summary(plan: dict) -> dict:
                     "matched": s["matched"], "zero_skipped": s["zero_skipped"],
                     "db_only": s["db_only"]}
                 for k, s in plan["sections"].items()}
-    return {"inserts": len(plan["inserts"]), "updates": len(plan["updates"]),
-            "unchanged": plan["unchanged"], "rejects": len(plan["rejects"])}
+    out = {"inserts": len(plan["inserts"]), "updates": len(plan["updates"]),
+           "unchanged": plan["unchanged"], "rejects": len(plan["rejects"])}
+    if plan.get("stale"):
+        out["stale_removed"] = len(plan["stale"])
+    return out
 
 
 async def _read_upload(file: UploadFile) -> bytes:

@@ -17,15 +17,36 @@ material) granularity) and pages_internal/material_estimator_engine.py
                      max(Original_SQM − (Done_SQM + Done_SQM_staged), 0),
                      falling back to the summed Surface_Area_SQM when no
                      progress row exists (legacy load_all() steps 5–7).
-  * allocation     = one GLOBAL pool per material; tags consume it strictly in
-                     priority order; codes within a tag in numeric-first order;
-                     materials within a code in recipe (id) order.
+  * allocation     = one GLOBAL pool per material COMPONENT; tags consume it
+                     strictly in priority order; codes within a tag in
+                     numeric-first order; materials within a code in recipe
+                     (id) order.
   * rounding       = quantities 4 dp, percentages 2 dp — matching the legacy
                      cascade. round_n() is half-up via floor(x·10ⁿ + 0.5) in
                      BOTH languages so ties can never diverge between runtimes
                      (Python's built-in round() is half-even; JS has no
                      built-in — this shared formula replaces both).
   * statuses       = the exact legacy label strings (✅ / 🟡 / 🔴).
+
+2026-07-30 COMPONENT IDENTITY ruling (overturns the 2026-07-18 Material_Code
+pooling rule, which read: "component lines sharing one Material_Code keep their
+own demand rows but read the SAME pooled stock figure"):
+
+  A material is identified by (Material_Code, SAP_Code), NOT by Material_Code
+  alone. Multi-part chemical systems list one code as several distinct physical
+  components — GI-8005765 is four rows, Comp-A/B/C/D, separated only by the
+  variant SAP (1041 / 1041-1 / 1041-2 / 1041-3) — and each component is a
+  different drum on a different shelf. Pooling them summed four unlike things
+  into one bucket, so the earlier recipe lines drained stock that belonged to
+  the later ones and the bottleneck ratio was meaningless.
+
+  Each component therefore gets its OWN available pool, its OWN on-order pool,
+  its OWN shortfall, and its OWN row in every report. `Material_Key` (below) is
+  the grouping key everywhere a material used to be keyed by code.
+
+  SAP codes are whitespace-normalized on both sides of the join, because the
+  ERP carries entries like "1043 - 2" for the same component the recipe calls
+  "1043-2" (same rule as _CALC_POOL_SQL in sme.py).
 
 Deliberate, documented deviations from legacy:
   * non-numeric system codes sort after numeric ones instead of crashing
@@ -69,6 +90,22 @@ def _s(v: Any) -> str:
     return str(v).strip() if v is not None else ""
 
 
+def sap_norm(v: Any) -> str:
+    """Whitespace-stripped SAP code. The ERP writes the same variant as "1043-2"
+    and "1043 - 2"; both must land in the same component pool."""
+    return "".join(str(v).split()) if v is not None else ""
+
+
+def mat_key(material_code: Any, sap_code: Any) -> str:
+    """The component identity used as a pool / grouping / sort key.
+
+    Sorting this string groups components under their material and orders them
+    A→D by variant SAP ("M7|77" < "M7|77-1" < …), which is exactly the reading
+    order the reports want. `|` never occurs in a Material_Code or SAP code.
+    """
+    return f"{_s(material_code)}|{sap_norm(sap_code)}"
+
+
 def syscode_sort_key(code: str) -> tuple:
     """Numeric-first ordering for lining-system codes (legacy sorted by int)."""
     s = _s(code)
@@ -89,6 +126,8 @@ def build_model(equipment: list[dict], recipes: list[dict],
     for r in recipes:
         code = _s(r.get("Lining_System_Code"))
         row = {"Material_Code": _s(r.get("Material_Code")),
+               "SAP_Code": sap_norm(r.get("SAP_Code")),
+               "Material_Key": mat_key(r.get("Material_Code"), r.get("SAP_Code")),
                "Material_Name": _s(r.get("Material_Name")),
                "UOM": _s(r.get("UOM")),
                "For_1_SQM": _num(r.get("For_1_SQM"))}
@@ -136,7 +175,8 @@ def build_model(equipment: list[dict], recipes: list[dict],
     pool_ordered_init: dict[str, float] = {}
     mat_meta: dict[str, dict] = {}
     for m in materials:
-        mat = _s(m.get("material_code"))
+        # 2026-07-30 COMPONENT IDENTITY: one pool per (code, SAP), not per code.
+        mat = mat_key(m.get("material_code"), m.get("sap_code"))
         pool_init[mat] = _num(m.get("available_qty"))
         # 2026-07-28 EFFECTIVE-ORDERED ruling (Q2a). `ordered_qty` is the raw
         # Initial_Ordered_Qty workbook snapshot and is NEVER decremented when
@@ -147,7 +187,9 @@ def build_model(equipment: list[dict], recipes: list[dict],
         # order is self-correcting and needs no schema change.
         eff_ordered = _num(m.get("ordered_qty")) - _num(m.get("received_qty"))
         pool_ordered_init[mat] = eff_ordered if eff_ordered > 0.0 else 0.0
-        mat_meta[mat] = {"Material_Name": _s(m.get("material_name")),
+        mat_meta[mat] = {"Material_Code": _s(m.get("material_code")),
+                         "SAP_Code": sap_norm(m.get("sap_code")),
+                         "Material_Name": _s(m.get("material_name")),
                          "UOM": _s(m.get("uom"))}
 
     return {"units": units, "codes_by_tag": codes_by_tag,
@@ -199,7 +241,8 @@ def cascade_allocate(model: dict, order: list[str]) -> list[dict]:
             unit = model["units"][(tag, code)]
             remaining = unit["remaining"]
             for r in model["recipes_by_code"].get(code, []):
-                mat = r["Material_Code"]
+                mat = r["Material_Key"]
+                meta = model["mat_meta"].get(mat, {})
                 demand = r["For_1_SQM"] * remaining
                 before = pool.get(mat, 0.0)
                 alloc = min(demand, before)
@@ -211,9 +254,17 @@ def cascade_allocate(model: dict, order: list[str]) -> list[dict]:
                     "Lining_System_Code": code,
                     "Lining_System_Short_Name": unit["short_name"],
                     "Total_SQM": round_n(remaining, 2),
-                    "Material_Code": mat,
-                    "Material_Name": r["Material_Name"] or
-                                     model["mat_meta"].get(mat, {}).get("Material_Name", ""),
+                    "Material_Code": r["Material_Code"],
+                    "SAP_Code": r["SAP_Code"],
+                    "Material_Key": mat,
+                    # The STOCK master's name wins. For a multi-part system the
+                    # recipe repeats one generic name on all four lines
+                    # ("Cumicrete PU MF 300 - 3mm"), while the stock master
+                    # names the actual component ("… (3MM) A"). Showing the
+                    # generic name four times makes the rows unidentifiable in
+                    # the UI, so the specific name leads and the recipe name is
+                    # the fallback for a SAP with no stock row.
+                    "Material_Name": meta.get("Material_Name") or r["Material_Name"],
                     "UOM": r["UOM"],
                     "For_1_SQM": r["For_1_SQM"],
                     "Demand_Qty": d4,
@@ -227,7 +278,7 @@ def cascade_allocate(model: dict, order: list[str]) -> list[dict]:
                 })
     # ── pass 2: on-order stock, same priority walk ──────────────────────────
     for ln in lines:
-        mat = ln["Material_Code"]
+        mat = ln["Material_Key"]
         gap = ln["_demand"] - ln["_avail"]
         before = pool_ordered.get(mat, 0.0)
         alloc = min(gap, before) if gap > 0.0 else 0.0
@@ -298,6 +349,7 @@ def compute_feasibility(model: dict, lines: list[dict], order: list[str]) -> lis
             "Completion_Pct": completion,
             "Status": status,
             "Bottleneck_Material_Code": bottleneck["Material_Code"] if has_bn else "—",
+            "Bottleneck_SAP_Code": bottleneck["SAP_Code"] if has_bn else "—",
             "Bottleneck_Material_Name": bottleneck["Material_Name"] if has_bn else "—",
             "Bottleneck_Shortfall": bottleneck["Shortfall_Available_Qty"] if has_bn else 0.0,
         })
@@ -391,8 +443,9 @@ def build_sqm_by_code(lines: list[dict], rollup: list[dict]) -> list[dict]:
     block: dict[str, dict[str, dict]] = {}
     for ln in lines:
         code = ln["Lining_System_Code"]
-        b = block.setdefault(code, {}).setdefault(ln["Material_Code"], {
+        b = block.setdefault(code, {}).setdefault(ln["Material_Key"], {
             "Material_Code": ln["Material_Code"],
+            "SAP_Code": ln["SAP_Code"],
             "Material_Name": ln["Material_Name"], "UOM": ln["UOM"],
             "Demand_Qty": 0.0, "Alloc_Available": 0.0, "Alloc_Ordered": 0.0,
             "Shortfall_Available_Qty": 0.0, "Shortfall_Qty": 0.0})
@@ -408,7 +461,8 @@ def build_sqm_by_code(lines: list[dict], rollup: list[dict]) -> list[dict]:
                  for k, v in m.items()}
                 for m in block.get(code, {}).values()
                 if m["Shortfall_Available_Qty"] > 0]
-        mats.sort(key=lambda m: (-m["Shortfall_Qty"], m["Material_Code"]))
+        mats.sort(key=lambda m: (-m["Shortfall_Qty"], m["Material_Code"],
+                                 m["SAP_Code"]))
         out.append({**{k: round_n(v, 2) if isinstance(v, float) else v
                        for k, v in a.items()},
                     "Equipment_Tags": ", ".join(tags),
@@ -469,31 +523,37 @@ def build_procurement_list(model: dict, lines: list[dict]) -> list[dict]:
     single most expensive mistake this two-tier split prevents."""
     shortage: dict[str, float] = {}
     gross: dict[str, float] = {}
+    ident: dict[str, dict] = {}
     for ln in lines:
-        mat = ln["Material_Code"]
+        mat = ln["Material_Key"]
         shortage[mat] = shortage.get(mat, 0.0) + ln["Shortfall_Qty"]
         gross[mat] = gross.get(mat, 0.0) + ln["Shortfall_Available_Qty"]
+        ident.setdefault(mat, ln)
     out = []
     for mat in sorted(shortage):
         if shortage[mat] <= 0:
             continue
         meta = model["mat_meta"].get(mat, {})
-        out.append({"Material_Code": mat,
-                    "Material_Name": meta.get("Material_Name", ""),
-                    "UOM": meta.get("UOM", ""),
+        ln = ident[mat]
+        out.append({"Material_Code": ln["Material_Code"],
+                    "SAP_Code": ln["SAP_Code"],
+                    "Material_Name": meta.get("Material_Name") or ln["Material_Name"],
+                    "UOM": meta.get("UOM") or ln["UOM"],
                     "Available_Qty": model["pool_init"].get(mat, 0.0),
                     "Ordered_Qty": (model.get("pool_ordered_init") or {}).get(mat, 0.0),
                     "Gross_Shortfall_Qty": round_n(gross.get(mat, 0.0), 3),
                     "Shortage_Qty_To_Buy": round_n(shortage[mat], 3)})
-    out.sort(key=lambda r: (-r["Shortage_Qty_To_Buy"], r["Material_Code"]))
+    out.sort(key=lambda r: (-r["Shortage_Qty_To_Buy"], r["Material_Code"],
+                            r["SAP_Code"]))
     return out
 
 
 def build_totals(lines: list[dict]) -> list[dict]:
     totals: dict[str, dict] = {}
     for ln in lines:
-        t = totals.setdefault(ln["Material_Code"], {
+        t = totals.setdefault(ln["Material_Key"], {
             "Material_Code": ln["Material_Code"],
+            "SAP_Code": ln["SAP_Code"],
             "Material_Name": ln["Material_Name"], "UOM": ln["UOM"],
             "Demand_Qty": 0.0, "Allocated_Qty": 0.0, "Alloc_Available": 0.0,
             "Alloc_Ordered": 0.0, "Shortfall_Available_Qty": 0.0,

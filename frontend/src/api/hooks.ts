@@ -1351,11 +1351,16 @@ export function useSmeMasterCreate(kind: 'equipment' | 'recipes' | 'materials') 
   })
 }
 
+// `params` carries the materials lane's required `sap_code` (2026-07-30
+// COMPONENT IDENTITY): one Material_Code can be four physical components, so
+// the server refuses a code-only edit rather than rewriting all four rows.
 export function useSmeMasterPatch(kind: 'equipment' | 'recipes' | 'materials') {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, body }: { id: string | number; body: Row }) =>
-      api.patch(`/sme/master/${kind}/${encodeURIComponent(String(id))}`, body)
+    mutationFn: ({ id, body, params }: {
+      id: string | number; body: Row; params?: Record<string, string>
+    }) =>
+      api.patch(`/sme/master/${kind}/${encodeURIComponent(String(id))}`, body, { params })
         .then((r) => r.data),
     onSuccess: () => invalidateSmeFamily(qc),
   })
@@ -1364,8 +1369,10 @@ export function useSmeMasterPatch(kind: 'equipment' | 'recipes' | 'materials') {
 export function useSmeMasterDelete(kind: 'equipment' | 'recipes' | 'materials') {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (id: string | number) =>
-      api.delete(`/sme/master/${kind}/${encodeURIComponent(String(id))}`)
+    mutationFn: ({ id, params }: {
+      id: string | number; params?: Record<string, string>
+    }) =>
+      api.delete(`/sme/master/${kind}/${encodeURIComponent(String(id))}`, { params })
         .then((r) => r.data),
     onSuccess: () => invalidateSmeFamily(qc),
   })

@@ -34,30 +34,72 @@ sme_equipment_t = _MD.tables["sme_equipment"]
 sme_recipe_t = _MD.tables["sme_recipe"]
 sme_sqm_t = _MD.tables["sme_sqm_progress"]
 
-# Postgres-native port of the SQLite sme_materials_view (same columns/order).
-SQL_SME_MATERIALS = '''
-SELECT s."Material_Code" AS material_code, s."Material_Name" AS material_name,
+# Postgres-native port of the SQLite sme_materials_view, at PER-COMPONENT grain.
+#
+# 2026-07-30 COMPONENT IDENTITY ruling: one row per (Material_Code, SAP_Code).
+# The frozen SQLite view emits one row per Material_Code and reaches the ledger
+# through inventory.Material_Code, which sums EVERY variant SAP of a multi-part
+# system into a single figure — the clumping this ruling removes. Here each
+# component reads only its OWN SAP's ledger. SAP strings are whitespace-stripped
+# on both sides because the ERP writes "1043 - 2" for the recipe's "1043-2".
+_LEDGER = '''COALESCE((SELECT SUM({t}."Quantity") FROM {tbl} {t}
+                 WHERE REPLACE(TRIM({t}."SAP_Code"), ' ', '')
+                       = REPLACE(TRIM(COALESCE(s."SAP_Code", '')), ' ', '')
+                   AND TRIM(COALESCE(s."SAP_Code", '')) <> ''
+                   AND EXISTS (SELECT 1 FROM inventory i
+                               WHERE REPLACE(TRIM(i."SAP_Code"), ' ', '')
+                                     = REPLACE(TRIM({t}."SAP_Code"), ' ', ''))), 0)'''
+_RECV = _LEDGER.format(t="r", tbl="receipts")
+_CONS = _LEDGER.format(t="c", tbl="consumption")
+
+SQL_SME_MATERIALS = f'''
+SELECT s."Material_Code" AS material_code, s."SAP_Code" AS sap_code,
+       s."Material_Name" AS material_name,
        s."Item" AS item, s."Vendor" AS vendor,
        s."Purchasing_Document" AS purchasing_document, s."Document_Date" AS document_date,
        s."Nature" AS nature, s."UOM" AS uom,
        s."Initial_Available_Qty" AS initial_available_qty,
        s."Initial_Ordered_Qty" AS initial_ordered_qty,
-       COALESCE((SELECT SUM(r."Quantity") FROM receipts r JOIN inventory i ON r."SAP_Code"=i."SAP_Code"
-                 WHERE TRIM(COALESCE(i."Material_Code",''))=TRIM(s."Material_Code")), 0) AS received_qty,
-       COALESCE((SELECT SUM(c."Quantity") FROM consumption c JOIN inventory i ON c."SAP_Code"=i."SAP_Code"
-                 WHERE TRIM(COALESCE(i."Material_Code",''))=TRIM(s."Material_Code")), 0) AS consumed_qty,
-       (s."Initial_Available_Qty"
-        + COALESCE((SELECT SUM(r."Quantity") FROM receipts r JOIN inventory i ON r."SAP_Code"=i."SAP_Code"
-                    WHERE TRIM(COALESCE(i."Material_Code",''))=TRIM(s."Material_Code")), 0)
-        - COALESCE((SELECT SUM(c."Quantity") FROM consumption c JOIN inventory i ON c."SAP_Code"=i."SAP_Code"
-                    WHERE TRIM(COALESCE(i."Material_Code",''))=TRIM(s."Material_Code")), 0)
-       ) AS available_qty,
+       {_RECV} AS received_qty,
+       {_CONS} AS consumed_qty,
+       (s."Initial_Available_Qty" + {_RECV} - {_CONS}) AS available_qty,
        s."Initial_Ordered_Qty" AS ordered_qty
 FROM sme_inventory_seed s
 '''
 
+# ── Legacy parity, restated as a CONSERVATION invariant ──────────────────────
+# The PG port and the frozen SQLite view no longer share a grain, so row-for-row
+# parity is not merely broken — it is the thing we set out to break. What must
+# still hold is that splitting a material into components LOSES NOTHING: rolled
+# back up to Material_Code, every quantity has to match the legacy view exactly.
+# That catches any double-count or dropped SAP the split could introduce, which
+# is the failure mode worth gating on. Both sides are rolled up explicitly.
+_ROLLUP_COLS = '''SELECT material_code,
+       SUM(initial_available_qty) AS initial_available_qty,
+       SUM(initial_ordered_qty)   AS initial_ordered_qty,
+       SUM(received_qty)          AS received_qty,
+       SUM(consumed_qty)          AS consumed_qty,
+       SUM(available_qty)         AS available_qty,
+       SUM(ordered_qty)           AS ordered_qty'''
+
+SQL_SME_MATERIALS_ROLLUP = f'''
+{_ROLLUP_COLS}
+FROM ({SQL_SME_MATERIALS}) c
+GROUP BY material_code
+'''
+SQL_SME_MATERIALS_ROLLUP_SQLITE = f'''
+{_ROLLUP_COLS}
+FROM sme_materials_view
+GROUP BY material_code
+'''
+
 # Parity registry (consumed by parity_check.py alongside stock.DERIVED).
-DERIVED_SME = {"sme_materials": {"sql": SQL_SME_MATERIALS, "view": "sme_materials_view"}}
+DERIVED_SME = {"sme_materials": {
+    "sql": SQL_SME_MATERIALS,
+    "view": "sme_materials_view",
+    "parity_sql": SQL_SME_MATERIALS_ROLLUP,
+    "parity_source_sql": SQL_SME_MATERIALS_ROLLUP_SQLITE,
+}}
 
 
 def _rows(res):
@@ -150,7 +192,7 @@ async def sqm_progress(site_id: Optional[str] = None,
 
 @router.get("/materials", summary="SME materials with derived Available_Qty")
 async def materials(session: AsyncSession = Depends(get_session)):
-    rows = _rows(await session.execute(text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code"')))
+    rows = _rows(await session.execute(text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code", s."SAP_Code"')))
     return {"items": rows}
 
 
@@ -280,14 +322,22 @@ async def _demand_matrix(session: AsyncSession, site_id: str | None) -> dict:
 
     r = sme_recipe_t
     rec_rows = _rows(await session.execute(
-        select(r.c["Lining_System_Code"], r.c["Material_Code"], r.c["Material_Name"],
-               r.c["UOM"], r.c["For_1_SQM"]).order_by(r.c["id"])))
+        select(r.c["Lining_System_Code"], r.c["Material_Code"], r.c["SAP_Code"],
+               r.c["Material_Name"], r.c["UOM"],
+               r.c["For_1_SQM"]).order_by(r.c["id"])))
     recipes: dict[str, list[dict]] = {}
     for rr in rec_rows:
         recipes.setdefault(str(rr["Lining_System_Code"]), []).append(rr)
 
-    pool = {m["material_code"]: float(m["available_qty"] or 0)
-            for m in _rows(await session.execute(text(SQL_SME_MATERIALS)))}
+    # 2026-07-30 COMPONENT IDENTITY: keyed per (Material_Code, SAP_Code) like
+    # the parity engine. Keying on material_code alone did NOT merely pool the
+    # components here — the dict comprehension let the LAST component's stock
+    # silently overwrite the other three.
+    mat_rows = _rows(await session.execute(text(SQL_SME_MATERIALS)))
+    pool = {sme_engine.mat_key(m["material_code"], m["sap_code"]):
+            float(m["available_qty"] or 0) for m in mat_rows}
+    names = {sme_engine.mat_key(m["material_code"], m["sap_code"]):
+             (m["material_name"] or "") for m in mat_rows}
 
     # Deterministic cascade order: tag asc, then system code numeric asc.
     eq_rows.sort(key=lambda x: (str(x["Equipment_Tag_No"]), _syskey(x["Lining_System_Code"])))
@@ -301,33 +351,49 @@ async def _demand_matrix(session: AsyncSession, site_id: str | None) -> dict:
         if remaining <= 0:
             continue
         for rr in recipes.get(str(eq["Lining_System_Code"]), []):
-            mat = rr["Material_Code"]
+            key = sme_engine.mat_key(rr["Material_Code"], rr["SAP_Code"])
+            sap = sme_engine.sap_norm(rr["SAP_Code"])
+            # The stock master names the component; the recipe repeats one
+            # generic name across all four rows of a multi-part system.
+            name = names.get(key) or rr["Material_Name"]
             demand = remaining * float(rr["For_1_SQM"] or 0)
             if demand <= 0:
                 continue
-            before = pool.get(mat, 0.0)
+            before = pool.get(key, 0.0)
             alloc = min(demand, before)
-            pool[mat] = max(0.0, before - alloc)
+            pool[key] = max(0.0, before - alloc)
+            # Round ONCE, then derive: rounding demand, allocated and shortfall
+            # independently lets `allocated + shortfall == demand` drift by up
+            # to 1e-4 per line, which at CNCEC's ~1,400 lines no longer hides
+            # inside the reconciliation tolerance. Deriving the shortfall from
+            # the two rounded figures makes the identity exact by construction.
+            d4 = round(demand, 4)
+            a4 = round(alloc, 4)
+            s4 = round(d4 - a4, 4)
             lines.append({
                 "Equipment_Tag_No": eq["Equipment_Tag_No"],
                 "Lining_System_Code": eq["Lining_System_Code"],
                 "Lining_System_Short_Name": eq["Lining_System_Short_Name"],
                 "Remaining_SQM": round(remaining, 2),
-                "Material_Code": mat, "Material_Name": rr["Material_Name"],
+                "Material_Code": rr["Material_Code"], "SAP_Code": sap,
+                "Material_Name": name,
                 "UOM": rr["UOM"],
-                "Demand_Qty": round(demand, 4),
-                "Allocated_Qty": round(alloc, 4),
-                "Shortfall_Qty": round(demand - alloc, 4),
+                "Demand_Qty": d4,
+                "Allocated_Qty": a4,
+                "Shortfall_Qty": s4,
                 "Pool_Before": round(before, 4),
-                "Pool_After": round(pool[mat], 4),
+                "Pool_After": round(pool[key], 4),
             })
-            t = totals.setdefault(mat, {"Material_Code": mat,
-                                        "Material_Name": rr["Material_Name"],
+            t = totals.setdefault(key, {"Material_Code": rr["Material_Code"],
+                                        "SAP_Code": sap,
+                                        "Material_Name": name,
                                         "UOM": rr["UOM"], "Demand_Qty": 0.0,
                                         "Allocated_Qty": 0.0, "Shortfall_Qty": 0.0})
-            t["Demand_Qty"] += demand
-            t["Allocated_Qty"] += alloc
-            t["Shortfall_Qty"] += demand - alloc
+            # Accumulate the SAME rounded figures the lines report, so the
+            # totals reconcile with them exactly instead of to a tolerance.
+            t["Demand_Qty"] += d4
+            t["Allocated_Qty"] += a4
+            t["Shortfall_Qty"] += s4
     totals_rows = [{**t, "Demand_Qty": round(t["Demand_Qty"], 3),
                     "Allocated_Qty": round(t["Allocated_Qty"], 3),
                     "Shortfall_Qty": round(t["Shortfall_Qty"], 3)}
@@ -369,19 +435,23 @@ async def _snapshot_rows(session: AsyncSession, site_id: str | None) -> dict:
     equipment = _rows(await session.execute(stmt.order_by(e.c["Equipment_Tag_No"], e.c["id"])))
 
     r = sme_recipe_t
+    # SAP_Code rides along as the component discriminator (2026-07-30 ruling):
+    # without it the engine cannot tell the Comp-A/B/C/D lines of a multi-part
+    # system apart — they share a Material_Code AND a Material_Name.
     recipes = _rows(await session.execute(
         select(r.c["Lining_System_Code"], r.c["Lining_System_Name"],
-               r.c["Material_Code"], r.c["Material_Name"], r.c["UOM"],
-               r.c["For_1_SQM"]).order_by(r.c["id"])))
+               r.c["Material_Code"], r.c["SAP_Code"], r.c["Material_Name"],
+               r.c["UOM"], r.c["For_1_SQM"]).order_by(r.c["id"])))
 
     # received_qty rides along for the engine's EFFECTIVE-ORDERED netting
     # (ruling Q2a): Initial_Ordered_Qty is never decremented on delivery, so
     # the engine subtracts receipts to avoid counting arrived stock twice.
-    materials = [{k: m[k] for k in ("material_code", "material_name", "nature",
-                                    "uom", "available_qty", "ordered_qty",
-                                    "received_qty")}
+    materials = [{k: m[k] for k in ("material_code", "sap_code", "material_name",
+                                    "nature", "uom", "available_qty",
+                                    "ordered_qty", "received_qty")}
                  for m in _rows(await session.execute(
-                     text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code"')))]
+                     text(SQL_SME_MATERIALS
+                          + ' ORDER BY s."Material_Code", s."SAP_Code"')))]
 
     s = sme_sqm_t
     # Legacy load_all() folds Done_SQM_staged into done; keep both raw here and
@@ -514,8 +584,10 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
 # EXISTING stock, not a quantity on order. Labelling it "Ordered" in a
 # procurement document invites double-ordering. Net_Demand (= Shortfall_Qty) is
 # the figure to actually raise a PR against.
-_MATERIAL_DEMAND_COLS = ["S_No", "Material_Code", "Material_Name", "UOM",
-                         "Total_Needed", "Available_Qty", "Ordered_Qty",
+# SAP_Code sits right after Material_Code: for a multi-part system the code
+# repeats on four rows and the SAP is what says WHICH component this is.
+_MATERIAL_DEMAND_COLS = ["S_No", "Material_Code", "SAP_Code", "Material_Name",
+                         "UOM", "Total_Needed", "Available_Qty", "Ordered_Qty",
                          "Allocated_Qty", "Net_Demand", "Fulfillment_Pct"]
 
 # Material-Wise Segregated Report (2026-07-28), grouped by system code.
@@ -524,8 +596,9 @@ _SEGREGATED_CODE_COLS = ["Lining_System_Code", "System_Name", "Equipment_Count",
                          "SQM_Achievable_Now", "SQM_Achievable_With_Ordered",
                          "SQM_Deficit", "Coverage_Now_Pct", "Equipment_Tags"]
 _SEGREGATED_BLOCK_COLS = ["Lining_System_Code", "System_Name", "Material_Code",
-                          "Material_Name", "UOM", "Demand_Qty", "Available_Qty",
-                          "Ordered_Qty", "Shortfall_Qty", "Net_Shortfall_Qty"]
+                          "SAP_Code", "Material_Name", "UOM", "Demand_Qty",
+                          "Available_Qty", "Ordered_Qty", "Shortfall_Qty",
+                          "Net_Shortfall_Qty"]
 _SEGREGATED_UNIT_COLS = ["Equipment_Tag_No", "Name", "Lining_System_Code",
                          "System_Name", "Remaining_SQM", "SQM_Achievable_Now",
                          "SQM_Achievable_With_Ordered", "SQM_Deficit",
@@ -564,41 +637,48 @@ def _segregated_sections(plan: dict) -> list[tuple[str, list[str], list[list]]]:
 
 def _material_demand_rows(plan: dict) -> list[dict]:
     """Session-wide material rollup: the per-(equipment × material) cascade
-    lines collapsed to ONE row per (Material_Code, Material_Name, UOM).
+    lines collapsed to ONE row per PHYSICAL COMPONENT.
 
     Presentation aggregation, deliberately outside the parity-locked engine —
     same contract as _overview_rows. Mirrors the on-screen combined-procurement
     table (frontend/src/sme/session.ts weightedProcurement), including its
     worst-coverage-first ordering, so the exported document and the UI agree.
-    That table groups by Material_Code alone; grouping by the triple here is
-    equivalent as long as a code carries one name/UOM (verified 20/20 against
-    live CNCEC data) and splits correctly if it ever does not.
+
+    2026-07-30 COMPONENT IDENTITY: the group key is the engine's Material_Key,
+    i.e. (Material_Code, SAP_Code). It used to include Material_Name and UOM,
+    which looks like it would separate components but does NOT — the recipe
+    repeats one generic name and one UOM across all four rows of a multi-part
+    system, so name+UOM collapsed them right back into a single line.
     """
-    acc: dict[tuple[str, str, str], dict] = {}
+    acc: dict[str, dict] = {}
     for ln in plan["lines"]:
-        key = (str(ln["Material_Code"]), str(ln.get("Material_Name") or ""),
-               str(ln.get("UOM") or ""))
+        key = str(ln["Material_Key"])
         a = acc.setdefault(key, {"demand": 0.0, "alloc": 0.0, "short": 0.0,
-                                 "avail": 0.0, "ordered": 0.0})
+                                 "avail": 0.0, "ordered": 0.0,
+                                 "code": str(ln["Material_Code"]),
+                                 "sap": str(ln.get("SAP_Code") or ""),
+                                 "name": str(ln.get("Material_Name") or ""),
+                                 "uom": str(ln.get("UOM") or "")})
         a["demand"] += ln["Demand_Qty"]
         a["alloc"] += ln["Allocated_Qty"]
         a["avail"] += ln["Alloc_Available"]
         a["ordered"] += ln["Alloc_Ordered"]
         a["short"] += ln["Shortfall_Qty"]
     out = []
-    for (code, name, uom), a in acc.items():
+    for a in acc.values():
         # Coverage stays on PHYSICAL stock, matching feasibility and the
         # segregated report — on-order units cannot be applied today.
         pct = (min(100.0, a["avail"] / a["demand"] * 100.0)
                if a["demand"] > 0 else 100.0)
-        out.append({"S_No": 0, "Material_Code": code, "Material_Name": name,
-                    "UOM": uom, "Total_Needed": round(a["demand"], 3),
+        out.append({"S_No": 0, "Material_Code": a["code"], "SAP_Code": a["sap"],
+                    "Material_Name": a["name"],
+                    "UOM": a["uom"], "Total_Needed": round(a["demand"], 3),
                     "Available_Qty": round(a["avail"], 3),
                     "Ordered_Qty": round(a["ordered"], 3),
                     "Allocated_Qty": round(a["alloc"], 3),
                     "Net_Demand": round(a["short"], 3),
                     "Fulfillment_Pct": round(pct, 1)})
-    out.sort(key=lambda r: (r["Fulfillment_Pct"], r["Material_Code"]))
+    out.sort(key=lambda r: (r["Fulfillment_Pct"], r["Material_Code"], r["SAP_Code"]))
     for i, r in enumerate(out, 1):
         r["S_No"] = i
     return out
@@ -1090,7 +1170,7 @@ async def sme_export(key: str, format: str = "xlsx", site_id: Optional[str] = No
         title, items = "SME Demand Totals (Net Order List)", (await _demand_matrix(session, site_id))["totals"]
     elif key == "materials":
         title = "SME Materials (Available Qty)"
-        items = _rows(await session.execute(text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code"')))
+        items = _rows(await session.execute(text(SQL_SME_MATERIALS + ' ORDER BY s."Material_Code", s."SAP_Code"')))
     else:
         raise HTTPException(404, f"unknown SME export {key!r}")
 
