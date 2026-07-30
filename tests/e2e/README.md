@@ -5,7 +5,7 @@ Fully self-contained: one command builds an isolated stack (throwaway Postgres
 DB loaded with the **real** legacy data via the production cutover script, a
 hermetic FastAPI on **:8010** with WhatsApp/SMTP/scheduler disabled, and a Vite
 dev server on **:5183** proxying to it), runs every spec headlessly, then tears
-it all down. A developer's normal `:8000` / `:5173` / `gihub` stack is never
+it all down. **42 specs, ~19 s.** A developer's normal `:8000` / `:5173` / `gihub` stack is never
 touched.
 
 ## Run it
@@ -36,6 +36,7 @@ Prereqs: repo `.venv` (backend deps), local Postgres on `:5433` with the
 | `specs/exec-summary.spec.ts` | Executive Summary renders; Download PDF yields a real `%PDF-` file |
 | `specs/offline-queue.spec.ts` | offline mutation queue: queue → badge → reconnect → HOD sees the replayed entry |
 | `specs/ask-data.spec.ts` | /ai/query template lane from the HOD dashboard card |
+| `specs/table-tools.spec.ts` | the global table wrapper (`lib/smartTable.tsx`): sorters on every field-backed column and none on action columns, ordering both ways, filters on text but not booleans, and the server-paginated opt-out |
 | `specs/entry-docs.spec.ts` | **`gated` project, runs last** — flips `require_entry_documents` ON and proves the document gate + library |
 
 ## CI

@@ -46,3 +46,72 @@ sharing the tunnel's single egress IP.
   `ls ~/.cloudflared/*.json` and update `config.yml`.
 - Optional: put **Cloudflare Access** in front of `gi.giinventory.com` to gate
   who can reach the test site.
+
+---
+
+## ⚠️ Error 1033 — the recurring cause, and the fix
+
+**Error 1033 means the hostname's tunnel has no healthy connector registered.**
+On this Mac it has always been the same thing: **several cloudflared connectors
+running at once against DIFFERENT tunnel IDs**, so whichever one the DNS CNAME
+points at is not the one that is up.
+
+Three connectors were live at diagnosis time (2026-07-29):
+
+| Owner | What |
+|---|---|
+| you (a terminal) | `cloudflared tunnel --config deploy/cloudflared/config.yml run gi-hub` — a local-config tunnel |
+| you (a terminal) | `cloudflared tunnel run --token …` — a *different* tunnel ID |
+| **root (LaunchDaemon)** | `cloudflared tunnel run --token …` — the remotely managed one, `/Library/LaunchDaemons/com.cloudflare.cloudflared.plist` |
+
+**Exactly one connector should run: the root LaunchDaemon.** Verified clean
+2026-07-30.
+
+### Verify what is actually running
+
+```bash
+ps aux | grep -i "[c]loudflared tunnel"
+```
+
+```bash
+cloudflared tunnel list
+```
+
+### Kill the rogue user-level instances (leaves the root daemon alone)
+
+```bash
+pkill -f "cloudflared tunnel --config"
+```
+
+```bash
+pkill -u "$(id -u)" -f "cloudflared tunnel run --token"
+```
+
+### Stop the dormant user LaunchAgent from resurrecting a local-config tunnel
+
+`~/Library/LaunchAgents/com.gi.cloudflared.plist` runs
+`cloudflared tunnel --config ~/.cloudflared/config.yml run gi-hub` with
+`KeepAlive=true`, so killing its process is not enough:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.gi.cloudflared" 2>/dev/null; launchctl disable "gui/$(id -u)/com.gi.cloudflared"
+```
+
+### Restart the remotely managed (token) tunnel
+
+```bash
+sudo launchctl kickstart -k system/com.cloudflare.cloudflared
+```
+
+### Confirm it reconnected
+
+```bash
+sudo log show --predicate 'process == "cloudflared"' --last 2m --style compact | tail -30
+```
+
+### 🔐 Security note
+
+The managed daemon takes its tunnel token as a **command-line argument**, so the
+full token is readable by any local process via `ps aux`. If this machine is ever
+shared, rotate the token and move it into the plist's `EnvironmentVariables`
+instead of `ProgramArguments`.

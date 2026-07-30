@@ -7,9 +7,10 @@
 > highest-value tests and must always pass.
 >
 > **Last full sweep:** 2026-07-12 night shift (visual, isolated `gihub_e2e` DB).
-> **Automated gates (2026-07-26):** service_tests **777/0** (suites
-> A…AQ) · Playwright **39/39** · legacy bug_check 599/0 · build+tsc ·
-> alembic single head `f1a7c9e83b52`. §14 lists the 2026-07-18 feature rows;
+> **Automated gates (2026-07-30):** service_tests **951/0** (suites
+> A…AZ) · Playwright **42/42** · parity:sme **1,276** · legacy bug_check
+> 599/0 · build+tsc · alembic single head `a4e9b1c73f28`. §14 lists the
+> 2026-07-18 feature rows;
 > §15 the 2026-07-24…26 native-program rows (Send/Receive sync, QR
 > stickers/scan, RTR sessions, release pipeline).
 

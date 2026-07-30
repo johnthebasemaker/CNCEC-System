@@ -27,6 +27,10 @@ Flags: `--json` for scripts/CI, `--api` / `--web` for non-default ports.
 
 ## 1. The standard gates (run before every commit)
 
+Current baselines (2026-07-30): **service_tests 951/0 · Playwright 42/42 ·
+parity:sme 1,276 · bug_check 599/0 · alembic head `a4e9b1c73f28`.**
+`tools/parity_check.py` is meaningful only on CI or a freshly-cutover DB.
+
 ```bash
 # backend service tests (CI mirror, hermetic)
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \

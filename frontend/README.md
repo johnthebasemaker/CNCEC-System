@@ -7,6 +7,18 @@ built on the PostgreSQL foundation.
 Stack: **React + TypeScript + Vite**, **Ant Design** (UI), **TanStack Query**
 (data fetching/caching), **React Router**, **axios**.
 
+> ### ⚠️ Table convention (locked 2026-07-30)
+> Import `Table` from **`src/lib/smartTable.tsx`**, never from `'antd'`
+> directly. That wrapper derives a sorter for every `dataIndex`-backed column
+> and a checkbox filter for every categorical one — no call-site change, no
+> added chrome. It deliberately leaves **server-paginated** grids alone
+> (auto-detected from controlled pagination), because sorting one page out of
+> N looks like it works and silently lies. Explicit `sorter`/`filters` on a
+> column always win; `smart={false}` opts out entirely.
+> SME grids also use `src/sme/materialCols.tsx` so a material component shows
+> its variant SAP under the code and its full name wrapped, never ellipsed.
+> Rationale: [`docs/TABLE_TOOLS_RUNLOG.md`](../docs/TABLE_TOOLS_RUNLOG.md).
+
 ## Run it (two processes)
 
 **1. Backend** (from the repo root) — serves the data on :8000:

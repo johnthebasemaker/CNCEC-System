@@ -1,0 +1,284 @@
+# PROJECT HANDOVER — read this first
+
+> **Updated 2026-07-30.** This is the fresh-session entry point: what is locked,
+> where we are, and what happens next. Read this file, then
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the system brain), then
+> [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state + gotchas) and
+> [`REPO_MAP.md`](REPO_MAP.md) (the segregation contract).
+>
+> **Next phase: Feature Fine-Tuning and UI Polish.**
+> **Hetzner production deployment is PAUSED by decision, not by blocker.**
+
+---
+
+## PAST — critical architecture rules, LOCKED
+
+These are decisions that were each made *because the alternative was tried and
+broke something*. Do not revisit them without an explicit instruction.
+
+### 1. SME allocation is keyed on `(Material_Code, SAP_Code)` — never pool by code alone
+
+*Locked 2026-07-30. Overturns the 2026-07-18 Material_Code pooling rule.*
+
+A multi-part chemical system lists **one `Material_Code` as several distinct
+physical drums**, separated only by the variant SAP — `GI-8005765` is Comp-A/B/C/D
+at SAPs `1041` / `1041-1` / `1041-2` / `1041-3`. Each is a different container on a
+different shelf.
+
+* The engine key is `mat_key(Material_Code, SAP_Code)` → `"CODE|SAP"`, exposed on
+  every allocation line as **`Material_Key`**.
+* Each component gets its **own** available pool, on-order pool, shortfall and
+  report row.
+* SAP codes are **whitespace-normalized on both sides** of every join — the ERP
+  writes `"1043 - 2"` for the recipe's `"1043-2"` (`sap_norm()` / `sapNorm()`).
+* `sme_inventory_seed`'s primary key is **`(Material_Code, SAP_Code)`**
+  (alembic `a4e9b1c73f28`).
+
+**Why it is not negotiable:** pooling summed four unlike drums into one bucket, so
+earlier recipe lines drained stock belonging to later ones. Measured on real data,
+it reported components A and B as **fully covered while both were 10 short**, and D
+as **10 short while it held three times what it needed**. The shortfall was not
+imprecise — it was *inverted*, and SQM-achievable collapsed to 0 against a true 20.
+Four `az-revert` checks in suite AZ pin each of those failures.
+
+**Also locked:** `Material_Name + UOM` is **not** a valid discriminator. All four PU
+rows in `For_1_SQM.xlsx` carry the same name *and* the same UOM; the names disagree
+between the two workbooks; the UOM disagrees on 25 of 32 pairs. `SAP_Code` is the
+only real discriminator.
+
+### 2. "On Order" uses exact double-count netting
+
+*Locked 2026-07-28 (ruling Q2a).*
+
+```
+effective_ordered = max(Initial_Ordered_Qty − Σreceipts, 0)
+```
+
+`Initial_Ordered_Qty` is a static workbook snapshot that is **never decremented on
+delivery** — arrivals land as receipts, which already inflate `available_qty`.
+Adding both buckets verbatim double-counts every delivered unit (10 live materials
+at ruling time; `GI-8005762` alone had 10,920 of 47,320 already received). The clamp
+at zero handles over-delivery.
+
+Companion field contract, conserved on every line:
+
+```
+Demand_Qty      = Allocated_Qty + Shortfall_Qty
+Allocated_Qty   = Alloc_Available + Alloc_Ordered
+Shortfall_Available_Qty = the PHYSICAL gap  → drives feasibility / "Ready to Build"
+Shortfall_Qty           = the NET gap       → drives the buy list
+```
+
+Feasibility judges **tier 1 only**: stock on a truck cannot be applied to a tank
+today.
+
+### 3. `tools/pg_excel_sync.py` — native upserts, no Pandas
+
+* Every master-data write is `INSERT … ON CONFLICT (<natural key>) DO UPDATE` with
+  `COALESCE(excluded.col, table.col)`, so a blank workbook cell never erases data.
+* **Pandas is deliberately not used.** It is not in `backend/requirements.txt` (it
+  arrives only transitively via streamlit for the legacy app), so a production-path
+  tool must not import it. The reader is openpyxl via `bulk_import.py`.
+* **Column-mapping logic is never duplicated** — the planners live in
+  `backend/api/bulk_import.py` and this tool replaces only the *write* path.
+* The whole sync is **one transaction** across all five kinds; a failure anywhere
+  rolls everything back.
+* It refuses to run against anything that is not a Postgres URL, and refuses
+  outright if the URL mentions `gi_database`.
+* Ledger tables (`receipts`/`consumption`/`returns`) have **no** unique constraint
+  and must never get one — the same (date, SAP, qty) line can legitimately repeat.
+  Idempotency there comes from `plan_ledger`'s three-tier reconcile.
+
+### 4. The cutover protects the 86 blank-SAP legacy recipe rows
+
+The frozen legacy SQLite `sme_recipe` and `sme_inventory_seed` **have no `SAP_Code`
+column at all**. A cutover therefore lands 86 recipe rows with no SAP and every
+material as one blank-SAP seed row.
+
+* Those 86 rows are **real recipe data the workbook does not cover** — measured:
+  they are *disjoint* from the 30 workbook-coded `(code, material)` pairs, zero
+  overlap. **Nothing deletes them.**
+* Blank-SAP *seed* placeholders are retired only when **both** hold: (a) the
+  workbook supplied a real SAP for that `Material_Code`, **and** (b) no blank-SAP
+  *recipe* line still references it. Guard (b) was learned the hard way — without
+  it, coverage collapsed to **0.0% across all 29 equipment**, because those recipe
+  lines can only draw on a blank-SAP seed row.
+* The documented remedy for a mixed state is the **SME reseed**
+  (`pg_excel_sync --sme-reseed`), which replaces both sides from the workbook and
+  converges to `sme_recipe` 41 rows / `sme_inventory_seed` 32 rows, zero blanks.
+
+### 5. Global tables render through `smartTable.tsx`
+
+`frontend/src/lib/smartTable.tsx` is a drop-in replacement for antd's `Table`.
+All 99 `<Table>` instances across 45 files import `Table` from there instead of
+from `'antd'`. It derives sorters and filters from the column definitions with
+**no change at the call site and no added chrome**.
+
+Four rules it encodes:
+
+| Rule | Why |
+|---|---|
+| No `dataIndex` → no sorter | An "Actions" column of buttons has nothing to sort by |
+| Numeric → sorter, no filter | A quantity is a measurement, not a category |
+| Boolean → sorter, no filter | A "true/false" dropdown rarely matches what the cell renders |
+| **Server-paginated → untouched** | Sorting one page of 20 out of 5,000 *looks* like it works and silently lies |
+
+Server-side paging is **auto-detected** from controlled pagination (`total` **and**
+`current` both set); four grids match and all four opt out. Filters cap at 30
+distinct values and grow a search box above 8. An explicit `sorter`/`filters` on a
+column always wins; `smart={true|false}` overrides the sniff.
+
+**Companion:** `frontend/src/sme/materialCols.tsx` renders material components —
+the variant SAP under the code, and names that **wrap rather than ellipse**
+(truncation was eating the single character that distinguishes
+`CUMICRETE PU MF 300 (1MM) C` from its three siblings).
+
+### 6. Standing rules that predate this session (still binding)
+
+* **Both SME engines change together.** `backend/api/sme_engine.py` and
+  `frontend/src/sme/engine.ts` are line-for-line mirrors proven equal against
+  `sme_parity_fixture.json` → `sme_parity_golden.json`. Any numeric change =
+  change BOTH + regenerate the golden in ONE commit.
+* **Half-up rounding** `floor(x·10ⁿ + 0.5)` is shared verbatim across both
+  languages. Never "fix" it to half-even.
+* **STRICT BOTTLENECK** (2026-07-07): a unit's coverage is its least-available
+  material's rate, never the Σalloc/Σdemand average.
+* **Unmodelled is never 100%** (ruling Q5): a system code with no recipe rows
+  scores 0 SQM achievable, never a silent full-ready.
+* **FEFO + over-issue stay allow-and-log** — never add a hard block.
+* **Never delete `system_audit_log` rows** — audit assertions are delta-counted.
+* **`gi_database.db` is untouchable** — never staged, never written by new-stack
+  tooling. Verify its sha256 is unchanged after any data work.
+* `sme_inventory_seed` never mingles with the ERP `inventory` table (SME Canon
+  Rule 2).
+
+---
+
+## PRESENT — current state and baselines
+
+All green locally at commit `fae0b3f` (main), verified 2026-07-30.
+
+| Gate | Result | Command |
+|---|---|---|
+| Backend service tests | **951 / 0** (suites A…AZ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **42 / 42** (~19 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| SME TS↔PY parity | **1,276 comparisons** | `npm run parity:sme --prefix frontend` |
+| Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
+| Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
+| Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
+| Alembic | single head **`a4e9b1c73f28`** (`sme_component_pooling`) | see ARCHITECTURE §8 |
+| `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
+
+**Local Cloudflare tunnelling is resolved and stable.** Verified 2026-07-30: a
+single managed tunnel is running (the root LaunchDaemon,
+`/Library/LaunchDaemons/com.cloudflare.cloudflared.plist`). The two rogue
+user-level instances that caused the recurring **Error 1033** are gone, and the
+dormant user LaunchAgent `com.gi.cloudflared` is unloaded. Diagnosis and the exact
+recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/README.md).
+
+### What shipped most recently (this session, merged to main)
+
+| PR | Commit | What |
+|---|---|---|
+| #15 | `7868e8d` | **Project-wide table sorting + filtering** — `smartTable.tsx`, 99 tables / 45 files, +3 E2E specs |
+| #16 | `c62c415` | **SME component pooling fix** — `(Material_Code, SAP_Code)` everywhere, suite AZ (20 checks), alembic `a4e9b1c73f28` |
+
+Immediately before those, on the same programme:
+
+* **Two-tier allocation + reverse SQM** (`docs/SME_SQM_BOTTLENECK_RUNLOG.md`) —
+  Available vs Ordered split, SQM-achievable bottleneck maths, Material-Wise
+  Segregated Report.
+* **Session-report aggregation** (`docs/SESSION_REPORT_SUMMARY_RUNLOG.md`) —
+  Total Material Demand sheet leads the workbook and the PDF.
+* **`tools/pg_excel_sync.py`** (`docs/PG_EXCEL_SYNC_RUNLOG.md`) — the atomic,
+  idempotent, Postgres-native Excel sync.
+
+### Live CNCEC numbers after the component split
+
+| | Value |
+|---|---|
+| Component stock pools | **32** (was 20 pooled materials) |
+| Allocation lines | 352 |
+| Material rows in reports | **30** (was 20) |
+| Remaining SQM | 49,435 |
+| SQM achievable **now** | **2,778** (5.6%) |
+| SQM achievable **with on-order** | **24,743** (50.1%) |
+| Buy list | 160,093 units |
+| Multi-component materials | 4 (`GI-8005764/65/66/67`) |
+
+### Known caveats carried forward
+
+1. **Stock UOM is display-only** (ruling Q2). Recipe rates are per-SQM in `KG`
+   while stock is in `Can`/`BAG`/`DR`/`EA` for 25 of 32 pairs, and `PACKAGE SIZE`
+   is blank for every PU component — there is no conversion factor in the data.
+   Quantities are taken to be in the recipe's unit. A real pack-size table is
+   outstanding.
+2. **The ERP `inventory` table has a UNIQUE on `Material_Code`**, so the variant
+   SAPs cannot all carry it there — the sync reports this per SAP. Pre-existing and
+   untouched; it means the *ERP* side still cannot express component identity.
+   Wants its own decision.
+3. **`tools/parity_check.py` fails against the live mirror BY DESIGN** — Postgres
+   is permanently ahead of the frozen SQLite since the Excel injection. It is
+   meaningful only on CI or a freshly-reloaded/cutover mirror.
+4. **`postgres-dual-ci.yml` has never passed on the GitHub runner** (always at the
+   `legacy/bug_check.py` step) while the same tree passes 599/0 locally under every
+   simulated CI condition. Cause is Linux-runner-specific and unresolved; failures
+   now surface as `::error::` annotations plus uploaded artifacts.
+5. **The dev database has been migrated and re-synced.** `alembic upgrade head` +
+   a `sme-materials` workbook sync were applied to `:5433/gihub` so the suites
+   could run against the new primary key. Rebuildable; the migration has a working
+   `downgrade()`.
+
+---
+
+## FUTURE — what happens next
+
+### Immediate next phase: Feature Fine-Tuning and UI Polish
+
+The next session's focus. No deployment work. Suggested starting points, none of
+them committed to:
+
+* The four multi-component materials now render as 4 rows each — worth an operator
+  read-through of the SME Session Report, Execution Plan and Procurement views to
+  confirm the density is right.
+* `smartTable` filter labels come from the **raw** field value, so a column whose
+  `render` maps codes to friendly labels lists the codes in its dropdown. Only
+  `UsersPage` has been given an explicit `filters` override so far; other columns
+  with label-mapping renders may want the same treatment.
+* The stock-UOM display mismatch (caveat 1) is now visible in the UI.
+
+### Phase 3 — Hetzner Ubuntu Docker deployment: **PAUSED**
+
+Paused by decision on 2026-07-30, **not blocked**. Everything needed is built and
+documented; it will be executed only after fine-tuning is complete.
+
+When it resumes, the runbook is [`tools/migration/README.md`](tools/migration/README.md)
+and the kit is [`docs/DEPLOY.md`](docs/DEPLOY.md) + [`deploy/`](deploy/). Open
+operator items at the time of pausing:
+
+* **Server side:** generate strong `JWT_SECRET` and `POSTGRES_PASSWORD` (both are
+  `CHANGE_ME` in `deploy/.env`); set `GI_ENV=production` to arm the JWT boot guard.
+* **Meta side:** approve the `gi_evening_summary` template (2 body vars, lang
+  `en`); subscribe the webhook URL. The other four templates are LIVE.
+* **Cloudflare (one-time, for the native apps):** a Zero Trust Access application
+  for `gi.giinventory.com/api/*` with a **Bypass (Everyone)** policy — without it
+  every native API call dies as a CORS-killed 302. Details: `docs/NATIVE_APPS.md` §6.
+* ⚠️ **The tunnel token is passed as a command-line argument**, so it is visible in
+  full to any local process via `ps aux`. Consider rotating it and moving it into
+  the plist's `EnvironmentVariables` rather than `ProgramArguments`.
+
+---
+
+## Run logs — the detailed history
+
+Each recent programme has its own run log with the rulings, the maths, the
+revert-verification and the caveats:
+
+| Log | Covers |
+|---|---|
+| [`docs/SME_COMPONENT_POOLING_RUNLOG.md`](docs/SME_COMPONENT_POOLING_RUNLOG.md) | The `(Material_Code, SAP_Code)` ruling, end to end |
+| [`docs/TABLE_TOOLS_RUNLOG.md`](docs/TABLE_TOOLS_RUNLOG.md) | `smartTable.tsx` and the four rules |
+| [`docs/SME_SQM_BOTTLENECK_RUNLOG.md`](docs/SME_SQM_BOTTLENECK_RUNLOG.md) | Available vs Ordered, reverse-SQM bottleneck |
+| [`docs/SESSION_REPORT_SUMMARY_RUNLOG.md`](docs/SESSION_REPORT_SUMMARY_RUNLOG.md) | Total Material Demand aggregation |
+| [`docs/PG_EXCEL_SYNC_RUNLOG.md`](docs/PG_EXCEL_SYNC_RUNLOG.md) | The atomic Excel → Postgres sync |
+| [`docs/POSTGRES_MIGRATION.md`](docs/POSTGRES_MIGRATION.md) §8 | The full per-slice project history |

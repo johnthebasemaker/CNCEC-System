@@ -8,6 +8,15 @@ is a *separate* set of processes. Per-slice history is in
 
 ---
 
+> ⚠️ **THIS FILE IS HISTORICAL (last substantive update 2026-07-08).** For the
+> current state read [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md) first —
+> locked architecture rules, live baselines and the next phase — then
+> [`PROJECT_STATUS.md`](PROJECT_STATUS.md). The gate numbers and "what's left"
+> list below are superseded: gates are now **service_tests 951/0 · Playwright
+> 42/42 · parity:sme 1,276 · bug_check 599/0 · alembic head `a4e9b1c73f28`**,
+> and the Hetzner deployment is **PAUSED by decision** in favour of Feature
+> Fine-Tuning and UI Polish. The how-to-work rules further down remain valid.
+
 ## 🎯 CURRENT STATUS (2026-07-08) — read this, then [`PROJECT_STATUS.md`](PROJECT_STATUS.md)
 
 **🔓 FREEZE TEMPORARILY LIFTED — feature-gap program active.** On top of the
@@ -105,7 +114,7 @@ DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
   .venv/bin/python backend/api/parity_check.py --source gi_database.db  # 5 derived views PASS
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
   JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
-  .venv/bin/python -m backend.api.service_tests                 # 750/0 (suites A…AO — see ARCHITECTURE.md §8)
+  .venv/bin/python -m backend.api.service_tests                 # 951/0 (suites A…AZ — see ARCHITECTURE.md §8)
 npm run build --prefix frontend                                 # tsc + vite green
 ```
 
