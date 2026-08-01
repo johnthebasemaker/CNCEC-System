@@ -27,7 +27,7 @@
  * values that render the same text, fall back to the raw string rather than
  * mislabel a checkbox. An explicit `filters` array still overrides everything.
  */
-import { isValidElement, useMemo } from 'react'
+import { isValidElement, useEffect, useMemo, useState } from 'react'
 import type { Key, ReactNode } from 'react'
 import { Table as AntTable } from 'antd'
 import type { TableProps } from 'antd'
@@ -244,11 +244,36 @@ export type SmartTableProps<T> = TableProps<T> & {
 }
 
 /**
+ * The app header's height, which is what a viewport-sticky table header has to
+ * clear. It lives in CSS (`--gi-header-h`) because it is breakpoint-dependent,
+ * and call sites hard-coded `offsetHeader: 64` — correct on desktop, 8px too
+ * far down on a phone, which opened a gap that rows showed through.
+ */
+function readHeaderOffset(): number {
+  if (typeof window === 'undefined') return DEFAULT_HEADER_OFFSET
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--gi-header-h')
+  const n = Number.parseInt(v, 10)
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_HEADER_OFFSET
+}
+
+const DEFAULT_HEADER_OFFSET = 64
+
+function useHeaderOffset(): number {
+  const [h, setH] = useState(readHeaderOffset)
+  useEffect(() => {
+    const onResize = () => setH(readHeaderOffset())
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  return h
+}
+
+/**
  * Drop-in replacement for antd's `Table`. Import it in place of `Table` and the
  * grid gains sorting and filtering with no other change at the call site.
  */
 export function Table<T extends object = Record<string, unknown>>(
-  { smart, columns, dataSource, pagination, ...rest }: SmartTableProps<T>,
+  { smart, columns, dataSource, pagination, sticky, scroll, ...rest }: SmartTableProps<T>,
 ): ReactNode {
   // Controlled `total` + `current` means the server owns paging: only the
   // current page is in memory, so client-side sort/filter would mislead.
@@ -261,7 +286,28 @@ export function Table<T extends object = Record<string, unknown>>(
     [enabled, columns, dataSource],
   )
 
-  return <AntTable<T> columns={cols} dataSource={dataSource} pagination={pagination} {...rest} />
+  // Sticky headers, normalised in ONE place instead of 95 call sites.
+  //
+  // 1. `scroll.y` and `sticky` are mutually exclusive. With a body height antd
+  //    already pins the header inside the table's own scroll box; adding
+  //    viewport-sticky on top detaches that header and floats it into the
+  //    MIDDLE of the scrolling body — rows stay visible above it and slide
+  //    under it. That is the portrait-mode overlap. The header stays sticky
+  //    either way; this just picks the mechanism that owns it.
+  // 2. Otherwise the offset follows the real header height rather than a
+  //    hard-coded 64.
+  const headerOffset = useHeaderOffset()
+  const stickyProp = useMemo(() => {
+    if (scroll?.y !== undefined && scroll?.y !== null) return undefined
+    if (sticky === false || sticky === undefined) return sticky
+    const base = sticky === true ? {} : sticky
+    return { ...base, offsetHeader: headerOffset }
+  }, [sticky, scroll?.y, headerOffset])
+
+  return (
+    <AntTable<T> columns={cols} dataSource={dataSource} pagination={pagination}
+      sticky={stickyProp} scroll={scroll} {...rest} />
+  )
 }
 
 export default Table
