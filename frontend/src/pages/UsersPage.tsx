@@ -101,11 +101,9 @@ export default function UsersPage() {
     { title: 'Username', dataIndex: 'username', key: 'username' },
     {
       title: 'Role', dataIndex: 'role', key: 'role',
-      // Explicit filters: the cell renders the friendly label, so leaving
-      // smartTable to derive options from the raw field would list `hod` /
-      // `store_keeper` in a dropdown above rows reading "Head of Department".
-      filters: roleOptions.map((o) => ({ text: o.label, value: o.value })),
-      onFilter: (v, r) => String(r.role) === String(v),
+      // No explicit `filters` needed: smartTable labels each option with what
+      // the cell renders ("Head of Department", not `hod`) and filters on the
+      // raw role, so the dropdown lists exactly the roles present in the table.
       render: (v: string, r) => <Tag color={ROLE_COLOR[v] ?? 'default'}>{String(r.label ?? v)}</Tag>,
     },
     { title: 'Site', dataIndex: 'Site_ID', key: 'Site_ID', render: (v) => v || <Typography.Text type="secondary">global</Typography.Text> },

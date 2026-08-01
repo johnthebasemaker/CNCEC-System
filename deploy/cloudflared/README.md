@@ -1,4 +1,119 @@
-# Local multi-user testing over the existing `gi-hub` Cloudflare Tunnel
+# Cloudflare Tunnels — the developer workflow
+
+> **Start here: [THE WORKFLOW](#the-workflow-2026-08-01) below.** It is the
+> definitive, measured answer to "which command do I run for which environment".
+> The sections after it are the original notes plus the Error 1033 post-mortem.
+
+---
+
+## THE WORKFLOW (2026-08-01)
+
+### What actually exists on this Mac
+
+Measured, not assumed (`cloudflared tunnel list` + `ps aux` + live probes):
+
+| Tunnel | ID | Connector | Serves |
+|---|---|---|---|
+| **GI-MacBook-Local** | `9a68ed28…` | **root LaunchDaemon, always up** (`/Library/LaunchDaemons/com.cloudflare.cloudflared.plist`) | ingress is **dashboard-managed** (remotely configured) |
+| **Local-Tunnel-gi-hub** | `40802134…` | none — only when you run its `--token` by hand | this is why `local.giinventory.com` needs that terminal open |
+| **gi-hub** | `8e2f8d9d…` | none — started by `config.yml` in this folder | credentials on disk at `~/.cloudflared/8e2f8d9d….json` |
+| Hetzner-Production | `ccf809f6…` | none (server not provisioned) | the future production box |
+
+**The trap this file used to hide:** `config.yml` says `tunnel: 8e2f8d9d`
+(**gi-hub**) but its only ingress rule is `local.giinventory.com`. Those are two
+different tunnels. Proven 2026-08-01: with the gi-hub connector fully registered
+(4 QUIC connections) and Vite live on :5173, `https://local.giinventory.com`
+still returned **530 / Error 1033** — the hostname is not routed to gi-hub. That
+is exactly why only the raw `--token` command works today.
+
+### Pick one of these two, once
+
+**Option A — recommended: make the config file authoritative.** One DNS command
+(it rewrites the CNAME for that hostname; run it yourself, it changes your
+Cloudflare account):
+
+```bash
+cloudflared tunnel route dns gi-hub local.giinventory.com
+```
+
+After that the token is never needed again: ingress lives in git, the tunnel
+runs from `config.yml`, and `local.giinventory.com` is served by **gi-hub**.
+
+**Option B — keep the token.** Leave the DNS alone and configure
+`Local-Tunnel-gi-hub`'s public hostname in the Zero Trust dashboard
+(`local.giinventory.com` → `http://localhost:5173`). The ingress then lives in
+the dashboard, not in this repo, and you keep running its `--token` command.
+
+### The two environments, end to end
+
+Each needs **three things up: the API, Vite, and exactly one connector.**
+
+#### Local development → `https://local.giinventory.com`
+
+```bash
+./run_api.sh
+```
+
+```bash
+npm run dev:local --prefix frontend
+```
+
+```bash
+cloudflared tunnel --config deploy/cloudflared/config.yml run gi-hub
+```
+
+(That third command is the Option-A form. On Option B it stays your
+`cloudflared tunnel run --token …` line — same slot, same rules.)
+
+#### The `gi.giinventory.com` mirror
+
+`gi.giinventory.com` is **already served by the root LaunchDaemon**, which is
+always running and is the one connector you must not duplicate. So there is **no
+tunnel command to run** — you only repoint what the dev server answers with:
+
+```bash
+npm run dev:gi --prefix frontend
+```
+
+⚠️ `gi.giinventory.com` becomes the **production** hostname the moment the
+Hetzner box goes live. From that day, serving it from this Mac is no longer a
+mirror — it is a hijack of production. Use `local.giinventory.com` day to day.
+
+### Why port 5173 can never be fought over
+
+`vite.config.ts` now sets **`strictPort: true`**. A tunnel's ingress points at a
+fixed port, so the old failure mode was silent: start a second dev server, Vite
+quietly takes **5174**, the terminal looks healthy, and the tunnel keeps serving
+the first one (or nothing at all). With `strictPort` the second start dies
+immediately with `EADDRINUSE`. **Run one dev server at a time** — `dev:local`
+and `dev:gi` are alternatives, never concurrent.
+
+Related: `npm run dev` (plain) is for `http://localhost:5173` and is the only
+one whose HMR websocket works locally. `dev:local` / `dev:gi` point HMR at the
+tunnel's TLS port, so browsing localhost while running them logs
+`[vite] failed to connect to websocket` and live-reload stops — harmless, but
+use plain `dev` when you are not testing through a tunnel.
+
+### The rule that prevents Error 1033
+
+**One hostname → one tunnel → one connector.** 1033 means the hostname's tunnel
+has no healthy connector; on this Mac it has always been several connectors
+racing across *different* tunnel IDs. Before starting anything:
+
+```bash
+ps aux | grep -i "[c]loudflared tunnel"
+```
+
+Expect exactly one line — the root daemon. If you see your own
+`--config` or `--token` process from an earlier session, kill it first:
+
+```bash
+pkill -f "cloudflared tunnel --config"
+```
+
+---
+
+## Original notes
 
 This reuses the tunnel you already created for the legacy build
 (`8e2f8d9d-08f4-432e-9857-dee2ff4ebb63`) to serve the **new** React/FastAPI stack
