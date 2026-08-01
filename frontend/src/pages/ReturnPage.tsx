@@ -5,9 +5,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
-import {
-  useCategories, useDocsRequired, useList, useReturnEntry, useReturnSources, useSites,
-} from '../api/hooks'
+import { useCategories, useDocsRequired, useInventoryMaster, useReturnEntry, useReturnSources, useSites } from '../api/hooks'
 import type { Row as ApiRow } from '../api/client'
 import DeliveryPrefRadio from '../components/DeliveryPrefRadio'
 import DraftBanner from '../components/DraftBanner'
@@ -47,7 +45,7 @@ export default function ReturnPage() {
   const { message } = App.useApp()
   const [form] = Form.useForm<FormValues>()
   const { data: sites } = useSites()
-  const inventory = useList('/inventory', { limit: 500 })
+  const inventory = useInventoryMaster()
   const ret = useReturnEntry()
   const [docs, setDocs] = useState<EntryDoc[]>([])
   const [olderWindow, setOlderWindow] = useState(false)

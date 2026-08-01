@@ -190,8 +190,8 @@ All green locally at commit `fae0b3f` (main), verified 2026-07-30.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **951 / 0** (suites A…AZ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **42 / 42** (~19 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **963 / 0** (suites A…AZ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **46 / 46** (~23 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,276 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |

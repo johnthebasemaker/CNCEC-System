@@ -7574,6 +7574,79 @@ async def test_material_card():
               r.status_code == 404 and r2.status_code == 422,
               f"{r.status_code}/{r2.status_code}")
 
+        # --- scan payloads that are not bare SAP codes (2026-08-01) ----------
+        # The operator's printed stickers carry "SAP|Description"; sending that
+        # whole string was the reported failure
+        # (`no inventory item with SAP code '1163|Cable Tie Wire ( Nylon)'`).
+        for label, payload in [
+            ("delimited label payload 'SAP|Description'", "SVCP-1|SVCP Scan Probe"),
+            ("a Material_Code instead of a SAP", "GI-SVCP-01"),
+            ("a lower-cased Material_Code", "gi-svcp-01"),
+            ("a tagged payload 'SAP: <code>'", "SAP: SVCP-1"),
+        ]:
+            rr = await ac.get("/stock/material-card", headers=H(hod_t),
+                              params={"sap": payload})
+            jj = rr.json() if rr.status_code == 200 else {}
+            check(f"ap-scan: {label} resolves to the item",
+                  rr.status_code == 200 and jj.get("sap_code") == "SVCP - 1"
+                  and jj.get("current_stock") == 77,
+                  f"{rr.status_code} {jj.get('sap_code')!r} stock={jj.get('current_stock')}")
+
+        # A delimited payload must not smuggle a cross-site read: scoping is
+        # applied AFTER resolution, so the HOD still sees only CNCEC's 77.
+        rr = await ac.get("/stock/material-card", headers=H(worker_t),
+                          params={"sap": "SVCP-1|SVCP Scan Probe"})
+        jj = rr.json() if rr.status_code == 200 else {}
+        check("ap-scan: a label payload stays site-scoped for a store keeper",
+              rr.status_code == 200 and jj.get("scope") == "CNCEC"
+              and jj.get("current_stock") == 77 and jj.get("by_site") == [],
+              f"{rr.status_code} scope={jj.get('scope')} stock={jj.get('current_stock')}")
+
+        # --- Material Intelligence payload ----------------------------------
+        rr = await ac.get("/stock/material-card", headers=H(hod_t),
+                          params={"sap": "SVCP-1"})
+        jj = rr.json()
+        series = jj.get("series", [])
+        check("ap-intel: burn rate and days of cover are over the WHOLE window",
+              # 30 consumed over a 30-day window = 1/day against 77 in stock.
+              jj.get("avg_daily_consumption") == 1.0 and jj.get("days_of_cover") == 77.0,
+              f"burn={jj.get('avg_daily_consumption')} cover={jj.get('days_of_cover')}")
+        # `balance` is each day's CLOSING balance, walked backwards from today:
+        # day-2 received 100 (→107), day-1 issued 30 (→77), today unchanged.
+        check("ap-intel: the balance line ends at today's stock and runs back",
+              len(series) == 30 and series[-1]["balance"] == 77
+              and series[-2]["balance"] == 77 and series[-3]["balance"] == 107,
+              f"tail={[p['balance'] for p in series[-3:]]}")
+        check("ap-intel: movements are newest-first and name the counterparty",
+              len(jj.get("movements", [])) == 3
+              and jj["movements"][0]["kind"] == "Issued"
+              and jj["movements"][0]["qty"] == 30,
+              str(jj.get("movements"))[:120])
+        check("ap-intel: admin gets the per-site split, scoped roles never do",
+              jj.get("by_site") == [],
+              str(jj.get("by_site")))
+
+        rr = await ac.get("/stock/material-card", headers=H(admin_t),
+                          params={"sap": "SVCP-1"})
+        jj = rr.json()
+        check("ap-intel: the admin split covers both sites",
+              sorted(x["site"] for x in jj.get("by_site", [])) == ["CNCEC", "OTHERSITE"],
+              str(jj.get("by_site")))
+
+        # A wider window pulls in the 45-day-old receipt the 30-day one excludes.
+        rr = await ac.get("/stock/material-card", headers=H(hod_t),
+                          params={"sap": "SVCP-1", "days": 90})
+        jj = rr.json()
+        check("ap-intel: ?days= widens the window (45-day-old receipt appears)",
+              jj.get("window_days") == 90 and len(jj.get("series", [])) == 90
+              and jj.get("totals", {}).get("received_30d") == 107,
+              f"window={jj.get('window_days')} recv={jj.get('totals', {}).get('received_30d')}")
+
+        r3 = await ac.get("/stock/material-card", headers=H(hod_t),
+                          params={"sap": "SVCP-1", "days": 5})
+        check("ap-intel: the window is bounded (days=5 → 422)",
+              r3.status_code == 422, str(r3.status_code))
+
         async with SessionLocal() as s:  # cleanup
             await s.execute(_sqt("DELETE FROM receipts WHERE \"SAP_Code\" LIKE 'SVCP%'"))
             await s.execute(_sqt("DELETE FROM consumption WHERE \"SAP_Code\" LIKE 'SVCP%'"))

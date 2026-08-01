@@ -276,6 +276,11 @@ export function canAccessPath(user: User | null, pathname: string): boolean {
     return ent ? canAccess(user, ent.access) : canAccess(user, { minLevel: 2 })
   }
   if (path.startsWith('/master/')) return canAccess(user, { minLevel: 3 })
+  // The QR-scan Material Intelligence page is open to ANY signed-in user:
+  // store keepers (level 0) are the ones holding the scanner, and its endpoint
+  // is get_current_user + site_scope — not the level-1 gate the /stock LIST
+  // carries. Inheriting /stock's rule would bounce an SK off their own scan.
+  if (path.startsWith('/stock/material/')) return true
   for (const g of NAV) {
     const node = g.children.find((n) => n.key === path)
     if (node) return canAccess(user, node.access)

@@ -9,6 +9,7 @@ import { useAuth } from './auth/AuthContext'
 // <Outlet>, so the sidebar stays put while a page chunk loads.
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const StockPage = lazy(() => import('./pages/StockPage'))
+const MaterialCardPage = lazy(() => import('./pages/MaterialCardPage'))
 const RecordsPage = lazy(() => import('./pages/RecordsPage'))
 const MasterDataPage = lazy(() => import('./pages/MasterDataPage'))
 const ReceivePage = lazy(() => import('./pages/ReceivePage'))
@@ -53,6 +54,9 @@ export default function App() {
       <Route element={<AppLayout />}>
         <Route index element={<Dashboard />} />
         <Route path="stock" element={<StockPage />} />
+        {/* Where a QR scan lands. The param may be a SAP code, a Material_Code
+            or a raw label payload — the server resolves all three. */}
+        <Route path="stock/material/:sap" element={<MaterialCardPage />} />
         <Route path="entry/receive" element={<ReceivePage />} />
         <Route path="entry/issue" element={<IssuePage />} />
         <Route path="entry/return" element={<ReturnPage />} />

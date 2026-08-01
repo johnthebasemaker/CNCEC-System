@@ -4,10 +4,7 @@ import type { ColumnsType } from 'antd/es/table'
 import type { FormInstance } from 'antd'
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons'
 import { useAuth } from '../auth/AuthContext'
-import {
-  useCancelSmr, useCreateSmr, useIntentVsActual, useList, useSites, useSmrItems,
-  useSmrList, useSmrStock,
-} from '../api/hooks'
+import { useCancelSmr, useCreateSmr, useIntentVsActual, useInventoryMaster, useList, useSites, useSmrItems, useSmrList, useSmrStock } from '../api/hooks'
 import type { Row as ApiRow } from '../api/client'
 import { useState } from 'react'
 
@@ -46,7 +43,7 @@ function NewRequest() {
   const [form] = Form.useForm<FormValues>()
   const { data: sites } = useSites()
   const employees = useList('/employees', { limit: 500 })
-  const inventory = useList('/inventory', { limit: 500 })
+  const inventory = useInventoryMaster()
   const create = useCreateSmr()
   const ppe = Form.useWatch('old_ppe_returned', form)
 

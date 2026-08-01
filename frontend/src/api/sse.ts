@@ -1,4 +1,4 @@
-import { API_BASE, getAuthToken } from './client'
+import { apiBase, getAuthToken } from './client'
 
 // Shared SSE consumer (Phase AI-5) — the HubAssistant pattern extracted:
 // axios buffers whole responses and EventSource can't carry the bearer
@@ -10,7 +10,7 @@ export async function streamSse(
   onEvent: (ev: Record<string, unknown>) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     credentials: 'include',
     method: 'POST',
     headers: {

@@ -1,5 +1,5 @@
 import { App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Typography } from 'antd'
-import { useAdjustmentEntry, useAdjustmentReasons, useList, useSites } from '../api/hooks'
+import { useAdjustmentEntry, useAdjustmentReasons, useInventoryMaster, useSites } from '../api/hooks'
 import type { Row as ApiRow } from '../api/client'
 
 interface FormValues {
@@ -21,7 +21,7 @@ export default function AdjustPage() {
   const { message } = App.useApp()
   const [form] = Form.useForm<FormValues>()
   const { data: sites } = useSites()
-  const inventory = useList('/inventory', { limit: 500 })
+  const inventory = useInventoryMaster()
   const { data: reasons } = useAdjustmentReasons()
   const adjust = useAdjustmentEntry()
 

@@ -9,10 +9,7 @@ import type { Dayjs } from 'dayjs'
 import { DownloadOutlined, EditOutlined, InboxOutlined, MinusCircleOutlined, PlusOutlined } from '@ant-design/icons'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../api/client'
-import {
-  downloadPrPdf, useAutoDraftPr, useCreatePr, useEditPrLine, useHodPrLines, useHodPrs,
-  useList, useRenamePr, useSites, useSubmitPr,
-} from '../api/hooks'
+import { downloadPrPdf, useAutoDraftPr, useCreatePr, useEditPrLine, useHodPrLines, useHodPrs, useInventoryMaster, useRenamePr, useSites, useSubmitPr } from '../api/hooks'
 import type { Row as ApiRow } from '../api/client'
 
 function errMsg(e: unknown): string {
@@ -39,7 +36,7 @@ function NewPr() {
   const { user } = useAuth()
   const [form] = Form.useForm<PrFormValues>()
   const { data: sites } = useSites()
-  const inventory = useList('/inventory', { limit: 500 })
+  const inventory = useInventoryMaster()
   const create = useCreatePr()
   const autoDraft = useAutoDraftPr()
   const siteWatch = Form.useWatch('site_id', form)

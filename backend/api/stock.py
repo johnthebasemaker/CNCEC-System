@@ -15,6 +15,7 @@ backend/api/parity_check.py — run it after changing any SQL here.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -285,16 +286,69 @@ async def stock_expiring(limit: int = Query(200, ge=1, le=5000), offset: int = Q
 
 
 # --- scan-to-dashboard material card (QR ecosystem, 2026-07-24) ----------------
+#: Printed labels are not all bare SAP codes. This repo's generators emit one
+#: (documents.py `_qr_png`), but the operator's older stickers carry
+#: "1163|Cable Tie Wire ( Nylon)" — SAP, a delimiter, then the description.
+#: The scanner parses this client-side too (frontend/src/lib/barcode.ts); doing
+#: it here as well means an old cached bundle, a hand-typed code or a
+#: third-party scanner app still resolves instead of 404-ing.
+_SCAN_DELIMS = re.compile(r"[|;\t\n\r]")
+
+
+_SCAN_TAGGED = re.compile(
+    r"(?:sap|mat(?:erial)?)(?:[_ ]?code)?\s*[:=]\s*([A-Za-z0-9._/-]+)", re.I)
+
+
+def _scan_tokens(raw: str) -> list[str]:
+    """Identifier candidates inside a scanned payload, best first."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    out: list[str] = []
+    tagged = _SCAN_TAGGED.search(text)          # "SAP: 1163" / "MAT=GI-700…"
+    cands = [text, *(_SCAN_DELIMS.split(text))]
+    if tagged:
+        cands.insert(1, tagged.group(1))
+    for cand in cands:
+        c = cand.strip()
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+async def _resolve_material(session: AsyncSession, raw: str):
+    """First inventory row matching a scan, by SAP code or by Material_Code.
+
+    Both sides are whitespace-normalized (ERP rows like "1043 - 2"), and the
+    lookup is case-insensitive so a hand-typed "gi-7001394" resolves.
+    """
+    for tok in _scan_tokens(raw):
+        norm = tok.replace(" ", "")
+        row = (await session.execute(text('''
+            SELECT "SAP_Code", "Equipment_Description", "Material_Code",
+                   "Category", "UOM", "Site_ID", "Minimum_Qty", "Unit_Cost"
+            FROM inventory
+            WHERE REPLACE(TRIM("SAP_Code"), ' ', '') = :v
+               OR UPPER(REPLACE(TRIM(COALESCE("Material_Code", '')), ' ', '')) = UPPER(:v)
+            ORDER BY CASE WHEN REPLACE(TRIM("SAP_Code"), ' ', '') = :v THEN 0 ELSE 1 END
+            LIMIT 1'''), {"v": norm})).mappings().first()
+        if row is not None:
+            return row
+    return None
+
+
 @router.get("/material-card",
-            summary="One material's stock + 30-day receipt/consumption trend "
+            summary="One material's stock, trend, lots and movements "
                     "(role-scoped: site-pinned for level <3, global for admin)")
-async def material_card(sap: str = Query(..., max_length=80),
+async def material_card(sap: str = Query(..., max_length=200),
+                        days: int = Query(30, ge=7, le=365),
                         user: dict = Depends(get_current_user),
                         session: AsyncSession = Depends(get_session)):
-    """Backs the QR-scan Material Dashboard modal. Scoping is the standard
+    """Backs the QR-scan Material Intelligence page. Scoping is the standard
     rule: site_scope() pins SK / supervisor / warehouse / HOD to their own
-    site's ledger rows; admin & logistics see the global picture. SAP codes
-    are whitespace-normalized on both sides (ERP rows like "1043 - 2")."""
+    site's ledger rows; admin & logistics see the global picture. `sap` accepts
+    a SAP code, a Material_Code, or a raw label payload like
+    "1163|Cable Tie Wire ( Nylon)" — see `_resolve_material`."""
     norm = sap.strip().replace(" ", "")
     if not norm:
         raise HTTPException(422, "sap must not be blank")
@@ -302,13 +356,12 @@ async def material_card(sap: str = Query(..., max_length=80),
     if scope == "":
         raise HTTPException(403, "no site is assigned to your account")
 
-    inv = (await session.execute(text('''
-        SELECT "SAP_Code", "Equipment_Description", "Material_Code",
-               "Category", "UOM", "Site_ID"
-        FROM inventory WHERE REPLACE(TRIM("SAP_Code"), ' ', '') = :sap
-        LIMIT 1'''), {"sap": norm})).mappings().first()
+    inv = await _resolve_material(session, sap)
     if inv is None:
-        raise HTTPException(404, f"no inventory item with SAP code {sap!r}")
+        raise HTTPException(404, f"no inventory item matches {sap!r}")
+    # Everything below keys on the RESOLVED SAP, not the scanned text — a scan
+    # may have arrived as a Material_Code or a delimited label payload.
+    norm = str(inv["SAP_Code"]).strip().replace(" ", "")
 
     site_w = "AND COALESCE(\"Site_ID\",'HQ') = :site" if scope else ""
     params: dict = {"sap": norm}
@@ -325,9 +378,9 @@ async def material_card(sap: str = Query(..., max_length=80),
         '''), params)).scalar() or 0
 
     import datetime as _dt
-    days = [( _dt.date.today() - _dt.timedelta(days=i)).isoformat()
-            for i in range(29, -1, -1)]
-    params["from"] = days[0]
+    window = [(_dt.date.today() - _dt.timedelta(days=i)).isoformat()
+              for i in range(days - 1, -1, -1)]
+    params["from"] = window[0]
     rows = (await session.execute(text(f'''
         SELECT substr("Date", 1, 10) AS d, 'r' AS k, SUM("Quantity") AS q
         FROM receipts
@@ -339,11 +392,81 @@ async def material_card(sap: str = Query(..., max_length=80),
         WHERE REPLACE(TRIM("SAP_Code"),' ','') = :sap
           AND "Date" >= :from {site_w} GROUP BY 1'''), params)).all()
     by_day: dict[str, dict] = {d: {"date": d, "received": 0.0, "consumed": 0.0}
-                               for d in days}
+                               for d in window}
     for d, k, q in rows:
         if d in by_day:
             by_day[d]["received" if k == "r" else "consumed"] += float(q or 0)
     series = list(by_day.values())
+    # Running stock BACKWARDS from today: stock[i-1] = stock[i] - received + consumed.
+    # Gives the balance line its history without a second pass over the ledger.
+    bal = float(stock)
+    for pt in reversed(series):
+        pt["balance"] = round(bal, 4)
+        bal = bal - pt["received"] + pt["consumed"]
+
+    consumed_win = sum(x["consumed"] for x in series)
+    received_win = sum(x["received"] for x in series)
+    # Burn rate over the WHOLE window (not just days with movement): a material
+    # issued once a month burns slowly, and averaging only active days would
+    # claim a month of stock is a day of stock.
+    per_day = consumed_win / days if days else 0.0
+    days_cover = round(float(stock) / per_day, 1) if per_day > 0 else None
+
+    # Open lots, earliest expiry first — the FEFO picture for this material.
+    # `lots` carries no quantity column (it is a lot REGISTER); the remaining
+    # balance is derived per lot exactly as SQL_LOT_BALANCE does it.
+    site_l = 'AND COALESCE(l."Site_ID",\'HQ\') = :site' if scope else ""
+    lots = [dict(m) for m in (await session.execute(text(f'''
+        SELECT l."Lot_Number", l."Expiry_Date", l."Status", l."Site_ID",
+               COALESCE((SELECT SUM(r."Quantity") FROM receipts r
+                         WHERE r."Lot_Number" = l."Lot_Number"
+                           AND r."SAP_Code" = l."SAP_Code"
+                           AND COALESCE(r."Site_ID",'HQ') = l."Site_ID"), 0)
+             - COALESCE((SELECT SUM(c."Quantity") FROM consumption c
+                         WHERE c."Lot_Number" = l."Lot_Number"
+                           AND c."SAP_Code" = l."SAP_Code"
+                           AND COALESCE(c."Site_ID",'HQ') = l."Site_ID"), 0)
+               AS "Remaining_Qty"
+        FROM lots l
+        WHERE REPLACE(TRIM(l."SAP_Code"),' ','') = :sap {site_l}
+        ORDER BY COALESCE(NULLIF(l."Expiry_Date",''), '9999-12-31'), l."Lot_Number"
+        LIMIT 25'''), params)).mappings().all()]
+
+    # Last movements, newest first — what actually happened to this material.
+    # Counterparty column differs per ledger: receipts name the supplier,
+    # issues the recipient, returns carry only a reason.
+    moves = [dict(m) for m in (await session.execute(text(f'''
+        SELECT "Date" AS d, 'Received' AS kind, "Quantity" AS qty,
+               COALESCE("Supplier",'') AS party, COALESCE("Site_ID",'') AS site
+        FROM receipts
+        WHERE REPLACE(TRIM("SAP_Code"),' ','') = :sap {site_w}
+        UNION ALL
+        SELECT "Date", 'Issued', "Quantity",
+               COALESCE("Issued_To",''), COALESCE("Site_ID",'')
+        FROM consumption
+        WHERE REPLACE(TRIM("SAP_Code"),' ','') = :sap {site_w}
+        UNION ALL
+        SELECT "Date", 'Returned', "Quantity",
+               COALESCE("Reason",''), COALESCE("Site_ID",'')
+        FROM returns
+        WHERE REPLACE(TRIM("SAP_Code"),' ','') = :sap {site_w}
+        ORDER BY 1 DESC LIMIT 12'''), params)).mappings().all()]
+
+    # Per-site split — only meaningful for the unscoped (global) roles.
+    by_site: list[dict] = []
+    if not scope:
+        by_site = [{"site": r[0] or "—", "stock": round(float(r[1] or 0), 4)}
+                   for r in (await session.execute(text('''
+            SELECT COALESCE("Site_ID",'HQ') AS s, SUM(q) FROM (
+                SELECT "Site_ID", "Quantity" AS q FROM receipts
+                 WHERE REPLACE(TRIM("SAP_Code"),' ','') = :sap
+                UNION ALL SELECT "Site_ID", -"Quantity" FROM consumption
+                 WHERE REPLACE(TRIM("SAP_Code"),' ','') = :sap
+                UNION ALL SELECT "Site_ID", -"Quantity" FROM returns
+                 WHERE REPLACE(TRIM("SAP_Code"),' ','') = :sap
+            ) t GROUP BY 1 ORDER BY 2 DESC'''), {"sap": norm})).all()]
+
+    minimum = float(inv["Minimum_Qty"] or 0)
     return {"sap_code": str(inv["SAP_Code"]).strip(),
             "description": (inv["Equipment_Description"] or "").strip(),
             "material_code": (inv["Material_Code"] or "").strip() or None,
@@ -351,7 +474,19 @@ async def material_card(sap: str = Query(..., max_length=80),
             "uom": (inv["UOM"] or "").strip(),
             "scope": scope or None,
             "current_stock": float(stock),
+            "minimum_qty": minimum,
+            "unit_cost": float(inv["Unit_Cost"] or 0),
+            "stock_value": round(float(stock) * float(inv["Unit_Cost"] or 0), 2),
+            "below_minimum": bool(minimum > 0 and float(stock) < minimum),
+            "window_days": days,
+            "avg_daily_consumption": round(per_day, 4),
+            "days_of_cover": days_cover,
             "series": series,
+            "lots": lots,
+            "movements": moves,
+            "by_site": by_site,
             "totals": {
-                "received_30d": round(sum(x["received"] for x in series), 4),
-                "consumed_30d": round(sum(x["consumed"] for x in series), 4)}}
+                # The 30d names are kept: they are the shipped contract, and
+                # the window defaults to 30. They mean "over window_days".
+                "received_30d": round(received_win, 4),
+                "consumed_30d": round(consumed_win, 4)}}

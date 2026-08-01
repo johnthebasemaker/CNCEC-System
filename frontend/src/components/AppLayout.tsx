@@ -1,8 +1,8 @@
 import { Suspense, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Alert, Badge, Button, ConfigProvider, Layout, Menu, Skeleton, Space, Switch, Tooltip, Typography } from 'antd'
+import { Alert, Badge, Button, ConfigProvider, Drawer, Grid, Layout, Menu, Skeleton, Space, Switch, Tooltip, Typography } from 'antd'
 import type { MenuProps } from 'antd'
-import { AppstoreOutlined, LogoutOutlined, MoonOutlined, QrcodeOutlined, SearchOutlined, SunOutlined, UserOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, LogoutOutlined, MenuOutlined, MoonOutlined, QrcodeOutlined, SearchOutlined, SunOutlined, UserOutlined } from '@ant-design/icons'
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useHealth, useOverdueActions, useWorkQueues } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
@@ -13,9 +13,8 @@ import { useThemeMode } from '../theme/ThemeContext'
 import { siderTheme } from '../theme/themes'
 import CommandPalette from './CommandPalette'
 import HubAssistant from './HubAssistant'
-import MaterialCardModal from './MaterialCardModal'
 import QrScanner from './QrScanner'
-import { BARCODE_FORMATS } from '../lib/barcode'
+import { BARCODE_FORMATS, parseScanPayload } from '../lib/barcode'
 import NotificationBell from './NotificationBell'
 import OfflineSyncBadge from './OfflineSyncBadge'
 import SyncControls from './SyncControls'
@@ -116,11 +115,11 @@ export default function AppLayout() {
   // Red SLA badge — polled only for admins (endpoint is level-4).
   const { data: overdue } = useOverdueActions(level >= 4)
   const [profileOpen, setProfileOpen] = useState(false)
-  // Global QR scan → Material Dashboard (QR ecosystem): scanner decodes a
-  // rack/bin sticker (payload = SAP code), the modal shows role-scoped stock
-  // + the 30-day receive/consume trend.
+  // Global QR scan → Material Intelligence page (QR ecosystem). The sticker
+  // payload is parsed client-side (parseScanPayload) AND resolved server-side,
+  // because labels are not all bare SAP codes — the operator's older stickers
+  // read "1163|Cable Tie Wire ( Nylon)".
   const [scanOpen, setScanOpen] = useState(false)
-  const [scanSap, setScanSap] = useState<string | null>(null)
 
   // Collapsible sidebar groups — the role's primary group opens by default
   // (progressive disclosure); the choice persists, and the active group is
@@ -146,47 +145,79 @@ export default function AppLayout() {
     ? roleHome(user)
     : null
 
+  // Mobile shell: below `md` the nav is an OVERLAY drawer, not a rail in the
+  // flex row. antd's zero-width Sider trigger re-opens the rail IN FLOW, which
+  // is what squeezed the content column on a phone — every industry-standard
+  // app slides the nav over the page instead.
+  const screens = Grid.useBreakpoint()
+  const isMobile = !screens.md
+  const [navOpen, setNavOpen] = useState(false)
+  useEffect(() => { setNavOpen(false) }, [location.pathname])
+
+  const navBody = (
+    <div className="gi-sider-scroll">
+      <div className="gi-brand">
+        <div className="gi-wordmark">GI&nbsp;Hub</div>
+        <div className="gi-brand-sub">ERP CONSOLE</div>
+      </div>
+      <Menu
+        mode="inline"
+        selectedKeys={[location.pathname]}
+        openKeys={openKeys.filter((k) => visibleGroupIds(user, allAreas).includes(k))}
+        onOpenChange={(keys) => onOpenChange(keys as string[])}
+        items={buildMenu(user, queues ?? {}, overdue?.count, allAreas)}
+        onClick={({ key }) => navigate(key)}
+      />
+      {isAdmin && (
+        <div className="gi-nav-allareas" style={{ padding: '12px 16px 20px', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <AppstoreOutlined style={{ opacity: 0.7 }} />
+          <Typography.Text style={{ flex: 1, fontSize: 12, opacity: 0.85 }}>All areas</Typography.Text>
+          <Switch size="small" checked={allAreas} onChange={setAll}
+            aria-label="Show all navigation areas" />
+        </div>
+      )}
+    </div>
+  )
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <ConfigProvider theme={siderTheme}>
-        <Sider
-          width={232}
-          className="gi-sider"
-          breakpoint="md"
-          collapsedWidth={0}
-          style={{ height: '100vh', position: 'sticky', top: 0 }}
-        >
-          <div className="gi-sider-scroll">
-            <div className="gi-brand">
-              <div className="gi-wordmark">GI&nbsp;Hub</div>
-              <div className="gi-brand-sub">ERP CONSOLE</div>
-            </div>
-            <Menu
-              mode="inline"
-              selectedKeys={[location.pathname]}
-              openKeys={openKeys.filter((k) => visibleGroupIds(user, allAreas).includes(k))}
-              onOpenChange={(keys) => onOpenChange(keys as string[])}
-              items={buildMenu(user, queues ?? {}, overdue?.count, allAreas)}
-              onClick={({ key }) => navigate(key)}
-            />
-            {isAdmin && (
-              <div className="gi-nav-allareas" style={{ padding: '12px 16px 20px', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <AppstoreOutlined style={{ opacity: 0.7 }} />
-                <Typography.Text style={{ flex: 1, fontSize: 12, opacity: 0.85 }}>All areas</Typography.Text>
-                <Switch size="small" checked={allAreas} onChange={setAll}
-                  aria-label="Show all navigation areas" />
-              </div>
-            )}
-          </div>
-        </Sider>
+        {isMobile ? (
+          <Drawer
+            open={navOpen}
+            onClose={() => setNavOpen(false)}
+            placement="left"
+            width={264}
+            closable={false}
+            rootClassName="gi-nav-drawer"
+            styles={{ body: { padding: 0 } }}
+          >
+            {navBody}
+          </Drawer>
+        ) : (
+          <Sider
+            width={232}
+            className="gi-sider"
+            trigger={null}
+            style={{ height: '100vh', position: 'sticky', top: 0 }}
+          >
+            {navBody}
+          </Sider>
+        )}
       </ConfigProvider>
       <Layout>
         <Header
           className="gi-header"
           style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingInline: 24 }}
         >
-          <Typography.Text strong className="gi-header-title">Warehouse &amp; Inventory</Typography.Text>
-          <Space size="middle">
+          <Space size="small">
+            {isMobile && (
+              <Button type="text" aria-label="Open navigation" icon={<MenuOutlined />}
+                onClick={() => setNavOpen(true)} />
+            )}
+            <Typography.Text strong className="gi-header-title">Warehouse &amp; Inventory</Typography.Text>
+          </Space>
+          <Space size="middle" className="gi-header-actions">
             <Tooltip title="Jump to any page (⌘K / Ctrl-K)">
               <Button type="text" aria-label="Open command palette" icon={<SearchOutlined />}
                 onClick={() => window.dispatchEvent(new Event('gi-open-command-palette'))} />
@@ -219,7 +250,7 @@ export default function AppLayout() {
             <Button size="small" icon={<LogoutOutlined />} onClick={logout}>Sign out</Button>
           </Space>
         </Header>
-        <Content style={{ margin: 24 }}>
+        <Content className="gi-content">
           {Boolean((health as { maintenance?: boolean } | undefined)?.maintenance) && (
             <Alert type="warning" showIcon banner style={{ marginBottom: 16 }}
               title="Maintenance mode is ON — non-admin sign-ins are paused until it is switched off." />
@@ -245,10 +276,8 @@ export default function AppLayout() {
         onClose={() => setScanOpen(false)}
         onDecode={(text) => {
           setScanOpen(false)
-          // Labels encode the raw SAP code; tolerate "SAP:1385"-style payloads.
-          setScanSap(text.trim().replace(/^SAP[:\s]+/i, ''))
+          navigate(`/stock/material/${encodeURIComponent(parseScanPayload(text))}`)
         }} />
-      <MaterialCardModal sap={scanSap} open={!!scanSap} onClose={() => setScanSap(null)} />
     </Layout>
   )
 }
