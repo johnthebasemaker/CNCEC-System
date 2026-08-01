@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { App, Button, ConfigProvider, Form, Input, Select } from 'antd'
-import { EnvironmentOutlined, LockOutlined, SafetyOutlined, UserOutlined } from '@ant-design/icons'
+import { App, Button, ConfigProvider, Form, Input, Select, Tooltip, Typography } from 'antd'
+import { EnvironmentOutlined, LockOutlined, SafetyOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
 import { useAuth } from '../auth/AuthContext'
 import { useRegister, useRegisterSites } from '../api/hooks'
 import { darkTheme } from '../theme/themes'
+import ServerConfigModal from '../components/ServerConfigModal'
+import { apiBase, isApiOverridden } from '../api/client'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -34,6 +36,7 @@ export default function LoginPage() {
   const regRole: string = Form.useWatch('role', regForm) ?? 'store_keeper'
   const isScoped = SCOPED_ROLES.has(regRole)
   const { data: regSites, isLoading: sitesLoading } = useRegisterSites(mode === 'register')
+  const [serverOpen, setServerOpen] = useState(false)
 
   const onLogin = async (v: { username: string; password: string }) => {
     setLoading(true)
@@ -78,6 +81,14 @@ export default function LoginPage() {
       <div className="gi-login">
         <div className="gi-login-card gi-stagger">
           <div className="gi-login-head">
+            {/* Server picker: an installed APK/EXE/DMG is built once against
+                production, so the only way to test it against the local tunnel
+                is a runtime override. Deliberately on the LOGIN screen — the
+                server has to be chosen before there is a session. */}
+            <Tooltip title="Server configuration">
+              <Button type="text" aria-label="Server configuration" className="gi-login-gear"
+                icon={<SettingOutlined />} onClick={() => setServerOpen(true)} />
+            </Tooltip>
             <div className="gi-wordmark">GI&nbsp;Hub</div>
             <div className="gi-brand-sub">
               {mode === 'register' ? 'ERP CONSOLE — REQUEST ACCESS' : 'ERP CONSOLE — SIGN IN'}
@@ -157,7 +168,13 @@ export default function LoginPage() {
               </Button>
             </Form>
           )}
+          {isApiOverridden() && (
+            <Typography.Paragraph type="warning" style={{ fontSize: 12, textAlign: 'center', marginTop: 12, marginBottom: 0 }}>
+              Connected to {apiBase()}
+            </Typography.Paragraph>
+          )}
         </div>
+        <ServerConfigModal open={serverOpen} onClose={() => setServerOpen(false)} />
       </div>
     </ConfigProvider>
   )

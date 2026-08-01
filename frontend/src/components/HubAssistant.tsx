@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Alert, Button, Card, Input, Space, Tooltip, Typography } from 'antd'
 import { CloseOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons'
-import { API_BASE, api, getAuthToken } from '../api/client'
+import { apiBase, api, getAuthToken } from '../api/client'
 
 interface Msg { who: 'user' | 'ai'; text: string }
 interface AiHealth { ok: boolean; enabled: boolean; message: string }
@@ -46,7 +46,7 @@ export default function HubAssistant() {
     const ctrl = new AbortController()
     abortRef.current = ctrl
     try {
-      const res = await fetch(`${API_BASE}/ai/assistant`, {
+      const res = await fetch(`${apiBase()}/ai/assistant`, {
         method: 'POST',
         credentials: 'include',
         headers: {

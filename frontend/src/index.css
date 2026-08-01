@@ -159,6 +159,12 @@ body {
   white-space: nowrap;
 }
 
+/* Content gutter: generous on desktop, frugal on a phone — a fixed 24px
+   margin spends 48px of a 375px screen on empty space. */
+.gi-content {
+  margin: 24px;
+}
+
 /* On narrow screens, keep only the actionable header items */
 @media (max-width: 900px) {
   .gi-header-title,
@@ -170,6 +176,52 @@ body {
   .gi-health-label {
     display: none;
   }
+}
+
+/* ─── Mobile shell (< md) ───────────────────────────────────────────────── */
+@media (max-width: 767px) {
+  .gi-content {
+    margin: 12px;
+  }
+  /* The header packs a hamburger + 7 icon buttons; let it wrap rather than
+     overflow, and reclaim the horizontal padding a phone cannot spare. */
+  .gi-header {
+    padding-inline: 12px !important;
+    height: auto !important;
+    min-height: 56px;
+    line-height: 1.4 !important;
+  }
+  .gi-header-actions {
+    gap: 2px !important;
+  }
+  /* Tables: let a wide grid scroll inside its own box instead of pushing the
+     page sideways. Nothing in the app should scroll the BODY horizontally. */
+  .ant-table-wrapper {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  /* antd's default cell padding is desktop-sized; 8px keeps 3–4 columns
+     readable on a phone instead of 2. */
+  .ant-table.ant-table-small .ant-table-tbody > tr > td,
+  .ant-table.ant-table-small .ant-table-thead > tr > th {
+    padding: 6px 8px !important;
+  }
+  /* Page titles shed a size step so a heading never wraps to three lines. */
+  .gi-page h3.ant-typography {
+    font-size: 20px;
+  }
+  /* Modals go near-full-bleed — a centred 720px dialog on a 375px screen
+     leaves a useless 8px frame. */
+  .ant-modal {
+    max-width: calc(100vw - 16px);
+    margin: 8px auto;
+  }
+}
+
+/* The nav drawer reuses the sider's navy gradient so opening it does not flip
+   the app to a light panel mid-gesture. */
+.gi-nav-drawer .ant-drawer-body {
+  background: var(--gi-sider-bg);
 }
 
 /* API health indicator — pulsing dot instead of a Tag */
@@ -392,4 +444,18 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Server-configuration gear, pinned to the login card's top-right corner. */
+.gi-login-head {
+  position: relative;
+}
+.gi-login-gear {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  color: rgba(240, 244, 248, 0.55);
+}
+.gi-login-gear:hover {
+  color: var(--gi-gold-light);
 }

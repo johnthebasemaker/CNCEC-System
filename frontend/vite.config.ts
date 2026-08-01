@@ -97,7 +97,20 @@ export default defineConfig({
       },
     },
   },
+  // `vite preview` serves the BUILT bundle on the same port and proxy as dev.
+  // Testing over the tunnel this way is the honest measurement: `npm run dev`
+  // ships ~28 MB of unbundled ES modules to the browser, which is fine on
+  // localhost and painfully slow through Cloudflare.
   preview: {
+    port: 5173,
+    strictPort: true,
     allowedHosts: ALLOWED_HOSTS,
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_PROXY || 'http://127.0.0.1:8000',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api/, ''),
+      },
+    },
   },
 })

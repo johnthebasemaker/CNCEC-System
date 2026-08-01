@@ -18,6 +18,26 @@ export function useSites() {
   })
 }
 
+/**
+ * The inventory MASTER, shared by every picker in the app.
+ *
+ * This is the heaviest call on an entry page — ~100 KB of JSON — and eight
+ * pages were each requesting it under their own query key with the global
+ * 15 s staleTime, so walking Receive → Issue → Return re-downloaded it every
+ * time. It is master data that changes on the order of days, so it gets ONE
+ * cache entry and a 5-minute staleTime like the other masters: fetched once
+ * per session, instant on every page after the first. Mutations that edit the
+ * master already invalidate the '/inventory' key, so edits still show up.
+ */
+export function useInventoryMaster(limit = 500) {
+  return useQuery<ListResponse>({
+    queryKey: ['/inventory', { limit }],
+    staleTime: 300_000,
+    queryFn: () => fetchList('/inventory', { limit }),
+    placeholderData: (prev) => prev,
+  })
+}
+
 export function useCategories(enabled = true) {
   return useQuery({
     queryKey: ['categories'],

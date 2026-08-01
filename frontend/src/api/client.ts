@@ -6,12 +6,61 @@ import axios from 'axios'
 // VITE_API_URL=https://gi.giinventory.com/api so the standalone binaries talk
 // to the hosted backend — their origin is tauri://localhost etc., so relative
 // paths would otherwise resolve nowhere.
-export const API_BASE =
+const BUILD_API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/+$/, '') || '/api'
 
-// withCredentials keeps the httpOnly refresh cookie flowing when API_BASE is
+// --- server override (native builds) -----------------------------------------
+// An installed APK/EXE/DMG is compiled ONCE against production, but the same
+// binary has to be pointable at the local tunnel for testing. The build-time
+// VITE_API_URL is therefore only the DEFAULT: a runtime override lives in
+// localStorage and wins, so a tester switches server without a rebuild.
+// Web builds keep the relative '/api' unless someone deliberately overrides.
+export const API_OVERRIDE_KEY = 'gi_api_base'
+
+/** Normalise a user-entered origin into an API base ('' = use the default). */
+export function normalizeApiBase(input: string): string {
+  const v = (input || '').trim().replace(/\/+$/, '')
+  if (!v) return ''
+  // A bare host is the common input ("local.giinventory.com"); assume https
+  // and the /api prefix nginx and the Vite proxy both mount the API under.
+  const withProto = /^https?:\/\//i.test(v) ? v : `https://${v}`
+  return /\/api$/i.test(withProto) ? withProto : `${withProto}/api`
+}
+
+function readOverride(): string {
+  try { return localStorage.getItem(API_OVERRIDE_KEY) || '' } catch { return '' }
+}
+
+let _apiBase = readOverride() || BUILD_API_BASE
+
+/** The base every request actually uses right now (override → build → /api). */
+export function apiBase(): string { return _apiBase }
+
+/** True when the app is talking to something other than its built-in default. */
+export function isApiOverridden(): boolean { return readOverride() !== '' }
+
+export function getApiBaseDefault(): string { return BUILD_API_BASE }
+
+/**
+ * Point the app at a different server. Persisted, applied to the live axios
+ * instance immediately, and deliberately NOT merged with the current session:
+ * tokens are issued by one server and meaningless to another, so the caller
+ * signs out and reloads after switching.
+ */
+export function setApiBase(input: string): string {
+  const norm = normalizeApiBase(input)
+  try {
+    if (norm) localStorage.setItem(API_OVERRIDE_KEY, norm)
+    else localStorage.removeItem(API_OVERRIDE_KEY)
+  } catch { /* private mode — the override just won't persist */ }
+  _apiBase = norm || BUILD_API_BASE
+  api.defaults.baseURL = _apiBase
+  return _apiBase
+}
+
+// withCredentials keeps the httpOnly refresh cookie flowing when the base is
 // cross-origin (native apps); it is a no-op for same-origin web requests.
-export const api = axios.create({ baseURL: API_BASE, withCredentials: true })
+export const api = axios.create({ baseURL: _apiBase, withCredentials: true })
 
 // RTR client identity: the backend issues a 90-day refresh-token family to
 // installed native apps ('native') and a 7-day one to browsers ('web').
@@ -89,7 +138,7 @@ async function refreshAccessToken(): Promise<string | null> {
     // httpOnly Set-Cookie the JS never sees — the browser/webview stores the
     // new cookie automatically (withCredentials covers the cross-origin
     // native case). Only the short-lived access token lives in JS.
-    const { data } = await axios.post(`${API_BASE}/auth/refresh`, null, {
+    const { data } = await axios.post(`${apiBase()}/auth/refresh`, null, {
       withCredentials: true,
     })
     const t = (data?.access_token as string) ?? null
@@ -117,7 +166,7 @@ function logApiFailure(err: unknown) {
   const res = e?.response
   const headers = (res?.headers ?? {}) as Record<string, unknown>
   console.error('[GI Hub] API request failed', {
-    url: `${API_BASE}${e?.config?.url ?? ''}`,
+    url: `${apiBase()}${e?.config?.url ?? ''}`,
     method: (e?.config?.method ?? 'get').toUpperCase(),
     message: e?.message,
     code: e?.code,
@@ -132,7 +181,7 @@ function logApiFailure(err: unknown) {
       '[GI Hub] Possible Cloudflare Access block detected on native API request. ' +
         'The API path needs an Access Bypass/Service-Auth policy — see docs/NATIVE_APPS.md.',
     )
-  } else if (!res && API_BASE.startsWith('http')) {
+  } else if (!res && apiBase().startsWith('http')) {
     console.error(
       '[GI Hub] No response on a cross-origin (native) request. If this domain is ' +
         'behind Cloudflare Access, its login redirect is blocked by CORS and looks ' +
@@ -158,7 +207,7 @@ function noteApiUnreachable(url: string, status?: number) {
   _lastUnreachableLog = now
   const where = status ? `${status} from the API proxy` : 'network error'
   console.error(
-    `[GI Hub] API unreachable (${where}, ${API_BASE}${url}). ` +
+    `[GI Hub] API unreachable (${where}, ${apiBase()}${url}). ` +
       'Ensure the Python backend is running: ' +
       '.venv/bin/uvicorn backend.api.main:app --host 127.0.0.1 --port 8000',
   )

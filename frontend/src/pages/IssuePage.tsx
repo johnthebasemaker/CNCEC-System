@@ -10,7 +10,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { BarcodeOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
-import { useBins, useBulkEntry, useCategories, useDocsRequired, useList, useSites, useWbsOptions } from '../api/hooks'
+import { useBins, useBulkEntry, useCategories, useDocsRequired, useInventoryMaster, useSites, useWbsOptions } from '../api/hooks'
 import type { Row as ApiRow } from '../api/client'
 import DeliveryPrefRadio from '../components/DeliveryPrefRadio'
 import DraftBanner from '../components/DraftBanner'
@@ -56,7 +56,7 @@ export default function IssuePage() {
   const { message } = App.useApp()
   const [form] = Form.useForm<FormValues>()
   const { data: sites } = useSites()
-  const inventory = useList('/inventory', { limit: 500 })
+  const inventory = useInventoryMaster()
   const bulk = useBulkEntry('consumption', ['/consumption'])
   const [staged, setStaged] = useState<StagedRow[]>([])
   const [editingUid, setEditingUid] = useState<string | null>(null)
@@ -83,6 +83,11 @@ export default function IssuePage() {
   const [liningCode, setLiningCode] = useState<string | undefined>()
   const lining = useQuery({
     queryKey: ['/entry/lining-systems', watchSite],
+    // Only the Surface-Shields flow reads this, so it must not be on the
+    // critical path of an ordinary issue: fetched when that category is
+    // picked, then cached for the rest of the session.
+    enabled: category === SURFACE_SHIELDS,
+    staleTime: 300_000,
     queryFn: async () => (await api.get('/entry/lining-systems',
       { params: watchSite ? { site_id: watchSite } : {} })).data as {
         systems: { code: string; short_name: string; substrate: string

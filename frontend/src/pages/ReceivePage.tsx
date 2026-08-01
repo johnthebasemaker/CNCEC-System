@@ -8,7 +8,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { BarcodeOutlined, DeleteOutlined, EditOutlined, PaperClipOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
-import { useBulkEntry, useCategories, useDocsRequired, useList, useReceiptMeta, useSites, useWbsOptions } from '../api/hooks'
+import { useBulkEntry, useCategories, useDocsRequired, useInventoryMaster, useReceiptMeta, useSites, useWbsOptions } from '../api/hooks'
 import { api } from '../api/client'
 import type { Row as ApiRow } from '../api/client'
 import DeliveryPrefRadio from '../components/DeliveryPrefRadio'
@@ -54,7 +54,7 @@ export default function ReceivePage() {
   const { message } = App.useApp()
   const [form] = Form.useForm<FormValues>()
   const { data: sites } = useSites()
-  const inventory = useList('/inventory', { limit: 500 })
+  const inventory = useInventoryMaster()
   const bulk = useBulkEntry('receipt', ['/receipts'])
   const [staged, setStaged] = useState<StagedRow[]>([])
   const [editingUid, setEditingUid] = useState<string | null>(null)

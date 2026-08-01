@@ -7,7 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { Row as ApiRow } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
-import { useList, useSites } from '../api/hooks'
+import { useInventoryMaster, useSites } from '../api/hooks'
 import SubmissionInsight from '../components/SubmissionInsight'
 
 function errMsg(e: unknown): string {
@@ -27,7 +27,7 @@ export default function CrossSitePage() {
   const qc = useQueryClient()
   const isAdmin = (user?.level ?? 0) >= 4
   const { data: sites } = useSites()
-  const inventory = useList('/inventory', { limit: 500 })
+  const inventory = useInventoryMaster()
   const [form] = Form.useForm()
 
   const { data, isFetching } = useQuery({
