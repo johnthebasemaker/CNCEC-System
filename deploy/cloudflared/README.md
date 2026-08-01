@@ -19,36 +19,38 @@ Measured, not assumed (`cloudflared tunnel list` + `ps aux` + live probes):
 | **gi-hub** | `8e2f8d9d…` | none — started by `config.yml` in this folder | credentials on disk at `~/.cloudflared/8e2f8d9d….json` |
 | Hetzner-Production | `ccf809f6…` | none (server not provisioned) | the future production box |
 
-**The trap this file used to hide:** `config.yml` says `tunnel: 8e2f8d9d`
-(**gi-hub**) but its only ingress rule is `local.giinventory.com`. Those are two
-different tunnels. Proven 2026-08-01: with the gi-hub connector fully registered
-(4 QUIC connections) and Vite live on :5173, `https://local.giinventory.com`
-still returned **530 / Error 1033** — the hostname is not routed to gi-hub. That
-is exactly why only the raw `--token` command works today.
+**`local.giinventory.com` is served by the `gi-hub` tunnel — the one this
+folder's `config.yml` runs.** Re-measured 2026-08-01 (second pass): the
+hostname answers **HTTP 200** while that connector is up and **530 / Error
+1033** within seconds of stopping it. So `config.yml` is authoritative, the
+ingress lives in git, and the raw `--token` command is **no longer needed**.
 
-### Pick one of these two, once
+<details>
+<summary>History — why the token used to be the only thing that worked</summary>
 
-**Option A — recommended: make the config file authoritative.** One DNS command
-(it rewrites the CNAME for that hostname; run it yourself, it changes your
-Cloudflare account):
-
-```bash
-cloudflared tunnel route dns gi-hub local.giinventory.com
-```
-
-After that the token is never needed again: ingress lives in git, the tunnel
-runs from `config.yml`, and `local.giinventory.com` is served by **gi-hub**.
-
-**Option B — keep the token.** Leave the DNS alone and configure
-`Local-Tunnel-gi-hub`'s public hostname in the Zero Trust dashboard
-(`local.giinventory.com` → `http://localhost:5173`). The ingress then lives in
-the dashboard, not in this repo, and you keep running its `--token` command.
+Earlier the same day, the same probe returned 530 *with gi-hub fully
+registered* (4 QUIC connections, Vite live on :5173): the hostname was then
+routed to a different tunnel, `Local-Tunnel-gi-hub` (`40802134…`), whose token
+had to be run by hand. `cloudflared tunnel route dns gi-hub
+local.giinventory.com` is the command that moves it — worth knowing if the
+hostname ever starts returning 1033 again with a healthy connector, because it
+means the DNS record points at some other tunnel.
+</details>
 
 ### The two environments, end to end
 
-Each needs **three things up: the API, Vite, and exactly one connector.**
+Each needs **three things up: the API, Vite, and exactly one connector** — which
+is what `bin/dev.sh` exists to handle:
 
 #### Local development → `https://local.giinventory.com`
+
+```bash
+./bin/dev.sh tunnel
+```
+
+That raises Postgres, the API, Vite in `dev:local` mode and the gi-hub
+connector, then probes the hostname and tells you the HTTP code it got. The
+long-hand equivalent, if you ever want the pieces in separate terminals:
 
 ```bash
 ./run_api.sh
@@ -61,9 +63,6 @@ npm run dev:local --prefix frontend
 ```bash
 cloudflared tunnel --config deploy/cloudflared/config.yml run gi-hub
 ```
-
-(That third command is the Option-A form. On Option B it stays your
-`cloudflared tunnel run --token …` line — same slot, same rules.)
 
 #### The `gi.giinventory.com` mirror
 
@@ -108,8 +107,12 @@ Expect exactly one line — the root daemon. If you see your own
 `--config` or `--token` process from an earlier session, kill it first:
 
 ```bash
-pkill -f "cloudflared tunnel --config"
+./bin/dev.sh stop
 ```
+
+`bin/dev.sh` enforces this rule for you: `tunnel` mode refuses to start when
+another connector is already running as your user, and `stop` sweeps only
+processes owned by **you** — the root daemon is never a match.
 
 ---
 
