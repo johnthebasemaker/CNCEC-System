@@ -21,6 +21,11 @@
   --gi-app-bg: linear-gradient(160deg, #020c1b 0%, #0a1929 60%, #020c1b 100%);
   --gi-line: #2a4060;
   --gi-scroll-thumb: #2a4060;
+  /* Mirrors theme/themes.ts → darkTheme colorBgContainer + Table.headerBg.
+     Sticky headers need these in CSS: the holder element is antd-internal and
+     takes no token, so it must be painted opaque by hand. */
+  --gi-surface: #162038;
+  --gi-table-header-bg: #1b2a47;
 }
 
 :root[data-theme='light'] {
@@ -28,6 +33,8 @@
   --gi-app-bg: linear-gradient(160deg, #eef2ff 0%, #f8fafc 60%, #eef2ff 100%);
   --gi-line: #e5e7eb;
   --gi-scroll-thumb: #cbd5e1;
+  --gi-surface: #ffffff;
+  --gi-table-header-bg: #f1f5f9;
 }
 
 * {
@@ -165,6 +172,13 @@ body {
   margin: 24px;
 }
 
+/* The app header's height. Sticky TABLE headers must clear exactly this, so it
+   is a variable rather than a 64 hard-coded at 95 call sites — smartTable.tsx
+   reads it for `offsetHeader`, and it changes at the mobile breakpoint. */
+:root {
+  --gi-header-h: 64px;
+}
+
 /* On narrow screens, keep only the actionable header items */
 @media (max-width: 900px) {
   .gi-header-title,
@@ -180,16 +194,20 @@ body {
 
 /* ─── Mobile shell (< md) ───────────────────────────────────────────────── */
 @media (max-width: 767px) {
+  :root {
+    --gi-header-h: 56px;
+  }
   .gi-content {
     margin: 12px;
   }
-  /* The header packs a hamburger + 7 icon buttons; let it wrap rather than
-     overflow, and reclaim the horizontal padding a phone cannot spare. */
+  /* The header packs a hamburger + 7 icon buttons; reclaim the horizontal
+     padding a phone cannot spare. The HEIGHT stays fixed and matches
+     --gi-header-h: a sticky table header offsets against it, and an
+     auto-height header would leave a gap that rows show through. */
   .gi-header {
     padding-inline: 12px !important;
-    height: auto !important;
-    min-height: 56px;
-    line-height: 1.4 !important;
+    height: var(--gi-header-h) !important;
+    line-height: var(--gi-header-h) !important;
   }
   .gi-header-actions {
     gap: 2px !important;
@@ -458,4 +476,30 @@ body {
 }
 .gi-login-gear:hover {
   color: var(--gi-gold-light);
+}
+
+/* ─── Sticky table headers ──────────────────────────────────────────────────
+   Two things must hold or rows bleed through the header while scrolling:
+
+   1. STACKING. antd computes the sticky holder's z-index per stacking context,
+      and it came out inconsistently across pages (measured: 9 on one Dashboard
+      table, 23 on the next). Anything above the app header's z-index 20 makes
+      a table header slide OVER the app chrome. Pin both sticky layers just
+      under it so a table header always passes beneath the app header and
+      always above its own rows.
+   2. OPACITY. The holder must be fully opaque. antd fills the <th> cells from
+      the Table.headerBg token, but the holder BEHIND them (borders, the
+      scrollbar gutter, the gap after the last column) inherits nothing, and
+      any translucency there shows the rows travelling underneath. */
+.ant-table-sticky-holder,
+.ant-table-sticky-scroll {
+  z-index: 11 !important;
+}
+
+.ant-table-sticky-holder {
+  background: var(--gi-surface) !important;
+}
+
+.ant-table-sticky-holder .ant-table-thead > tr > th {
+  background: var(--gi-table-header-bg) !important;
 }

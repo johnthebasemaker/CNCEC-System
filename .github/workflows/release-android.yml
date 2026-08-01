@@ -18,6 +18,12 @@ on:
   push:
     tags: ['v*']
 
+# Re-running a tag (or pushing it twice) must not race two builds onto the
+# same GitHub Release.
+concurrency:
+  group: release-android-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-android:
     name: Build Android .apk
@@ -80,17 +86,27 @@ jobs:
             exit 1
           fi
 
+      # Stamp the version into the FILENAME. Every release so far produced an
+      # identically-named asset, so the Releases page gave no way to tell which
+      # build an installer came from. A manual dispatch is labelled by commit.
       - name: Rename APK
+        shell: bash
         run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
           mkdir -p out
-          cp frontend/android/app/build/outputs/apk/debug/app-debug.apk out/GI-Hub-android.apk
+          cp frontend/android/app/build/outputs/apk/debug/app-debug.apk \
+             "out/GI-Hub-${VERSION}-android.apk"
           ls -lh out/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: GI-Hub-Android
-          path: out/GI-Hub-android.apk
+          path: out/*.apk
           retention-days: 30
           if-no-files-found: error
 
