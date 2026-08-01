@@ -154,6 +154,36 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
 
 ---
 
+## Running it locally — one command
+
+`bin/dev.sh` raises and levels the whole stack (Postgres + FastAPI + Vite +,
+where it applies, the Cloudflare connector). Three environments, one at a time —
+they all want `:5173`:
+
+| Command | Serves | Connector |
+|---|---|---|
+| `./bin/dev.sh localhost` | `http://localhost:5173` (HMR live) | none |
+| `./bin/dev.sh tunnel` | `https://local.giinventory.com` | starts `gi-hub` from `deploy/cloudflared/config.yml` |
+| `./bin/dev.sh gi` | `https://gi.giinventory.com` (legacy mirror) | none — the **root LaunchDaemon** already serves it |
+
+```bash
+./bin/dev.sh stop
+```
+
+`stop` kills the API, Vite and *our* connector — process-group signals plus a
+repo-scoped sweep, so uvicorn's reloader child and Vite's node child go too —
+and then reports whether `:8000` and `:5173` are actually free. Also
+`./bin/dev.sh status` and `./bin/dev.sh logs [api|web|tunnel]`.
+
+Two things it will not do, on purpose: it leaves **Postgres** running (a shared
+brew service the legacy app and every suite use — `stop --db` if you really mean
+it), and every sweep is scoped to your uid so the **root cloudflared daemon**
+that serves `gi.giinventory.com` can never be caught in it. Starting a second
+connector is how Error 1033 came back before; `tunnel` mode refuses to start
+when one of yours is already up. Details: [`deploy/cloudflared/README.md`](deploy/cloudflared/README.md).
+
+---
+
 ## PRESENT — current state and baselines
 
 All green locally at commit `fae0b3f` (main), verified 2026-07-30.

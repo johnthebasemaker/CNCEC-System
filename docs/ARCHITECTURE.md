@@ -379,8 +379,13 @@ tag Release via softprops/action-gh-release.
 
 ## 9. Operational notes
 
-- Local dev: `./run_api.sh` (:8000, asyncpg → :5433/gihub) + `npm run dev
-  --prefix frontend` (:5173). Hermetic: prefix `GI_DOTENV=0 GI_SCHEDULER=0`.
+- Local dev: **`./bin/dev.sh localhost`** raises Postgres + API + Vite in one
+  command (`tunnel` adds the cloudflared connector for local.giinventory.com;
+  `gi` serves the gi.giinventory.com mirror without one; `stop` guarantees a
+  clean slate — see PROJECT_HANDOVER §"Running it locally"). The pieces
+  individually are still `./run_api.sh` (:8000, asyncpg → :5433/gihub) +
+  `npm run dev --prefix frontend` (:5173). Hermetic: prefix
+  `GI_DOTENV=0 GI_SCHEDULER=0`.
 - **Local Cloudflare tunnel:** exactly ONE connector should run — the managed
   root LaunchDaemon (`/Library/LaunchDaemons/com.cloudflare.cloudflared.plist`).
   Several simultaneous connectors on different tunnel IDs is what produces the

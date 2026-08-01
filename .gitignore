@@ -57,6 +57,9 @@ yolov8*.pt
 logs/
 reports_archive/
 
+# bin/dev.sh scratch: pidfiles + per-component logs for the local dev stack.
+.dev/
+
 # Live operational tracking workbooks (operator-owned, synced via
 # tools/excel_sync.py — never commit; archived snapshots in data-archive/
 # and legacy/scripts/sme_seed_data/ predate this rule and stay tracked).
