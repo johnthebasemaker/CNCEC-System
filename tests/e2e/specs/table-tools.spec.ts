@@ -72,6 +72,18 @@ test.describe('table-tools:admin', () => {
     await trigger.click()
     const dropdown = page.locator('.ant-table-filter-dropdown').last()
     await expect(dropdown).toBeVisible()
+
+    // Filter labels follow the CELL, not the raw field: the Role column renders
+    // `hod` as "Head of Department", so the checkbox must read that too — a
+    // dropdown of raw codes above rows of friendly labels is unusable.
+    const options = (await dropdown.locator('.ant-dropdown-menu-item').allInnerTexts())
+      .map((s) => s.trim())
+    expect(options.length).toBeGreaterThan(1)
+    const rendered = new Set(await column(page, 2))
+    for (const o of options) {
+      expect(rendered, `filter option "${o}" must read like the cells do`).toContain(o)
+    }
+
     await dropdown.locator('.ant-dropdown-menu-item').first().click()
     await dropdown.getByRole('button', { name: /^ok$/i }).click()
 

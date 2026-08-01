@@ -3,12 +3,15 @@
 > **Purpose:** a fresh AI instance (or engineer) reading ONLY this file plus
 > [`PROJECT_STATUS.md`](PROJECT_STATUS.md) must understand the exact state,
 > tech stack and rules of the project with no chat history. Written 2026-07-13;
-> finalized 2026-07-18 (pre-deploy batch); **updated 2026-07-26 (native-app
-> program: Capacitor/Tauri + release pipeline + RTR auth + Send/Receive sync
-> + QR ecosystem)** at gates `service_tests 777/0 (suites A…AQ) · Playwright
-> 39/39 · bug_check 599/0 · build+tsc ✅ · alembic single head f1a7c9e83b52`.
-> Only the Hetzner deployment itself remains (+ the one-time Cloudflare
-> Access bypass for `/api/*` — §9).
+> finalized 2026-07-18 (pre-deploy batch); updated 2026-07-26 (native-app
+> program); **updated 2026-07-30 (SME allocation overhaul: two-tier
+> Available-vs-Ordered + reverse SQM + COMPONENT IDENTITY; global table
+> tools)** at gates `service_tests 951/0 (suites A…AZ) · Playwright 42/42 ·
+> parity:sme 1,276 · bug_check 599/0 · build+tsc ✅ · alembic single head
+> a4e9b1c73f28`.
+> **The Hetzner deployment is PAUSED by decision** — next phase is Feature
+> Fine-Tuning and UI Polish. Locked rules + baselines in one page:
+> [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md).
 
 ---
 
@@ -41,6 +44,29 @@ full ledger backfill, stock verified **429/429** vs the workbook). A
 reload re-run the sync (same on the production box after the final load;
 the runbook says so):
 
+**Preferred since 2026-07-27: `tools/pg_excel_sync.py`** — the single-entry,
+ATOMIC replacement (one transaction across all five kinds; a failure anywhere
+rolls the whole sync back). Dry-run by default:
+
+```bash
+DATABASE_URL=postgresql+psycopg2://…/gihub \
+  .venv/bin/python tools/pg_excel_sync.py --site CNCEC            # dry-run
+DATABASE_URL=… .venv/bin/python tools/pg_excel_sync.py --site CNCEC --commit
+DATABASE_URL=… .venv/bin/python tools/pg_excel_sync.py --site CNCEC \
+    --sme-reseed --commit                            # SME wholesale replace
+```
+
+It imports `bulk_import.py`'s planners and replaces ONLY the write path, so
+column mapping is never duplicated; every master write is `ON CONFLICT … DO
+UPDATE` with `COALESCE(excluded.col, table.col)`. **It must never import
+Pandas** (absent from `backend/requirements.txt` — it arrives only
+transitively via streamlit for the legacy app). It refuses non-Postgres URLs
+and any URL mentioning `gi_database`. Exit code 1 after a successful commit
+just means the stock-verification line found mismatches — that is a signal,
+not a failure.
+
+The older per-kind chain still works and is what the historical runbook used:
+
 ```bash
 tools/excel_sync.py --site CNCEC --commit            # header-NAME-driven; all 4 workbooks at repo root
 tools/excel_sync_reconcile.py --commit               # zeroes superseded rows; date-less lines
@@ -60,6 +86,15 @@ identity is **(code, material, SAP_Code)** — PU systems carry Comp-A/B/C/D
 lines sharing one Material_Code, distinguished only by variant SAPs
 (1041/-1/-2/-3); SAP-aware files merge repeated identities as coat lines
 (For_1_SQM sums), legacy no-SAP files keep first-occurrence-wins.
+**STOCK identity matches it since 2026-07-30**: `sme_inventory_seed`'s PK is
+`(Material_Code, SAP_Code)` (alembic `a4e9b1c73f28`), so each component drum
+holds its own quantities. SAP codes are whitespace-normalized on both sides
+of every join (the ERP writes `"1043 - 2"` for `"1043-2"`). ⚠️ The frozen
+legacy SQLite has NO `SAP_Code` column on either SME table, so a cutover
+lands 86 blank-SAP recipe rows + one blank-SAP seed row per material; the
+86 are REAL data (disjoint from the workbook's coded pairs — measured), and
+a blank-SAP seed row is retired only when no blank-SAP recipe line still
+references it. `--sme-reseed` is the remedy for a mixed state.
 `tools/parity_check.py` fails against the live mirror BY DESIGN (only
 meaningful on CI or a freshly-reloaded mirror). Executed 2026-07-18:
 inventory+ledger 429/429, SME reseed run by the operator (recipes 41, codes
@@ -71,8 +106,9 @@ FastAPI app in `main.py` (lifespan starts 3 daemons — report scheduler,
 16:00 evening digest, **Friday 17:00 weekly exec PDF** — all disabled by
 `GI_SCHEDULER=0`). `models.py` (repo `backend/models.py`) is the single schema
 contract; alembic migrations in `backend/alembic/versions` (single head
-**`f1a7c9e83b52`** = `refresh_sessions_rtr`; before it `c7d4e8f19a25` =
-feedback_triage, `b3f2a9c47d18` = SME SAP codes). Modules:
+**`a4e9b1c73f28`** = `sme_component_pooling`; before it `f1a7c9e83b52` =
+refresh_sessions_rtr, `c7d4e8f19a25` = feedback_triage, `b3f2a9c47d18` =
+SME SAP codes). Modules:
 
 | Module | Owns |
 |---|---|
@@ -86,7 +122,7 @@ feedback_triage, `b3f2a9c47d18` = SME SAP codes). Modules:
 | `lining_analytics.py` | `GET /analytics/lining-coverage` — read-only SME engine with **live-ledger availability pool**; RL/BL family coverage + 90-day-burn depletion dates (hod/logistics; scoped site-pinned, default CNCEC) |
 | `logistics.py` / `warehouse.py` / `receiving.py` | PR→PO→assignment→DN two-stage approval state machine (`draft→pending_logistics→…→received`), RL/BL family separation, reschedules, force-close + 24 h undo, vendor returns |
 | `requests.py` | supervisor SMRs (worker must be an active employee at the site) → SK approve → HOD issue queue |
-| `sme.py` + `sme_engine.py` | SME read layer + planning engine — **dual TS/Python engines with golden parity; change BOTH or neither** (frontend twin: `frontend/src/sme/engine.ts`). **`GET /sme/calculator?code&sqm`** (2026-07-18, level ≥2): recipe demand math `For_1_SQM × SQM` per component line, pack counts from Package_Size, **live ERP stock via the `sme_recipe.SAP_Code` join** + per-line shortfall + human explanation strings — the 🧮 Smart Calculator tab's backend |
+| `sme.py` + `sme_engine.py` | SME read layer + planning engine — **dual TS/Python engines with golden parity; change BOTH or neither** (frontend twin: `frontend/src/sme/engine.ts`). **2026-07-30 COMPONENT IDENTITY:** every pool/total/shortfall/report row keys on `Material_Key` = `mat_key(Material_Code, SAP_Code)`; `sap_norm()` strips whitespace. **2026-07-28 two-tier allocation:** `Allocated_Qty = Alloc_Available + Alloc_Ordered`, on-order netted `max(Initial_Ordered_Qty − Σreceipts, 0)`, `Shortfall_Available_Qty` (physical → feasibility) vs `Shortfall_Qty` (net → buy list), plus reverse-SQM `build_sqm_rollup`/`build_sqm_by_code` where a unit's achievable area is its SCARCEST component's rate. **`GET /sme/calculator?code&sqm`** (2026-07-18, level ≥2): recipe demand math `For_1_SQM × SQM` per component line, pack counts from Package_Size, **live ERP stock via the `sme_recipe.SAP_Code` join** + per-line shortfall + human explanation strings — the 🧮 Smart Calculator tab's backend |
 | `sme_master.py` | **Phase S6 (cutover day): Master Data CRUD** — `/sme/master/*` equipment/recipes/materials-seed/progress/settings, exact-lock {hod, admin}, HOD site-pinned, every write audited; equipment create seeds `sme_sqm_progress`, delete cascades it; materials write `sme_inventory_seed` ONLY (Canon Rule 2) |
 | `ai/` | Hub Assistant SSE, OCR lanes, PDF extract, `/ai/nl-search` (unscoped, Ollama→safety gate→`gi_ai_ro` read-only PG login), **`/ai/query` two-lane chat-with-your-data** (below), **`ai/handwritten.py`** — the handwritten-consumption-form spec implementation (below §7) |
 | `notifications.py` + `services/notifications.py` | in-app bell (`app_notifications`) + unified `dispatch()` (bell ALWAYS + best-effort WhatsApp; `X-Delivery-Preference: evening` stages into `pending_summary_notifications` for the 16:00 digest; critical always immediate) |
@@ -96,7 +132,7 @@ feedback_triage, `b3f2a9c47d18` = SME SAP codes). Modules:
 | `console.py` | admin settings (whitelist incl. `maintenance_mode`, `require_entry_documents`, `mtc_required_category`), pg_dump backup, sessions revoke, outbox retries, lot lifecycle. **Bug Tracking Engine (2026-07-18)**: `bug_reports` + `title/severity/rollback_notes/safety_constraints/triage_notes`; admin triage drawer; **`GET /admin/feedback/{id}/prompt`** renders a self-contained coding-agent implementation prompt (report + triage + rollback plan + the project's non-negotiable gates) and `GET /admin/feedback-export.md` a batch digest — the portal never mutates code itself |
 | `documents.py` | SOP/manual downloads, QR label sheets, employee badges, **`GET /documents/material-stickers`** (2026-07-24, {hod,admin}): 2×6 full-bleed A4 rack stickers replicating the operator's CNCEC sheet — Material Name (auto-shrink 17→11pt), QR from `SAP_Code`, SAP/MAT lines, category; `sap_codes` repeats = copies, category filter, site-scoped |
 | `stock.py` | stock views + **`GET /stock/material-card?sap=`** (2026-07-24): the 📷 scan-to-dashboard payload — whitespace-normalized SAP match, `site_scope` pinning (''→403), all-time stock + 30-day gap-free receipt/consumption series |
-| `service_tests.py` | the 777-check gate (suites A…AQ), see §8 |
+| `service_tests.py` | the 951-check gate (suites A…AZ), see §8 |
 
 ## 3. Database facts that bite
 
@@ -168,6 +204,21 @@ site-scope-pinned, 30-day gap-free 2-series Recharts trend). **Entry documents:*
 inline image/PDF preview reused by the ApprovalsPage 📎 drawer. **Draft
 recovery:** `lib/formDraft.ts` (localStorage, debounced) + DraftBanner on the
 three entry forms. SME engine twin lives in `sme/engine.ts` (golden parity).
+
+**2026-07-30 global table tools:** every grid renders through
+**`lib/smartTable.tsx`** — a drop-in replacement for antd's `Table` (import
+`Table` from there, not from `'antd'`; 99 instances across 45 files). It
+derives a sorter for every `dataIndex`-backed column and a checkbox filter
+for every categorical one, with no call-site change and no added chrome.
+Rules: no `dataIndex` ⇒ no sorter (action columns); numeric and boolean
+columns get a sorter but no filter; **server-paginated grids are left alone**
+(auto-detected from controlled pagination — `total` AND `current` set — because
+sorting one page of N silently lies). Filters cap at 30 distinct values,
+search box above 8; explicit `sorter`/`filters` always win; `smart={bool}`
+overrides. Known limit: filter labels come from the RAW field value, so a
+column whose `render` maps codes to labels needs an explicit `filters` array
+(as `UsersPage` does). Companion **`sme/materialCols.tsx`** renders material
+components — variant SAP under the code, names WRAP rather than ellipse.
 
 **2026-07-18 UI polish:** every antd Table carries `sticky={{ offsetHeader:
 64 }}` (SmePage grids use the live-measured pinned-band offset instead);
@@ -254,19 +305,23 @@ memory — deliberately not reproduced here).
 ## 8. Testing — the gates
 
 ```bash
-# 1. service tests (777 checks, suites A…AQ) — CI mirror, hermetic
+# 1. service tests (951 checks, suites A…AZ) — CI mirror, hermetic
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
 JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 .venv/bin/python -u -m backend.api.service_tests
 
 # 2. SQLite↔PG parity oracle (5 aggregates) — same env vars (Phase B: tools/)
+#    ⚠️ meaningful ONLY on CI or a freshly-cutover DB (PG is permanently ahead).
+#    `sme_materials` is asserted as a CONSERVATION invariant since 2026-07-30:
+#    the PG port is per-COMPONENT while the frozen SQLite view pools by
+#    Material_Code, so both sides are rolled up and every quantity must match.
 .venv/bin/python tools/parity_check.py
 
 # 3. frontend
 npm run build --prefix frontend && cd frontend && npx tsc --noEmit
 
 # 4. headless E2E (Playwright — builds/destroys its own gihub_e2e_pw stack)
-cd tests/e2e && npm test        # 39 tests, ~15 s
+cd tests/e2e && npm test        # 42 tests, ~19 s
 
 # 5. alembic single head
 .venv/bin/python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; c=Config('backend/alembic.ini'); c.set_main_option('script_location','backend/alembic'); print(ScriptDirectory.from_config(c).get_heads())"
@@ -284,6 +339,17 @@ Surface-Shields workflow + Smart Calculator + report scoping · **AO** Bug
 Tracking Engine. 2026-07-24…26: **AP** material-card scan dashboard
 (site-scope matrix) · **AQ** RTR (per-client TTLs, in-family rotation,
 replay → family revocation w/ other-family isolation, logout, audit).
+2026-07-27…30: **AW** pg_excel_sync (PG-only guards, atomicity, idempotency,
+COALESCE preservation) · **AX** session-report aggregation · **AY** two-tier
+allocation + reverse SQM · **AZ** component identity (pools, dirty-SAP
+normalization, naming, per-component shortfall, the bottleneck as a specific
+drum, 4 `az-revert` checks against the old grain, 4 `az-sql` checks on the
+derived-availability SQL, 5 `az-cutover` convergence checks).
+⚠️ **The derived-view parity gate is partly vacuous for SME materials** —
+every SME material in the legacy data has `received_qty = consumed_qty = 0`,
+so both sides agree trivially on exactly the columns the ledger-join rewrite
+touches. Suite AZ's `az-sql` checks cover it directly instead; reverting the
+join to `inventory.Material_Code` fails all four.
 ⚠️ Test-authoring trap suite AQ exposed: httpx
 `cookies.set(..., domain="host")` SILENTLY drops the cookie (host-only
 domain mismatch) — suite E's replay checks passed vacuously for months;
@@ -315,6 +381,12 @@ tag Release via softprops/action-gh-release.
 
 - Local dev: `./run_api.sh` (:8000, asyncpg → :5433/gihub) + `npm run dev
   --prefix frontend` (:5173). Hermetic: prefix `GI_DOTENV=0 GI_SCHEDULER=0`.
+- **Local Cloudflare tunnel:** exactly ONE connector should run — the managed
+  root LaunchDaemon (`/Library/LaunchDaemons/com.cloudflare.cloudflared.plist`).
+  Several simultaneous connectors on different tunnel IDs is what produces the
+  recurring **Error 1033**; diagnosis + recovery commands live in
+  `deploy/cloudflared/README.md`. ⚠️ The tunnel token is passed as a
+  command-line argument and is therefore visible in `ps aux`.
 - Mirror Postgres runs on brew postgresql@16 :5433 (autostart).
 - Meta/WhatsApp is LIVE (templates approved, lang `en`); operator TODOs that
   remain: approve `gi_evening_summary`, set webhook env + subscribe URL,
@@ -328,9 +400,10 @@ tag Release via softprops/action-gh-release.
   -cr` **+ `codesign --force --deep --sign -`** — M-series refuses fully
   unsigned code) + local JDK-21 path: `docs/NATIVE_APPS.md`;
   troubleshooting: `docs/DEBUGGING.md` + `tools/diagnose_sync.py`.
-- Remaining program work: **ONLY the Hetzner production deployment**
-  (runbook `tools/migration/README.md` — includes the post-load Excel
-  re-sync + SME reseed). Everything else through the 2026-07-18 pre-deploy
+- Remaining program work: **the Hetzner production deployment is PAUSED by
+  decision (2026-07-30)** — the next phase is Feature Fine-Tuning and UI
+  Polish. When it resumes: runbook `tools/migration/README.md` (includes the
+  post-load Excel re-sync + SME reseed). Everything else through the 2026-07-18 pre-deploy
   batch AND the 2026-07-24…26 native program (Capacitor/Tauri + release
   pipeline + RTR + Send/Receive + QR stickers/scan) is SHIPPED
   (B2/B3/B4/B7 remain documented-optional). Ops handoff PDFs live in

@@ -23,8 +23,8 @@ off (users are being pointed at the React app):
 | `backend/` | New stack | FastAPI API (`backend/api/`), SQLAlchemy `models.py` (the schema contract — also verified by legacy bug_check's parity check), Alembic |
 | `frontend/` | New stack | React + Vite + AntD SPA; SME TS engine twin in `src/sme/engine.ts`. **Native shells (2026-07-24):** `capacitor.config.ts` (the `android/`/`ios/` projects are GITIGNORED — regenerated per build by `npx cap add`) and `src-tauri/` (**COMMITTED** Tauri v2 scaffold incl. the explicit CSP in `tauri.conf.json` — its `connect-src` must track the API domain) |
 | `deploy/` | New stack deploy | `docker-compose.prod.yml`, `Dockerfile.api`/`Dockerfile.web`, nginx, certbot, backup + v2 pipeline scripts — see `docs/DEPLOY.md` |
-| `tests/e2e/` | New stack | Playwright suite (39) — global-setup loads its throwaway DB via `tools/migration/cutover_migrate.py` |
-| `tools/` | Bridge + ops | `dual_ci.py` (mirror reload; imports `legacy/database.py` by design), `migrate_sqlite_to_postgres.py` (core copier), `parity_check.py` (SQLite-views ↔ PG-SQL oracle — ⚠️ fails vs the LIVE mirror by design since the Excel injection), `pg_smoke.py`, `migration/cutover_migrate.py` + `migration/README.md` (**the production cutover runbook**), **`excel_sync.py`** (header-name-driven workbook sync; `--kinds`, `--sme-reseed`) + **`excel_sync_reconcile.py`** (post-sync ledger reconciliation), **`export_docs_pdf.py`** (manual/SOP → `docs/export/` PDFs). The bridge pieces retire once the legacy app is switched off; the Excel-sync + PDF tools are permanent ops |
+| `tests/e2e/` | New stack | Playwright suite (**42**) — global-setup loads its throwaway DB via `tools/migration/cutover_migrate.py` |
+| `tools/` | Bridge + ops | `dual_ci.py` (mirror reload; imports `legacy/database.py` by design), `migrate_sqlite_to_postgres.py` (core copier), `parity_check.py` (SQLite-views ↔ PG-SQL oracle — ⚠️ fails vs the LIVE mirror by design since the Excel injection), `pg_smoke.py`, `migration/cutover_migrate.py` + `migration/README.md` (**the production cutover runbook**), **`pg_excel_sync.py`** (⭐ the preferred sync since 2026-07-27: ONE atomic transaction across all five kinds, Postgres-native `ON CONFLICT` upserts, dry-run by default, PG-only guards — imports `bulk_import.py`'s planners so mapping is never duplicated, and **must never import Pandas**), **`excel_sync.py`** (the older per-kind chain; header-name-driven, `--kinds`, `--sme-reseed`) + **`excel_sync_reconcile.py`** (post-sync ledger reconciliation), **`export_docs_pdf.py`** (manual/SOP → `docs/export/` PDFs). The bridge pieces retire once the legacy app is switched off; the Excel-sync + PDF tools are permanent ops |
 | `data-archive/` | Archive | Root-level artifacts moved at Phase B: seed xlsx files, sample PO pdf, `IMG_2397.JPG`, `gi_database.*.bak`, `PyWhatKit_DB.txt`, `demo_seed.db` |
 | `gi_database.db` | **Shared bridge — root by design** | The legacy SQLite system of record AND the source for `tools/dual_ci.py` / `parity_check.py` / the final production `cutover_migrate.py` load. Deliberately NOT moved (and never staged — it is live, constantly-modified data) |
 | `reports_archive/` | Shared runtime | Deliberately the same directory both stacks' report archives use |
@@ -34,6 +34,7 @@ off (users are being pointed at the React app):
 | `run_api.sh` | New stack | Local backend launcher (`:8000`) |
 | `.github/workflows/` | Shared | `postgres-dual-ci.yml` gates BOTH apps: `legacy/bug_check.py` + `tools/dual_ci.py` + `tools/parity_check.py` + **gi_ai_ro role provisioning** + `backend.api.service_tests` (777) + frontend build — ⚠️ its dual-ci job has NEVER passed on the GitHub runner (bug_check step; failures now surface as public annotations + artifacts). `deploy.yml` (v1, **manual-only** — server not provisioned) · `deploy-v2.yml` (manual cutover pipeline, gated) · **release pipeline (2026-07-25, `v*` tags/dispatch only): `release-desktop.yml` (Tauri dmg/exe/msi — green) + `release-android.yml` (Capacitor APK, JDK 21 required)** — both inject `VITE_API_URL` and attach assets to the tag's GitHub Release |
 | `CNCEC_Inventory.xlsx` etc. (root `*.xlsx`) | Operator data | The four live tracking workbooks `tools/excel_sync.py` reads — **gitignored, never committed** (archived snapshots live in `data-archive/`) |
+| `PROJECT_HANDOVER.md` | Shared docs | **The fresh-session entry point** — locked architecture rules (PAST), current baselines (PRESENT), next phase (FUTURE) |
 | `docs/` · `handoff.md` | Shared docs | New-stack brain (`ARCHITECTURE.md`) + status/migration log · role-based v2 manual (`docs/USER_MANUAL.md`) + ops PDFs (`docs/export/`) · **native build/install/release guide (`docs/NATIVE_APPS.md`) + sync-doctor debugging guide (`docs/DEBUGGING.md`)** · handwritten-OCR spec (`docs/features/handwritten-ocr/`) · SME Canon + legacy handoff |
 
 ## Rules of engagement (the short version)
@@ -57,7 +58,13 @@ off (users are being pointed at the React app):
    `legacy/docker-compose.yml`, new stack = `deploy/`. Don't mix them.
 6. **SME engine parity contract:** `frontend/src/sme/engine.ts` and
    `backend/api/sme_engine.py` are proven equal against
-   `backend/api/sme_parity_fixture.json`/`sme_parity_golden.json` (509
-   comparisons; `service_tests` suite G + `npm run parity:sme`). Any numeric
+   `backend/api/sme_parity_fixture.json`/`sme_parity_golden.json` (**1,276
+   comparisons**; `service_tests` suite G + `npm run parity:sme`). Any numeric
    change = change BOTH engines + regenerate the golden in ONE commit.
-7. Audit rows are never deleted (`system_audit_log`); tests use delta counts.
+7. **SME material identity is `(Material_Code, SAP_Code)`** (locked
+   2026-07-30) — recipes AND stock. Never pool by `Material_Code` alone; a
+   multi-part system is four physical drums sharing one code. Details:
+   [`PROJECT_HANDOVER.md`](PROJECT_HANDOVER.md).
+8. **Frontend tables import `Table` from `src/lib/smartTable.tsx`**, not from
+   `'antd'` — that wrapper is what gives every grid sorting + filtering.
+9. Audit rows are never deleted (`system_audit_log`); tests use delta counts.

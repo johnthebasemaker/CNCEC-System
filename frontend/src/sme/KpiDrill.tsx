@@ -52,7 +52,9 @@ export default function KpiDrill({ title, value, delta, deltaColor, help, drillT
       <Modal open={open} onCancel={() => setOpen(false)} footer={null} width={820}
         title={drillTitle}>
         {help && <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>{help}</Typography.Paragraph>}
-        <Table sticky={{ offsetHeader: 64 }} size="small" columns={columns} dataSource={data} rowKey="_k"
+        {/* No `sticky` here: inside a Modal there is no app header to offset
+            against, and `scroll.y` already pins the header to the table body. */}
+        <Table size="small" columns={columns} dataSource={data} rowKey="_k"
           scroll={{ x: 'max-content', y: 440 }}
           pagination={{ pageSize: 15, showTotal: (t) => `${t} rows` }} />
       </Modal>

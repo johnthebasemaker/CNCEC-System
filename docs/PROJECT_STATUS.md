@@ -1,4 +1,8 @@
-# PROJECT STATUS — resume here (updated 2026-07-26 · FEATURE-COMPLETE + native apps — only the Hetzner deployment remains)
+# PROJECT STATUS — resume here (updated 2026-07-30 · FEATURE-COMPLETE · deployment PAUSED, fine-tuning next)
+
+> 📌 **A fresh session should read [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md)
+> FIRST** — it carries the locked architecture rules, the current baselines and
+> the next phase in one page. This file is the deeper state + gotchas reference.
 
 **This is the single source of truth for "where we left off."** A fresh chat
 should read this file, then [`ARCHITECTURE.md`](ARCHITECTURE.md) (**the full
@@ -34,20 +38,34 @@ Outlook-style **Send/Receive sync engine**, the **QR sticker + scan-to-
 dashboard ecosystem**, and native production API routing (`VITE_API_URL` +
 CSP/CORS). The repo is now PUBLIC at `johnthebasemaker/GI_Hub_Project`
 with tags v0.1.0–v1.0.1 (desktop installers already on the Releases page).
-**The ONLY remaining work is the Hetzner production deployment** (runbook:
-`tools/migration/README.md`; deploy kit: `docs/DEPLOY.md` + `deploy/`),
-plus one Cloudflare dashboard action for the native apps (§3.6).
+**2026-07-30 — the SME allocation lane was overhauled and the deployment
+was PAUSED by decision.** Three programmes landed on top of the above:
+`tools/pg_excel_sync.py` (atomic, idempotent, Postgres-native Excel sync),
+the **two-tier Available-vs-Ordered allocation with reverse-SQM bottleneck
+maths**, and the **component-identity fix** — SME stock is now pooled per
+`(Material_Code, SAP_Code)` instead of per `Material_Code`, because a
+multi-part system is four physical drums sharing one code. Alongside them,
+**every table in the app gained sorting and filtering** via
+`frontend/src/lib/smartTable.tsx`.
 
-## 1. Gates (all green locally — 2026-07-26)
+**The Hetzner production deployment is PAUSED (not blocked)** — the next
+phase is *Feature Fine-Tuning and UI Polish*. Everything the deployment
+needs is built and documented (runbook: `tools/migration/README.md`; deploy
+kit: `docs/DEPLOY.md` + `deploy/`), plus one Cloudflare dashboard action for
+the native apps (§3.6). Locked rules + baselines:
+[`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md).
+
+## 1. Gates (all green locally — 2026-07-30)
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **777/0** (suites A…AQ) | `DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub JWT_SECRET=ci-only-service-test-secret-key-32bytes-min .venv/bin/python -u -m backend.api.service_tests` |
-| Playwright E2E | **39/39** (~15 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **951/0** (suites A…AZ) | `DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub JWT_SECRET=ci-only-service-test-secret-key-32bytes-min .venv/bin/python -u -m backend.api.service_tests` |
+| Playwright E2E | **42/42** (~19 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | Legacy regression | **599/0** | `.venv/bin/python legacy/bug_check.py` |
 | Frontend | build + `tsc -b` ✅ | `npm run build --prefix frontend` |
-| SME engine parity | 509 comparisons | `npm run parity:sme --prefix frontend` |
-| Alembic | single head **`f1a7c9e83b52`** (refresh_sessions/RTR) | see ARCHITECTURE §8 |
+| SME engine parity | **1,276 comparisons** | `npm run parity:sme --prefix frontend` |
+| Alembic | single head **`a4e9b1c73f28`** (sme_component_pooling) | see ARCHITECTURE §8 |
+| Derived-view parity | **5/5** ⚠️ fresh cutover / CI only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Release pipeline | desktop ✅ (dmg/exe/msi on v0.1.0–v1.0.1) · Android fixed (JDK 21) — next tag should attach the `.apk` | `git tag vX.Y.Z && git push origin vX.Y.Z` |
 
 ⚠️ **`postgres-dual-ci.yml` has NEVER passed on the GitHub runner** (30/30
@@ -128,8 +146,43 @@ injection. It stays meaningful only on CI / a freshly-reloaded mirror.
      `SameSite=None;Secure` under `GI_ENV=production`; explicit Tauri CSP;
      `logApiFailure()` console diagnostics incl. Cloudflare-Access
      detection; Apple-Silicon 3-step install fix documented.
+- **SME allocation overhaul + global table tools (2026-07-27…30):**
+  1. **`tools/pg_excel_sync.py`** — ONE atomic transaction across all five
+     workbook kinds, Postgres-native `ON CONFLICT` upserts with
+     `COALESCE(excluded, table)`, dry-run by default, PG-only guards, and a
+     preflight that names the wrong interpreter. Mapping logic is NOT
+     duplicated — it imports `bulk_import.py`'s planners and replaces only
+     the write path. **No Pandas** (not in `backend/requirements.txt`).
+     Log: `docs/PG_EXCEL_SYNC_RUNLOG.md`.
+  2. **Session-report aggregation** — a "Total Material Demand" sheet leads
+     the workbook and a "Material-Wise Summary" leads the PDF, with
+     download buttons in Combined Procurement.
+     Log: `docs/SESSION_REPORT_SUMMARY_RUNLOG.md`.
+  3. **Two-tier allocation + reverse SQM** — `Allocated_Qty` splits into
+     `Alloc_Available` + `Alloc_Ordered`; on-order is netted
+     `max(Initial_Ordered_Qty − Σreceipts, 0)` against double-counting;
+     material availability is restated as **SQM achievable**, bottlenecked
+     by the scarcest component. Feasibility judges PHYSICAL stock only.
+     New Material-Wise Segregated Report (PDF + Excel).
+     Log: `docs/SME_SQM_BOTTLENECK_RUNLOG.md`.
+  4. **Component identity (alembic `a4e9b1c73f28`)** — SME stock pools are
+     keyed `(Material_Code, SAP_Code)`. A multi-part system lists ONE code
+     as four physical drums; pooling them reported covered components as
+     short and short ones as covered. Suite **AZ** (20 checks) incl. four
+     revert-verifications. Display names now come from the STOCK master
+     (the recipe repeats one generic name on all four lines) and wrap
+     instead of ellipsing. Log: `docs/SME_COMPONENT_POOLING_RUNLOG.md`.
+  5. **Global table sorting + filtering** — `frontend/src/lib/smartTable.tsx`
+     wraps antd's `Table` for all 99 grids across 45 files; sorters and
+     filters are derived from the column definitions with zero call-site
+     change and zero added chrome. Server-paginated grids opt out
+     automatically. Log: `docs/TABLE_TOOLS_RUNLOG.md`.
 
-## 3. Deployment — the one remaining task
+## 3. Deployment — ⏸️ PAUSED by decision (2026-07-30)
+
+**The next phase is *Feature Fine-Tuning and UI Polish*.** Phase 3 (Hetzner
+Ubuntu + Docker) is paused, **not blocked** — everything below is built and
+documented, and it resumes once fine-tuning is done.
 
 Follow `tools/migration/README.md` end-to-end. Highlights:
 1. Provision Hetzner CPX42 · `deploy/` kit (`docs/DEPLOY.md`) · TLS ·
@@ -181,6 +234,31 @@ _Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
   Shared half-up rounding `floor(x·10ⁿ+0.5)` — never "fix" to half-even.
 - **Recipe identity is (code, material, SAP_Code)** — PU component lines
   share a Material_Code; don't collapse them. CRUD dup-checks the triple.
+- **STOCK identity is (Material_Code, SAP_Code) too** (2026-07-30, locked —
+  overturns the 2026-07-18 pooling rule). `sme_inventory_seed`'s PK is the
+  pair; the engines key every pool, total, shortfall and report row on
+  `Material_Key` = `"CODE|SAP"`. **Never revert to pooling by Material_Code
+  alone** — it reported covered components as short and short ones as
+  covered. `Material_Name + UOM` is NOT a usable discriminator (all four PU
+  recipe rows share both). SAP codes are whitespace-normalized on both
+  sides of every join (`"1043 - 2"` ≡ `"1043-2"`).
+- **On-order netting is exact:** `effective_ordered =
+  max(Initial_Ordered_Qty − Σreceipts, 0)`. The workbook's ordered figure is
+  never decremented on delivery, so adding it verbatim double-counts every
+  arrived unit. Feasibility judges PHYSICAL stock only.
+- **The 86 blank-SAP legacy recipe rows are REAL data** — they are disjoint
+  from the workbook's coded pairs (measured: zero overlap). The cutover
+  keeps them, and a blank-SAP seed row is retired only when no blank-SAP
+  recipe line still references it. Deleting them collapsed coverage to 0.0%
+  across all 29 equipment once; don't repeat it. The remedy for a mixed
+  state is `pg_excel_sync --sme-reseed`.
+- **Every table renders through `lib/smartTable.tsx`**, not antd's `Table`
+  directly — import `Table` from there. It derives sorters/filters from the
+  column definitions and auto-opts-out of server-paginated grids. Explicit
+  `sorter`/`filters` on a column always wins.
+- **`tools/pg_excel_sync.py` must never import Pandas** (absent from
+  `backend/requirements.txt`) and must never duplicate `bulk_import.py`'s
+  column mapping — it imports the planners and replaces only the writes.
 - After ANY mirror reload: re-run `create_ai_readonly_role.sql` (REVOKEs
   get wiped) AND the Excel sync chain (ARCHITECTURE §1).
 - `gi_database.db` stays modified-but-uncommitted at repo root; **never
@@ -218,6 +296,12 @@ _Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
   `docs/features/handwritten-ocr/` — OCR spec (preserve-exactly rules).
   `docs/DEPLOY.md` + `deploy/` — infra kit. `tools/migration/README.md` —
   cutover runbook.
+- **Run logs (recent programmes, each with rulings + revert-verification):**
+  `docs/SME_COMPONENT_POOLING_RUNLOG.md` · `docs/TABLE_TOOLS_RUNLOG.md` ·
+  `docs/SME_SQM_BOTTLENECK_RUNLOG.md` ·
+  `docs/SESSION_REPORT_SUMMARY_RUNLOG.md` · `docs/PG_EXCEL_SYNC_RUNLOG.md`.
+- **`PROJECT_HANDOVER.md`** (repo root) — the fresh-session entry point:
+  locked rules (PAST) · baselines (PRESENT) · next phase (FUTURE).
 - **Ops handoff PDFs:** `docs/export/` (User Manual + SOP), regenerated via
   `python tools/export_docs_pdf.py`.
 - Root `USER_MANUAL.md` / `SOP.md` are the **frozen legacy** docs still

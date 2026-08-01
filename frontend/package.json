@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:local": "VITE_TUNNEL=1 VITE_TUNNEL_HOST=local.giinventory.com vite",
+    "dev:gi": "VITE_TUNNEL=1 VITE_TUNNEL_HOST=gi.giinventory.com vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "parity:sme": "node scripts/sme_parity.mjs",

@@ -1,9 +1,9 @@
 import { Card, Col, Empty, Row, Typography } from 'antd'
 import { Table } from '../lib/smartTable'
-import { CloudServerOutlined, DollarOutlined, EnvironmentOutlined, InboxOutlined, WarningOutlined } from '@ant-design/icons'
+import { DollarOutlined, EnvironmentOutlined, InboxOutlined, WarningOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis } from 'recharts'
-import { useDashboardMetrics, useHealth, useInventorySummary, useList, useSites } from '../api/hooks'
+import { useDashboardMetrics, useInventorySummary, useList, useSites } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
 import AskDataCard from '../components/AskDataCard'
 import BrowseTable from '../components/BrowseTable'
@@ -15,13 +15,26 @@ interface CatRow {
   count: number
 }
 
-const catColumns: ColumnsType<CatRow> = [
-  { title: 'Category', dataIndex: 'Category', key: 'Category', render: (v) => v ?? '—' },
-  { title: 'Items', dataIndex: 'count', key: 'count', align: 'right', width: 100 },
-]
+const nf = (v: number) => v.toLocaleString('en-US')
+
+/** Share of the master this category holds — the counts alone don't say whether
+ *  "Chemicals: 84" is most of the inventory or a rounding error. */
+function catColumnsFor(total: number): ColumnsType<CatRow> {
+  return [
+    { title: 'Category', dataIndex: 'Category', key: 'Category', render: (v) => v ?? '—' },
+    { title: 'Items', dataIndex: 'count', key: 'count', align: 'right', width: 90 },
+    {
+      title: 'Share', dataIndex: 'count', key: 'share', align: 'right', width: 90,
+      render: (v: number) => (
+        <Typography.Text type="secondary" style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {total > 0 ? `${((v / total) * 100).toFixed(1)}%` : '—'}
+        </Typography.Text>
+      ),
+    },
+  ]
+}
 
 export default function Dashboard() {
-  const { data: health } = useHealth()
   const { data: summary } = useInventorySummary()
   const { data: sites } = useSites()
   const { user } = useAuth()
@@ -29,12 +42,20 @@ export default function Dashboard() {
   const expiringCount = expiring.data?.total ?? 0
   const { data: metrics } = useDashboardMetrics()
 
+  const byCategory = summary?.by_category ?? []
+  const catTotal = byCategory.reduce((s, r) => s + (r.count ?? 0), 0)
+  const catColumns = catColumnsFor(catTotal)
+
   return (
     <div>
       <Typography.Title level={3} style={{ marginTop: 0 }}>
         Dashboard
       </Typography.Title>
 
+      {/* Four cards, one clean row. The fifth used to be a "Database: online"
+          card stranded on a row of its own — it read the same `useHealth()` as
+          the header's "API online" chip, which is on every page, not just this
+          one. A KPI slot is worth more than a duplicated status light. */}
       <Row gutter={[16, 16]} className="gi-cascade">
         <Col xs={12} md={6}>
           <KpiCard
@@ -68,14 +89,6 @@ export default function Dashboard() {
             valueColor={expiringCount > 0 ? status.critical : undefined}
           />
         </Col>
-        <Col xs={12} md={6}>
-          <KpiCard
-            title="Database"
-            value={health ? 'online' : '—'}
-            icon={<CloudServerOutlined />}
-            tint={status.ok}
-          />
-        </Col>
       </Row>
 
       {/* Phase 5 — legacy visual parity: stock-vs-min, burn forecast, top-consumed. */}
@@ -88,7 +101,7 @@ export default function Dashboard() {
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
                   <XAxis dataKey="sap" tick={{ fontSize: 10 }} interval={0} angle={-35} textAnchor="end" height={52} />
                   <YAxis tick={{ fontSize: 10 }} />
-                  <RTooltip />
+                  <RTooltip formatter={(v) => nf(Number(v))} />
                   <Legend />
                   <Bar dataKey="current" name="Current" fill={status.info} />
                   <Bar dataKey="minimum" name="Minimum" fill={status.critical} />
@@ -105,7 +118,7 @@ export default function Dashboard() {
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
                   <XAxis dataKey="sap" tick={{ fontSize: 10 }} interval={0} angle={-35} textAnchor="end" height={52} />
                   <YAxis tick={{ fontSize: 10 }} />
-                  <RTooltip />
+                  <RTooltip formatter={(v) => nf(Number(v))} />
                   <Bar dataKey="days_remaining" name="Days of cover" fill={brand.gold} />
                 </BarChart>
               </ResponsiveContainer>
@@ -120,7 +133,7 @@ export default function Dashboard() {
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
                   <XAxis dataKey="sap" tick={{ fontSize: 10 }} interval={0} angle={-35} textAnchor="end" height={52} />
                   <YAxis tick={{ fontSize: 10 }} />
-                  <RTooltip />
+                  <RTooltip formatter={(v) => nf(Number(v))} />
                   <Bar dataKey="consumed" name="Consumed" fill={status.ok} />
                 </BarChart>
               </ResponsiveContainer>
@@ -135,7 +148,7 @@ export default function Dashboard() {
             <Table<CatRow> sticky={{ offsetHeader: 64 }}
               size="small"
               columns={catColumns}
-              dataSource={summary?.by_category ?? []}
+              dataSource={byCategory}
               rowKey={(r) => String(r.Category)}
               pagination={false}
               scroll={{ y: 320 }}

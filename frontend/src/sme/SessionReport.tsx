@@ -34,6 +34,17 @@ const secHdr: React.CSSProperties = {
 const nf = (v: number, d = 3) =>
   v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: d })
 
+/** The gold totals bar that closes each report card. */
+function SummaryStrip({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      border: '1px solid rgba(212,175,55,.45)', background: 'rgba(212,175,55,.07)',
+      borderRadius: 8, padding: '8px 12px', display: 'flex', gap: 20, flexWrap: 'wrap',
+      alignItems: 'center', fontSize: '0.78rem', marginTop: 10,
+    }}>{children}</div>
+  )
+}
+
 /** Shared download driver — the server oracle renders every official document,
  *  so both button groups POST the same current priority order. */
 function useSessionDownload(order: string[], siteId?: string) {
@@ -147,9 +158,19 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
       title: 'To Order', dataIndex: 'Shortfall_Qty', key: 's', align: 'right',
       render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v)}</span>,
     },
-    { title: 'SQM Total', dataIndex: 'SQM_Total', key: 'st', align: 'right', render: (v: number) => nf(v, 1) },
-    { title: 'SQM Done', dataIndex: 'SQM_Done', key: 'sd', align: 'right', render: (v: number) => nf(v, 1) },
-    { title: 'SQM Deficit', dataIndex: 'SQM_Deficit', key: 'sx', align: 'right', render: (v: number) => nf(v, 1) },
+    // Three columns repeating "SQM" cost more width than the numbers do; one
+    // group header says it once for all of them.
+    {
+      title: 'Area (m²)',
+      children: [
+        { title: 'Total', dataIndex: 'SQM_Total', key: 'st', align: 'right', render: (v: number) => nf(v, 1) },
+        { title: 'Done', dataIndex: 'SQM_Done', key: 'sd', align: 'right', render: (v: number) => nf(v, 1) },
+        {
+          title: 'Deficit', dataIndex: 'SQM_Deficit', key: 'sx', align: 'right',
+          render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : undefined }}>{nf(v, 1)}</span>,
+        },
+      ],
+    },
     {
       title: 'Coverage', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 100,
       render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
@@ -210,23 +231,26 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           drillTitle="Session Feasibility" rows={plan.feasibility.map((f) => ({
             '#': f.Priority_Rank, Tag: f.Equipment_Tag_No, Name: f.Name,
             'Completion %': f.Completion_Pct, Status: f.Status,
-            Bottleneck: f.Bottleneck_Material_Code,
+            // The bottleneck is one PHYSICAL drum, so it needs its variant SAP:
+            // "GI-8005765" alone names four components of a multi-part system.
+            Bottleneck: f.Bottleneck_Material_Code, 'Bottleneck SAP': f.Bottleneck_SAP_Code,
           }))} help="Equipment in the session, in priority order." /></Col>
         <Col flex="1 1 160px"><KpiDrill title="Materials" value={String(combined.length)}
           drillTitle="Session Materials" rows={combined.map((r) => ({
-            Material: r.Material_Code, Name: r.Material_Name, Demand: r.Demand_Qty,
-            Allocated: r.Allocated_Qty, 'Coverage %': r.Fulfillment_Pct,
-          }))} help="Distinct materials demanded by the session." /></Col>
+            Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
+            Demand: r.Demand_Qty, Allocated: r.Allocated_Qty, 'Coverage %': r.Fulfillment_Pct,
+          }))} help="Material components demanded by the session — one row per physical drum (Material_Code + variant SAP)." /></Col>
         <Col flex="1 1 160px"><KpiDrill title="Need to Order" value={String(shortOnly.length)}
           accent={shortOnly.length > 0 ? '#EF4444' : '#10B981'}
           drillTitle="Order List (shortfall > 0)" rows={shortOnly.map((r) => ({
-            Material: r.Material_Code, Name: r.Material_Name, 'To Order': r.Shortfall_Qty,
-            'Coverage %': r.Fulfillment_Pct,
-          }))} help="Materials that must be procured to fully build the session." /></Col>
+            Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
+            'To Order': r.Shortfall_Qty, 'Coverage %': r.Fulfillment_Pct,
+          }))} help="Components that must be procured to fully build the session." /></Col>
         <Col flex="1 1 160px"><KpiDrill title="Overall Coverage" value={`${cov.toFixed(1)}%`}
           accent={fc(cov)} drillTitle="Coverage by Material"
           rows={combined.map((r) => ({
-            Material: r.Material_Code, Name: r.Material_Name, 'Coverage %': r.Fulfillment_Pct,
+            Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
+            'Coverage %': r.Fulfillment_Pct,
           }))} help="Allocated ÷ Demand across the whole session." /></Col>
       </Row>
 
@@ -249,7 +273,10 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
               <Space>
                 <StatusDot pct={st.fulfillPct} />
                 <b style={{ ...mono, fontSize: '0.8rem' }}>{tag}</b>
-                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>{st.name.slice(0, 30)}</span>
+                <span style={{
+                  fontSize: '0.75rem', opacity: 0.7, maxWidth: 320,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }} title={st.name}>{st.name}</span>
                 <FulfilPill pct={st.fulfillPct} />
               </Space>
             ),
@@ -266,11 +293,18 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           <ResponsiveContainer width="100%" height={Math.max(120, shortOnly.length * 30 + 60)}>
             <BarChart data={shortOnly} layout="vertical">
               <XAxis type="number" tick={{ fontSize: 10 }} />
+              {/* The variant SAP, not the name, is what tells the four drums of a
+                  multi-part system apart — and the truncated name used to make
+                  them four identical bars. */}
               <YAxis type="category" width={170} tick={{ fontSize: 10, fontFamily: 'JetBrains Mono, monospace' }}
-                dataKey={(r: WeightedProcurementRow) => `${r.Material_Code} ${r.Material_Name}`.slice(0, 26)} />
+                dataKey={(r: WeightedProcurementRow) => (r.SAP_Code ? `${r.Material_Code} · ${r.SAP_Code}` : r.Material_Code)} />
               <Tooltip formatter={(v) => nf(Number(v))} />
               <Legend wrapperStyle={{ fontSize: 11, fontFamily: 'JetBrains Mono, monospace' }} />
-              <Bar dataKey="Allocated_Qty" name="Available" stackId="p" fill="#10B981" fillOpacity={0.8} />
+              {/* Split the allocated segment the way the table below splits it:
+                  `Allocated_Qty` is stock PLUS stock on order, so plotting it as
+                  one bar named "Available" overstated what is on the shelf. */}
+              <Bar dataKey="Available_Qty" name="Available" stackId="p" fill="#10B981" fillOpacity={0.8} />
+              <Bar dataKey="Ordered_Qty" name="On Order" stackId="p" fill="#F59E0B" fillOpacity={0.8} />
               <Bar dataKey="Shortfall_Qty" name="To Order" stackId="p" fill="#EF4444" fillOpacity={0.8} />
             </BarChart>
           </ResponsiveContainer>
@@ -278,17 +312,13 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
         <Table<WeightedProcurementRow> sticky={{ offsetHeader: 64 }} size="small" rowKey="Material_Key" columns={combinedCols}
           dataSource={combined} pagination={{ pageSize: 15, showTotal: (t) => `${t} materials` }}
           scroll={{ x: 'max-content' }} style={{ marginTop: 8 }} />
-        <div style={{
-          border: '1px solid rgba(212,175,55,.45)', background: 'rgba(212,175,55,.07)',
-          borderRadius: 8, padding: '8px 12px', display: 'flex', gap: 20, flexWrap: 'wrap',
-          alignItems: 'center', fontSize: '0.78rem', marginTop: 10,
-        }}>
+        <SummaryStrip>
           <span>Equipment: <b style={mono}>{sessionTags.length}</b></span>
-          <span>Materials: <b style={mono}>{combined.length}</b></span>
+          <span>Components: <b style={mono}>{combined.length}</b></span>
           <span>Total demand: <b style={mono}>{nf(totDemand)}</b></span>
           <span>To procure: <b style={{ ...mono, color: totShort > 0 ? '#EF4444' : undefined }}>{nf(totShort)}</b></span>
           <span style={{ marginLeft: 'auto' }}>Coverage: <FulfilPill pct={cov} /></span>
-        </div>
+        </SummaryStrip>
       </Card>
 
       {/* Material-Wise Segregated Report — reverse SQM per system code */}
@@ -330,16 +360,12 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
                 ]} />
             ),
           }} />
-        <div style={{
-          border: '1px solid rgba(212,175,55,.45)', background: 'rgba(212,175,55,.07)',
-          borderRadius: 8, padding: '8px 12px', display: 'flex', gap: 20, flexWrap: 'wrap',
-          alignItems: 'center', fontSize: '0.78rem', marginTop: 10,
-        }}>
+        <SummaryStrip>
           <span>Remaining: <b style={mono}>{nf(sqmTot.rem, 1)}</b> m²</span>
           <span>Achievable now: <b style={{ ...mono, color: '#10B981' }}>{nf(sqmTot.now, 1)}</b> m²</span>
           <span>With ordered: <b style={{ ...mono, color: '#F59E0B' }}>{nf(sqmTot.ord, 1)}</b> m²</span>
           <span>Deficit: <b style={{ ...mono, color: sqmTot.def > 0 ? '#EF4444' : undefined }}>{nf(sqmTot.def, 1)}</b> m²</span>
-        </div>
+        </SummaryStrip>
       </Card>
 
       {/* Smart suggestions (client-side simulation loop) */}

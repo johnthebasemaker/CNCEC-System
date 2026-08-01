@@ -1,5 +1,11 @@
 # Deploying the new stack (React + FastAPI + PostgreSQL)
 
+> ⏸️ **PAUSED by decision (2026-07-30).** Phase 3 (Hetzner Ubuntu +
+> Docker) is deferred until *Feature Fine-Tuning and UI Polish* is
+> complete. Nothing here is blocked — the kit is built, documented and
+> ready. Current state + locked rules:
+> [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md).
+
 Turnkey deploy for the **new** React/FastAPI/Postgres stack — the feature-complete
 app built in the 2026-07 session. This is a *separate* deployment from the
 Streamlit app (repo-root `docker-compose.yml`); the two do not interfere.

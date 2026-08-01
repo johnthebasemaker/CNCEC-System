@@ -19,12 +19,15 @@
  * A call site can force the decision either way with `smart={true|false}`, and an
  * explicit `sorter`/`filters` on a column is always left untouched.
  *
- * Known limit: filter labels come from the RAW field value, so a column whose
- * `render` maps codes to friendly labels (UsersPage's Role → "Head of
- * Department") lists the codes in its dropdown. Give such a column an explicit
- * `filters` array to override.
+ * Filter LABELS follow the cell, not the column's raw field: a column whose
+ * `render` turns `hod` into "Head of Department" lists "Head of Department" in
+ * its dropdown, while the checkbox still filters on the raw value. The label is
+ * read out of the rendered node (see `nodeText`) and is trusted only when it is
+ * stable and unambiguous — a value that renders differently row to row, or two
+ * values that render the same text, fall back to the raw string rather than
+ * mislabel a checkbox. An explicit `filters` array still overrides everything.
  */
-import { useMemo } from 'react'
+import { isValidElement, useMemo } from 'react'
 import type { Key, ReactNode } from 'react'
 import { Table as AntTable } from 'antd'
 import type { TableProps } from 'antd'
@@ -38,6 +41,16 @@ const MAX_FILTER_OPTIONS = 30
 const FILTER_SEARCH_FROM = 8
 /** Rows sampled when deciding whether a column is categorical. */
 const SAMPLE = 400
+/** Occurrences of a value inspected before its rendered label is trusted. */
+const LABEL_CONFIRM = 2
+/** Total `render` calls a column may cost while deriving its filter labels. */
+const LABEL_BUDGET = MAX_FILTER_OPTIONS * LABEL_CONFIRM
+/** Longer than this and the cell is prose, not a label — keep the raw value. */
+const LABEL_MAX_LEN = 80
+/** Depth guard for walking a rendered cell; real cells nest a handful deep. */
+const LABEL_MAX_DEPTH = 6
+/** Props a component may carry its text in when it has no children. */
+const LABEL_PROPS = ['text', 'title', 'label'] as const
 
 // Numeric-aware so "10" sorts after "9" and "TK-2" after "TK-10" reads naturally.
 const collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
@@ -57,6 +70,88 @@ function isBlank(v: unknown): boolean {
   return v === null || v === undefined || v === '' || (typeof v === 'number' && Number.isNaN(v))
 }
 
+/** The string a raw cell value is keyed and filtered by. */
+function asKey(v: unknown): string {
+  return v instanceof Date ? v.toISOString().slice(0, 10) : String(v)
+}
+
+/**
+ * Readable text of a rendered cell, without mounting it. Handles the shapes our
+ * columns actually return: plain strings, `<Tag>label</Tag>`, fragments and
+ * spans mixing an icon with text, antd's `{ children, props }` cell wrapper, and
+ * components that carry their text in a prop (`<Badge text=… />`).
+ */
+function nodeText(node: unknown, depth = 0): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return ''
+  if (typeof node === 'string') return node
+  if (typeof node === 'number') return String(node)
+  if (depth >= LABEL_MAX_DEPTH) return ''
+  if (Array.isArray(node)) return node.map((n) => nodeText(n, depth + 1)).join(' ')
+  if (isValidElement(node)) {
+    const props = (node.props ?? {}) as Record<string, unknown>
+    const kids = nodeText(props.children, depth + 1)
+    if (kids.trim()) return kids
+    for (const p of LABEL_PROPS) {
+      const val = props[p]
+      if (typeof val === 'string' || typeof val === 'number') return String(val)
+    }
+    return ''
+  }
+  // A render may return { children, props } to drive colSpan/rowSpan.
+  if (typeof node === 'object' && 'children' in (node as object)) {
+    return nodeText((node as { children: unknown }).children, depth + 1)
+  }
+  return ''
+}
+
+type CellRender<T> = NonNullable<ColumnType<T>['render']>
+
+/**
+ * Map each raw value to the label its cell renders, keeping only the mappings
+ * that are safe to show in a checkbox list. A value is dropped when the render
+ * throws, yields no text, or disagrees with itself across rows (a label that
+ * depends on the whole record, not the field); a label shared by two different
+ * values is dropped from both, since two identically-named checkboxes filtering
+ * different rows is worse than showing the codes.
+ */
+function derivedLabels<T>(
+  rows: readonly T[], path: Key | readonly Key[], render: CellRender<T>,
+): Map<string, string> {
+  const found = new Map<string, string | null>()
+  const checks = new Map<string, number>()
+  const n = Math.min(rows.length, SAMPLE)
+  let budget = LABEL_BUDGET
+  for (let i = 0; i < n && budget > 0; i += 1) {
+    const v = pick(rows[i], path)
+    if (isBlank(v)) continue
+    const s = asKey(v)
+    const done = checks.get(s) ?? 0
+    if (done >= LABEL_CONFIRM) continue
+    checks.set(s, done + 1)
+    budget -= 1
+
+    let text = ''
+    try {
+      text = nodeText(render(v, rows[i], i)).replace(/\s+/g, ' ').trim()
+    } catch {
+      text = '' // a render that needs more context than we can give it
+    }
+    const usable = text && text.length <= LABEL_MAX_LEN ? text : null
+    const prev = found.get(s)
+    found.set(s, prev === undefined ? usable : (prev === usable ? prev : null))
+  }
+
+  const byLabel = new Map<string, number>()
+  for (const label of found.values()) {
+    if (label) byLabel.set(label, (byLabel.get(label) ?? 0) + 1)
+  }
+  const out = new Map<string, string>()
+  for (const [value, label] of found) {
+    if (label && label !== value && byLabel.get(label) === 1) out.set(value, label)
+  }
+  return out
+}
+
 /**
  * One comparator for every column. Blanks sort to the top ascending (and so to
  * the bottom descending), which is what you want when you click a shortfall
@@ -70,9 +165,13 @@ export function compareValues(a: unknown, b: unknown): number {
   return collator.compare(String(a), String(b))
 }
 
-/** Distinct non-blank values, or null when the column is not filter-worthy. */
-function filterOptions<T>(rows: readonly T[], path: Key | readonly Key[]):
-    { text: string; value: string }[] | null {
+/**
+ * Distinct non-blank values labelled the way their cells read, or null when the
+ * column is not filter-worthy.
+ */
+function filterOptions<T>(
+  rows: readonly T[], path: Key | readonly Key[], render?: CellRender<T>,
+): { text: string; value: string }[] | null {
   const seen = new Map<string, string>()
   const n = Math.min(rows.length, SAMPLE)
   for (let i = 0; i < n; i += 1) {
@@ -85,14 +184,20 @@ function filterOptions<T>(rows: readonly T[], path: Key | readonly Key[]):
     // and the sorter already groups them.
     if (typeof v === 'number' || typeof v === 'boolean'
         || (typeof v === 'object' && !(v instanceof Date))) return null
-    const s = v instanceof Date ? v.toISOString().slice(0, 10) : String(v)
+    const s = asKey(v)
     if (!seen.has(s)) {
       if (seen.size >= MAX_FILTER_OPTIONS) return null
       seen.set(s, s)
     }
   }
   if (seen.size < 2) return null
-  return [...seen.keys()].sort(collator.compare).map((s) => ({ text: s, value: s }))
+
+  // Label each option the way its cell reads. Only now, with the column known
+  // to be categorical, is it worth calling `render` at all.
+  const labels = render ? derivedLabels(rows, path, render) : null
+  return [...seen.keys()]
+    .map((s) => ({ text: labels?.get(s) ?? s, value: s }))
+    .sort((a, b) => collator.compare(a.text, b.text))
 }
 
 function enhance<T>(col: AnyCol<T>, rows: readonly T[]): AnyCol<T> {
@@ -111,14 +216,14 @@ function enhance<T>(col: AnyCol<T>, rows: readonly T[]): AnyCol<T> {
     out.showSorterTooltip = c.showSorterTooltip ?? false
   }
   if (c.filters === undefined && c.filterDropdown === undefined) {
-    const opts = filterOptions(rows, path)
+    const opts = filterOptions(rows, path, c.render)
     if (opts) {
       out.filters = opts
       out.filterSearch = c.filterSearch ?? opts.length >= FILTER_SEARCH_FROM
+      // Labels follow the cell; the checkbox still filters on the raw value.
       out.onFilter = (value, record) => {
         const v = pick(record, path)
-        const s = v instanceof Date ? v.toISOString().slice(0, 10) : String(v)
-        return !isBlank(v) && s === String(value)
+        return !isBlank(v) && asKey(v) === String(value)
       }
     }
   }

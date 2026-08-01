@@ -1,5 +1,10 @@
 # Production Cutover — legacy SQLite → PostgreSQL
 
+> ⏸️ **The Hetzner deployment is PAUSED by decision (2026-07-30)** — the next
+> phase is Feature Fine-Tuning and UI Polish. This runbook stays current and
+> ready; nothing here is blocked. See
+> [`PROJECT_HANDOVER.md`](../../PROJECT_HANDOVER.md).
+
 `cutover_migrate.py` is the one-shot, heavily-verified data migration for
 cutover day. It wraps the proven core copier
 (`backend/migrate_sqlite_to_postgres.py` — the same code `dual_ci` exercises on
@@ -45,6 +50,16 @@ Exit code `0` only when every blocking check passes.
      reading them from the repo root):
 
      ```bash
+     # preferred since 2026-07-27 — ONE atomic transaction, dry-run by default
+     DATABASE_URL=… .venv/bin/python tools/pg_excel_sync.py --site CNCEC
+     DATABASE_URL=… .venv/bin/python tools/pg_excel_sync.py --site CNCEC --commit
+     DATABASE_URL=… .venv/bin/python tools/pg_excel_sync.py --site CNCEC \
+         --sme-reseed --commit                       # SME: wholesale replace
+     ```
+
+     <details><summary>the older per-kind chain (still supported)</summary>
+
+     ```bash
      DATABASE_URL=… .venv/bin/python tools/excel_sync.py \
          --site CNCEC --commit                       # inventory + ledger (+ SME upserts)
      DATABASE_URL=… .venv/bin/python tools/excel_sync_reconcile.py --commit
@@ -52,12 +67,42 @@ Exit code `0` only when every blocking check passes.
          --site CNCEC --kinds sme-equipment,sme-recipes,sme-materials \
          --sme-reseed --commit                       # SME trio: wholesale replace
      ```
-     The reseed is REQUIRED: the fresh load restores the legacy SQLite's
-     OLD system-code numbering — the workbooks carry the renumbered codes
-     (1–10) and the exact recipe SAP joins. It aborts if recorded
-     `Done_SQM` would be lost (override: `--force-drop-progress` after
-     reading the printout). Confirm the closing line reads
-     **`STOCK VERIFICATION: 429/429`** (or the current workbook row count).
+     </details>
+
+     **⚠️ THE SME RESEED IS REQUIRED — two independent reasons.**
+
+     1. The fresh load restores the legacy SQLite's OLD system-code
+        numbering; the workbooks carry the renumbered codes (1–10) and the
+        exact recipe SAP joins.
+     2. **The frozen legacy SQLite has NO `SAP_Code` column on either SME
+        table** (`sme_recipe`, `sme_inventory_seed`). A cutover therefore
+        lands **86 blank-SAP recipe rows** and one **blank-SAP seed row per
+        material**, while the workbook carries 41 SAP-coded recipe rows and
+        32 per-component seed rows. An *additive* sync onto that state leaves
+        both sets side by side.
+
+     What the additive path does if you run it anyway (it is safe, just
+     mixed): the seed loader retires a blank-SAP placeholder ONLY when the
+     workbook supplied a real SAP for that `Material_Code` **and** no
+     blank-SAP *recipe* line still references it. On a fresh cutover that
+     retires 2 genuinely orphaned rows and **holds 20**, printing the reason
+     and pointing at the reseed. **The 86 blank-SAP recipe rows are never
+     deleted** — they are real recipe data the workbook does not cover
+     (measured: zero overlap with the workbook's coded pairs), and removing
+     them collapsed SQM coverage to 0.0% across all 29 equipment when it was
+     tried.
+
+     After `--sme-reseed --commit` the target converges to the known-good
+     shape: **`sme_recipe` 41 rows / 0 blank SAP · `sme_inventory_seed` 32
+     rows / 0 blank SAP**. Re-running is a no-op (`+0 new ~0 changed
+     =32 unchanged`).
+
+     The reseed aborts if recorded `Done_SQM` would be lost (override:
+     `--force-drop-progress` after reading the printout). Confirm the closing
+     line reads **`STOCK VERIFICATION: 429/429`** (or the current workbook row
+     count). ⚠️ `pg_excel_sync.py` exits **1** when that verification finds
+     mismatches even though the commit succeeded — that is a signal, not a
+     failed sync.
    - `VACUUM ANALYZE;`,
    - confirm `deploy/.env` secrets on the server (`JWT_SECRET`, `WHATSAPP_*`,
      `SMTP_*`, `EMAIL_LOGISTICS_TO`) and that the file is **`chmod 600`** —
@@ -88,7 +133,7 @@ Exit code `0` only when every blocking check passes.
    stack, and run the smoke gates against production:
 
    ```bash
-   DATABASE_URL=… JWT_SECRET=… .venv/bin/python -m backend.api.service_tests   # expect 750/0
+   DATABASE_URL=… JWT_SECRET=… .venv/bin/python -m backend.api.service_tests   # expect 951/0
    # NOTE: tools/parity_check.py is NOT a production smoke gate — it compares
    # against the frozen SQLite and fails BY DESIGN once the Excel injection
    # is applied. The stock-verification line from excel_sync.py is the
@@ -111,5 +156,11 @@ Exit code `0` only when every blocking check passes.
 - Legacy SQLite **views are not migrated** to Postgres: the FastAPI layer
   computes those aggregations itself (`backend/api/stock.py` — parity-checked
   against the SQLite views by `backend.api.parity_check`).
-- SME S6 (master-data CRUD) remains a separate cutover-day work item; this
-  script moves the data either way (sme_* tables are ordinary tables).
+- SME S6 (master-data CRUD) shipped on cutover day 2026-07-13; this script
+  moves the data either way (sme_* tables are ordinary tables).
+- **`sme_inventory_seed`'s primary key is `(Material_Code, SAP_Code)`** since
+  alembic `a4e9b1c73f28` (2026-07-30). The migration collapses any legacy
+  comma-list SAP (`"1041, 1041-1, …"`) to its first SAP and widens the key; it
+  **cannot** recover the per-component quantities from a pooled row — nothing
+  can, that information was destroyed on load. The workbook reload above is
+  what converges them.

@@ -6,13 +6,31 @@ import { VitePWA } from 'vite-plugin-pwa'
 // the uvicorn process on :8000 (so there are no CORS concerns in dev and the
 // same relative paths keep working in prod behind a reverse proxy).
 //
-// Tunnel mode (`VITE_TUNNEL=1 npm run dev`): exposes the dev server through the
-// Cloudflare Tunnel at gi.giinventory.com for multi-user testing. The tunnel
-// host is allowed unconditionally below (Vite blocks unknown Hosts by default);
-// the flag only repoints HMR's websocket at the tunnel's TLS port, so local dev
-// without it is unchanged (HMR just won't work through the tunnel).
+// Tunnel mode (`VITE_TUNNEL=1 npm run dev`): exposes the dev server through a
+// Cloudflare Tunnel for multi-user testing. Vite rejects unknown Host headers
+// with "Blocked request. This host is not allowed" (a 403 from Vite, not from
+// Cloudflare), so EVERY hostname that may reach the dev server must be listed.
+//
+//   local.giinventory.com — the local dev tunnel; use this day to day.
+//   gi.giinventory.com    — kept working for existing setups, but it becomes
+//                           the PRODUCTION hostname once the Hetzner box is
+//                           live, at which point it must stop resolving here.
+//
+// HMR's websocket has to target the exact host you are browsing, so it follows
+// VITE_TUNNEL_HOST (default: local.giinventory.com). Point that at whichever
+// hostname your tunnel serves:
+//
+//   npm run dev:local   → VITE_TUNNEL=1 VITE_TUNNEL_HOST=local.giinventory.com
+//   npm run dev:gi      → VITE_TUNNEL=1 VITE_TUNNEL_HOST=gi.giinventory.com
+//
+// Without VITE_TUNNEL the flag is inert and plain localhost dev (`npm run dev`)
+// is unchanged. Only ONE of these may run at a time — see `strictPort` below.
 const tunnel = process.env.VITE_TUNNEL === '1'
-const TUNNEL_HOST = 'gi.giinventory.com'
+const TUNNEL_HOSTS = ['local.giinventory.com', 'gi.giinventory.com']
+const TUNNEL_HOST = process.env.VITE_TUNNEL_HOST ?? 'local.giinventory.com'
+// Union, so an explicit VITE_TUNNEL_HOST is always accepted even if it is not
+// one of the defaults above.
+const ALLOWED_HOSTS = Array.from(new Set([...TUNNEL_HOSTS, TUNNEL_HOST]))
 
 export default defineConfig({
   plugins: [
@@ -62,7 +80,12 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
-    allowedHosts: [TUNNEL_HOST],
+    // Fail loudly instead of drifting to 5174. A tunnel's ingress points at a
+    // FIXED port, so a second dev server silently taking the next one looks
+    // like it started fine while the tunnel serves the first one (or nothing) —
+    // the two environments can never quietly fight over 5173 this way.
+    strictPort: true,
+    allowedHosts: ALLOWED_HOSTS,
     ...(tunnel ? { hmr: { host: TUNNEL_HOST, clientPort: 443, protocol: 'wss' } } : {}),
     proxy: {
       '/api': {
@@ -75,6 +98,6 @@ export default defineConfig({
     },
   },
   preview: {
-    allowedHosts: [TUNNEL_HOST],
+    allowedHosts: ALLOWED_HOSTS,
   },
 })
