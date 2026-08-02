@@ -6266,7 +6266,23 @@ async def test_sme_sk_upgrades():
             await s.execute(_sqt(
                 'INSERT INTO receipts ("Date", "SAP_Code", "Quantity", "Site_ID") '
                 "VALUES ('2026-07-01 00:00:00', 'SVCN-1', 150, 'CNCEC'), "
-                "('2026-07-01 00:00:00', 'SVCN - 3', 10, 'CNCEC')"))
+                "('2026-07-01 00:00:00', 'SVCN - 3', 10, 'CNCEC'), "
+                # POISON PILL (2026-08-02 strict decoupling): a large ERP
+                # receipt the calculator must NOT see. Before the decoupling
+                # SVCN-1 read 150 straight off this ledger; if a join ever
+                # creeps back it reads 650 and the check below fails loudly.
+                "('2026-07-02 00:00:00', 'SVCN-1', 500, 'CNCEC')"))
+            # The calculator's stock now comes from the SME seed — same figures
+            # as the ledger above, so the expectations are unchanged, but the
+            # SOURCE is the workbook. 'SVCN - 3' is written DIRTY on the SME
+            # side too, pinning the whitespace normalization on the new join.
+            await s.execute(_sqt(
+                'INSERT INTO sme_inventory_seed ("Material_Code", "SAP_Code", '
+                '"Material_Name", "UOM", "Initial_Available_Qty", '
+                '"Initial_Ordered_Qty") VALUES '
+                "('SVCN-M1', 'SVCN-1', 'SVCN Primer', 'KG', 150, 0), "
+                "('SVCN-M2', 'SVCN-2', 'SVCN Mortar A', 'KG', 0, 0), "
+                "('SVCN-M2', 'SVCN - 3', 'SVCN Mortar B', 'KG', 10, 0)"))
             await s.execute(_sqt(
                 'INSERT INTO sme_recipe ("Lining_System_Code", "Material_Code", '
                 '"SAP_Code", "Material_Name", "Material_Description", "UOM", '
@@ -6309,8 +6325,10 @@ async def test_sme_sk_upgrades():
               r.status_code == 403, f"got {r.status_code}")
 
         # single system via the legacy `code` param — new payload shape;
-        # M2's stock must POOL SVCN-2 (0) + the whitespace-variant
-        # 'SVCN - 3' receipt (10) because both share Material_Code SVCN-M2
+        # M2's stock must POOL the SME seed rows SVCN-2 (0) and the
+        # whitespace-variant 'SVCN - 3' (10) because both share Material_Code
+        # SVCN-M2. SVCN-1 reads 150 from its seed row, NOT the 650 sitting in
+        # the ERP ledger against the same SAP (strict decoupling).
         r = await ac.get("/sme/calculator", headers=H(hod_t),
                          params={"code": "9908", "sqm": 40})
         j = r.json() if r.status_code == 200 else {}
@@ -6400,6 +6418,8 @@ async def test_sme_sk_upgrades():
             await s.execute(_sqt("DELETE FROM receipts WHERE \"SAP_Code\" LIKE 'SVCN%'"))
             await s.execute(_sqt("DELETE FROM inventory WHERE \"SAP_Code\" LIKE 'SVCN%'"))
             await s.execute(_sqt("DELETE FROM sme_recipe WHERE \"Material_Code\" LIKE 'SVCN-%'"))
+            await s.execute(_sqt("DELETE FROM sme_inventory_seed "
+                                 "WHERE \"Material_Code\" LIKE 'SVCN-%'"))
             await s.execute(_sqt(
                 "DELETE FROM sme_sqm_progress WHERE \"Equipment_Tag_No\" LIKE 'SVCN%'"))
             await s.execute(_sqt(
@@ -8087,14 +8107,39 @@ async def test_pg_excel_sync():
             await _scalar("SELECT COUNT(*) FROM sme_inventory_seed "
                           "WHERE \"Material_Code\"='SVCW-MAT-1'"))
 
-    rc, out = await _run(_dir)                      # no --commit
+    rc, out = await _run(_dir)                      # no --commit, no --erp
     check("aw: the run is a DRY-RUN by default and writes nothing",
           rc == 0 and await _svcw_counts() == (0, 0, 0, 0, 0),
           f"rc={rc} counts={await _svcw_counts()}")
     check("aw: the dry-run still reports what it would insert",
           "+1 new" in out and "dry-run only" in out, out[-300:])
 
-    rc, out = await _run(_dir, "--commit")
+    # ── 2026-08-02 STRICT DECOUPLING: the ERP half is opt-in ────────────────
+    check("aw: the DEFAULT run is SME-only — it does not even plan the ERP "
+          "warehouse kinds, so a routine spreadsheet re-sync cannot rewrite "
+          "the inventory master or append to its ledger",
+          "▶ inventory" not in out and "▶ ledger" not in out
+          and "▶ sme-materials" in out
+          and "ERP warehouse is untouched" in out, out[:400])
+    rc, _erp_out = await _run(_dir, "--erp")
+    check("aw: --erp widens the same run back to all five kinds and SAYS so",
+          rc == 0 and "▶ inventory" in _erp_out and "▶ ledger" in _erp_out
+          and "WRITES the live warehouse" in _erp_out, _erp_out[:400])
+    rc, _k_out = await _run(_dir, "--kinds", "ledger")
+    check("aw: naming an ERP kind in --kinds is itself the opt-in (no --erp "
+          "needed) and selects EXACTLY that kind",
+          rc == 0 and "▶ ledger" in _k_out and "▶ sme-materials" not in _k_out,
+          _k_out[:400])
+    _nodir = _stage("SVCW", {n: b for n, b in _books("SVCW").items()
+                             if n != "CNCEC_Inventory.xlsx"})
+    _dirs.append(_nodir)
+    check("aw: an SME-only run never opens CNCEC_Inventory.xlsx, so a missing "
+          "ERP workbook cannot block it",
+          (await _run(_nodir))[0] == 0
+          and (await _run(_nodir, "--erp"))[0] == 2,   # …but --erp still needs it
+          "an SME-only run must not require the ERP workbook")
+
+    rc, out = await _run(_dir, "--erp", "--commit")
     _after = await _svcw_counts()
     check("aw: --commit applies all five kinds in one pass",
           rc == 0 and _after == (1, 1, 1, 1, 1), f"rc={rc} counts={_after}")
@@ -8106,7 +8151,7 @@ async def test_pg_excel_sync():
               'SELECT "Original_SQM" FROM sme_sqm_progress '
               "WHERE \"Equipment_Tag_No\"='SVCW-T1'") or 0) - 20) < 1e-9)
 
-    rc, out = await _run(_dir, "--commit")
+    rc, out = await _run(_dir, "--erp", "--commit")
     check("aw: re-running --commit is a NO-OP — the sync is idempotent",
           rc == 0 and await _svcw_counts() == (1, 1, 1, 1, 1)
           and out.count("+0 new") >= 3 and "+0 new  ~0 corrected" in out,
@@ -8120,7 +8165,7 @@ async def test_pg_excel_sync():
     _dirs.append(_bdir)
     _boom = ""
     try:
-        await _run(_bdir, "--commit")
+        await _run(_bdir, "--erp", "--commit")
     except Exception as e:  # noqa: BLE001 — any failure must roll everything back
         _boom = type(e).__name__
     _leaked = (
@@ -8360,14 +8405,21 @@ async def test_sqm_bottleneck():
 
     # ── Q2a: effective ordered = ordered − received, clamped at zero ─────────
     m = mk({"A": 0, "B": 0}, ordered={"A": 100, "B": 10}, received={"A": 40, "B": 25})
-    check("ay-q2a: effective ordered nets delivered stock off the order "
-          "(100 ordered − 40 received = 60) — the double-count fix",
-          m["pool_ordered_init"][E.mat_key("A", "SA")] == 60.0,
+    check("ay-q2a: SUPERSEDED by strict decoupling — the on-order pool is the "
+          "workbook's Initial_Ordered_Qty verbatim (100, not 100 − 40): nothing "
+          "adds receipts to availability any more, so netting them off the "
+          "order would delete units that were never counted twice",
+          m["pool_ordered_init"][E.mat_key("A", "SA")] == 100.0,
           str(m["pool_ordered_init"]))
-    check("ay-q2a: over-delivery clamps at zero, never negative "
-          "(10 ordered − 25 received → 0)",
-          m["pool_ordered_init"][E.mat_key("B", "SB")] == 0.0,
+    check("ay-q2a: a received_qty on the INPUT is ignored outright, not merely "
+          "absent — B keeps its full order of 10 against 25 'received'",
+          m["pool_ordered_init"][E.mat_key("B", "SB")] == 10.0,
           str(m["pool_ordered_init"]))
+    check("ay-q2a: the pool still clamps at zero — a negative workbook cell "
+          "must not create anti-stock",
+          E.build_model([], [], [{"material_code": "N", "sap_code": "SN",
+                                  "available_qty": 0, "ordered_qty": -12}],
+                        [])["pool_ordered_init"][E.mat_key("N", "SN")] == 0.0)
 
     # ── Q1/Q6: two-tier cascade + conservation ──────────────────────────────
     m = mk({"A": 5, "B": 10}, ordered={"A": 20})       # A: 5 on hand, 15 usable on order
@@ -8654,13 +8706,11 @@ async def test_component_identity():
           and len(old["totals"]) == 1,
           str({ln["Material_Name"] for ln in old["lines"]}))
 
-    # ── the derived-availability SQL, per component ──────────────────────────
-    # SQL_SME_MATERIALS now reaches the ledger through the component's OWN SAP
-    # instead of through inventory.Material_Code (which summed every variant SAP
-    # of the material into all four component rows at once). The derived-view
-    # PARITY gate cannot prove this: every SME material in the legacy data has
-    # received_qty = consumed_qty = 0, so both sides agree vacuously on exactly
-    # the columns this rewrite touches. Hence a direct test.
+    # ── the seed-driven availability SQL, per component ──────────────────────
+    # SQL_SME_MATERIALS keeps its per-component GRAIN (that is this suite's
+    # ruling) but, since 2026-08-02, reads nothing but sme_inventory_seed. The
+    # ledger half of this block moved to suite BA, which asserts the decoupling
+    # against exactly the ERP writes that used to move these numbers.
     from sqlalchemy import text as _azt
 
     from . import sme as _azsme
@@ -8678,43 +8728,23 @@ async def test_component_identity():
         return {r["sap_code"]: dict(r) for r in rows}
 
     try:
-        for sap in ("SVCZ-1", "SVCZ-2"):
-            await _exec('INSERT INTO inventory ("SAP_Code", "Site_ID", '
-                        '"Equipment_Description", "UOM") VALUES (:s, \'CNCEC\', '
-                        '\'SVCZ component\', \'KG\')', s=sap)
+        for sap, av in (("SVCZ-1", 100), ("SVCZ-2", 40)):
             await _exec('INSERT INTO sme_inventory_seed ("Material_Code", '
                         '"SAP_Code", "Material_Name", "UOM", '
                         '"Initial_Available_Qty", "Initial_Ordered_Qty") '
-                        'VALUES (\'SVCZ-MAT\', :s, :n, \'KG\', 100, 0)',
-                        s=sap, n=f"SVCZ comp {sap[-1]}")
-        # a receipt for component 1 only, plus a DIRTY-SAP receipt for component 2
-        await _exec('INSERT INTO receipts ("Date", "SAP_Code", "Quantity", '
-                    '"Site_ID", "DN_No") VALUES (\'2026-07-30\', \'SVCZ-1\', 25, '
-                    '\'CNCEC\', \'SVCZ-DN\')')
-        await _exec('INSERT INTO receipts ("Date", "SAP_Code", "Quantity", '
-                    '"Site_ID", "DN_No") VALUES (\'2026-07-30\', \'SVCZ - 2\', 7, '
-                    '\'CNCEC\', \'SVCZ-DN\')')
+                        'VALUES (\'SVCZ-MAT\', :s, :n, \'KG\', :a, 5)',
+                        s=sap, n=f"SVCZ comp {sap[-1]}", a=av)
         d = await _derived()
-        check("az-sql: a receipt raises ONLY its own component's derived "
-              "availability (comp 1 → 125), leaving the sibling at 100 + its own 7",
-              len(d) == 2 and d["SVCZ-1"]["available_qty"] == 125.0
-              and d["SVCZ-1"]["received_qty"] == 25.0
-              and d["SVCZ-2"]["available_qty"] == 107.0,
-              str({k: (v["received_qty"], v["available_qty"]) for k, v in d.items()}))
-        check("az-sql: a receipt whose ERP SAP is written 'SVCZ - 2' still lands "
-              "on component SVCZ-2 — normalized on both sides of the join",
-              d["SVCZ-2"]["received_qty"] == 7.0, str(d.get("SVCZ-2")))
-        # consumption is the mirror case
-        await _exec('INSERT INTO consumption ("Date", "SAP_Code", "Quantity", '
-                    '"Site_ID") VALUES (\'2026-07-30\', \'SVCZ-1\', 10, \'CNCEC\')')
-        d = await _derived()
-        check("az-sql: consumption likewise debits only its own component "
-              "(125 − 10 = 115; the sibling is untouched at 107)",
-              d["SVCZ-1"]["available_qty"] == 115.0
-              and d["SVCZ-1"]["consumed_qty"] == 10.0
-              and d["SVCZ-2"]["available_qty"] == 107.0,
-              str({k: (v["consumed_qty"], v["available_qty"]) for k, v in d.items()}))
-        # the CONSERVATION invariant the parity gate asserts, on live-shaped data
+        check("az-sql: each component row carries its OWN seeded quantity — "
+              "one Material_Code, two independent pools (100 and 40)",
+              len(d) == 2 and d["SVCZ-1"]["available_qty"] == 100.0
+              and d["SVCZ-2"]["available_qty"] == 40.0,
+              str({k: v["available_qty"] for k, v in d.items()}))
+        check("az-sql: available_qty IS Initial_Available_Qty — the derived "
+              "column no longer diverges from the seed at all",
+              all(v["available_qty"] == v["initial_available_qty"]
+                  and v["ordered_qty"] == v["initial_ordered_qty"]
+                  for v in d.values()), str(d))
         rolled = None
         async with SessionLocal() as s:
             rolled = (await s.execute(_azt(
@@ -8723,15 +8753,11 @@ async def test_component_identity():
                     "WHERE material_code = 'SVCZ-MAT' GROUP BY material_code")
             ))).mappings().all()
         check("az-sql: rolled back up to Material_Code the components conserve "
-              "exactly (200 seeded + 32 received − 10 consumed = 222)",
-              len(rolled) == 1 and rolled[0]["available_qty"] == 222.0
-              and rolled[0]["received_qty"] == 32.0
-              and rolled[0]["consumed_qty"] == 10.0, str(dict(rolled[0])))
+              "exactly (100 + 40 = 140 available, 5 + 5 = 10 on order)",
+              len(rolled) == 1 and rolled[0]["available_qty"] == 140.0
+              and rolled[0]["ordered_qty"] == 10.0, str(dict(rolled[0])))
     finally:
-        await _exec('DELETE FROM receipts WHERE "DN_No" = \'SVCZ-DN\'')
-        await _exec('DELETE FROM consumption WHERE "SAP_Code" LIKE \'SVCZ%\'')
         await _exec('DELETE FROM sme_inventory_seed WHERE "Material_Code" = \'SVCZ-MAT\'')
-        await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCZ%\'')
 
     # ── the cutover → sync path must CONVERGE, not accumulate ────────────────
     # The frozen legacy SQLite seed has no SAP_Code column at all, so a cutover
@@ -8812,10 +8838,195 @@ async def test_component_identity():
               not again["inserts"] and not again["updates"]
               and not again.get("stale") and again["unchanged"] == 4,
               str(_azbi._summary(again)))
+
+        # ── the header the LIVE workbook actually ships ─────────────────────
+        # Materials_DetailsAvailable_Qty.xlsx writes "Available Qty" with a
+        # SPACE while the ordered column keeps its underscore. `_col` matches
+        # header names exactly, so the single "Available_Qty" alias resolved to
+        # None and every material re-baselined to the 0.0 that summing no cells
+        # produces — 30 of them on the live data, caught in a dry-run.
+        _spaced = _xlsx({"Materials": [
+            [h.replace("Available_Qty", "Available Qty") for h in hdr],
+            ["1", "V", "PO1", "2026-03-01", "SVCZ-P", "SVCZ-A", "P comp A",
+             "Liquid", "KG", 77, 3]]})
+        async with SessionLocal() as s:
+            sp = await _azbi.plan_sme_materials(s, _spaced)
+        check("az-header: 'Available Qty' (space) is read as the availability "
+              "column, not silently zeroed",
+              any(u["diff"].get("Initial_Available_Qty") == 77.0
+                  for u in sp["updates"]),
+              str([u["diff"] for u in sp["updates"]]))
+
+        # ── a quantity column the workbook OMITS must not erase the stored one
+        _noqty = _xlsx({"Materials": [
+            [h for h in hdr if h not in ("Available_Qty", "Ordered_Qty")],
+            ["1", "V", "PO1", "2026-03-01", "SVCZ-P", "SVCZ-A", "P comp A",
+             "Liquid", "KG"]]})
+        async with SessionLocal() as s:
+            nq = await _azbi.plan_sme_materials(s, _noqty)
+        check("az-header: a workbook with NO quantity columns leaves the stored "
+              "quantities alone and SAYS so — it does not re-baseline to zero",
+              not any("Qty" in k for u in nq["updates"] for k in u["diff"])
+              and any("LEFT AS THEY ARE" in w for w in nq["warnings"]),
+              f'updates={[u["diff"] for u in nq["updates"]]} '
+              f'warnings={nq["warnings"]}')
     finally:
         await _exec('DELETE FROM sme_recipe WHERE "Material_Code" LIKE \'SVCZ-%\'')
         await _exec('DELETE FROM sme_inventory_seed '
                     'WHERE "Material_Code" LIKE \'SVCZ-%\'')
+
+
+async def test_sme_strict_decoupling():
+    """Suite BA — STRICT DECOUPLING of the SME estimator from the ERP ledger.
+
+    Ruling, 2026-08-02: the estimator and the warehouse are two separate pools.
+    An ERP receipt, issue or return is a warehouse event; it must not move a
+    single SME number. SME quantities come from `sme_inventory_seed` — the data
+    ingested from Materials_DetailsAvailable_Qty.xlsx — and from nowhere else.
+
+    Two things used to couple them and both are gone:
+      * SQL_SME_MATERIALS derived available = seed + Σreceipts − Σconsumption
+        through a SAP join into the ERP `inventory` master;
+      * the Smart Calculator built its ENTIRE stock pool out of the ledger.
+
+    The method here is deliberately a before/after: take every SME read, post
+    real ERP movement against the very SAP the SME material uses, take them
+    again, and require byte-identical answers. A grep of the SQL alone would
+    pass while a join hid behind an ORM call.
+    """
+    from sqlalchemy import text as _bat
+
+    from . import sme as _basme
+
+    async def _exec(sql, **kw):
+        async with SessionLocal() as s:
+            await s.execute(_bat(sql), kw)
+            await s.commit()
+
+    MAT, SAP, SYS = "SVCBA-MAT", "SVCBA-1", "9901"
+
+    transport = ASGITransport(app=app)
+    try:
+        # ERP side: a real inventory master row + the SME side: a seed row and a
+        # recipe that uses it. This is the exact shape that used to couple.
+        await _exec('INSERT INTO inventory ("SAP_Code", "Material_Code", '
+                    '"Site_ID", "Equipment_Description", "UOM", "Opening_Stock") '
+                    'VALUES (:s, :m, \'CNCEC\', \'BA decoupling probe\', '
+                    '\'KG\', 0)', s=SAP, m=MAT)
+        await _exec('INSERT INTO sme_inventory_seed ("Material_Code", '
+                    '"SAP_Code", "Material_Name", "UOM", '
+                    '"Initial_Available_Qty", "Initial_Ordered_Qty") '
+                    'VALUES (:m, :s, \'BA probe material\', \'KG\', 100, 60)',
+                    m=MAT, s=SAP)
+        await _exec('INSERT INTO sme_recipe ("Lining_System_Code", '
+                    '"Material_Code", "SAP_Code", "Material_Name", "UOM", '
+                    '"For_1_SQM") VALUES (:c, :m, :s, \'BA probe material\', '
+                    '\'KG\', 2.0)', c=SYS, m=MAT, s=SAP)
+
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            # /auth/login carries a 10-per-minute per-IP budget and this suite
+            # runs last, behind every other suite's logins from the same
+            # in-process client. Clear the sliding window rather than let a 429
+            # masquerade as a decoupling failure.
+            from . import ratelimit as _barl
+            _barl._hits.clear()
+            r = await ac.post("/auth/login",
+                              json={"username": "admin", "password": "admin2026"})
+            check("ba: admin login for the decoupling probe",
+                  r.status_code == 200 and "access_token" in r.json(),
+                  f"{r.status_code} {r.text[:200]}")
+            H = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+            async def probe() -> dict:
+                """Every SME surface that reads a quantity, in one shot."""
+                mats = (await ac.get("/sme/materials", headers=H)).json()["items"]
+                snap = (await ac.get("/sme/model-snapshot", headers=H)).json()
+                calc = (await ac.get("/sme/calculator", headers=H,
+                                     params={"code": SYS, "sqm": 10})).json()
+                line = next(ln for ln in calc["systems"][0]["lines"]
+                            if ln["material_code"] == MAT)
+                return {
+                    "material": next(m for m in mats if m["sap_code"] == SAP),
+                    "snapshot": next(m for m in snap["materials"]
+                                     if m["sap_code"] == SAP),
+                    "calc_stock": line["available_stock"],
+                    "calc_short": line["shortfall_qty"],
+                }
+
+            before = await probe()
+            check("ba: baseline reads come straight off the seed row "
+                  "(100 available, 60 on order, calculator sees the same 100)",
+                  before["material"]["available_qty"] == 100.0
+                  and before["material"]["ordered_qty"] == 60.0
+                  and before["calc_stock"] == 100.0, str(before))
+            check("ba: no ERP-derived field survives in the SME payload — "
+                  "received_qty / consumed_qty are gone from /sme/materials AND "
+                  "from the model snapshot the browser engine consumes",
+                  not ({"received_qty", "consumed_qty"} & set(before["material"]))
+                  and not ({"received_qty", "consumed_qty"}
+                           & set(before["snapshot"])), str(before["material"]))
+
+            # ── the actual warehouse movement ───────────────────────────────
+            await _exec('INSERT INTO receipts ("Date", "SAP_Code", "Quantity", '
+                        '"Site_ID", "DN_No") VALUES (\'2026-08-02\', :s, 500, '
+                        '\'CNCEC\', \'SVCBA-DN\')', s=SAP)
+            await _exec('INSERT INTO consumption ("Date", "SAP_Code", '
+                        '"Quantity", "Site_ID") VALUES (\'2026-08-02\', :s, 70, '
+                        '\'CNCEC\')', s=SAP)
+            await _exec('INSERT INTO returns ("Date", "SAP_Code", "Quantity", '
+                        '"Site_ID") VALUES (\'2026-08-02\', :s, 30, \'CNCEC\')',
+                        s=SAP)
+            # …and the dirty-SAP spelling, which the old join normalized onto
+            # this same component. It must miss just as completely.
+            await _exec('INSERT INTO receipts ("Date", "SAP_Code", "Quantity", '
+                        '"Site_ID", "DN_No") VALUES (\'2026-08-02\', :s, 900, '
+                        '\'CNCEC\', \'SVCBA-DN\')', s="SVCBA - 1")
+
+            after = await probe()
+            check("ba: 500 received + 70 consumed + 30 returned against the SME "
+                  "material's OWN SAP moves nothing — availability stays 100 "
+                  "(it was 100 + 500 − 70 = 530 before the decoupling)",
+                  after["material"]["available_qty"] == 100.0, str(after))
+            check("ba: the on-order pool is untouched too — receipts are no "
+                  "longer netted off it (60, not 60 − 500 clamped to 0)",
+                  after["material"]["ordered_qty"] == 60.0
+                  and after["snapshot"]["ordered_qty"] == 60.0, str(after))
+            check("ba: the Smart Calculator's stock pool comes from the seed, "
+                  "not the ledger — 100 before and after, shortfall unchanged",
+                  after["calc_stock"] == 100.0
+                  and after["calc_short"] == before["calc_short"], str(after))
+            check("ba: EVERY SME read is byte-identical across the warehouse "
+                  "movement — the strongest form of the rule",
+                  after == before, f"before={before} after={after}")
+
+            # ── but the SME's own table is still live ───────────────────────
+            await _exec('UPDATE sme_inventory_seed SET "Initial_Available_Qty" '
+                        '= 250 WHERE "Material_Code" = :m', m=MAT)
+            moved = await probe()
+            check("ba: decoupled is not frozen — editing the SEED (the Excel "
+                  "sync's target) moves every SME number at once",
+                  moved["material"]["available_qty"] == 250.0
+                  and moved["snapshot"]["available_qty"] == 250.0
+                  and moved["calc_stock"] == 250.0, str(moved))
+
+        # ── and a source-level guard, so a future join is caught at review ──
+        # Word-boundary matched: `sme_inventory_seed` and `sme_consumption_log`
+        # are SME-owned tables whose names embed an ERP one, and `_` is a word
+        # character, so they cannot trip this.
+        import re as _bare
+        _sql = _basme.SQL_SME_MATERIALS + str(_basme._CALC_POOL_SQL)
+        _erp = _bare.findall(r"\b(receipts|consumption|returns|inventory)\b", _sql)
+        check("ba: neither SME quantity query so much as NAMES an ERP table "
+              "(receipts / consumption / returns / inventory)",
+              not _erp, f"found {sorted(set(_erp))} in:\n{_sql}")
+    finally:
+        await _exec('DELETE FROM receipts WHERE "DN_No" = \'SVCBA-DN\'')
+        await _exec('DELETE FROM consumption WHERE "SAP_Code" LIKE \'SVCBA%\'')
+        await _exec('DELETE FROM returns WHERE "SAP_Code" LIKE \'SVCBA%\'')
+        await _exec('DELETE FROM sme_recipe WHERE "Material_Code" = :m', m=MAT)
+        await _exec('DELETE FROM sme_inventory_seed WHERE "Material_Code" = :m',
+                    m=MAT)
+        await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBA%\'')
 
 
 async def main() -> int:
@@ -8930,6 +9141,8 @@ async def main() -> int:
     await test_sqm_bottleneck()
     print("\n AZ. component identity — (Material_Code, SAP_Code) stock pools")
     await test_component_identity()
+    print("\n BA. SME strict decoupling — the ERP ledger never moves an SME number")
+    await test_sme_strict_decoupling()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

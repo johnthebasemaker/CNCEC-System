@@ -159,8 +159,10 @@ injection. It stays meaningful only on CI / a freshly-reloaded mirror.
      download buttons in Combined Procurement.
      Log: `docs/SESSION_REPORT_SUMMARY_RUNLOG.md`.
   3. **Two-tier allocation + reverse SQM** — `Allocated_Qty` splits into
-     `Alloc_Available` + `Alloc_Ordered`; on-order is netted
-     `max(Initial_Ordered_Qty − Σreceipts, 0)` against double-counting;
+     `Alloc_Available` + `Alloc_Ordered`; on-order was netted
+     `max(Initial_Ordered_Qty − Σreceipts, 0)` against double-counting
+     (**superseded 2026-08-02 by strict decoupling** — the on-order pool is
+     `Initial_Ordered_Qty` verbatim now that no receipt reaches availability);
      material availability is restated as **SQM achievable**, bottlenecked
      by the scarcest component. Feasibility judges PHYSICAL stock only.
      New Material-Wise Segregated Report (PDF + Excel).
@@ -242,10 +244,15 @@ _Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
   covered. `Material_Name + UOM` is NOT a usable discriminator (all four PU
   recipe rows share both). SAP codes are whitespace-normalized on both
   sides of every join (`"1043 - 2"` ≡ `"1043-2"`).
-- **On-order netting is exact:** `effective_ordered =
-  max(Initial_Ordered_Qty − Σreceipts, 0)`. The workbook's ordered figure is
-  never decremented on delivery, so adding it verbatim double-counts every
-  arrived unit. Feasibility judges PHYSICAL stock only.
+- **STRICT DECOUPLING (2026-08-02, supersedes the on-order netting):** the SME
+  estimator is a separate pool from the ERP warehouse. `available_qty` **is**
+  `Initial_Available_Qty` and `ordered_qty` **is** `Initial_Ordered_Qty`, both
+  straight from `sme_inventory_seed`; `receipts` / `consumption` / `returns` /
+  `inventory` are never read by `/sme/*`. The old
+  `effective_ordered = max(Initial_Ordered_Qty − Σreceipts, 0)` existed only to
+  undo receipts flowing into availability, so it went with them. Feasibility
+  still judges PHYSICAL stock only. Pinned by suite **BA**; see
+  `docs/SME_STRICT_DECOUPLING_RUNLOG.md`.
 - **The 86 blank-SAP legacy recipe rows are REAL data** — they are disjoint
   from the workbook's coded pairs (measured: zero overlap). The cutover
   keeps them, and a blank-SAP seed row is retired only when no blank-SAP

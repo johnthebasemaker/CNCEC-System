@@ -22,6 +22,23 @@ separation: system NAMES are tokenized (…RL… = rubber, CBL/ARTL/brick/stone 
 brick — composites like "RL+CBL 30THK" count in BOTH), and material names are
 checked first (BRICK/STONE → BL, CHEMOLINE/RUBBER → RL) before inheriting
 from the systems that consume them.
+
+⚠️ RELATIONSHIP TO THE 2026-08-02 STRICT-DECOUPLING RULE
+--------------------------------------------------------
+That rule says the SME ESTIMATOR is a separate pool from the ERP warehouse:
+`/sme/*` reads `sme_inventory_seed` and nothing else, and suite BA proves an
+ERP receipt cannot move a single number there.
+
+This module is NOT the estimator. Answering "what can the warehouse actually
+support today" is its entire reason to exist, so it deliberately reads the
+live ledger — but only into a LOCAL copy of the snapshot's material rows
+(`{**m, "available_qty": …}` below). It writes nothing, and the `sme_*`
+tables and `/sme/*` endpoints never see these figures.
+
+If the decoupling is ever meant to cover this page too, the honest change is
+to RETIRE the page, not to feed it seed stock: fed from the seed it would
+compute exactly what `/sme/*` already computes. That is an operator ruling,
+not a refactor — flagged in docs/SME_STRICT_DECOUPLING_RUNLOG.md §6.
 """
 from __future__ import annotations
 

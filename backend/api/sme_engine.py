@@ -178,15 +178,20 @@ def build_model(equipment: list[dict], recipes: list[dict],
         # 2026-07-30 COMPONENT IDENTITY: one pool per (code, SAP), not per code.
         mat = mat_key(m.get("material_code"), m.get("sap_code"))
         pool_init[mat] = _num(m.get("available_qty"))
-        # 2026-07-28 EFFECTIVE-ORDERED ruling (Q2a). `ordered_qty` is the raw
-        # Initial_Ordered_Qty workbook snapshot and is NEVER decremented when
-        # the goods arrive — arrivals land as receipts, which already inflate
-        # available_qty. Adding both buckets verbatim double-counts every
-        # delivered unit (10 live materials at ruling time; GI-8005762 alone
-        # had 10,920 of 47,320 already received). Netting receipts off the
-        # order is self-correcting and needs no schema change.
-        eff_ordered = _num(m.get("ordered_qty")) - _num(m.get("received_qty"))
-        pool_ordered_init[mat] = eff_ordered if eff_ordered > 0.0 else 0.0
+        # 2026-08-02 STRICT DECOUPLING supersedes the 2026-07-28 effective-
+        # ordered netting (ruling Q2a). That netting subtracted `received_qty`
+        # because ERP receipts flowed into `available_qty`, so counting the
+        # order as well double-counted every delivered unit. The ledger no
+        # longer reaches this module at all: `available_qty` is the workbook's
+        # Initial_Available_Qty and `ordered_qty` its Initial_Ordered_Qty, two
+        # independent workbook figures. Subtracting receipts now would remove
+        # units from the order that were never added to availability.
+        #
+        # `received_qty` is therefore IGNORED even when a caller supplies it —
+        # the parity fixture still carries values for it precisely to prove
+        # that. Clamped at zero because a workbook can hold a negative cell.
+        ordered = _num(m.get("ordered_qty"))
+        pool_ordered_init[mat] = ordered if ordered > 0.0 else 0.0
         mat_meta[mat] = {"Material_Code": _s(m.get("material_code")),
                          "SAP_Code": sap_norm(m.get("sap_code")),
                          "Material_Name": _s(m.get("material_name")),
