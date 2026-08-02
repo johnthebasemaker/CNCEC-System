@@ -35,8 +35,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 30.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 60.0,
-        "Ordered_Pool_After": 60.0,
+        "Ordered_Pool_Before": 100.0,
+        "Ordered_Pool_After": 100.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -59,8 +59,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 15.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 25.0,
-        "Ordered_Pool_After": 25.0,
+        "Ordered_Pool_Before": 40.0,
+        "Ordered_Pool_After": 40.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -83,8 +83,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 60.0,
-        "Ordered_Pool_After": 60.0,
+        "Ordered_Pool_Before": 100.0,
+        "Ordered_Pool_After": 100.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -131,8 +131,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 60.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 60.0,
-        "Ordered_Pool_After": 60.0,
+        "Ordered_Pool_Before": 100.0,
+        "Ordered_Pool_After": 100.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -155,8 +155,8 @@
         "Alloc_Ordered": 25.0,
         "Allocated_Qty": 30.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 25.0,
-        "Ordered_Pool_After": 0.0,
+        "Ordered_Pool_Before": 40.0,
+        "Ordered_Pool_After": 15.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -200,12 +200,12 @@
         "Pool_Before": 0.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 0.0,
-        "Alloc_Ordered": 0.0,
-        "Allocated_Qty": 0.0,
-        "Shortfall_Qty": 4.0,
-        "Ordered_Pool_Before": 0.0,
-        "Ordered_Pool_After": 0.0,
-        "Fulfillment_With_Ordered_Pct": 0.0
+        "Alloc_Ordered": 4.0,
+        "Allocated_Qty": 4.0,
+        "Shortfall_Qty": 0.0,
+        "Ordered_Pool_Before": 15.0,
+        "Ordered_Pool_After": 11.0,
+        "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
         "Equipment_Tag_No": "TK-C",
@@ -224,12 +224,12 @@
         "Pool_Before": -5.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 0.0,
-        "Alloc_Ordered": 0.0,
-        "Allocated_Qty": -5.0,
-        "Shortfall_Qty": 7.0,
-        "Ordered_Pool_Before": 0.0,
-        "Ordered_Pool_After": 0.0,
-        "Fulfillment_With_Ordered_Pct": 0.0
+        "Alloc_Ordered": 7.0,
+        "Allocated_Qty": 2.0,
+        "Shortfall_Qty": 0.0,
+        "Ordered_Pool_Before": 10.0,
+        "Ordered_Pool_After": 3.0,
+        "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
         "Equipment_Tag_No": "TK-D",
@@ -251,8 +251,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 60.0,
-        "Ordered_Pool_After": 60.0,
+        "Ordered_Pool_Before": 100.0,
+        "Ordered_Pool_After": 100.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -275,8 +275,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 0.0,
-        "Ordered_Pool_After": 0.0,
+        "Ordered_Pool_Before": 11.0,
+        "Ordered_Pool_After": 11.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -388,10 +388,10 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
-        "Status": "✅ 100% Fully Ready to Build",
-        "Bottleneck_Material_Code": "—",
-        "Bottleneck_SAP_Code": "—",
-        "Bottleneck_Material_Name": "—",
+        "Status": "\u2705 100% Fully Ready to Build",
+        "Bottleneck_Material_Code": "\u2014",
+        "Bottleneck_SAP_Code": "\u2014",
+        "Bottleneck_Material_Name": "\u2014",
         "Bottleneck_Shortfall": 0.0
       },
       {
@@ -405,7 +405,7 @@
         "Total_Shortfall_Qty": 25.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 16.67,
-        "Status": "🟡 Partially Ready (16.7%)",
+        "Status": "\ud83d\udfe1 Partially Ready (16.7%)",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
         "Bottleneck_Material_Name": "Hardener",
@@ -416,13 +416,13 @@
         "Equipment_Tag_No": "TK-C",
         "Name": "Tank C",
         "Total_Demand_Qty": 11.0,
-        "Total_Allocated_Qty": -5.0,
+        "Total_Allocated_Qty": 6.0,
         "Total_Alloc_Available": -5.0,
-        "Total_Alloc_Ordered": 0.0,
+        "Total_Alloc_Ordered": 11.0,
         "Total_Shortfall_Qty": 16.0,
-        "Total_Net_Shortfall_Qty": 16.0,
+        "Total_Net_Shortfall_Qty": 5.0,
         "Completion_Pct": 0.0,
-        "Status": "🔴 Blocked by Shortages",
+        "Status": "\ud83d\udd34 Blocked by Shortages",
         "Bottleneck_Material_Code": "M5",
         "Bottleneck_SAP_Code": "S5",
         "Bottleneck_Material_Name": "Rubber Sheet",
@@ -439,10 +439,10 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
-        "Status": "✅ 100% Fully Ready to Build",
-        "Bottleneck_Material_Code": "—",
-        "Bottleneck_SAP_Code": "—",
-        "Bottleneck_Material_Name": "—",
+        "Status": "\u2705 100% Fully Ready to Build",
+        "Bottleneck_Material_Code": "\u2014",
+        "Bottleneck_SAP_Code": "\u2014",
+        "Bottleneck_Material_Name": "\u2014",
         "Bottleneck_Shortfall": 0.0
       },
       {
@@ -456,7 +456,7 @@
         "Total_Shortfall_Qty": 100.0,
         "Total_Net_Shortfall_Qty": 70.0,
         "Completion_Pct": 20.0,
-        "Status": "🟡 Partially Ready (20.0%)",
+        "Status": "\ud83d\udfe1 Partially Ready (20.0%)",
         "Bottleneck_Material_Code": "M7",
         "Bottleneck_SAP_Code": "77-2",
         "Bottleneck_Material_Name": "PU MF 300 (3MM) C",
@@ -482,11 +482,11 @@
         "Material_Name": "Hardener",
         "UOM": "KG",
         "Demand_Qty": 49.0,
-        "Allocated_Qty": 45.0,
+        "Allocated_Qty": 49.0,
         "Alloc_Available": 20.0,
-        "Alloc_Ordered": 25.0,
+        "Alloc_Ordered": 29.0,
         "Shortfall_Available_Qty": 29.0,
-        "Shortfall_Qty": 4.0
+        "Shortfall_Qty": 0.0
       },
       {
         "Material_Code": "M3",
@@ -518,11 +518,11 @@
         "Material_Name": "Additive",
         "UOM": "KG",
         "Demand_Qty": 2.0,
-        "Allocated_Qty": -5.0,
+        "Allocated_Qty": 2.0,
         "Alloc_Available": -5.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Ordered": 7.0,
         "Shortfall_Available_Qty": 7.0,
-        "Shortfall_Qty": 7.0
+        "Shortfall_Qty": 0.0
       },
       {
         "Material_Code": "M7",
@@ -605,16 +605,6 @@
         "Shortage_Qty_To_Buy": 10.0
       },
       {
-        "Material_Code": "M6",
-        "SAP_Code": "S6",
-        "Material_Name": "Additive",
-        "UOM": "KG",
-        "Available_Qty": -5.0,
-        "Ordered_Qty": 0.0,
-        "Gross_Shortfall_Qty": 7.0,
-        "Shortage_Qty_To_Buy": 7.0
-      },
-      {
         "Material_Code": "M5",
         "SAP_Code": "S5",
         "Material_Name": "Rubber Sheet",
@@ -623,16 +613,6 @@
         "Ordered_Qty": 0.0,
         "Gross_Shortfall_Qty": 5.0,
         "Shortage_Qty_To_Buy": 5.0
-      },
-      {
-        "Material_Code": "M2",
-        "SAP_Code": "S2",
-        "Material_Name": "Hardener",
-        "UOM": "KG",
-        "Available_Qty": 20.0,
-        "Ordered_Qty": 25.0,
-        "Gross_Shortfall_Qty": 29.0,
-        "Shortage_Qty_To_Buy": 4.0
       }
     ],
     "sqm_units": [
@@ -701,7 +681,7 @@
         "Done_SQM": 0.0,
         "Remaining_SQM": 8.0,
         "SQM_Achievable_Now": 0.0,
-        "SQM_Achievable_With_Ordered": 0.0,
+        "SQM_Achievable_With_Ordered": 8.0,
         "SQM_Deficit": 8.0,
         "Coverage_Now_Pct": 0.0,
         "Has_Recipe": true
@@ -886,22 +866,11 @@
         "Done_SQM": 0.0,
         "Remaining_SQM": 8.0,
         "SQM_Achievable_Now": 0.0,
-        "SQM_Achievable_With_Ordered": 0.0,
+        "SQM_Achievable_With_Ordered": 8.0,
         "SQM_Deficit": 8.0,
         "Equipment_Tags": "TK-C",
         "Coverage_Now_Pct": 0.0,
         "Blocking_Materials": [
-          {
-            "Material_Code": "M6",
-            "SAP_Code": "S6",
-            "Material_Name": "Additive",
-            "UOM": "KG",
-            "Demand_Qty": 2.0,
-            "Alloc_Available": -5.0,
-            "Alloc_Ordered": 0.0,
-            "Shortfall_Available_Qty": 7.0,
-            "Shortfall_Qty": 7.0
-          },
           {
             "Material_Code": "M2",
             "SAP_Code": "S2",
@@ -909,9 +878,20 @@
             "UOM": "KG",
             "Demand_Qty": 4.0,
             "Alloc_Available": 0.0,
-            "Alloc_Ordered": 0.0,
+            "Alloc_Ordered": 4.0,
             "Shortfall_Available_Qty": 4.0,
-            "Shortfall_Qty": 4.0
+            "Shortfall_Qty": 0.0
+          },
+          {
+            "Material_Code": "M6",
+            "SAP_Code": "S6",
+            "Material_Name": "Additive",
+            "UOM": "KG",
+            "Demand_Qty": 2.0,
+            "Alloc_Available": -5.0,
+            "Alloc_Ordered": 7.0,
+            "Shortfall_Available_Qty": 7.0,
+            "Shortfall_Qty": 0.0
           }
         ]
       }
@@ -921,7 +901,7 @@
         "Pause_Tag": "TK-B",
         "Pause_Name": "Tank B",
         "Newly_Completable_Count": 0,
-        "Newly_Completable_Tags": "—",
+        "Newly_Completable_Tags": "\u2014",
         "Avg_Completion_Gain_Pct": 0.0,
         "Net_Gain_Score": -1,
         "Recommended": true
@@ -930,7 +910,7 @@
         "Pause_Tag": "TK-C",
         "Pause_Name": "Tank C",
         "Newly_Completable_Count": 0,
-        "Newly_Completable_Tags": "—",
+        "Newly_Completable_Tags": "\u2014",
         "Avg_Completion_Gain_Pct": 0.0,
         "Net_Gain_Score": -1,
         "Recommended": false
@@ -939,7 +919,7 @@
         "Pause_Tag": "TK-E",
         "Pause_Name": "Tank E",
         "Newly_Completable_Count": 0,
-        "Newly_Completable_Tags": "—",
+        "Newly_Completable_Tags": "\u2014",
         "Avg_Completion_Gain_Pct": 0.0,
         "Net_Gain_Score": -1,
         "Recommended": false
@@ -957,10 +937,10 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
-        "Status": "✅ 100% Fully Ready to Build",
-        "Bottleneck_Material_Code": "—",
-        "Bottleneck_SAP_Code": "—",
-        "Bottleneck_Material_Name": "—",
+        "Status": "\u2705 100% Fully Ready to Build",
+        "Bottleneck_Material_Code": "\u2014",
+        "Bottleneck_SAP_Code": "\u2014",
+        "Bottleneck_Material_Name": "\u2014",
         "Bottleneck_Shortfall": 0.0,
         "Scenario": "If 'TK-B' is paused"
       },
@@ -969,13 +949,13 @@
         "Equipment_Tag_No": "TK-C",
         "Name": "Tank C",
         "Total_Demand_Qty": 11.0,
-        "Total_Allocated_Qty": -1.0,
+        "Total_Allocated_Qty": 6.0,
         "Total_Alloc_Available": -1.0,
-        "Total_Alloc_Ordered": 0.0,
+        "Total_Alloc_Ordered": 7.0,
         "Total_Shortfall_Qty": 12.0,
-        "Total_Net_Shortfall_Qty": 12.0,
+        "Total_Net_Shortfall_Qty": 5.0,
         "Completion_Pct": 0.0,
-        "Status": "🔴 Blocked by Shortages",
+        "Status": "\ud83d\udd34 Blocked by Shortages",
         "Bottleneck_Material_Code": "M5",
         "Bottleneck_SAP_Code": "S5",
         "Bottleneck_Material_Name": "Rubber Sheet",
@@ -993,10 +973,10 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
-        "Status": "✅ 100% Fully Ready to Build",
-        "Bottleneck_Material_Code": "—",
-        "Bottleneck_SAP_Code": "—",
-        "Bottleneck_Material_Name": "—",
+        "Status": "\u2705 100% Fully Ready to Build",
+        "Bottleneck_Material_Code": "\u2014",
+        "Bottleneck_SAP_Code": "\u2014",
+        "Bottleneck_Material_Name": "\u2014",
         "Bottleneck_Shortfall": 0.0,
         "Scenario": "If 'TK-B' is paused"
       },
@@ -1011,7 +991,7 @@
         "Total_Shortfall_Qty": 100.0,
         "Total_Net_Shortfall_Qty": 70.0,
         "Completion_Pct": 20.0,
-        "Status": "🟡 Partially Ready (20.0%)",
+        "Status": "\ud83d\udfe1 Partially Ready (20.0%)",
         "Bottleneck_Material_Code": "M7",
         "Bottleneck_SAP_Code": "77-2",
         "Bottleneck_Material_Name": "PU MF 300 (3MM) C",
@@ -1046,8 +1026,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 60.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 60.0,
-        "Ordered_Pool_After": 60.0,
+        "Ordered_Pool_Before": 100.0,
+        "Ordered_Pool_After": 100.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1070,8 +1050,8 @@
         "Alloc_Ordered": 10.0,
         "Allocated_Qty": 30.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 25.0,
-        "Ordered_Pool_After": 15.0,
+        "Ordered_Pool_Before": 40.0,
+        "Ordered_Pool_After": 30.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1094,8 +1074,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 30.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 60.0,
-        "Ordered_Pool_After": 60.0,
+        "Ordered_Pool_Before": 100.0,
+        "Ordered_Pool_After": 100.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1118,8 +1098,8 @@
         "Alloc_Ordered": 15.0,
         "Allocated_Qty": 15.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 15.0,
-        "Ordered_Pool_After": 0.0,
+        "Ordered_Pool_Before": 30.0,
+        "Ordered_Pool_After": 15.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1142,8 +1122,8 @@
         "Alloc_Ordered": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 60.0,
-        "Ordered_Pool_After": 60.0,
+        "Ordered_Pool_Before": 100.0,
+        "Ordered_Pool_After": 100.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1183,7 +1163,7 @@
         "Total_Shortfall_Qty": 10.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 66.67,
-        "Status": "🟡 Partially Ready (66.7%)",
+        "Status": "\ud83d\udfe1 Partially Ready (66.7%)",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
         "Bottleneck_Material_Name": "Hardener",
@@ -1200,7 +1180,7 @@
         "Total_Shortfall_Qty": 15.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 0.0,
-        "Status": "🔴 Blocked by Shortages",
+        "Status": "\ud83d\udd34 Blocked by Shortages",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
         "Bottleneck_Material_Name": "Hardener",
@@ -1346,7 +1326,7 @@
         "Pause_Tag": "TK-A",
         "Pause_Name": "Tank A",
         "Newly_Completable_Count": 0,
-        "Newly_Completable_Tags": "—",
+        "Newly_Completable_Tags": "\u2014",
         "Avg_Completion_Gain_Pct": 0.0,
         "Net_Gain_Score": -1,
         "Recommended": false
@@ -1364,10 +1344,10 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
-        "Status": "✅ 100% Fully Ready to Build",
-        "Bottleneck_Material_Code": "—",
-        "Bottleneck_SAP_Code": "—",
-        "Bottleneck_Material_Name": "—",
+        "Status": "\u2705 100% Fully Ready to Build",
+        "Bottleneck_Material_Code": "\u2014",
+        "Bottleneck_SAP_Code": "\u2014",
+        "Bottleneck_Material_Name": "\u2014",
         "Bottleneck_Shortfall": 0.0,
         "Scenario": "If 'TK-B' is paused"
       }

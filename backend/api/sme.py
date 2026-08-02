@@ -5,10 +5,25 @@ This module only READS the sme_* tables — it never writes them. Master Data
 writes live in backend/api/sme_master.py (Phase S6, unlocked at cutover);
 everything here stays a pure read so the analytics/engine surface is
 side-effect-free.
-`SQL_SME_MATERIALS` is a Postgres-native port of the SQLite `sme_materials_view`
-(derived Available_Qty = seed + received − consumed, joined via
-SAP_Code → inventory.Material_Code); parity vs the SQLite view is asserted by
-backend/api/parity_check.py.
+
+STRICT DECOUPLING (locked 2026-08-02)
+-------------------------------------
+The SME estimator is a SEPARATE POOL from the ERP warehouse. Its quantities come
+from `sme_inventory_seed` (the Excel workbook) and nothing else. The ERP ledger —
+`receipts`, `consumption`, `returns` — and the ERP `inventory` master are NEVER
+read from this module. Both places they used to leak in are gone:
+
+  * `SQL_SME_MATERIALS` derived `available_qty = seed + Σreceipts − Σconsumption`
+    via a SAP join into `inventory`. It is now `available_qty = seed` verbatim.
+  * `_CALC_POOL_SQL` (Smart Calculator) built its whole stock pool out of the ERP
+    ledger. It now pools `sme_inventory_seed.Initial_Available_Qty`.
+
+Consequence, and it is deliberate: the ordered pool is no longer netted against
+receipts (the 2026-07-28 ruling Q2a). That netting existed ONLY because arriving
+goods inflated `available_qty` through the ledger, so counting the order too
+double-counted them. With the ledger disconnected nothing inflates availability,
+so netting would now UNDER-count the order by every unit ever received. See
+`sme_engine.build_model`.
 
 Ordering always uses an explicit key (never rowid) per SME Canon Rule 1.
 Restricted to hod/admin (level ≥ 2), matching the old PAGE_ACCESS.
@@ -34,25 +49,20 @@ sme_equipment_t = _MD.tables["sme_equipment"]
 sme_recipe_t = _MD.tables["sme_recipe"]
 sme_sqm_t = _MD.tables["sme_sqm_progress"]
 
-# Postgres-native port of the SQLite sme_materials_view, at PER-COMPONENT grain.
+# The SME stock master, at PER-COMPONENT grain — seed table ONLY.
 #
-# 2026-07-30 COMPONENT IDENTITY ruling: one row per (Material_Code, SAP_Code).
-# The frozen SQLite view emits one row per Material_Code and reaches the ledger
-# through inventory.Material_Code, which sums EVERY variant SAP of a multi-part
-# system into a single figure — the clumping this ruling removes. Here each
-# component reads only its OWN SAP's ledger. SAP strings are whitespace-stripped
-# on both sides because the ERP writes "1043 - 2" for the recipe's "1043-2".
-_LEDGER = '''COALESCE((SELECT SUM({t}."Quantity") FROM {tbl} {t}
-                 WHERE REPLACE(TRIM({t}."SAP_Code"), ' ', '')
-                       = REPLACE(TRIM(COALESCE(s."SAP_Code", '')), ' ', '')
-                   AND TRIM(COALESCE(s."SAP_Code", '')) <> ''
-                   AND EXISTS (SELECT 1 FROM inventory i
-                               WHERE REPLACE(TRIM(i."SAP_Code"), ' ', '')
-                                     = REPLACE(TRIM({t}."SAP_Code"), ' ', ''))), 0)'''
-_RECV = _LEDGER.format(t="r", tbl="receipts")
-_CONS = _LEDGER.format(t="c", tbl="consumption")
-
-SQL_SME_MATERIALS = f'''
+# 2026-08-02 STRICT DECOUPLING: `available_qty` is the workbook's
+# `Initial_Available_Qty`, full stop. There is no ledger sub-select here any
+# more, and there must never be one again: an ERP receipt, issue or return is a
+# warehouse event and has no bearing on what the estimator believes it holds.
+# The two `received_qty` / `consumed_qty` columns went with it — they were pure
+# ERP readings, and leaving them in the payload would invite exactly the
+# recoupling this rule forbids.
+#
+# 2026-07-30 COMPONENT IDENTITY ruling still holds: one row per
+# (Material_Code, SAP_Code), because one Material_Code can be four physical
+# drums separated only by the variant SAP.
+SQL_SME_MATERIALS = '''
 SELECT s."Material_Code" AS material_code, s."SAP_Code" AS sap_code,
        s."Material_Name" AS material_name,
        s."Item" AS item, s."Vendor" AS vendor,
@@ -60,9 +70,7 @@ SELECT s."Material_Code" AS material_code, s."SAP_Code" AS sap_code,
        s."Nature" AS nature, s."UOM" AS uom,
        s."Initial_Available_Qty" AS initial_available_qty,
        s."Initial_Ordered_Qty" AS initial_ordered_qty,
-       {_RECV} AS received_qty,
-       {_CONS} AS consumed_qty,
-       (s."Initial_Available_Qty" + {_RECV} - {_CONS}) AS available_qty,
+       s."Initial_Available_Qty" AS available_qty,
        s."Initial_Ordered_Qty" AS ordered_qty
 FROM sme_inventory_seed s
 '''
@@ -74,11 +82,16 @@ FROM sme_inventory_seed s
 # back up to Material_Code, every quantity has to match the legacy view exactly.
 # That catches any double-count or dropped SAP the split could introduce, which
 # is the failure mode worth gating on. Both sides are rolled up explicitly.
+#
+# 2026-08-02: the two ledger-derived columns are gone from the comparison. The
+# legacy SQLite view still ADDS the ledger into its `available_qty`, so this gate
+# now also asserts that the frozen dataset carries no ERP movement against an SME
+# material — true on a fresh cutover, which is the only state parity_check is
+# meaningful in anyway (PROJECT_HANDOVER caveat 3). Suite BA pins the decoupling
+# directly, on live-shaped data, and does not depend on that.
 _ROLLUP_COLS = '''SELECT material_code,
        SUM(initial_available_qty) AS initial_available_qty,
        SUM(initial_ordered_qty)   AS initial_ordered_qty,
-       SUM(received_qty)          AS received_qty,
-       SUM(consumed_qty)          AS consumed_qty,
        SUM(available_qty)         AS available_qty,
        SUM(ordered_qty)           AS ordered_qty'''
 
@@ -443,12 +456,14 @@ async def _snapshot_rows(session: AsyncSession, site_id: str | None) -> dict:
                r.c["Material_Code"], r.c["SAP_Code"], r.c["Material_Name"],
                r.c["UOM"], r.c["For_1_SQM"]).order_by(r.c["id"])))
 
-    # received_qty rides along for the engine's EFFECTIVE-ORDERED netting
-    # (ruling Q2a): Initial_Ordered_Qty is never decremented on delivery, so
-    # the engine subtracts receipts to avoid counting arrived stock twice.
+    # 2026-08-02 STRICT DECOUPLING: the snapshot carries NO ERP-derived field.
+    # `received_qty` used to ride along for the engine's effective-ordered
+    # netting (ruling Q2a); with the ledger disconnected there is nothing to net
+    # against, and shipping the field would re-open the coupling from the client
+    # side. Both engines now take `ordered_qty` at face value.
     materials = [{k: m[k] for k in ("material_code", "sap_code", "material_name",
                                     "nature", "uom", "available_qty",
-                                    "ordered_qty", "received_qty")}
+                                    "ordered_qty")}
                  for m in _rows(await session.execute(
                      text(SQL_SME_MATERIALS
                           + ' ORDER BY s."Material_Code", s."SAP_Code"')))]
@@ -1226,14 +1241,21 @@ async def sme_export_rows(body: RowsExportBody,
 # ─── Smart Calculator (2026-07-18 · multi-system + material-pooled stock) ────
 # "System codes + target SQM(s) → segregated material list with explanations."
 # Pure recipe math (demand = For_1_SQM × SQM — the CNCEC prediction project's
-# model) enriched with live ERP stock. Availability is pooled per
-# Material_Code: one material code can carry several variant SAP codes (the
-# Excel-injection identity rule), so the ledger is summed over EVERY variant
-# SAP sharing the line's Material_Code — SAP strings are whitespace-normalized
-# on both sides because the ERP carries entries like "1043 - 2". The SAP code
-# stays in the payload as an internal id; the UI displays the Material Code.
+# model) enriched with SME stock. Availability is pooled per Material_Code: one
+# material code can carry several variant SAP codes (the Excel-injection
+# identity rule), so stock is summed over EVERY variant SAP sharing the line's
+# Material_Code — SAP strings are whitespace-normalized on both sides because
+# the workbook carries entries like "1043 - 2". The SAP code stays in the
+# payload as an internal id; the UI displays the Material Code.
 # NOTE: component lines sharing one Material_Code (PU Comp-A/B/C/D) keep their
 # own demand rows but read the SAME pooled stock figure.
+#
+# 2026-08-02 STRICT DECOUPLING: this pool was built from the ERP ledger
+# (Σreceipts − Σconsumption − Σreturns, gated on a SAP existing in the ERP
+# `inventory` master). It is now `sme_inventory_seed.Initial_Available_Qty`.
+# `stock` stays NULL — meaning "unknown", which the UI renders as no stock
+# column rather than a confident zero — when the recipe's SAPs have no seed row
+# at all; `known_saps` counts the SAPs the SME master actually knows.
 
 _CALC_POOL_SQL = text('''
     WITH mats AS (
@@ -1242,28 +1264,19 @@ _CALC_POOL_SQL = text('''
         FROM sme_recipe
         WHERE TRIM("Material_Code") = ANY(:mats) AND "SAP_Code" IS NOT NULL
     ),
-    inv AS (
-        SELECT DISTINCT REPLACE(TRIM("SAP_Code"), ' ', '') AS sap FROM inventory
-    ),
-    led AS (
-        SELECT sap, SUM(q) AS stock FROM (
-            SELECT REPLACE(TRIM("SAP_Code"), ' ', '') AS sap,
-                   COALESCE("Quantity", 0) AS q FROM receipts
-            UNION ALL
-            SELECT REPLACE(TRIM("SAP_Code"), ' ', ''), -COALESCE("Quantity", 0)
-            FROM consumption
-            UNION ALL
-            SELECT REPLACE(TRIM("SAP_Code"), ' ', ''), -COALESCE("Quantity", 0)
-            FROM returns
-        ) t GROUP BY sap
+    seed AS (
+        SELECT REPLACE(TRIM("SAP_Code"), ' ', '') AS sap,
+               SUM(COALESCE("Initial_Available_Qty", 0)) AS stock
+        FROM sme_inventory_seed
+        WHERE TRIM(COALESCE("SAP_Code", '')) <> ''
+        GROUP BY REPLACE(TRIM("SAP_Code"), ' ', '')
     )
     SELECT m.mat,
-           SUM(CASE WHEN i.sap IS NOT NULL THEN COALESCE(l.stock, 0) END) AS stock,
-           COUNT(i.sap) AS known_saps,
+           SUM(CASE WHEN s.sap IS NOT NULL THEN s.stock END) AS stock,
+           COUNT(s.sap) AS known_saps,
            COUNT(*)     AS pool_saps
     FROM mats m
-    LEFT JOIN inv i ON i.sap = m.sap
-    LEFT JOIN led l ON l.sap = m.sap
+    LEFT JOIN seed s ON s.sap = m.sap
     GROUP BY m.mat''')
 
 

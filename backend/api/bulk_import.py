@@ -699,11 +699,29 @@ async def plan_sme_materials(session: AsyncSession, data: bytes) -> dict:
           "Material_Name": _col(headers, "Material_Name"),
           "Nature": _col(headers, "Nature"), "UOM": _col(headers, "UOM"),
           "sap": _col(headers, "SAP_Code", "SAP CODE"),
-          "avail": _col(headers, "Available_Qty"),
-          "ordered": _col(headers, "Ordered_Qty")}
+          # `_col` matches header names EXACTLY (case-insensitively), so every
+          # spelling the workbook actually ships has to be listed. The live
+          # Materials_DetailsAvailable_Qty.xlsx writes "Available Qty" with a
+          # SPACE while the ordered column keeps its underscore; with only the
+          # underscored alias here the availability column resolved to None and
+          # every material silently re-baselined to 0 — 29 of them, on real
+          # data, caught by a dry-run. Missing columns are now handled below
+          # rather than defaulting to zero, but the aliases come first.
+          "avail": _col(headers, "Available_Qty", "Available Qty",
+                        "Available Quantity", "Available"),
+          "ordered": _col(headers, "Ordered_Qty", "Ordered Qty",
+                          "Ordered Quantity", "Ordered")}
     mat_i = _col(headers, "Material_Code")
     if mat_i is None:
         raise HTTPException(422, "Material_Code column missing")
+    # A quantity column the workbook does not carry must LEAVE THE STORED VALUE
+    # ALONE, never overwrite it with the 0.0 that summing no cells produces.
+    # Omitting the field entirely is what makes that true on both write paths:
+    # the upsert's COALESCE(excluded, table) keeps the stored value, and the
+    # diff below can never propose a change for a field that is not there.
+    qty_fields = [(k, f"Initial_{'Available' if k == 'avail' else 'Ordered'}_Qty")
+                  for k in ("avail", "ordered") if ix[k] is not None]
+    missing_qty = [k for k in ("avail", "ordered") if ix[k] is None]
     # 2026-07-30 COMPONENT IDENTITY: aggregate per (Material_Code, SAP_Code).
     # This used to key on Material_Code alone, which SUMMED the four Comp-A/B/C/D
     # rows of a PU system into one stock figure and joined their SAPs into a
@@ -721,10 +739,9 @@ async def plan_sme_materials(session: AsyncSession, data: bytes) -> dict:
             return row[i] if i is not None and i < len(row) else None
         # The ERP writes the same variant as "1043-2" and "1043 - 2".
         sap = "".join((_s(cell("sap")) or "").split())
-        a = agg.setdefault((mat, sap), {"Initial_Available_Qty": 0.0,
-                                        "Initial_Ordered_Qty": 0.0})
-        a["Initial_Available_Qty"] += _f(cell("avail")) or 0.0
-        a["Initial_Ordered_Qty"] += _f(cell("ordered")) or 0.0
+        a = agg.setdefault((mat, sap), {col: 0.0 for _, col in qty_fields})
+        for key, col in qty_fields:
+            a[col] += _f(cell(key)) or 0.0
         dd = cell("Document_Date")
         dd = (_iso(dd) or "")[:10] or None
         if dd and dd > (a.get("Document_Date") or ""):
@@ -738,8 +755,8 @@ async def plan_sme_materials(session: AsyncSession, data: bytes) -> dict:
                 for r in (await session.execute(select(seed_t))).mappings().all()}
     inserts, updates, unchanged = [], [], 0
     for (mat, sap), a in agg.items():
-        a["Initial_Available_Qty"] = round(a["Initial_Available_Qty"], 4)
-        a["Initial_Ordered_Qty"] = round(a["Initial_Ordered_Qty"], 4)
+        for _, col in qty_fields:
+            a[col] = round(a[col], 4)
         cur = existing.get((mat, sap))
         if cur is None:
             inserts.append({"Material_Code": mat, "SAP_Code": sap, **a})
@@ -779,6 +796,15 @@ async def plan_sme_materials(session: AsyncSession, data: bytes) -> dict:
                    if mat in coded and not sap and (mat, sap) not in agg
                    and mat in sapless_recipe_mats})
     warnings = []
+    if missing_qty:
+        warnings.append(
+            "no "
+            + " or ".join("Available_Qty" if k == "avail" else "Ordered_Qty"
+                          for k in missing_qty)
+            + f" column in this workbook (headers: {', '.join(headers)}) — "
+            f"those quantities are LEFT AS THEY ARE in the database rather "
+            f"than re-baselined to 0. Rename the column if that is not what "
+            f"you meant.")
     if stale:
         warnings.append(
             f"{len(stale)} SAP-less placeholder row(s) superseded by the "

@@ -1,6 +1,6 @@
 # PROJECT HANDOVER — read this first
 
-> **Updated 2026-07-30.** This is the fresh-session entry point: what is locked,
+> **Updated 2026-08-02.** This is the fresh-session entry point: what is locked,
 > where we are, and what happens next. Read this file, then
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the system brain), then
 > [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state + gotchas) and
@@ -46,19 +46,47 @@ rows in `For_1_SQM.xlsx` carry the same name *and* the same UOM; the names disag
 between the two workbooks; the UOM disagrees on 25 of 32 pairs. `SAP_Code` is the
 only real discriminator.
 
-### 2. "On Order" uses exact double-count netting
+### 1a. The SME estimator is STRICTLY DECOUPLED from the ERP ledger
 
-*Locked 2026-07-28 (ruling Q2a).*
+*Locked 2026-08-02. Supersedes the 2026-07-28 effective-ordered netting (ruling Q2a).*
 
-```
-effective_ordered = max(Initial_Ordered_Qty − Σreceipts, 0)
-```
+The estimator and the warehouse are **two separate pools of data, calculated
+completely separately**. An ERP receipt, issue or return is a warehouse event and
+must not move a single SME number.
 
-`Initial_Ordered_Qty` is a static workbook snapshot that is **never decremented on
-delivery** — arrivals land as receipts, which already inflate `available_qty`.
-Adding both buckets verbatim double-counts every delivered unit (10 live materials
-at ruling time; `GI-8005762` alone had 10,920 of 47,320 already received). The clamp
-at zero handles over-delivery.
+* Every SME quantity comes from **`sme_inventory_seed`** — the data ingested from
+  `Materials_DetailsAvailable_Qty.xlsx` — and from nowhere else.
+* `available_qty` **is** `Initial_Available_Qty`; `ordered_qty` **is**
+  `Initial_Ordered_Qty`. No derivation, no join.
+* `receipts` / `consumption` / `returns` / `inventory` are **never named** by
+  `SQL_SME_MATERIALS` or by `_CALC_POOL_SQL` (Smart Calculator). Suite BA greps for
+  them, and — more to the point — posts real movement against an SME material's own
+  SAP and requires **every SME read to come back byte-identical**.
+* The snapshot the browser engine consumes carries **no `received_qty` /
+  `consumed_qty`** field at all.
+
+**What this overturns.** The two places the ledger used to leak in were
+`SQL_SME_MATERIALS` (`available = seed + Σreceipts − Σconsumption`, joined through
+the ERP `inventory` master) and the Smart Calculator, whose entire stock pool was
+`Σreceipts − Σconsumption − Σreturns`.
+
+**And why the netting had to go with it.** `effective_ordered =
+max(Initial_Ordered_Qty − Σreceipts, 0)` existed *only* because arriving goods
+inflated `available_qty` through the ledger, so counting the order as well
+double-counted them. With nothing inflating availability, subtracting receipts
+would strip units from the order that were never added — `GI-8005762` would lose
+the 10,920 it had received against an order of 95,200. Both engines now take
+`ordered_qty` at face value, clamped at zero. The parity fixture deliberately still
+carries `received_qty` values (M1 = 40, M2 = 15, M6 = 25) as **poison pills**: the
+golden proves both engines *ignore* the field rather than merely proving it is
+absent from the payload.
+
+Decoupled is not frozen — editing `sme_inventory_seed` (what the Excel sync writes)
+still moves every SME number at once. Suite BA pins that too.
+
+### 2. Two-tier allocation field contract
+
+*Locked 2026-07-28 (rulings Q1/Q6). The Q2a netting half is superseded — see 1a.*
 
 Companion field contract, conserved on every line:
 
@@ -74,6 +102,26 @@ today.
 
 ### 3. `tools/pg_excel_sync.py` — native upserts, no Pandas
 
+* **SME by default; the ERP half is opt-in** *(2026-08-02, with rule 1a)*. The
+  everyday command syncs `sme_recipe` / `sme_equipment` / `sme_inventory_seed` only:
+
+  ```bash
+  DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
+  .venv/bin/python tools/pg_excel_sync.py --site CNCEC [--commit]
+  ```
+
+  It prints `scope : SME tables only — the ERP warehouse is untouched`, and never
+  opens `CNCEC_Inventory.xlsx`. Writing the live warehouse master or appending to
+  its ledger requires `--erp` (or naming `inventory` / `ledger` in `--kinds`),
+  which prints `⚠️ ERP + SME — this run WRITES the live warehouse`.
+* **Header names must be listed exactly.** `bulk_import._col` matches
+  case-insensitively but does **not** normalise spaces vs underscores. The live
+  `Materials_DetailsAvailable_Qty.xlsx` ships **`Available Qty`** (space) beside
+  `Ordered_Qty` (underscore); with only the underscored alias the column resolved
+  to `None` and all 30 materials re-baselined to the `0.0` that summing no cells
+  produces. A quantity column the workbook omits is now **left alone** (the field
+  is dropped from the plan, so `COALESCE` keeps the stored value) and reported as
+  a warning, instead of silently zeroing.
 * Every master-data write is `INSERT … ON CONFLICT (<natural key>) DO UPDATE` with
   `COALESCE(excluded.col, table.col)`, so a blank workbook cell never erases data.
 * **Pandas is deliberately not used.** It is not in `backend/requirements.txt` (it
@@ -150,7 +198,7 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
 * **`gi_database.db` is untouchable** — never staged, never written by new-stack
   tooling. Verify its sha256 is unchanged after any data work.
 * `sme_inventory_seed` never mingles with the ERP `inventory` table (SME Canon
-  Rule 2).
+  Rule 2) — since 2026-08-02 this is the *narrow* case of rule 1a.
 
 ---
 
@@ -190,9 +238,9 @@ All green locally at commit `fae0b3f` (main), verified 2026-07-30.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **963 / 0** (suites A…AZ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **49 / 49** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
-| SME TS↔PY parity | **1,276 comparisons** | `npm run parity:sme --prefix frontend` |
+| Backend service tests | **978 / 0** (suites A…BA) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **49 / 49** (~22 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| SME TS↔PY parity | **1,258 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
@@ -210,6 +258,7 @@ recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/RE
 
 | PR | Commit | What |
 |---|---|---|
+| — | `feat/sme-strict-decoupling` | **SME ⇄ ERP strict decoupling** (rule 1a) — ledger stripped from `SQL_SME_MATERIALS` + Smart Calculator, effective-ordered netting removed from both engines, golden regenerated, suite **BA** (11 checks), `pg_excel_sync` defaults to SME-only, `Available Qty` header alias |
 | #15 | `7868e8d` | **Project-wide table sorting + filtering** — `smartTable.tsx`, 99 tables / 45 files, +3 E2E specs |
 | #16 | `c62c415` | **SME component pooling fix** — `(Material_Code, SAP_Code)` everywhere, suite AZ (20 checks), alembic `a4e9b1c73f28` |
 
@@ -223,18 +272,26 @@ Immediately before those, on the same programme:
 * **`tools/pg_excel_sync.py`** (`docs/PG_EXCEL_SYNC_RUNLOG.md`) — the atomic,
   idempotent, Postgres-native Excel sync.
 
-### Live CNCEC numbers after the component split
+### Live CNCEC numbers — decoupled, after the 2026-08-02 workbook re-sync
 
-| | Value |
-|---|---|
-| Component stock pools | **32** (was 20 pooled materials) |
-| Allocation lines | 352 |
-| Material rows in reports | **30** (was 20) |
-| Remaining SQM | 49,435 |
-| SQM achievable **now** | **2,778** (5.6%) |
-| SQM achievable **with on-order** | **24,743** (50.1%) |
-| Buy list | 160,093 units |
-| Multi-component materials | 4 (`GI-8005764/65/66/67`) |
+Both workbooks were re-synced on 2026-08-02 (`Equipment.xlsx` 58 rows changed,
+`Materials_DetailsAvailable_Qty.xlsx` 30 rows changed, 0 rejects, re-run is a
+no-op). These figures are now driven **only** by `sme_inventory_seed`.
+
+| | Value | Previously |
+|---|---|---|
+| Component stock pools | **32** | 32 |
+| Allocation lines | 352 | 352 |
+| Material rows in reports | **30** | 30 |
+| Remaining SQM | **42,403** | 49,435 |
+| SQM achievable **now** | **3,312** (7.8%) | 2,778 (5.6%) |
+| SQM achievable **with on-order** | **12,430** (29.3%) | 24,743 (50.1%) |
+| Seed totals | 358,684 available · 483,196 on order | — |
+| Multi-component materials | 4 (`GI-8005764/65/66/67`) | 4 |
+
+The "with on-order" figure fell because the workbook's own `Ordered_Qty` column is
+now the whole story — the old number was inflated by ERP receipts flowing into
+availability on top of a full order.
 
 ### Known caveats carried forward
 
@@ -249,7 +306,11 @@ Immediately before those, on the same programme:
    Wants its own decision.
 3. **`tools/parity_check.py` fails against the live mirror BY DESIGN** — Postgres
    is permanently ahead of the frozen SQLite since the Excel injection. It is
-   meaningful only on CI or a freshly-reloaded/cutover mirror.
+   meaningful only on CI or a freshly-reloaded/cutover mirror. Since rule 1a its
+   `sme_materials` rollup no longer compares `received_qty` / `consumed_qty`, and
+   its `available_qty` comparison additionally asserts that the frozen dataset
+   carries no ERP movement against an SME material (true on a fresh cutover). The
+   decoupling itself is pinned by **suite BA**, which does not depend on that.
 4. **`postgres-dual-ci.yml` has never passed on the GitHub runner** (always at the
    `legacy/bug_check.py` step) while the same tree passes 599/0 locally under every
    simulated CI condition. Cause is Linux-runner-specific and unresolved; failures
@@ -306,6 +367,7 @@ revert-verification and the caveats:
 
 | Log | Covers |
 |---|---|
+| [`docs/SME_STRICT_DECOUPLING_RUNLOG.md`](docs/SME_STRICT_DECOUPLING_RUNLOG.md) | Rule 1a: the two ledger leaks, suite BA, the CLI + header fixes, the re-sync |
 | [`docs/SME_COMPONENT_POOLING_RUNLOG.md`](docs/SME_COMPONENT_POOLING_RUNLOG.md) | The `(Material_Code, SAP_Code)` ruling, end to end |
 | [`docs/TABLE_TOOLS_RUNLOG.md`](docs/TABLE_TOOLS_RUNLOG.md) | `smartTable.tsx` and the four rules |
 | [`docs/SME_SQM_BOTTLENECK_RUNLOG.md`](docs/SME_SQM_BOTTLENECK_RUNLOG.md) | Available vs Ordered, reverse-SQM bottleneck |

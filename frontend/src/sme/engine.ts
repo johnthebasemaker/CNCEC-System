@@ -46,7 +46,9 @@ export interface SnapshotMaterial {
   uom?: string | null
   available_qty?: number | string | null
   ordered_qty?: number | string | null
-  received_qty?: number | string | null
+  // 2026-08-02 STRICT DECOUPLING: there is deliberately NO received_qty here.
+  // Both quantities above come from sme_inventory_seed (the Excel workbook);
+  // the ERP ledger never reaches this model. See buildModel().
 }
 export interface SnapshotProgress {
   Equipment_Tag_No: string
@@ -319,12 +321,14 @@ export function buildModel(
     // 2026-07-30 COMPONENT IDENTITY: one pool per (code, SAP), not per code.
     const mat = matKey(m.material_code, m.sap_code)
     poolInit.set(mat, num(m.available_qty))
-    // 2026-07-28 EFFECTIVE-ORDERED ruling (Q2a) — mirrors sme_engine.py.
-    // ordered_qty is a static workbook snapshot never decremented on delivery;
-    // arrivals land as receipts, which already inflate available_qty. Netting
-    // receipts off the order stops delivered stock being counted twice.
-    const effOrdered = num(m.ordered_qty) - num(m.received_qty)
-    poolOrderedInit.set(mat, effOrdered > 0 ? effOrdered : 0)
+    // 2026-08-02 STRICT DECOUPLING supersedes the 2026-07-28 effective-ordered
+    // netting (Q2a) — mirrors sme_engine.py. That netting subtracted receipts
+    // because they flowed into available_qty; the ERP ledger no longer reaches
+    // this model, so subtracting them would strip units from the order that
+    // were never added to availability. A `received_qty` on the input is
+    // IGNORED. Clamped at zero because a workbook cell can be negative.
+    const ordered = num(m.ordered_qty)
+    poolOrderedInit.set(mat, ordered > 0 ? ordered : 0)
     matMeta.set(mat, {
       Material_Code: s(m.material_code), SAP_Code: sapNorm(m.sap_code),
       Material_Name: s(m.material_name), UOM: s(m.uom),

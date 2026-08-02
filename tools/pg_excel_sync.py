@@ -2,17 +2,34 @@
 """
 tools/pg_excel_sync.py — one-command, idempotent Excel → PostgreSQL sync.
 
-Reads the four tracking workbooks that live in the repo root and syncs them
-into PostgreSQL in a single ATOMIC transaction. Dry-run by default:
+Reads the tracking workbooks that live in the repo root and syncs them into
+PostgreSQL in a single ATOMIC transaction. Dry-run by default:
 
     DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
     .venv/bin/python tools/pg_excel_sync.py --site CNCEC            # dry-run
     …                                       --site CNCEC --commit   # writes
 
-    CNCEC_Inventory.xlsx              → inventory master + receipts/consumption/returns
-    Equipment.xlsx                    → sme_equipment (+ sme_sqm_progress baseline)
-    For_1_SQM.xlsx                    → sme_recipe
+SME BY DEFAULT — THE ERP LEDGER IS OPT-IN (2026-08-02 STRICT DECOUPLING)
+------------------------------------------------------------------------
+The SME estimator is a separate pool from the ERP warehouse; a routine
+"re-sync my updated spreadsheets" must not be able to rewrite the live
+warehouse master or append to its ledger by accident. So the command above
+touches the SME tables ONLY:
+
+    Equipment.xlsx                      → sme_equipment (+ sme_sqm_progress)
+    For_1_SQM.xlsx                      → sme_recipe
     Materials_DetailsAvailable_Qty.xlsx → sme_inventory_seed
+
+The ERP half is still here and still works, but you have to ask for it:
+
+    …/pg_excel_sync.py --site CNCEC --erp             # SME + ERP
+    …/pg_excel_sync.py --site CNCEC --kinds inventory,ledger --commit
+
+    CNCEC_Inventory.xlsx → inventory master + receipts/consumption/returns
+
+`--kinds` naming an ERP kind is itself the opt-in — `--erp` is only shorthand
+for "everything". Workbooks are read lazily, so a missing CNCEC_Inventory.xlsx
+no longer blocks an SME-only run.
 
 WHY THIS EXISTS ALONGSIDE tools/excel_sync.py
 ---------------------------------------------
@@ -105,6 +122,14 @@ WORKBOOKS: dict[str, str] = {
     "sme-equipment": "Equipment.xlsx",
     "sme-materials": "Materials_DetailsAvailable_Qty.xlsx",
 }
+
+# 2026-08-02 STRICT DECOUPLING. `inventory` and `ledger` write the live ERP
+# warehouse — the master every stock figure, FEFO lot and PR is computed from.
+# They are NOT in the default run: the everyday invocation is an SME re-sync,
+# and a typo in a spreadsheet must not be able to append to the warehouse
+# ledger as a side effect. Order within each group stays the SAFE SEQUENCE.
+ERP_KINDS = ("inventory", "ledger")
+SME_KINDS = tuple(k for k in WORKBOOKS if k not in ERP_KINDS)
 
 # kind → (table key in bulk_import, natural-key columns for ON CONFLICT).
 # These MUST match a real UNIQUE constraint or PK, or Postgres raises
@@ -432,8 +457,15 @@ async def main() -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="explicit no-op default; refuses to combine with --commit")
     ap.add_argument("--kinds", default=None,
-                    help=f"comma list to restrict the run "
-                         f"(choices: {','.join(WORKBOOKS)})")
+                    help=f"comma list to run EXACTLY (choices: "
+                         f"{','.join(WORKBOOKS)}). Naming an ERP kind "
+                         f"({'/'.join(ERP_KINDS)}) is itself the opt-in.")
+    ap.add_argument("--erp", action="store_true",
+                    help=f"also sync the ERP warehouse kinds "
+                         f"({', '.join(ERP_KINDS)}) from CNCEC_Inventory.xlsx. "
+                         f"Off by default: the SME estimator is a separate "
+                         f"pool and a routine re-sync must not write the live "
+                         f"warehouse master or ledger.")
     ap.add_argument("--sme-reseed", action="store_true",
                     help="replace the SME trio wholesale instead of upserting "
                          "— required when the workbook RENUMBERS system codes")
@@ -456,7 +488,9 @@ async def main() -> int:
     import backend.api.bulk_import as bi
     from backend.api.db import SessionLocal, engine
 
-    kinds = list(WORKBOOKS)
+    # DEFAULT = SME only (strict decoupling). --erp widens it; an explicit
+    # --kinds is taken literally, so it can select either side.
+    kinds = list(WORKBOOKS) if args.erp else list(SME_KINDS)
     if args.kinds:
         want = {k.strip() for k in args.kinds.split(",") if k.strip()}
         unknown = want - set(WORKBOOKS)
@@ -477,10 +511,17 @@ async def main() -> int:
             data[kind] = fh.read()
 
     mode = "COMMIT" if args.commit else "DRY-RUN"
+    erp_kinds = [k for k in kinds if k in ERP_KINDS]
     print(f"== pg_excel_sync ({mode}) ==")
     print(f"   target : {_redact(url)}")
     print(f"   site   : {args.site}")
     print(f"   kinds  : {', '.join(kinds)}")
+    # Say plainly which side of the wall this run writes. Silence here is how
+    # an SME re-sync would quietly append to the warehouse ledger.
+    scope = (f"⚠️  ERP + SME — this run WRITES the live warehouse "
+             f"({', '.join(erp_kinds)})" if erp_kinds else
+             "SME tables only — the ERP warehouse is untouched")
+    print(f"   scope  : {scope}")
 
     # Dry-run only: the ledger's soft-FK check cannot see inventory rows that
     # were never written, so hand it the SAPs the inventory plan would insert.
