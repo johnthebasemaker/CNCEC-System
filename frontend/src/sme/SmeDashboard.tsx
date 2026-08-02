@@ -32,6 +32,7 @@ import type { BalanceRow, DashFilters } from './insights'
 import ProcurementView from './ProcurementView'
 import { RowsExportButtons } from './rowsExport'
 import { materialCodeCol, materialNameCol } from './materialCols'
+import TierNote from './TierNote'
 
 // Legacy dashboard_material_balance export columns (same frame as the CSV).
 const balanceExportCols = ['Code', 'Material Name', 'UOM', 'Available', 'On Order',
@@ -81,10 +82,17 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
     const balance = materialBalance(model, units, snap.materials)
     const pairs = pairCoverage(model, units, snap.materials)
     const projSqm = roundN(units.reduce((s, u) => s + u.remaining, 0), 2)
+    // 2026-08-03 STRICT TIER SEGREGATION: `fCov`/`canSqm` are PHYSICAL stock
+    // only (they always were, in intent — but `unitBottleneckRate` looked the
+    // pool up by Material_Code against a map keyed by Material_Key, so every
+    // lookup missed and the whole dashboard read 0% coverage). The
+    // forward-looking twin rides alongside, never merged in.
     const fCov = Math.min(balance.totals.coveragePct, 100)
+    const fCovOrd = Math.min(balance.totals.coverageWithOrderedPct, 100)
     const canSqm = roundN(projSqm * Math.min(1, fCov / 100), 2)
     return {
-      units, tags, balance, pairs, projSqm, fCov, canSqm,
+      units, tags, balance, pairs, projSqm, fCov, canSqm, fCovOrd,
+      canSqmOrd: roundN(projSqm * Math.min(1, fCovOrd / 100), 2),
       shortSqm: roundN(projSqm - canSqm, 2),
       locs: locationRows(model, units, snap.materials),
       codes: systemCodeRows(model, units, snap.materials),
@@ -98,7 +106,8 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
       description="Could not load the estimator model snapshot — check the API connection." />
   }
 
-  const { tags, balance, pairs, projSqm, fCov, canSqm, shortSqm, locs, codes, stockOnly } = computed
+  const { tags, balance, pairs, projSqm, fCov, canSqm, shortSqm, locs, codes, stockOnly,
+    fCovOrd, canSqmOrd } = computed
 
   // ── Drill-down frames (legacy _dd_* ports) ─────────────────────────────────
   const tagMeta = new Map(computed.units.map((u) => [u.tag, u]))
@@ -109,7 +118,10 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
   const dSqm: DrillRow[] = [...pairs].sort((a, b) => b.sqm - a.sqm)
     .map((p) => ({ 'Equipment Tag': p.tag, 'System Code': p.code, 'Total SQM': p.sqm }))
   const dCovSqm: DrillRow[] = [...pairs].sort((a, b) => a.coveragePct - b.coveragePct)
-    .map((p) => ({ 'Equipment Tag': p.tag, 'System Code': p.code, 'Total SQM': p.sqm, 'Coverage %': p.coveragePct, 'Coverable SQM': p.coverableSqm }))
+    .map((p) => ({ 'Equipment Tag': p.tag, 'System Code': p.code, 'Total SQM': p.sqm,
+      'Ready now %': p.coveragePct, 'Buildable now SQM': p.coverableSqm,
+      'With ordered %': p.coverageWithOrderedPct,
+      'With ordered SQM': p.coverableWithOrderedSqm }))
   const dDefSqm: DrillRow[] = [...pairs].filter((p) => p.deficitSqm > 0)
     .sort((a, b) => b.deficitSqm - a.deficitSqm)
     .map((p) => ({ 'Equipment Tag': p.tag, 'System Code': p.code, 'Total SQM': p.sqm, 'Coverable SQM': p.coverableSqm, 'SQM Deficit': p.deficitSqm }))
@@ -127,10 +139,10 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
     { title: 'Available', dataIndex: 'Available_Qty', key: 'avail', align: 'right', render: (v: number) => nf(v, 3) },
     { title: 'On Order', dataIndex: 'Ordered_Qty', key: 'ord', align: 'right', render: (v: number) => nf(v, 3) },
     { title: 'Total Demand', dataIndex: 'Demand_Qty', key: 'dem', align: 'right', render: (v: number) => nf(v, 3) },
-    { title: 'Shortfall', dataIndex: 'Shortfall', key: 'short', align: 'right', render: (v: number) => nf(v, 3) },
-    { title: 'Net Shortfall', dataIndex: 'Net_Shortfall', key: 'net', align: 'right', render: (v: number) => nf(v, 3) },
+    { title: 'Short (physical)', dataIndex: 'Shortfall', key: 'short', align: 'right', render: (v: number) => nf(v, 3) },
+    { title: 'To buy (net)', dataIndex: 'Net_Shortfall', key: 'net', align: 'right', render: (v: number) => nf(v, 3) },
     {
-      title: 'Coverage %', dataIndex: 'Coverage_Pct', key: 'cov', align: 'right', width: 110,
+      title: 'Ready now %', dataIndex: 'Coverage_Pct', key: 'cov', align: 'right', width: 110,
       render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
     },
   ]
@@ -139,11 +151,22 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
     { title: 'Code', dataIndex: 'label', key: 'c' },
     { title: 'Short Name', dataIndex: 'shortName', key: 's', ellipsis: true },
     { title: 'SQM Total', dataIndex: 'sqm', key: 't', align: 'right', render: (v: number) => nf(v, 1) },
-    { title: 'Coverage SQM', dataIndex: 'canSqm', key: 'a', align: 'right', render: (v: number) => nf(v, 1) },
+    { title: 'Buildable now SQM', dataIndex: 'canSqm', key: 'a', align: 'right',
+      render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v, 1)}</span> },
+    { title: 'With ordered SQM', dataIndex: 'canSqmWithOrdered', key: 'ao', align: 'right',
+      render: (v: number, r) => (
+        <span style={{ color: v > r.canSqm ? '#F59E0B' : undefined, opacity: v > r.canSqm ? 1 : 0.5 }}>{nf(v, 1)}</span>
+      ) },
     { title: 'SQM Deficit', dataIndex: 'shortSqm', key: 'd', align: 'right', render: (v: number) => nf(v, 1) },
     {
-      title: 'Coverage %', dataIndex: 'coveragePct', key: 'p', align: 'right',
+      title: 'Ready now %', dataIndex: 'coveragePct', key: 'p', align: 'right',
       render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
+    },
+    {
+      title: 'With ordered %', dataIndex: 'coverageWithOrderedPct', key: 'po', align: 'right',
+      render: (v: number, r) => (
+        <span style={{ color: v > r.coveragePct ? '#F59E0B' : undefined, opacity: v > r.coveragePct ? 1 : 0.5 }}>{v.toFixed(1)}%</span>
+      ),
     },
   ]
 
@@ -183,6 +206,8 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
         </Row>
       </Card>
 
+      <TierNote style={{ marginBottom: 12 }} />
+
       {/* ── Sub-view toggle (legacy dash_view radio) ──────────────────────── */}
       <Segmented options={['📈 Project Overview', '🛒 Material Requirement & Procurement']}
         value={view} onChange={(v) => setView(String(v))} style={{ marginBottom: 16 }} />
@@ -197,13 +222,16 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
             <Col flex="1 1 160px"><KpiDrill title="Total SQM" value={nf(projSqm)}
               drillTitle="SQM by Equipment & System Code" rows={dSqm}
               help="Remaining surface area (m²) after deducting daily consumption entries." /></Col>
-            <Col flex="1 1 160px"><KpiDrill title="Available Coverage SQM" value={nf(canSqm, 2)}
-              drillTitle="Coverable SQM by Equipment & System Code" rows={dCovSqm}
-              help="Area (m²) coverable with currently available stock." /></Col>
+            <Col flex="1 1 160px"><KpiDrill title="Buildable now SQM" value={nf(canSqm, 2)}
+              accent="#10B981" drillTitle="Buildable today (physical stock only)" rows={dCovSqm}
+              help="Area (m²) coverable with stock ON THE SHELF. Stock on an open purchase order is excluded." /></Col>
+            <Col flex="1 1 160px"><KpiDrill title="With ordered SQM" value={nf(canSqmOrd, 2)}
+              accent="#F59E0B" drillTitle="Buildable once purchase orders arrive" rows={dCovSqm}
+              help="Forecast only — adds stock already on order. Never a readiness figure." /></Col>
             <Col flex="1 1 160px"><KpiDrill title="SQM Deficit" value={nf(shortSqm, 2)}
               accent={shortSqm > 0 ? '#EF4444' : undefined}
               drillTitle="SQM Deficit by Equipment & System Code" rows={dDefSqm}
-              help="Area (m²) that cannot be completed with current stock." /></Col>
+              help="Area (m²) that cannot be completed with stock on hand." /></Col>
           </Row>
           <ProcurementView model={model} units={computed.units} materials={snap.materials} />
         </>
@@ -217,25 +245,28 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
         <Col flex="1 1 145px"><KpiDrill title="Total SQM" value={nf(projSqm)}
           drillTitle="SQM by Equipment & System Code" rows={dSqm}
           help="Remaining surface area (m²) after deducting daily consumption entries." /></Col>
-        <Col flex="1 1 145px"><KpiDrill title="Available Coverage SQM" value={nf(canSqm, 2)}
-          drillTitle="Coverable SQM by Equipment & System Code" rows={dCovSqm}
-          help="Area (m²) coverable with currently available stock = Total SQM × Coverage %." /></Col>
+        <Col flex="1 1 145px"><KpiDrill title="Buildable now SQM" value={nf(canSqm, 2)}
+          accent="#10B981" drillTitle="Buildable today (physical stock only)" rows={dCovSqm}
+          help="Area (m²) coverable with stock ON THE SHELF = Total SQM × Ready-now %. Stock on an open purchase order is excluded — it cannot line a tank today." /></Col>
+        <Col flex="1 1 145px"><KpiDrill title="With ordered SQM" value={nf(canSqmOrd, 2)}
+          accent="#F59E0B" drillTitle="Buildable once purchase orders arrive" rows={dCovSqm}
+          help="Forecast only — adds stock already on order. Never a readiness figure." /></Col>
         <Col flex="1 1 145px"><KpiDrill title="SQM Deficit" value={nf(shortSqm, 2)}
           accent={shortSqm > 0 ? '#EF4444' : undefined}
           drillTitle="SQM Deficit by Equipment & System Code" rows={dDefSqm}
-          help="Area (m²) that cannot be completed = Total SQM − Coverable SQM." /></Col>
-        <Col flex="1 1 145px"><KpiDrill title="Overall Coverage" value={`${fCov.toFixed(1)}%`}
+          help="Area (m²) that cannot be completed = Total SQM − Buildable now SQM." /></Col>
+        <Col flex="1 1 145px"><KpiDrill title="Coverage now" value={`${fCov.toFixed(1)}%`}
           accent={fc(fCov)} delta={`${(fCov - 100).toFixed(1)}%`} deltaColor={fc(fCov)}
           drillTitle="Coverable SQM by Equipment & System Code" rows={dCovSqm}
-          help="Allocated Qty ÷ Demand Qty × 100 across all filtered materials." /></Col>
-        <Col flex="1 1 145px"><KpiDrill title="Shortfall SQM" value={nf(shortSqm, 2)}
-          accent={shortSqm > 0 ? '#EF4444' : undefined}
-          drillTitle="SQM Deficit by Equipment & System Code" rows={dDefSqm}
-          help="Area (m²) shortfall = Total SQM − Available Coverage SQM." /></Col>
+          help={`Available Qty ÷ Demand Qty across all filtered materials — PHYSICAL stock only. Counting stock on order it would be ${fCovOrd.toFixed(1)}%.`} /></Col>
+        <Col flex="1 1 145px"><KpiDrill title="With ordered" value={`${fCovOrd.toFixed(1)}%`}
+          accent="#F59E0B"
+          drillTitle="Coverable SQM by Equipment & System Code" rows={dCovSqm}
+          help="Coverage once the open purchase orders land. Forecast only." /></Col>
         <Col flex="1 1 145px"><KpiDrill title="Critical (<50%)" value={String(critCount)}
           accent={critCount > 0 ? '#EF4444' : '#10B981'}
-          drillTitle="Critical Materials (Coverage < 50%)" rows={dCrit}
-          help="Materials where Available Qty covers less than 50% of total demand." /></Col>
+          drillTitle="Critical Materials (physical coverage < 50%)" rows={dCrit}
+          help="Materials where AVAILABLE Qty covers less than 50% of total demand. Stock on order does not lift a material out of this list." /></Col>
       </Row>
 
       {/* ── Gauge + demand-vs-available | per-location bars ───────────────── */}

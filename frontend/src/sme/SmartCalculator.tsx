@@ -15,8 +15,12 @@ interface CalcLine {
   sap_code: string | null; material_code: string | null; component: string
   material_name: string; uom: string; for_1_sqm: number; required_qty: number
   package_size: number | null; packages_needed: number | null
-  available_stock: number | null; pooled_saps: number
-  shortfall_qty: number | null; explanation: string
+  available_stock: number | null; ordered_stock: number | null; pooled_saps: number
+  /** PHYSICAL gap — what blocks the job today. */
+  shortfall_qty: number | null
+  /** Gap after stock already on order — what to raise a PR for. */
+  net_shortfall_qty: number | null
+  explanation: string
 }
 
 interface SystemBlock {
@@ -43,11 +47,21 @@ const noWrapHeader = () => ({ style: { whiteSpace: 'nowrap' as const } })
 
 // Availability is pooled per Material Code across every variant SAP (the SAP
 // code is an internal id and is deliberately NOT displayed).
+//
+// 2026-08-03 STRICT TIER SEGREGATION: this cell shows stock ON HAND only. A
+// material with nothing on the shelf reads red even when the whole quantity is
+// on an open PO — the "On Order" column beside it carries that, and says so.
 const stockCell = (v: number | null, r: { shortfall_qty: number | null; pooled_saps: number }) =>
   v == null ? '—'
     : r.shortfall_qty
       ? <Tag color="red">{fmt(v)} (short {fmt(r.shortfall_qty)})</Tag>
       : <Tag color="green">{fmt(v)} ✓</Tag>
+
+const orderedCell = (v: number | null, r: CalcLine | AggLine) =>
+  !v ? <span style={{ opacity: 0.4 }}>—</span>
+    : r.net_shortfall_qty
+      ? <Tag color="orange">{fmt(v)} (still buy {fmt(r.net_shortfall_qty)})</Tag>
+      : <Tag color="gold">{fmt(v)} — covers the gap</Tag>
 
 // 🧮 Smart Calculator — "system codes + target SQM(s) → segregated material
 // list with explanations" (recipe demand model: For_1_SQM × SQM; live ERP
@@ -114,8 +128,10 @@ export default function SmartCalculator({ siteId, stickyTop }:
       onHeaderCell: noWrapHeader,
       render: (v: number | null, r) => v != null
         ? `${v} × ${fmt(r.package_size)}` : '—' },
-    { title: 'In Stock (all variants)', dataIndex: 'available_stock', width: 170,
+    { title: 'Available now', dataIndex: 'available_stock', width: 170,
       align: 'right', onHeaderCell: noWrapHeader, render: stockCell },
+    { title: 'On Order', dataIndex: 'ordered_stock', width: 190,
+      align: 'right', onHeaderCell: noWrapHeader, render: orderedCell },
   ]
 
   const sysColumns: ColumnsType<CalcLine> = [
@@ -134,8 +150,10 @@ export default function SmartCalculator({ siteId, stickyTop }:
       onHeaderCell: noWrapHeader,
       render: (v: number | null, r) => v != null
         ? `${v} × ${fmt(r.package_size)}` : '—' },
-    { title: 'In Stock (all variants)', dataIndex: 'available_stock', width: 170,
+    { title: 'Available now', dataIndex: 'available_stock', width: 170,
       align: 'right', onHeaderCell: noWrapHeader, render: stockCell },
+    { title: 'On Order', dataIndex: 'ordered_stock', width: 190,
+      align: 'right', onHeaderCell: noWrapHeader, render: orderedCell },
   ]
 
   return (

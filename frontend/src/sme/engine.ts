@@ -17,6 +17,18 @@
  * four distinct drums (Comp-A/B/C/D at SAPs 1041/-1/-2/-3), so each gets its own
  * pool, its own shortfall and its own report row. `Material_Key` (see matKey) is
  * the grouping key everywhere a material used to be keyed by code.
+ *
+ * 2026-08-03 STRICT TIER SEGREGATION (locked) — full rationale in
+ * sme_engine.py. TIER 1 (`Alloc_Available`) is the ONLY input to readiness:
+ * Status, Completion_Pct, SQM_Achievable_Now, Coverage_Now_Pct,
+ * Fulfillment_Pct. TIER 2 (`Alloc_Ordered`) feeds ONLY the forward-looking
+ * twins — Completion_With_Ordered_Pct, SQM_Achievable_With_Ordered,
+ * Coverage_With_Ordered_Pct, Fulfillment_With_Ordered_Pct — and the NET buy
+ * list. `Allocated_Qty` (tier 1 + tier 2) is a CONSERVATION field so that
+ * Demand = Allocated + Shortfall_Qty holds; dividing it by Demand_Qty does NOT
+ * yield a coverage percentage anything may colour green. Every tier-2 number a
+ * consumer could want is published as its own named field precisely so nobody
+ * re-derives one from it.
  */
 
 // ─── Snapshot types (GET /sme/model-snapshot) ────────────────────────────────
@@ -102,6 +114,8 @@ export interface FeasibilityRow {
   Total_Shortfall_Qty: number
   Total_Net_Shortfall_Qty: number
   Completion_Pct: number
+  /** Tier 1 + tier 2. Forward-looking ONLY — never drives Status. */
+  Completion_With_Ordered_Pct: number
   Status: string
   Bottleneck_Material_Code: string
   Bottleneck_SAP_Code: string
@@ -153,6 +167,8 @@ export interface SqmUnitRow {
   SQM_Achievable_With_Ordered: number
   SQM_Deficit: number
   Coverage_Now_Pct: number
+  /** Tier 1 + tier 2. Forward-looking ONLY. */
+  Coverage_With_Ordered_Pct: number
   Has_Recipe: boolean
 }
 export interface BlockingMaterial {
@@ -178,6 +194,8 @@ export interface SqmCodeRow {
   SQM_Deficit: number
   Equipment_Tags: string
   Coverage_Now_Pct: number
+  /** Tier 1 + tier 2. Forward-looking ONLY. */
+  Coverage_With_Ordered_Pct: number
   Blocking_Materials: BlockingMaterial[]
 }
 export interface PlanResult {
@@ -456,14 +474,22 @@ export function computeFeasibility(
       shortNet += r.Shortfall_Qty
     }
     let minRate = 2
+    let minRateOrd = 2
     let bottleneck: AllocationLine | null = null
     for (const r of rows) {
       const rate = r.Demand_Qty > 0 ? clip(r.Alloc_Available / r.Demand_Qty, 0, 1) : 1
       if (rate < minRate) { minRate = rate; bottleneck = r } // strict: first min wins ties
+      // 2026-08-03 TIER SEGREGATION (mirrors sme_engine.py): the same
+      // bottleneck on tier 1 + tier 2, published as its OWN field so no
+      // consumer re-derives a forward-looking number from Allocated_Qty and
+      // presents it as readiness.
+      const rateO = r.Demand_Qty > 0 ? clip(r.Allocated_Qty / r.Demand_Qty, 0, 1) : 1
+      if (rateO < minRateOrd) minRateOrd = rateO
     }
     // 2026-07-07 STRICT BOTTLENECK ruling (mirrors sme_engine.py): coverage =
     // the LEAST-available material's rate, never the Σalloc/Σdemand average.
     const completion = demand > 0 ? roundN(clip(minRate * 100, 0, 100), 2) : 100
+    const completionOrd = demand > 0 ? roundN(clip(minRateOrd * 100, 0, 100), 2) : 100
     const status = short <= 0 ? STATUS_FULL
       : minRate === 0 ? STATUS_BLOCKED
         : `${STATUS_PARTIAL} (${completion.toFixed(1)}%)`
@@ -479,6 +505,8 @@ export function computeFeasibility(
       Total_Shortfall_Qty: roundN(short, 4),
       Total_Net_Shortfall_Qty: roundN(shortNet, 4),
       Completion_Pct: completion,
+      // Forward-looking twin of Completion_Pct. NEVER drives Status.
+      Completion_With_Ordered_Pct: completionOrd,
       Status: status,
       Bottleneck_Material_Code: hasBn ? bottleneck!.Material_Code : '—',
       Bottleneck_SAP_Code: hasBn ? bottleneck!.SAP_Code : '—',
@@ -647,6 +675,10 @@ export function buildSqmRollup(
         SQM_Achievable_With_Ordered: roundN(withOrd, 2),
         SQM_Deficit: roundN(remaining - now, 2),
         Coverage_Now_Pct: remaining > 0 ? roundN(clip((now / remaining) * 100, 0, 100), 2) : 100,
+        // 2026-08-03 TIER SEGREGATION: forward-looking twin, so the UI never
+        // has to build a "with ordered" percentage itself.
+        Coverage_With_Ordered_Pct: remaining > 0
+          ? roundN(clip((withOrd / remaining) * 100, 0, 100), 2) : 100,
         Has_Recipe: ul.length > 0,
       })
     }
@@ -669,7 +701,8 @@ export function buildSqmByCode(
         Lining_System_Code: r.Lining_System_Code, System_Name: r.System_Name,
         Equipment_Count: 0, Total_SQM: 0, Done_SQM: 0, Remaining_SQM: 0,
         SQM_Achievable_Now: 0, SQM_Achievable_With_Ordered: 0, SQM_Deficit: 0,
-        Equipment_Tags: '', Coverage_Now_Pct: 0, Blocking_Materials: [], _tags: [],
+        Equipment_Tags: '', Coverage_Now_Pct: 0, Coverage_With_Ordered_Pct: 0,
+        Blocking_Materials: [], _tags: [],
       }
       agg.set(r.Lining_System_Code, a)
     }
@@ -720,6 +753,8 @@ export function buildSqmByCode(
       Equipment_Tags: a._tags.join(', '),
       Coverage_Now_Pct: rem > 0
         ? roundN(clip((a.SQM_Achievable_Now / rem) * 100, 0, 100), 2) : 100,
+      Coverage_With_Ordered_Pct: rem > 0
+        ? roundN(clip((a.SQM_Achievable_With_Ordered / rem) * 100, 0, 100), 2) : 100,
       Blocking_Materials: mats,
     }
     out.push(row)

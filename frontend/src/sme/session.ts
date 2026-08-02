@@ -17,12 +17,27 @@ export interface CodeStat {
   code: string
   shortName: string
   sqm: number
+  /** TIER 1 — area buildable TODAY from physical stock. */
   canSqm: number
+  /** TIER 1 + 2 — area buildable once the open POs land. */
+  canSqmWithOrdered: number
+  /** sqm − canSqm: the PHYSICAL gap. Never netted against on-order stock. */
   shortSqm: number
   demand: number
+  /** Tier 1 + tier 2. Conservation only — never divide this by `demand`. */
   alloc: number
+  /** TIER 1 — physically allocated. */
+  allocAvailable: number
+  /** TIER 2 — covered by an open purchase order. */
+  allocOrdered: number
+  /** NET gap: what still has to be bought. */
   shortfall: number
+  /** PHYSICAL gap: what blocks the build today. */
+  shortfallAvailable: number
+  /** TIER 1 bottleneck %. The ONLY readiness number. Drives every dot/pill. */
   fulfillPct: number
+  /** TIER 1 + 2 bottleneck %. Forward-looking; must never colour a status. */
+  fulfillWithOrderedPct: number
 }
 
 export interface TagStat {
@@ -34,19 +49,37 @@ export interface TagStat {
   codes: string[]
   demand: number
   alloc: number
+  allocAvailable: number
+  allocOrdered: number
   shortfall: number
+  shortfallAvailable: number
   fulfillPct: number
+  fulfillWithOrderedPct: number
   sqm: number
   canSqm: number
+  canSqmWithOrdered: number
 }
 
 /** Per-(tag, code) rollup of cascade lines (legacy syscode_fulfillment + sqm_can_do).
+ *
  *  2026-07-07 STRICT BOTTLENECK ruling: the unit's coverage is the LEAST
  *  available material's rate — 3 materials at 100% + one at 25% ⇒ 25%.
- *  Never the Σalloc/Σdemand average, never higher than the worst component. */
+ *  Never the Σalloc/Σdemand average, never higher than the worst component.
+ *
+ *  2026-08-03 STRICT TIER SEGREGATION. `fulfillPct` and `canSqm` are computed
+ *  from `Alloc_Available` — PHYSICAL stock only. They used to be computed from
+ *  `Allocated_Qty` (physical PLUS on-order), and because this one function
+ *  feeds StatusDot, FulfilPill, canSqm and every "Coverage" figure in the
+ *  Session Builder, Session Report, Location Report, Execution Plan and the
+ *  per-equipment expanders, a material with ZERO physical stock and a large
+ *  open PO — PHENACIN ACP POWDER: 0 available, 56,350 on order — showed a
+ *  green 100% pill reading "Ready to Build". The forward-looking figure is not
+ *  lost: it is published beside it as `fulfillWithOrderedPct` / `canSqmWithOrdered`.
+ */
 export function codeStats(lines: AllocationLine[]): Map<string, CodeStat> {
   const out = new Map<string, CodeStat>()
   const minRate = new Map<string, number>()
+  const minRateOrd = new Map<string, number>()
   for (const ln of lines) {
     const k = unitKey(ln.Equipment_Tag_No, ln.Lining_System_Code)
     let s = out.get(k)
@@ -54,21 +87,35 @@ export function codeStats(lines: AllocationLine[]): Map<string, CodeStat> {
       s = {
         tag: ln.Equipment_Tag_No, code: ln.Lining_System_Code,
         shortName: ln.Lining_System_Short_Name, sqm: ln.Total_SQM,
-        canSqm: 0, shortSqm: 0, demand: 0, alloc: 0, shortfall: 0, fulfillPct: 100,
+        canSqm: 0, canSqmWithOrdered: 0, shortSqm: 0, demand: 0, alloc: 0,
+        allocAvailable: 0, allocOrdered: 0, shortfall: 0, shortfallAvailable: 0,
+        fulfillPct: 100, fulfillWithOrderedPct: 100,
       }
       out.set(k, s)
       minRate.set(k, 1)
+      minRateOrd.set(k, 1)
     }
     s.demand += ln.Demand_Qty
     s.alloc += ln.Allocated_Qty
+    s.allocAvailable += ln.Alloc_Available
+    s.allocOrdered += ln.Alloc_Ordered
     s.shortfall += ln.Shortfall_Qty
-    const rate = ln.Demand_Qty > 0 ? Math.min(1, ln.Allocated_Qty / ln.Demand_Qty) : 1
+    s.shortfallAvailable += ln.Shortfall_Available_Qty
+    // TIER 1 — readiness.
+    const rate = ln.Demand_Qty > 0 ? Math.min(1, ln.Alloc_Available / ln.Demand_Qty) : 1
     if (rate < minRate.get(k)!) minRate.set(k, rate)
+    // TIER 1 + 2 — forecast.
+    const rateO = ln.Demand_Qty > 0 ? Math.min(1, ln.Allocated_Qty / ln.Demand_Qty) : 1
+    if (rateO < minRateOrd.get(k)!) minRateOrd.set(k, rateO)
   }
   for (const [k, s] of out.entries()) {
     const rate = minRate.get(k) ?? 1  // bottleneck, not the average
+    const rateO = minRateOrd.get(k) ?? 1
     s.fulfillPct = roundN(rate * 100, 1)
+    s.fulfillWithOrderedPct = roundN(rateO * 100, 1)
     s.canSqm = roundN(s.sqm * rate, 2)
+    s.canSqmWithOrdered = roundN(s.sqm * rateO, 2)
+    // The deficit procurement has to close is measured against PHYSICAL stock.
     s.shortSqm = roundN(s.sqm - s.canSqm, 2)
   }
   return out
@@ -85,29 +132,43 @@ export function tagStats(model: SmeModel, lines: AllocationLine[]): Map<string, 
       t = {
         tag: s.tag, name: meta?.Name ?? '', location: meta?.Location ?? '',
         type: meta?.Type ?? '', substrate: meta?.Substrate ?? '',
-        codes: [], demand: 0, alloc: 0, shortfall: 0, fulfillPct: 100, sqm: 0, canSqm: 0,
+        codes: [], demand: 0, alloc: 0, allocAvailable: 0, allocOrdered: 0,
+        shortfall: 0, shortfallAvailable: 0, fulfillPct: 100,
+        fulfillWithOrderedPct: 100, sqm: 0, canSqm: 0, canSqmWithOrdered: 0,
       }
       out.set(s.tag, t)
     }
     t.codes.push(s.code)
     t.demand += s.demand
     t.alloc += s.alloc
+    t.allocAvailable += s.allocAvailable
+    t.allocOrdered += s.allocOrdered
     t.shortfall += s.shortfall
+    t.shortfallAvailable += s.shortfallAvailable
     t.sqm += s.sqm
     t.canSqm += s.canSqm
+    t.canSqmWithOrdered += s.canSqmWithOrdered
   }
   // Strict bottleneck at the tag level too: the equipment's coverage is its
   // WORST unit's coverage (canSqm stays the physical Σ of unit coverable SQM).
+  // Both tiers roll up the same way, kept strictly apart.
   const tagMin = new Map<string, number>()
+  const tagMinOrd = new Map<string, number>()
   for (const s of perCode.values()) {
     const cur = tagMin.get(s.tag)
     if (cur === undefined || s.fulfillPct < cur) tagMin.set(s.tag, s.fulfillPct)
+    const curO = tagMinOrd.get(s.tag)
+    if (curO === undefined || s.fulfillWithOrderedPct < curO) {
+      tagMinOrd.set(s.tag, s.fulfillWithOrderedPct)
+    }
   }
   for (const t of out.values()) {
     t.codes.sort(syscodeCompare)
     t.fulfillPct = roundN(tagMin.get(t.tag) ?? 100, 1)
+    t.fulfillWithOrderedPct = roundN(tagMinOrd.get(t.tag) ?? 100, 1)
     t.sqm = roundN(t.sqm, 2)
     t.canSqm = roundN(t.canSqm, 2)
+    t.canSqmWithOrdered = roundN(t.canSqmWithOrdered, 2)
   }
   return out
 }

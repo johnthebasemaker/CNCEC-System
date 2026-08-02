@@ -785,10 +785,16 @@ async def plan_export(body: PlanExportBody,
         fname = legacy_filename(
             f"location_report_{_fname_part(scope.lower().replace(' ', '_'))}", uname, fmt)
         if fmt == "xlsx":  # legacy workbook: main alloc table + 3 summary blocks
+            # 2026-08-03 STRICT TIER SEGREGATION: the single `Allocated_Qty`
+            # column summed physical stock and stock on order, and sat beside a
+            # physical-only Fulfillment_Pct. Split into the two tiers plus both
+            # gaps, so a reader can never mistake an open PO for a full shelf.
             cols = ["Equipment_Tag_No", "Lining_System_Code",
                     "Lining_System_Short_Name", "Total_SQM", "Material_Code",
-                    "Material_Name", "UOM", "Demand_Qty", "Allocated_Qty",
-                    "Shortfall_Qty", "Fulfillment_Pct"]
+                    "SAP_Code", "Material_Name", "UOM", "Demand_Qty",
+                    "Alloc_Available", "Alloc_Ordered",
+                    "Shortfall_Available_Qty", "Shortfall_Qty",
+                    "Fulfillment_Pct", "Fulfillment_With_Ordered_Pct"]
             data = location_report_xlsx(
                 [{"name": scope, "title": body.title or title,
                   "color_scheme": loc_scheme(loc or None),
@@ -1266,13 +1272,15 @@ _CALC_POOL_SQL = text('''
     ),
     seed AS (
         SELECT REPLACE(TRIM("SAP_Code"), ' ', '') AS sap,
-               SUM(COALESCE("Initial_Available_Qty", 0)) AS stock
+               SUM(COALESCE("Initial_Available_Qty", 0)) AS stock,
+               SUM(COALESCE("Initial_Ordered_Qty", 0))   AS on_order
         FROM sme_inventory_seed
         WHERE TRIM(COALESCE("SAP_Code", '')) <> ''
         GROUP BY REPLACE(TRIM("SAP_Code"), ' ', '')
     )
     SELECT m.mat,
-           SUM(CASE WHEN s.sap IS NOT NULL THEN s.stock END) AS stock,
+           SUM(CASE WHEN s.sap IS NOT NULL THEN s.stock END)    AS stock,
+           SUM(CASE WHEN s.sap IS NOT NULL THEN s.on_order END) AS on_order,
            COUNT(s.sap) AS known_saps,
            COUNT(*)     AS pool_saps
     FROM mats m
@@ -1341,6 +1349,7 @@ async def smart_calculator(code: Optional[str] = None,
     pool: dict[str, dict] = {}
     if mats:
         pool = {p.mat: {"stock": (float(p.stock) if p.stock is not None else None),
+                        "on_order": (float(p.on_order) if p.on_order is not None else None),
                         "saps": int(p.pool_saps)}
                 for p in (await session.execute(_CALC_POOL_SQL,
                                                 {"mats": mats})).all()}
@@ -1359,9 +1368,16 @@ async def smart_calculator(code: Optional[str] = None,
                     else None)
         p = pool.get(mat) if mat else None
         available = p["stock"] if p else None
+        on_order = p["on_order"] if p else None
         pooled = p["saps"] if p else 0
+        # 2026-08-03 STRICT TIER SEGREGATION: `shortfall_qty` stays the PHYSICAL
+        # gap (what blocks the job today); `net_shortfall_qty` is what is left
+        # to BUY once stock already on order is counted. Two fields, never one.
         short = (sme_engine.round_n(max(required - available, 0.0), 4)
                  if available is not None else None)
+        net_short = (sme_engine.round_n(
+            max(required - available - (on_order or 0.0), 0.0), 4)
+            if available is not None else None)
         expl = f"{per:g} {uom or 'unit'}/SQM × {target:g} SQM = {required:g} {uom}".strip()
         if packages:
             expl += f" → {packages} × {pkg:g} {uom} pack(s)"
@@ -1369,14 +1385,21 @@ async def smart_calculator(code: Optional[str] = None,
             expl += f" · in stock: {available:g}"
             if pooled > 1:
                 expl += f" (Σ {pooled} SAP variants)"
-            expl += f" (short {short:g})" if short else " ✓"
+            if short:
+                expl += f" (short {short:g}"
+                expl += (f", {net_short:g} to buy after {on_order:g} on order)"
+                         if on_order else ")")
+            else:
+                expl += " ✓"
         return {"sap_code": sap, "material_code": mat,
                 "component": (x["Material_Description"] or "").strip(),
                 "material_name": (x["Material_Name"] or "").strip(),
                 "uom": uom, "for_1_sqm": per, "required_qty": required,
                 "package_size": pkg, "packages_needed": packages,
-                "available_stock": available, "pooled_saps": pooled,
-                "shortfall_qty": short, "explanation": expl}
+                "available_stock": available, "ordered_stock": on_order,
+                "pooled_saps": pooled,
+                "shortfall_qty": short, "net_shortfall_qty": net_short,
+                "explanation": expl}
 
     systems: list[dict] = []
     agg: dict[tuple, dict] = {}
@@ -1404,8 +1427,10 @@ async def smart_calculator(code: Optional[str] = None,
                 "required_qty": 0.0, "package_size": ln["package_size"],
                 "packages_needed": None,
                 "available_stock": ln["available_stock"],
+                "ordered_stock": ln["ordered_stock"],
                 "pooled_saps": ln["pooled_saps"],
-                "shortfall_qty": None, "systems": [], "explanation": ""})
+                "shortfall_qty": None, "net_shortfall_qty": None,
+                "systems": [], "explanation": ""})
             a["required_qty"] = sme_engine.round_n(
                 a["required_qty"] + ln["required_qty"], 4)
             if a["package_size"] is None:
@@ -1416,10 +1441,15 @@ async def smart_calculator(code: Optional[str] = None,
     agg_lines, agg_short = [], 0
     for a in agg.values():
         req, pkg, avail = a["required_qty"], a["package_size"], a["available_stock"]
+        on_order = a["ordered_stock"]
         a["packages_needed"] = (int(-(-req // pkg))
                                 if pkg and pkg > 0 and req > 0 else None)
+        # PHYSICAL gap vs NET gap, kept apart (2026-08-03 tier segregation).
         a["shortfall_qty"] = (sme_engine.round_n(max(req - avail, 0.0), 4)
                               if avail is not None else None)
+        a["net_shortfall_qty"] = (sme_engine.round_n(
+            max(req - avail - (on_order or 0.0), 0.0), 4)
+            if avail is not None else None)
         if a["shortfall_qty"]:
             agg_short += 1
         uom = a["uom"]
@@ -1431,8 +1461,12 @@ async def smart_calculator(code: Optional[str] = None,
             expl += f" · in stock: {avail:g}"
             if a["pooled_saps"] > 1:
                 expl += f" (Σ {a['pooled_saps']} SAP variants)"
-            expl += (f" (short {a['shortfall_qty']:g})"
-                     if a["shortfall_qty"] else " ✓")
+            if a["shortfall_qty"]:
+                expl += f" (short {a['shortfall_qty']:g}"
+                expl += (f", {a['net_shortfall_qty']:g} to buy after "
+                         f"{on_order:g} on order)" if on_order else ")")
+            else:
+                expl += " ✓"
         a["explanation"] = expl
         agg_lines.append(a)
 

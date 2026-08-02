@@ -48,6 +48,25 @@ own demand rows but read the SAME pooled stock figure"):
   ERP carries entries like "1043 - 2" for the same component the recipe calls
   "1043-2" (same rule as _CALC_POOL_SQL in sme.py).
 
+2026-08-03 STRICT TIER SEGREGATION (locked). "Ready to build" is a claim about
+metal, drums and shelves. Stock on a purchase order is none of those.
+
+  TIER 1 — PHYSICAL, `Alloc_Available` / `pool_init`. The ONLY input to
+    readiness: Status, Completion_Pct, SQM_Achievable_Now, Coverage_Now_Pct,
+    Fulfillment_Pct, SQM_Deficit and every "can we build it today" answer.
+  TIER 2 — ON ORDER, `Alloc_Ordered` / `pool_ordered_init`. Feeds ONLY the
+    forward-looking twins — Completion_With_Ordered_Pct,
+    SQM_Achievable_With_Ordered, Coverage_With_Ordered_Pct,
+    Fulfillment_With_Ordered_Pct — and the NET buy list (`Shortfall_Qty`), so
+    stock already ordered is not ordered twice.
+
+  `Allocated_Qty` (= tier 1 + tier 2) is a CONSERVATION field: it exists so
+  `Demand = Allocated + Shortfall_Qty` holds. It is NOT a readiness quantity,
+  and dividing it by `Demand_Qty` does NOT produce a coverage percentage
+  anybody should colour green. Every tier-2 number a consumer might want is
+  published as its own named field precisely so nobody re-derives one from it.
+  Suite BB pins this end to end.
+
 Deliberate, documented deviations from legacy:
   * non-numeric system codes sort after numeric ones instead of crashing
     (legacy used int(code) and would raise ValueError);
@@ -324,15 +343,26 @@ def compute_feasibility(model: dict, lines: list[dict], order: list[str]) -> lis
         short = sum(r["Shortfall_Available_Qty"] for r in rows)
         short_net = sum(r["Shortfall_Qty"] for r in rows)
         min_rate, bottleneck = 2.0, None
+        min_rate_ord = 2.0
         for r in rows:
             rate = _clip(r["Alloc_Available"] / r["Demand_Qty"], 0.0, 1.0) \
                 if r["Demand_Qty"] > 0 else 1.0
             if rate < min_rate:  # strict: first line at the minimum wins ties
                 min_rate, bottleneck = rate, r
+            # 2026-08-03 TIER SEGREGATION: the same bottleneck, computed on
+            # tier 1 + tier 2. Published as its OWN field so no consumer ever
+            # has to re-derive a forward-looking number from `Allocated_Qty`
+            # and accidentally present it as readiness.
+            rate_o = _clip(r["Allocated_Qty"] / r["Demand_Qty"], 0.0, 1.0) \
+                if r["Demand_Qty"] > 0 else 1.0
+            if rate_o < min_rate_ord:
+                min_rate_ord = rate_o
         # 2026-07-07 STRICT BOTTLENECK ruling: coverage = the LEAST-available
         # material's rate, never the Σalloc/Σdemand average — the worst
         # component sets the ceiling for the whole system. (Was: alloc/demand.)
         completion = round_n(_clip(min_rate * 100.0, 0.0, 100.0), 2) \
+            if demand > 0 else 100.0
+        completion_ord = round_n(_clip(min_rate_ord * 100.0, 0.0, 100.0), 2) \
             if demand > 0 else 100.0
         if short <= 0:
             status = STATUS_FULL
@@ -352,6 +382,8 @@ def compute_feasibility(model: dict, lines: list[dict], order: list[str]) -> lis
             "Total_Shortfall_Qty": round_n(short, 4),
             "Total_Net_Shortfall_Qty": round_n(short_net, 4),
             "Completion_Pct": completion,
+            # Forward-looking twin of Completion_Pct. NEVER drives Status.
+            "Completion_With_Ordered_Pct": completion_ord,
             "Status": status,
             "Bottleneck_Material_Code": bottleneck["Material_Code"] if has_bn else "—",
             "Bottleneck_SAP_Code": bottleneck["SAP_Code"] if has_bn else "—",
@@ -418,6 +450,11 @@ def build_sqm_rollup(model: dict, lines: list[dict], order: list[str]) -> list[d
                 "SQM_Deficit": round_n(remaining - now, 2),
                 "Coverage_Now_Pct": round_n(_clip(now / remaining * 100.0, 0.0, 100.0), 2)
                                     if remaining > 0 else 100.0,
+                # 2026-08-03 TIER SEGREGATION: the forward-looking twin, so the
+                # UI never has to build a "with ordered" percentage itself.
+                "Coverage_With_Ordered_Pct": round_n(
+                    _clip(with_ord / remaining * 100.0, 0.0, 100.0), 2)
+                    if remaining > 0 else 100.0,
                 "Has_Recipe": bool(ul),
             })
     return out
@@ -473,6 +510,10 @@ def build_sqm_by_code(lines: list[dict], rollup: list[dict]) -> list[dict]:
                     "Equipment_Tags": ", ".join(tags),
                     "Coverage_Now_Pct": round_n(
                         _clip(a["SQM_Achievable_Now"] / rem * 100.0, 0.0, 100.0), 2)
+                        if rem > 0 else 100.0,
+                    "Coverage_With_Ordered_Pct": round_n(
+                        _clip(a["SQM_Achievable_With_Ordered"] / rem * 100.0,
+                              0.0, 100.0), 2)
                         if rem > 0 else 100.0,
                     "Blocking_Materials": mats})
     return out

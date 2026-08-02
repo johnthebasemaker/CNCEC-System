@@ -1,6 +1,6 @@
 # PROJECT HANDOVER — read this first
 
-> **Updated 2026-08-02.** This is the fresh-session entry point: what is locked,
+> **Updated 2026-08-03.** This is the fresh-session entry point: what is locked,
 > where we are, and what happens next. Read this file, then
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the system brain), then
 > [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state + gotchas) and
@@ -84,9 +84,40 @@ absent from the payload.
 Decoupled is not frozen — editing `sme_inventory_seed` (what the Excel sync writes)
 still moves every SME number at once. Suite BA pins that too.
 
+### 1b. STRICT TIER SEGREGATION — a purchase order is never readiness
+
+*Locked 2026-08-03.*
+
+**TIER 1** (`Alloc_Available` / `pool_init`) is the ONLY input to readiness:
+`Status`, `Completion_Pct`, `SQM_Achievable_Now`, `Coverage_Now_Pct`,
+`Fulfillment_Pct`, `SQM_Deficit`, and every "can we build it today" answer.
+
+**TIER 2** (`Alloc_Ordered` / `pool_ordered_init`) feeds ONLY the forward-looking
+twins — `Completion_With_Ordered_Pct`, `SQM_Achievable_With_Ordered`,
+`Coverage_With_Ordered_Pct`, `Fulfillment_With_Ordered_Pct` — and the NET buy
+list (`Shortfall_Qty`), so stock already ordered is not ordered twice.
+
+**`Allocated_Qty` (= tier 1 + tier 2) is a CONSERVATION field.** It exists so
+`Demand = Allocated + Shortfall_Qty` holds. It is NOT a readiness quantity, and
+`Allocated_Qty / Demand_Qty` is NOT a coverage percentage anything may colour
+green. Every tier-2 number a consumer could want is published as its own named
+field precisely so nobody re-derives one from it.
+
+**Why it is not negotiable:** the engine always had this right; six presentation
+layers above it did not. `PHENACIN ACP POWDER` (0 available, 56,350 on order)
+made **18 of 85** (tag, code) units render a green "100% Fully Ready" pill they
+had not earned, listed them under the *Fully Ready* filter, and overstated
+buildable area by **9,118 m² — 21.5 % of the remaining programme**. Suite BB
+(18 checks) and `tests/e2e/specs/sme-tiers.spec.ts` (4 tests) pin it end to end.
+Full account: [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md).
+
+Every SME tab shows the two tiers in separate columns, under a shared `TierNote`
+legend: **green = available now · amber = on order · red = still to buy**.
+
 ### 2. Two-tier allocation field contract
 
-*Locked 2026-07-28 (rulings Q1/Q6). The Q2a netting half is superseded — see 1a.*
+*Locked 2026-07-28 (rulings Q1/Q6). The Q2a netting half is superseded — see 1a;
+which figure each tier may drive is 1b.*
 
 Companion field contract, conserved on every line:
 
@@ -190,7 +221,10 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
 * **Half-up rounding** `floor(x·10ⁿ + 0.5)` is shared verbatim across both
   languages. Never "fix" it to half-even.
 * **STRICT BOTTLENECK** (2026-07-07): a unit's coverage is its least-available
-  material's rate, never the Σalloc/Σdemand average.
+  material's rate, never the Σalloc/Σdemand average. ⚠️ The Session Report's and
+  Location Report's *scope-wide* "Overall Coverage" KPI is still a quantity
+  average (`Σ Available ÷ Σ Demand`), not the Dashboard's area-weighted
+  bottleneck — pre-existing, flagged in the tier run log §7, awaiting a ruling.
 * **Unmodelled is never 100%** (ruling Q5): a system code with no recipe rows
   scores 0 SQM achievable, never a silent full-ready.
 * **FEFO + over-issue stay allow-and-log** — never add a hard block.
@@ -238,9 +272,9 @@ All green locally at commit `fae0b3f` (main), verified 2026-07-30.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **978 / 0** (suites A…BA) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **49 / 49** (~22 s, own throwaway DB) | `cd tests/e2e && npm test` |
-| SME TS↔PY parity | **1,258 comparisons** | `npm run parity:sme --prefix frontend` |
+| Backend service tests | **999 / 0** (suites A…BB) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **53 / 53** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| SME TS↔PY parity | **1,289 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
@@ -258,6 +292,7 @@ recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/RE
 
 | PR | Commit | What |
 |---|---|---|
+| — | `fix/sme-strict-tier-segregation` | **SME tier segregation** (rule 1b) — readiness is TIER 1 everywhere; `session.ts codeStats`, Total Overview, Location Report, Execution Plan, Dashboard, exec summary + PDF, Smart Calculator, location export all split; `insights.ts` Material_Key lookup bug fixed; suite **BB** (18) + 4 E2E |
 | — | `feat/sme-strict-decoupling` | **SME ⇄ ERP strict decoupling** (rule 1a) — ledger stripped from `SQL_SME_MATERIALS` + Smart Calculator, effective-ordered netting removed from both engines, golden regenerated, suite **BA** (11 checks), `pg_excel_sync` defaults to SME-only, `Available Qty` header alias |
 | #15 | `7868e8d` | **Project-wide table sorting + filtering** — `smartTable.tsx`, 99 tables / 45 files, +3 E2E specs |
 | #16 | `c62c415` | **SME component pooling fix** — `(Material_Code, SAP_Code)` everywhere, suite AZ (20 checks), alembic `a4e9b1c73f28` |
@@ -367,6 +402,7 @@ revert-verification and the caveats:
 
 | Log | Covers |
 |---|---|
+| [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md) | Rule 1b: the six layers that merged the tiers, the 21.5% measurement, the per-tab audit |
 | [`docs/SME_STRICT_DECOUPLING_RUNLOG.md`](docs/SME_STRICT_DECOUPLING_RUNLOG.md) | Rule 1a: the two ledger leaks, suite BA, the CLI + header fixes, the re-sync |
 | [`docs/SME_COMPONENT_POOLING_RUNLOG.md`](docs/SME_COMPONENT_POOLING_RUNLOG.md) | The `(Material_Code, SAP_Code)` ruling, end to end |
 | [`docs/TABLE_TOOLS_RUNLOG.md`](docs/TABLE_TOOLS_RUNLOG.md) | `smartTable.tsx` and the four rules |

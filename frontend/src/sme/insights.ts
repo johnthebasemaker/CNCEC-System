@@ -13,6 +13,12 @@
  *                      never cascades; every scope assumes full stock)
  *   coverable SQM    = scope SQM × min(1, coverage/100)
  *   4-tier colors    = ≥100 green · ≥90 orange · ≥80 yellow · <80 red (_fc)
+ *
+ * 2026-08-03 STRICT TIER SEGREGATION. Every `coveragePct` / `canSqm` /
+ * `Coverage_Pct` here is PHYSICAL-stock only (`Available_Qty`); the
+ * forward-looking twins are published beside them as `coverageWithOrderedPct`
+ * / `canSqmWithOrdered`. `Shortfall` is the physical gap, `Net_Shortfall` the
+ * gap after on-order stock. Nothing here may merge the two into one number.
  */
 import { matKey, roundN, sapNorm, syscodeCompare, unitKey } from './engine'
 import type { SmeModel, SnapshotMaterial } from './engine'
@@ -121,9 +127,14 @@ export interface BalanceRow {
 export interface ScopeTotals {
   demand: number
   availCapped: number
+  /** PHYSICAL gap (demand − available). Drives procurement. */
   shortfall: number
+  /** Gap after on-order stock — what still has to be BOUGHT. */
   netShortfall: number
+  /** TIER 1 bottleneck coverage, 0–100. The readiness number. */
   coveragePct: number // 0–100, uncapped-at-0 demand → 100
+  /** TIER 1 + 2 bottleneck coverage. Forward-looking only. */
+  coverageWithOrderedPct: number
 }
 
 function materialMaps(materials: SnapshotMaterial[]) {
@@ -175,7 +186,32 @@ function unitBottleneckRate(
   for (const r of model.recipesByCode.get(u.code) ?? []) {
     const rowDemand = r.For_1_SQM * u.remaining
     if (rowDemand <= 0) continue
-    const rate = Math.min(1, (avail.get(r.Material_Code) ?? 0) / rowDemand)
+    // The pool maps are keyed by matKey() = `${Material_Code}|${SAP_Code}`.
+    // This looked up `r.Material_Code` alone, which NEVER matches a key, so
+    // every lookup fell through to 0 and this function returned 0 for any unit
+    // with a positive-demand recipe line — the whole Dashboard read 0%
+    // coverage. Introduced when the 2026-07-30 component ruling re-keyed the
+    // maps without re-keying this call site.
+    const rate = Math.min(1, (avail.get(r.Material_Key) ?? 0) / rowDemand)
+    if (rate < minRate) minRate = rate
+  }
+  return minRate
+}
+
+/** 2026-08-03 TIER SEGREGATION: the same bottleneck against PHYSICAL + ON
+ *  ORDER stock. Kept as a separate function (rather than a flag) so a caller
+ *  has to name which tier it wants and cannot get the forward-looking number
+ *  by accident. */
+function unitBottleneckRateWithOrdered(
+  model: SmeModel, u: UnitRef, avail: Map<string, number>,
+  ordered: Map<string, number>,
+): number {
+  let minRate = 1
+  for (const r of model.recipesByCode.get(u.code) ?? []) {
+    const rowDemand = r.For_1_SQM * u.remaining
+    if (rowDemand <= 0) continue
+    const pool = (avail.get(r.Material_Key) ?? 0) + (ordered.get(r.Material_Key) ?? 0)
+    const rate = Math.min(1, pool / rowDemand)
     if (rate < minRate) minRate = rate
   }
   return minRate
@@ -183,15 +219,22 @@ function unitBottleneckRate(
 
 function bottleneckScope(
   model: SmeModel, units: UnitRef[], avail: Map<string, number>,
-): { coveragePct: number; coverableSqm: number; totalSqm: number } {
-  let total = 0, coverable = 0
+  ordered: Map<string, number>,
+): {
+  coveragePct: number; coverableSqm: number; totalSqm: number
+  coverageWithOrderedPct: number; coverableWithOrderedSqm: number
+} {
+  let total = 0, coverable = 0, coverableOrd = 0
   for (const u of units) {
     total += u.remaining
     coverable += u.remaining * unitBottleneckRate(model, u, avail)
+    coverableOrd += u.remaining * unitBottleneckRateWithOrdered(model, u, avail, ordered)
   }
   return {
     coveragePct: total > 0 ? (coverable / total) * 100 : 100,
     coverableSqm: coverable, totalSqm: total,
+    coverageWithOrderedPct: total > 0 ? (coverableOrd / total) * 100 : 100,
+    coverableWithOrderedSqm: coverableOrd,
   }
 }
 
@@ -230,12 +273,13 @@ export function materialBalance(
   }
   // Scope coverage = strict bottleneck area ratio (NOT the qty-weighted
   // tAvail/tDemand average — that could report above the worst component).
-  const bs = bottleneckScope(model, units, avail)
+  const bs = bottleneckScope(model, units, avail, ordered)
   return {
     rows,
     totals: {
       demand: tDemand, availCapped: tAvail, shortfall: tShort, netShortfall: tNet,
       coveragePct: bs.coveragePct,
+      coverageWithOrderedPct: bs.coverageWithOrderedPct,
     },
   }
 }
@@ -253,18 +297,24 @@ export interface PairCoverage {
   code: string
   shortName: string
   sqm: number
+  /** TIER 1 — physical stock only. */
   coveragePct: number
   coverableSqm: number
+  /** Measured against PHYSICAL stock: what procurement has to close. */
   deficitSqm: number
+  /** TIER 1 + 2 — forward-looking. */
+  coverageWithOrderedPct: number
+  coverableWithOrderedSqm: number
 }
 
 export function pairCoverage(
   model: SmeModel, units: UnitRef[], materials: SnapshotMaterial[],
 ): PairCoverage[] {
-  const { avail } = materialMaps(materials)
+  const { avail, ordered } = materialMaps(materials)
   return units.map((u) => {
     // Strict bottleneck: the pair's coverage is its least-available material.
     const cov = unitBottleneckRate(model, u, avail) * 100
+    const covOrd = unitBottleneckRateWithOrdered(model, u, avail, ordered) * 100
     const coverable = roundN(u.remaining * (Math.min(cov, 100) / 100), 2)
     return {
       tag: u.tag, code: u.code, shortName: u.shortName,
@@ -272,6 +322,8 @@ export function pairCoverage(
       coveragePct: roundN(cov, 1),
       coverableSqm: coverable,
       deficitSqm: roundN(u.remaining - coverable, 2),
+      coverageWithOrderedPct: roundN(covOrd, 1),
+      coverableWithOrderedSqm: roundN(u.remaining * (Math.min(covOrd, 100) / 100), 2),
     }
   })
 }
@@ -283,9 +335,14 @@ export interface GroupCoverage {
   shortName?: string
   equipment: number
   sqm: number
+  /** TIER 1 — buildable today. */
   canSqm: number
+  /** sqm − canSqm, measured on PHYSICAL stock. */
   shortSqm: number
   coveragePct: number
+  /** TIER 1 + 2 — buildable once the POs land. */
+  canSqmWithOrdered: number
+  coverageWithOrderedPct: number
 }
 
 function groupCoverage(
@@ -306,14 +363,16 @@ export function locationRows(
   const groups = groupCoverage(units, (u) => u.location)
   return [...groups.keys()].sort().map((loc) => {
     const gu = groups.get(loc)!
-    const cov = scopeCoverage(model, gu, materials).coveragePct
+    const t = scopeCoverage(model, gu, materials)
     const sqm = gu.reduce((s, u) => s + u.remaining, 0)
-    const can = roundN(sqm * Math.min(1, cov / 100), 2)
+    const can = roundN(sqm * Math.min(1, t.coveragePct / 100), 2)
     return {
       key: loc, label: loc || '—',
       equipment: new Set(gu.map((u) => u.tag)).size,
       sqm: roundN(sqm, 2), canSqm: can, shortSqm: roundN(sqm - can, 2),
-      coveragePct: roundN(cov, 1),
+      coveragePct: roundN(t.coveragePct, 1),
+      canSqmWithOrdered: roundN(sqm * Math.min(1, t.coverageWithOrderedPct / 100), 2),
+      coverageWithOrderedPct: roundN(t.coverageWithOrderedPct, 1),
     }
   })
 }
@@ -324,14 +383,16 @@ export function systemCodeRows(
   const groups = groupCoverage(units, (u) => u.code)
   return [...groups.keys()].sort(syscodeCompare).map((code) => {
     const gu = groups.get(code)!
-    const cov = scopeCoverage(model, gu, materials).coveragePct
+    const t = scopeCoverage(model, gu, materials)
     const sqm = gu.reduce((s, u) => s + u.remaining, 0)
-    const can = roundN(sqm * Math.min(1, cov / 100), 2)
+    const can = roundN(sqm * Math.min(1, t.coveragePct / 100), 2)
     return {
       key: code, label: `Code ${code}`, shortName: gu[0]?.shortName ?? '',
       equipment: new Set(gu.map((u) => u.tag)).size,
       sqm: roundN(sqm, 2), canSqm: can, shortSqm: roundN(sqm - can, 2),
-      coveragePct: roundN(cov, 1),
+      coveragePct: roundN(t.coveragePct, 1),
+      canSqmWithOrdered: roundN(sqm * Math.min(1, t.coverageWithOrderedPct / 100), 2),
+      coverageWithOrderedPct: roundN(t.coverageWithOrderedPct, 1),
     }
   })
 }

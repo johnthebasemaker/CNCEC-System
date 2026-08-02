@@ -89,7 +89,19 @@ async def _ledger_kpi(session, table: str, site, dfrom, dto, pfrom, pto, afrom, 
 
 def _capacity_from_lines(model: dict, lines: list[dict]) -> tuple[list[dict], list[dict]]:
     """Achievable SQM under the current pool, strict-bottleneck per unit:
-    the LEAST-covered material's rate caps the whole (tag, code) unit."""
+    the LEAST-covered material's rate caps the whole (tag, code) unit.
+
+    2026-08-03 STRICT TIER SEGREGATION. `Achievable_SQM` is TIER 1 —
+    `Alloc_Available`, physical stock on the shelf. It was computed from
+    `Allocated_Qty` (physical PLUS on order), so the HOD Executive Summary card
+    headed "Achievable SQM with available material" counted drums that were
+    still on a truck, and the `/analytics/lining-coverage` page did the same.
+    The forward-looking figure is not lost — it rides alongside as
+    `Achievable_With_Ordered_SQM` / `Coverage_With_Ordered_Pct`.
+
+    The bottleneck material is still chosen on tier 1: the thing stopping work
+    today is the empty shelf, not the open PO.
+    """
     by_unit: dict[tuple[str, str], list[dict]] = {}
     for ln in lines:
         by_unit.setdefault((ln["Equipment_Tag_No"], ln["Lining_System_Code"]), []).append(ln)
@@ -100,30 +112,48 @@ def _capacity_from_lines(model: dict, lines: list[dict]) -> tuple[list[dict], li
         unit = model["units"][(tag, code)]
         remaining = float(unit["remaining"])
         min_rate, bottleneck = 1.0, None
+        min_rate_ord = 1.0
         for r in rows:
-            rate = min(max(r["Allocated_Qty"] / r["Demand_Qty"], 0.0), 1.0) \
+            rate = min(max(r["Alloc_Available"] / r["Demand_Qty"], 0.0), 1.0) \
                 if r["Demand_Qty"] > 0 else 1.0
             if rate < min_rate:
                 min_rate, bottleneck = rate, r
+            rate_o = min(max(r["Allocated_Qty"] / r["Demand_Qty"], 0.0), 1.0) \
+                if r["Demand_Qty"] > 0 else 1.0
+            if rate_o < min_rate_ord:
+                min_rate_ord = rate_o
         achievable = round(min_rate * remaining, 2)
+        achievable_ord = round(min_rate_ord * remaining, 2)
         e = per_equipment.setdefault(tag, {
             "Equipment_Tag": tag,
             "Name": model["tag_meta"].get(tag, {}).get("Name", ""),
-            "Remaining_SQM": 0.0, "Achievable_SQM": 0.0, "Bottleneck": ""})
+            "Remaining_SQM": 0.0, "Achievable_SQM": 0.0,
+            "Achievable_With_Ordered_SQM": 0.0, "Bottleneck": ""})
         e["Remaining_SQM"] += remaining
         e["Achievable_SQM"] += achievable
-        if bottleneck is not None and bottleneck["Shortfall_Qty"] > 0 and not e["Bottleneck"]:
+        e["Achievable_With_Ordered_SQM"] += achievable_ord
+        # The blocker is whatever is missing from the SHELF (physical gap), not
+        # whatever is left to buy — a fully-ordered material still blocks today.
+        if (bottleneck is not None
+                and bottleneck["Shortfall_Available_Qty"] > 0
+                and not e["Bottleneck"]):
             e["Bottleneck"] = f'{bottleneck["Material_Code"]} ({bottleneck["Material_Name"]})'
         s = per_system.setdefault(code, {
             "System_Code": code, "System_Name": unit.get("short_name", ""),
-            "Remaining_SQM": 0.0, "Achievable_SQM": 0.0})
+            "Remaining_SQM": 0.0, "Achievable_SQM": 0.0,
+            "Achievable_With_Ordered_SQM": 0.0})
         s["Remaining_SQM"] += remaining
         s["Achievable_SQM"] += achievable
+        s["Achievable_With_Ordered_SQM"] += achievable_ord
 
     def _fin(d: dict) -> dict:
         rem, ach = round(d["Remaining_SQM"], 2), round(d["Achievable_SQM"], 2)
+        acho = round(d["Achievable_With_Ordered_SQM"], 2)
         return {**d, "Remaining_SQM": rem, "Achievable_SQM": ach,
-                "Coverage_Pct": round(ach / rem * 100.0, 1) if rem > 0 else 100.0}
+                "Achievable_With_Ordered_SQM": acho,
+                "Coverage_Pct": round(ach / rem * 100.0, 1) if rem > 0 else 100.0,
+                "Coverage_With_Ordered_Pct":
+                    round(acho / rem * 100.0, 1) if rem > 0 else 100.0}
 
     eq = sorted((_fin(v) for v in per_equipment.values()),
                 key=lambda r: r["Equipment_Tag"])
@@ -409,10 +439,16 @@ async def executive_summary_xlsx(date_from: str | None = Query(None),
          ["DN_Number", "PO_Number", "Warehouse_ID", "Site_ID", "status", "DN_Date", "Vehicle_No", "Driver_Name"])),
         ("Upcoming Deliveries", *tab(d["delivery_plan"]["upcoming_deliveries"],
          ["PO_Number", "Warehouse_ID", "Expected_Delivery", "status", "Site_ID", "Vendor_Name"])),
+        # Achievable_SQM is PHYSICAL stock; the "…_With_Ordered" columns are the
+        # forecast once open POs land (2026-08-03 tier segregation).
         ("Capacity per Equipment", *tab(d["sqm_capacity"]["per_equipment"],
-         ["Equipment_Tag", "Name", "Remaining_SQM", "Achievable_SQM", "Coverage_Pct", "Bottleneck"])),
+         ["Equipment_Tag", "Name", "Remaining_SQM", "Achievable_SQM",
+          "Achievable_With_Ordered_SQM", "Coverage_Pct",
+          "Coverage_With_Ordered_Pct", "Bottleneck"])),
         ("Capacity per System", *tab(d["sqm_capacity"]["per_system"],
-         ["System_Code", "System_Name", "Remaining_SQM", "Achievable_SQM", "Coverage_Pct"])),
+         ["System_Code", "System_Name", "Remaining_SQM", "Achievable_SQM",
+          "Achievable_With_Ordered_SQM", "Coverage_Pct",
+          "Coverage_With_Ordered_Pct"])),
         ("Cross-Site", *tab(d["cross_site"],
          ["id", "requesting_site", "target_site", "SAP_Code", "requested_qty", "available_qty", "status", "requested_by", "created"])),
     ]

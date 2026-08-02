@@ -296,24 +296,33 @@ export default function ExecutiveSummaryPage() {
 
             {/* ── SME capacity ──────────────────────────────────────── */}
             <Col xs={24} xl={12}>
-              <Card size="small" title="Achievable SQM with available material — per equipment">
+              {/* 2026-08-03 tier segregation: "Achievable" is stock ON HAND.
+                  It used to be computed from Allocated_Qty (physical + on
+                  order), so this card counted drums still on a truck. */}
+              <Card size="small" title="Achievable SQM with stock ON HAND — per equipment">
                 <SectionTable rows={d.sqm_capacity.per_equipment} empty="No SME model for this site"
                   columns={[col('Equipment', 'Equipment_Tag'), col('Name', 'Name'),
-                    col('Remaining SQM', 'Remaining_SQM'), col('Achievable SQM', 'Achievable_SQM'),
-                    { title: 'Coverage', dataIndex: 'Coverage_Pct',
+                    col('Remaining SQM', 'Remaining_SQM'),
+                    col('Achievable now', 'Achievable_SQM'),
+                    col('With ordered', 'Achievable_With_Ordered_SQM'),
+                    { title: 'Coverage now', dataIndex: 'Coverage_Pct',
                       render: (v) => <Progress percent={Number(v) || 0} size="small"
                         status={Number(v) >= 100 ? 'success' : Number(v) > 0 ? 'active' : 'exception'} /> },
+                    col('With ordered %', 'Coverage_With_Ordered_Pct'),
                     col('Bottleneck material', 'Bottleneck')]} />
               </Card>
             </Col>
             <Col xs={24} xl={12}>
-              <Card size="small" title="Achievable SQM — per system code">
+              <Card size="small" title="Achievable SQM with stock ON HAND — per system code">
                 <SectionTable rows={d.sqm_capacity.per_system} empty="No SME model for this site"
                   columns={[col('System', 'System_Code'), col('Name', 'System_Name'),
-                    col('Remaining SQM', 'Remaining_SQM'), col('Achievable SQM', 'Achievable_SQM'),
-                    { title: 'Coverage', dataIndex: 'Coverage_Pct',
+                    col('Remaining SQM', 'Remaining_SQM'),
+                    col('Achievable now', 'Achievable_SQM'),
+                    col('With ordered', 'Achievable_With_Ordered_SQM'),
+                    { title: 'Coverage now', dataIndex: 'Coverage_Pct',
                       render: (v) => <Progress percent={Number(v) || 0} size="small"
-                        status={Number(v) >= 100 ? 'success' : Number(v) > 0 ? 'active' : 'exception'} /> }]} />
+                        status={Number(v) >= 100 ? 'success' : Number(v) > 0 ? 'active' : 'exception'} /> },
+                    col('With ordered %', 'Coverage_With_Ordered_Pct')]} />
               </Card>
             </Col>
 

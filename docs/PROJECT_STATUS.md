@@ -244,6 +244,15 @@ _Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
   covered. `Material_Name + UOM` is NOT a usable discriminator (all four PU
   recipe rows share both). SAP codes are whitespace-normalized on both
   sides of every join (`"1043 - 2"` ≡ `"1043-2"`).
+- **STRICT TIER SEGREGATION (2026-08-03):** readiness is TIER 1 only.
+  `Alloc_Available` drives `Status`, `Completion_Pct`, `SQM_Achievable_Now`,
+  `Coverage_Now_Pct` and `Fulfillment_Pct`; `Alloc_Ordered` drives ONLY the
+  `*_With_Ordered_*` twins and the net buy list. `Allocated_Qty` (both tiers) is
+  a conservation field — dividing it by `Demand_Qty` is NOT a coverage figure.
+  The engine always obeyed this; six presentation layers did not, which made 18
+  of 85 units show a green "100% Fully Ready" pill and overstated buildable area
+  by 9,118 m² (21.5%). Suite **BB** + `sme-tiers.spec.ts`; see
+  `docs/SME_TIER_SEGREGATION_RUNLOG.md`.
 - **STRICT DECOUPLING (2026-08-02, supersedes the on-order netting):** the SME
   estimator is a separate pool from the ERP warehouse. `available_qty` **is**
   `Initial_Available_Qty` and `ordered_qty` **is** `Initial_Ordered_Qty`, both

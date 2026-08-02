@@ -388,6 +388,7 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\u2705 100% Fully Ready to Build",
         "Bottleneck_Material_Code": "\u2014",
         "Bottleneck_SAP_Code": "\u2014",
@@ -405,6 +406,7 @@
         "Total_Shortfall_Qty": 25.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 16.67,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\ud83d\udfe1 Partially Ready (16.7%)",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
@@ -422,6 +424,7 @@
         "Total_Shortfall_Qty": 16.0,
         "Total_Net_Shortfall_Qty": 5.0,
         "Completion_Pct": 0.0,
+        "Completion_With_Ordered_Pct": 0.0,
         "Status": "\ud83d\udd34 Blocked by Shortages",
         "Bottleneck_Material_Code": "M5",
         "Bottleneck_SAP_Code": "S5",
@@ -439,6 +442,7 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\u2705 100% Fully Ready to Build",
         "Bottleneck_Material_Code": "\u2014",
         "Bottleneck_SAP_Code": "\u2014",
@@ -456,6 +460,7 @@
         "Total_Shortfall_Qty": 100.0,
         "Total_Net_Shortfall_Qty": 70.0,
         "Completion_Pct": 20.0,
+        "Completion_With_Ordered_Pct": 50.0,
         "Status": "\ud83d\udfe1 Partially Ready (20.0%)",
         "Bottleneck_Material_Code": "M7",
         "Bottleneck_SAP_Code": "77-2",
@@ -628,6 +633,7 @@
         "SQM_Achievable_With_Ordered": 15.0,
         "SQM_Deficit": 0.0,
         "Coverage_Now_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       },
       {
@@ -642,6 +648,7 @@
         "SQM_Achievable_With_Ordered": 0.0,
         "SQM_Deficit": 0.0,
         "Coverage_Now_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       },
       {
@@ -656,6 +663,7 @@
         "SQM_Achievable_With_Ordered": 30.0,
         "SQM_Deficit": 25.0,
         "Coverage_Now_Pct": 16.67,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       },
       {
@@ -670,6 +678,7 @@
         "SQM_Achievable_With_Ordered": 0.0,
         "SQM_Deficit": 5.0,
         "Coverage_Now_Pct": 0.0,
+        "Coverage_With_Ordered_Pct": 0.0,
         "Has_Recipe": true
       },
       {
@@ -684,6 +693,7 @@
         "SQM_Achievable_With_Ordered": 8.0,
         "SQM_Deficit": 8.0,
         "Coverage_Now_Pct": 0.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       },
       {
@@ -698,6 +708,7 @@
         "SQM_Achievable_With_Ordered": 0.0,
         "SQM_Deficit": 0.0,
         "Coverage_Now_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       },
       {
@@ -712,6 +723,7 @@
         "SQM_Achievable_With_Ordered": 0.0,
         "SQM_Deficit": 12.0,
         "Coverage_Now_Pct": 0.0,
+        "Coverage_With_Ordered_Pct": 0.0,
         "Has_Recipe": false
       },
       {
@@ -726,6 +738,7 @@
         "SQM_Achievable_With_Ordered": 50.0,
         "SQM_Deficit": 80.0,
         "Coverage_Now_Pct": 20.0,
+        "Coverage_With_Ordered_Pct": 50.0,
         "Has_Recipe": true
       }
     ],
@@ -742,6 +755,7 @@
         "SQM_Deficit": 5.0,
         "Equipment_Tags": "TK-C",
         "Coverage_Now_Pct": 0.0,
+        "Coverage_With_Ordered_Pct": 0.0,
         "Blocking_Materials": [
           {
             "Material_Code": "M5",
@@ -768,6 +782,7 @@
         "SQM_Deficit": 80.0,
         "Equipment_Tags": "TK-E",
         "Coverage_Now_Pct": 20.0,
+        "Coverage_With_Ordered_Pct": 50.0,
         "Blocking_Materials": [
           {
             "Material_Code": "M7",
@@ -816,6 +831,7 @@
         "SQM_Deficit": 25.0,
         "Equipment_Tags": "TK-A, TK-B, TK-D",
         "Coverage_Now_Pct": 44.44,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Blocking_Materials": [
           {
             "Material_Code": "M2",
@@ -842,6 +858,7 @@
         "SQM_Deficit": 0.0,
         "Equipment_Tags": "TK-A",
         "Coverage_Now_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Blocking_Materials": []
       },
       {
@@ -856,6 +873,7 @@
         "SQM_Deficit": 12.0,
         "Equipment_Tags": "TK-D",
         "Coverage_Now_Pct": 0.0,
+        "Coverage_With_Ordered_Pct": 0.0,
         "Blocking_Materials": []
       },
       {
@@ -870,6 +888,7 @@
         "SQM_Deficit": 8.0,
         "Equipment_Tags": "TK-C",
         "Coverage_Now_Pct": 0.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Blocking_Materials": [
           {
             "Material_Code": "M2",
@@ -937,6 +956,7 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\u2705 100% Fully Ready to Build",
         "Bottleneck_Material_Code": "\u2014",
         "Bottleneck_SAP_Code": "\u2014",
@@ -955,6 +975,7 @@
         "Total_Shortfall_Qty": 12.0,
         "Total_Net_Shortfall_Qty": 5.0,
         "Completion_Pct": 0.0,
+        "Completion_With_Ordered_Pct": 0.0,
         "Status": "\ud83d\udd34 Blocked by Shortages",
         "Bottleneck_Material_Code": "M5",
         "Bottleneck_SAP_Code": "S5",
@@ -973,6 +994,7 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\u2705 100% Fully Ready to Build",
         "Bottleneck_Material_Code": "\u2014",
         "Bottleneck_SAP_Code": "\u2014",
@@ -991,6 +1013,7 @@
         "Total_Shortfall_Qty": 100.0,
         "Total_Net_Shortfall_Qty": 70.0,
         "Completion_Pct": 20.0,
+        "Completion_With_Ordered_Pct": 50.0,
         "Status": "\ud83d\udfe1 Partially Ready (20.0%)",
         "Bottleneck_Material_Code": "M7",
         "Bottleneck_SAP_Code": "77-2",
@@ -1163,6 +1186,7 @@
         "Total_Shortfall_Qty": 10.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 66.67,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\ud83d\udfe1 Partially Ready (66.7%)",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
@@ -1180,6 +1204,7 @@
         "Total_Shortfall_Qty": 15.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 0.0,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\ud83d\udd34 Blocked by Shortages",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
@@ -1239,6 +1264,7 @@
         "SQM_Achievable_With_Ordered": 30.0,
         "SQM_Deficit": 10.0,
         "Coverage_Now_Pct": 66.67,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       },
       {
@@ -1253,6 +1279,7 @@
         "SQM_Achievable_With_Ordered": 15.0,
         "SQM_Deficit": 15.0,
         "Coverage_Now_Pct": 0.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       },
       {
@@ -1267,6 +1294,7 @@
         "SQM_Achievable_With_Ordered": 0.0,
         "SQM_Deficit": 0.0,
         "Coverage_Now_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Has_Recipe": true
       }
     ],
@@ -1283,6 +1311,7 @@
         "SQM_Deficit": 25.0,
         "Equipment_Tags": "TK-B, TK-A",
         "Coverage_Now_Pct": 44.44,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Blocking_Materials": [
           {
             "Material_Code": "M2",
@@ -1309,6 +1338,7 @@
         "SQM_Deficit": 0.0,
         "Equipment_Tags": "TK-A",
         "Coverage_Now_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 100.0,
         "Blocking_Materials": []
       }
     ],
@@ -1344,6 +1374,7 @@
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
+        "Completion_With_Ordered_Pct": 100.0,
         "Status": "\u2705 100% Fully Ready to Build",
         "Bottleneck_Material_Code": "\u2014",
         "Bottleneck_SAP_Code": "\u2014",

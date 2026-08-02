@@ -64,6 +64,33 @@ export default async function globalSetup() {
   psql("INSERT INTO app_settings (key, value) VALUES ('require_entry_documents','0') "
        + "ON CONFLICT (key) DO UPDATE SET value='0'", E2E_DB)
 
+  // ── 1c. the SME tier-segregation fixture (sme-tiers.spec.ts) ─────────────
+  // A purpose-built copy of the PHENACIN ACP POWDER shape that produced the
+  // 2026-08-03 bug report: a material with ZERO stock on the shelf and MORE
+  // than enough on an open purchase order. The portal used to render this as
+  // a green "100% Fully Ready" pill. One tag, one system code, two materials:
+  //   E2ETIER-ACP  0 available / 5000 on order   ← the blocker
+  //   E2ETIER-OK   500 available / 0 on order
+  // 100 m² remaining at 1.0 per m² each, so "ready now" is exactly 0% and
+  // "with ordered" is exactly 100% — unambiguous to assert on.
+  psql(
+    "INSERT INTO sme_inventory_seed (\"Material_Code\", \"SAP_Code\", "
+    + "\"Material_Name\", \"UOM\", \"Initial_Available_Qty\", \"Initial_Ordered_Qty\") "
+    + "VALUES ('E2ETIER-ACP','E2E-1','E2E ACP Powder','KG',0,5000), "
+    + "('E2ETIER-OK','E2E-2','E2E Stocked Material','KG',500,0) "
+    + "ON CONFLICT (\"Material_Code\", \"SAP_Code\") DO UPDATE "
+    + "SET \"Initial_Available_Qty\" = excluded.\"Initial_Available_Qty\", "
+    + "\"Initial_Ordered_Qty\" = excluded.\"Initial_Ordered_Qty\"", E2E_DB)
+  psql(
+    "INSERT INTO sme_recipe (\"Lining_System_Code\", \"Lining_System_Name\", "
+    + "\"Material_Code\", \"SAP_Code\", \"Material_Name\", \"UOM\", \"For_1_SQM\") "
+    + "VALUES ('9101','E2E TIER','E2ETIER-ACP','E2E-1','E2E ACP Powder','KG',1.0), "
+    + "('9101','E2E TIER','E2ETIER-OK','E2E-2','E2E Stocked Material','KG',1.0)", E2E_DB)
+  psql(
+    "INSERT INTO sme_equipment (\"Site_ID\", \"Equipment_Tag_No\", \"Name\", "
+    + "\"Location\", \"Lining_System_Code\", \"Surface_Area_SQM\") "
+    + "VALUES ('CNCEC','E2E-TIER-TANK','E2E tier probe tank','TRAIN J','9101',100)", E2E_DB)
+
   // ── 2. known passwords for the role users (throwaway DB only) ────────────
   const resetScript = [
     'import bcrypt, sys',
