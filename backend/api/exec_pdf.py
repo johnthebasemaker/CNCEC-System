@@ -346,18 +346,24 @@ def render_exec_pdf(d: dict, *, site: str | None, username: str) -> bytes:
                    ["PO_Number", "Warehouse_ID", "Expected_Delivery", "status",
                     "Site_ID", "Vendor_Name"]),
            sub=f'expected up to {d["delivery_plan"]["window_to"]}')
-    _table(pdf, "Achievable SQM per Equipment (available material)",
+    # "Achievable" is PHYSICAL stock (tier 1); "Ordered" is the forecast once
+    # open POs land. They are separate columns and never summed together.
+    _table(pdf, "Achievable SQM per Equipment (stock ON HAND)",
            ["Equipment_Tag", "Name", "Remaining_SQM", "Achievable_SQM",
-            "Coverage_Pct", "Bottleneck"],
+            "Ordered_SQM", "Coverage_Pct", "Ordered_Pct", "Bottleneck"],
            rows_of(d["sqm_capacity"]["per_equipment"],
                    ["Equipment_Tag", "Name", "Remaining_SQM", "Achievable_SQM",
-                    "Coverage_Pct", "Bottleneck"]),
-           sub="SME engine, read-only - strict bottleneck: the least-covered material caps each unit")
-    _table(pdf, "Achievable SQM per System Code",
-           ["System_Code", "System_Name", "Remaining_SQM", "Achievable_SQM", "Coverage_Pct"],
+                    "Achievable_With_Ordered_SQM", "Coverage_Pct",
+                    "Coverage_With_Ordered_Pct", "Bottleneck"]),
+           sub="SME engine, read-only - strict bottleneck on PHYSICAL stock; "
+               "'Ordered' columns add stock on open purchase orders (forecast only)")
+    _table(pdf, "Achievable SQM per System Code (stock ON HAND)",
+           ["System_Code", "System_Name", "Remaining_SQM", "Achievable_SQM",
+            "Ordered_SQM", "Coverage_Pct", "Ordered_Pct"],
            rows_of(d["sqm_capacity"]["per_system"],
                    ["System_Code", "System_Name", "Remaining_SQM", "Achievable_SQM",
-                    "Coverage_Pct"]))
+                    "Achievable_With_Ordered_SQM", "Coverage_Pct",
+                    "Coverage_With_Ordered_Pct"]))
     _table(pdf, "Cross-Site Enquiries",
            ["id", "requesting_site", "target_site", "SAP_Code", "requested_qty",
             "available_qty", "status", "requested_by", "created"],

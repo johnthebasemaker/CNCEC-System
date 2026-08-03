@@ -785,10 +785,16 @@ async def plan_export(body: PlanExportBody,
         fname = legacy_filename(
             f"location_report_{_fname_part(scope.lower().replace(' ', '_'))}", uname, fmt)
         if fmt == "xlsx":  # legacy workbook: main alloc table + 3 summary blocks
+            # 2026-08-03 STRICT TIER SEGREGATION: the single `Allocated_Qty`
+            # column summed physical stock and stock on order, and sat beside a
+            # physical-only Fulfillment_Pct. Split into the two tiers plus both
+            # gaps, so a reader can never mistake an open PO for a full shelf.
             cols = ["Equipment_Tag_No", "Lining_System_Code",
                     "Lining_System_Short_Name", "Total_SQM", "Material_Code",
-                    "Material_Name", "UOM", "Demand_Qty", "Allocated_Qty",
-                    "Shortfall_Qty", "Fulfillment_Pct"]
+                    "SAP_Code", "Material_Name", "UOM", "Demand_Qty",
+                    "Alloc_Available", "Alloc_Ordered",
+                    "Shortfall_Available_Qty", "Shortfall_Qty",
+                    "Fulfillment_Pct", "Fulfillment_With_Ordered_Pct"]
             data = location_report_xlsx(
                 [{"name": scope, "title": body.title or title,
                   "color_scheme": loc_scheme(loc or None),
@@ -1238,24 +1244,31 @@ async def sme_export_rows(body: RowsExportBody,
                                       f'attachment; filename="{stem}.{fmt}"'})
 
 
-# ─── Smart Calculator (2026-07-18 · multi-system + material-pooled stock) ────
+# ─── Smart Calculator (2026-07-18 · multi-system, per-COMPONENT stock) ───────
 # "System codes + target SQM(s) → segregated material list with explanations."
 # Pure recipe math (demand = For_1_SQM × SQM — the CNCEC prediction project's
-# model) enriched with SME stock. Availability is pooled per Material_Code: one
-# material code can carry several variant SAP codes (the Excel-injection
-# identity rule), so stock is summed over EVERY variant SAP sharing the line's
-# Material_Code — SAP strings are whitespace-normalized on both sides because
-# the workbook carries entries like "1043 - 2". The SAP code stays in the
-# payload as an internal id; the UI displays the Material Code.
-# NOTE: component lines sharing one Material_Code (PU Comp-A/B/C/D) keep their
-# own demand rows but read the SAME pooled stock figure.
+# model) enriched with SME stock.
+#
+# 2026-08-04 COMPONENT IDENTITY (overturns the 2026-07-18 Material_Code pooling
+# rule for this endpoint, on explicit operator authorization). Stock is keyed on
+# **(Material_Code, SAP_Code)**, exactly like the estimator engine's
+# `mat_key()`. It used to be summed over EVERY variant SAP sharing a
+# Material_Code, so the four Comp-A/B/C/D drums of a multi-part system each read
+# the SAME pooled figure — the identical clumping that locked rule 1 removed
+# from the rest of the module: a calculator line could report a component as
+# covered out of a sibling's stock that is a different drum on a different
+# shelf, and conversely mark a well-stocked component short.
+#
+# SAP strings are whitespace-normalized on BOTH sides of the join (`sap_norm()`
+# in Python, `REPLACE(TRIM(...), ' ', '')` here) because the workbook and the
+# ERP both write the same variant as "1043-2" and "1043 - 2".
 #
 # 2026-08-02 STRICT DECOUPLING: this pool was built from the ERP ledger
 # (Σreceipts − Σconsumption − Σreturns, gated on a SAP existing in the ERP
-# `inventory` master). It is now `sme_inventory_seed.Initial_Available_Qty`.
-# `stock` stays NULL — meaning "unknown", which the UI renders as no stock
-# column rather than a confident zero — when the recipe's SAPs have no seed row
-# at all; `known_saps` counts the SAPs the SME master actually knows.
+# `inventory` master). It is now `sme_inventory_seed` only.
+#
+# `stock` stays NULL — meaning "unknown", which the UI renders as "—" rather
+# than a confident zero — when that exact component has no seed row.
 
 _CALC_POOL_SQL = text('''
     WITH mats AS (
@@ -1265,19 +1278,21 @@ _CALC_POOL_SQL = text('''
         WHERE TRIM("Material_Code") = ANY(:mats) AND "SAP_Code" IS NOT NULL
     ),
     seed AS (
-        SELECT REPLACE(TRIM("SAP_Code"), ' ', '') AS sap,
-               SUM(COALESCE("Initial_Available_Qty", 0)) AS stock
+        -- One row per PHYSICAL component. The SUM collapses only genuine
+        -- duplicates of the SAME (code, SAP) pair, never two components.
+        SELECT TRIM("Material_Code") AS mat,
+               REPLACE(TRIM("SAP_Code"), ' ', '') AS sap,
+               SUM(COALESCE("Initial_Available_Qty", 0)) AS stock,
+               SUM(COALESCE("Initial_Ordered_Qty", 0))   AS on_order
         FROM sme_inventory_seed
         WHERE TRIM(COALESCE("SAP_Code", '')) <> ''
-        GROUP BY REPLACE(TRIM("SAP_Code"), ' ', '')
+        GROUP BY TRIM("Material_Code"), REPLACE(TRIM("SAP_Code"), ' ', '')
     )
-    SELECT m.mat,
-           SUM(CASE WHEN s.sap IS NOT NULL THEN s.stock END) AS stock,
-           COUNT(s.sap) AS known_saps,
-           COUNT(*)     AS pool_saps
+    SELECT m.mat, m.sap,
+           s.stock    AS stock,
+           s.on_order AS on_order
     FROM mats m
-    LEFT JOIN seed s ON s.sap = m.sap
-    GROUP BY m.mat''')
+    LEFT JOIN seed s ON s.sap = m.sap AND s.mat = m.mat''')
 
 
 @router.get("/calculator", summary="Smart Calculator — materials for target "
@@ -1334,21 +1349,28 @@ async def smart_calculator(code: Optional[str] = None,
         raise HTTPException(404, "no recipe lines for system code(s) "
                             + ", ".join(repr(c) for c in unknown))
 
-    # -- material-pooled live stock: Σ ledger over every variant SAP that
-    #    shares each line's Material_Code (whitespace-normalized match) --
+    # -- per-COMPONENT SME stock, keyed (Material_Code, SAP_Code) --
+    # 2026-08-04: this used to key on Material_Code alone and sum every variant
+    # SAP under it, so four unlike drums shared one figure. The key is now the
+    # engine's own component identity; `sap_norm` matches the SQL's
+    # REPLACE(TRIM(...)) on both sides, so a recipe "1043-2" finds a seed row
+    # written "1043 - 2".
     mats = sorted({str(x["Material_Code"]).strip() for x in rows
                    if x["Material_Code"] and str(x["Material_Code"]).strip()})
     pool: dict[str, dict] = {}
     if mats:
-        pool = {p.mat: {"stock": (float(p.stock) if p.stock is not None else None),
-                        "saps": int(p.pool_saps)}
+        pool = {sme_engine.mat_key(p.mat, p.sap): {
+                    "stock": (float(p.stock) if p.stock is not None else None),
+                    "on_order": (float(p.on_order) if p.on_order is not None else None)}
                 for p in (await session.execute(_CALC_POOL_SQL,
                                                 {"mats": mats})).all()}
 
     def _mk_line(x, target: float) -> dict:
         per = float(x["For_1_SQM"] or 0)
         required = sme_engine.round_n(per * target, 4)
-        sap = str(x["SAP_Code"] or "").strip() or None
+        # The SAP is normalized the same way everywhere in the module, so the
+        # payload, the aggregation key and the stock lookup all agree.
+        sap = sme_engine.sap_norm(x["SAP_Code"]) or None
         mat = str(x["Material_Code"] or "").strip() or None
         uom = (x["UOM"] or "").strip()
         try:
@@ -1357,26 +1379,41 @@ async def smart_calculator(code: Optional[str] = None,
             pkg = None
         packages = (int(-(-required // pkg)) if pkg and pkg > 0 and required > 0
                     else None)
-        p = pool.get(mat) if mat else None
+        p = pool.get(sme_engine.mat_key(mat, sap)) if mat else None
         available = p["stock"] if p else None
-        pooled = p["saps"] if p else 0
+        on_order = p["on_order"] if p else None
+        # 2026-08-03 STRICT TIER SEGREGATION: `shortfall_qty` stays the PHYSICAL
+        # gap (what blocks the job today); `net_shortfall_qty` is what is left
+        # to BUY once stock already on order is counted. Two fields, never one.
         short = (sme_engine.round_n(max(required - available, 0.0), 4)
                  if available is not None else None)
+        net_short = (sme_engine.round_n(
+            max(required - available - (on_order or 0.0), 0.0), 4)
+            if available is not None else None)
         expl = f"{per:g} {uom or 'unit'}/SQM × {target:g} SQM = {required:g} {uom}".strip()
         if packages:
             expl += f" → {packages} × {pkg:g} {uom} pack(s)"
         if available is not None:
             expl += f" · in stock: {available:g}"
-            if pooled > 1:
-                expl += f" (Σ {pooled} SAP variants)"
-            expl += f" (short {short:g})" if short else " ✓"
+            if short:
+                expl += f" (short {short:g}"
+                expl += (f", {net_short:g} to buy after {on_order:g} on order)"
+                         if on_order else ")")
+            else:
+                expl += " ✓"
         return {"sap_code": sap, "material_code": mat,
                 "component": (x["Material_Description"] or "").strip(),
                 "material_name": (x["Material_Name"] or "").strip(),
                 "uom": uom, "for_1_sqm": per, "required_qty": required,
                 "package_size": pkg, "packages_needed": packages,
-                "available_stock": available, "pooled_saps": pooled,
-                "shortfall_qty": short, "explanation": expl}
+                "available_stock": available, "ordered_stock": on_order,
+                # `pooled_saps` is retained at 1 for payload compatibility: as
+                # of 2026-08-04 a line's stock is its OWN component's, never a
+                # pool, so there is nothing left to count. Kept rather than
+                # dropped so an older cached bundle does not render `undefined`.
+                "pooled_saps": 1,
+                "shortfall_qty": short, "net_shortfall_qty": net_short,
+                "explanation": expl}
 
     systems: list[dict] = []
     agg: dict[tuple, dict] = {}
@@ -1396,7 +1433,13 @@ async def smart_calculator(code: Optional[str] = None,
             "totals": {"line_count": len(lines),
                        "shortfall_lines": shortfall_lines}})
         for ln in lines:                    # cross-system material aggregation
-            key = (ln["material_code"], ln["sap_code"], ln["component"])
+            # 2026-08-04 COMPONENT IDENTITY: the key is (Material_Code,
+            # SAP_Code) — the physical drum — matching the engine's mat_key()
+            # and `_material_demand_rows`. `component` (the recipe's
+            # Material_Description) used to ride in the key, which could split
+            # ONE drum into two aggregate rows when two systems described it
+            # differently; the first description still labels the row.
+            key = sme_engine.mat_key(ln["material_code"], ln["sap_code"])
             a = agg.setdefault(key, {
                 "material_code": ln["material_code"], "sap_code": ln["sap_code"],
                 "component": ln["component"],
@@ -1404,8 +1447,10 @@ async def smart_calculator(code: Optional[str] = None,
                 "required_qty": 0.0, "package_size": ln["package_size"],
                 "packages_needed": None,
                 "available_stock": ln["available_stock"],
-                "pooled_saps": ln["pooled_saps"],
-                "shortfall_qty": None, "systems": [], "explanation": ""})
+                "ordered_stock": ln["ordered_stock"],
+                "pooled_saps": 1,
+                "shortfall_qty": None, "net_shortfall_qty": None,
+                "systems": [], "explanation": ""})
             a["required_qty"] = sme_engine.round_n(
                 a["required_qty"] + ln["required_qty"], 4)
             if a["package_size"] is None:
@@ -1416,10 +1461,15 @@ async def smart_calculator(code: Optional[str] = None,
     agg_lines, agg_short = [], 0
     for a in agg.values():
         req, pkg, avail = a["required_qty"], a["package_size"], a["available_stock"]
+        on_order = a["ordered_stock"]
         a["packages_needed"] = (int(-(-req // pkg))
                                 if pkg and pkg > 0 and req > 0 else None)
+        # PHYSICAL gap vs NET gap, kept apart (2026-08-03 tier segregation).
         a["shortfall_qty"] = (sme_engine.round_n(max(req - avail, 0.0), 4)
                               if avail is not None else None)
+        a["net_shortfall_qty"] = (sme_engine.round_n(
+            max(req - avail - (on_order or 0.0), 0.0), 4)
+            if avail is not None else None)
         if a["shortfall_qty"]:
             agg_short += 1
         uom = a["uom"]
@@ -1429,10 +1479,12 @@ async def smart_calculator(code: Optional[str] = None,
             expl += f" → {a['packages_needed']} × {pkg:g} {uom} pack(s)"
         if avail is not None:
             expl += f" · in stock: {avail:g}"
-            if a["pooled_saps"] > 1:
-                expl += f" (Σ {a['pooled_saps']} SAP variants)"
-            expl += (f" (short {a['shortfall_qty']:g})"
-                     if a["shortfall_qty"] else " ✓")
+            if a["shortfall_qty"]:
+                expl += f" (short {a['shortfall_qty']:g}"
+                expl += (f", {a['net_shortfall_qty']:g} to buy after "
+                         f"{on_order:g} on order)" if on_order else ")")
+            else:
+                expl += " ✓"
         a["explanation"] = expl
         agg_lines.append(a)
 

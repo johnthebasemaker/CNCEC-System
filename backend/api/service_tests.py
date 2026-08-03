@@ -4595,22 +4595,42 @@ async def test_executive_summary():
     # SME capacity rollup — synthetic model, strict-bottleneck expectation:
     # unit remaining 100 SQM, two materials at 50% and 100% coverage → the
     # 50% material caps achievable at 50 SQM.
+    #
+    # 2026-08-03 STRICT TIER SEGREGATION: M-A is HALF on the shelf and half on
+    # an open PO. Achievable_SQM must read the SHELF half only (50 SQM); the
+    # full 100 SQM appears solely as Achievable_With_Ordered_SQM. This function
+    # divided Allocated_Qty (both tiers) by demand, which is exactly how the
+    # HOD Executive Summary card headed "with available material" came to count
+    # drums that were still on a truck.
     model = {"units": {("TK-1", "1"): {"remaining": 100.0, "short_name": "CBL30"}},
              "tag_meta": {"TK-1": {"Name": "Tank 1"}}}
     lines = [
         {"Equipment_Tag_No": "TK-1", "Lining_System_Code": "1", "Material_Code": "M-A",
-         "Material_Name": "Mat A", "Demand_Qty": 200.0, "Allocated_Qty": 100.0,
-         "Shortfall_Qty": 100.0},
+         "Material_Name": "Mat A", "Demand_Qty": 200.0,
+         "Alloc_Available": 100.0, "Alloc_Ordered": 100.0, "Allocated_Qty": 200.0,
+         "Shortfall_Available_Qty": 100.0, "Shortfall_Qty": 0.0},
         {"Equipment_Tag_No": "TK-1", "Lining_System_Code": "1", "Material_Code": "M-B",
-         "Material_Name": "Mat B", "Demand_Qty": 50.0, "Allocated_Qty": 50.0,
-         "Shortfall_Qty": 0.0},
+         "Material_Name": "Mat B", "Demand_Qty": 50.0,
+         "Alloc_Available": 50.0, "Alloc_Ordered": 0.0, "Allocated_Qty": 50.0,
+         "Shortfall_Available_Qty": 0.0, "Shortfall_Qty": 0.0},
     ]
     eq, sy = esmod._capacity_from_lines(model, lines)
-    check("exec: capacity math = strict bottleneck (50% mat → 50/100 SQM)",
+    check("exec: capacity math = strict bottleneck on PHYSICAL stock "
+          "(M-A is 100 of 200 on the shelf → 50 of 100 SQM), and stock on "
+          "order does NOT lift it",
           len(eq) == 1 and eq[0]["Achievable_SQM"] == 50.0 and eq[0]["Coverage_Pct"] == 50.0
           and "M-A" in eq[0]["Bottleneck"]
           and len(sy) == 1 and sy[0]["System_Code"] == "1" and sy[0]["Achievable_SQM"] == 50.0,
           f"eq={eq} sy={sy}")
+    check("exec: the on-order forecast is published SEPARATELY — M-A's open PO "
+          "closes the whole gap, so with-ordered reads 100 SQM / 100%",
+          eq[0]["Achievable_With_Ordered_SQM"] == 100.0
+          and eq[0]["Coverage_With_Ordered_Pct"] == 100.0
+          and sy[0]["Achievable_With_Ordered_SQM"] == 100.0,
+          f"eq={eq[0]}")
+    check("exec: the bottleneck names the material missing from the SHELF even "
+          "when nothing is left to BUY (M-A: net shortfall 0, physical gap 100)",
+          eq[0]["Bottleneck"].startswith("M-A"), f'bottleneck={eq[0]["Bottleneck"]!r}')
 
 
 
@@ -6324,11 +6344,18 @@ async def test_sme_sk_upgrades():
         check("an: calculator is HOD+ (SK level 0 → 403)",
               r.status_code == 403, f"got {r.status_code}")
 
-        # single system via the legacy `code` param — new payload shape;
-        # M2's stock must POOL the SME seed rows SVCN-2 (0) and the
-        # whitespace-variant 'SVCN - 3' (10) because both share Material_Code
-        # SVCN-M2. SVCN-1 reads 150 from its seed row, NOT the 650 sitting in
-        # the ERP ledger against the same SAP (strict decoupling).
+        # Single system via the legacy `code` param.
+        #
+        # 2026-08-04 COMPONENT IDENTITY (overturns the 2026-07-18 pooling rule
+        # here too). SVCN-M2 is TWO physical drums: Comp-A at SAP 'SVCN-2' with
+        # a seed of 0, and Comp-B at the whitespace-variant 'SVCN - 3' with 10.
+        # They USED to share one pooled figure of 10, so Comp-A — which has
+        # nothing on its shelf — reported 10 available and only 6 short out of
+        # its sibling's stock. Each drum now reads its own seed row: Comp-A is
+        # 0 available and the FULL 16 short; Comp-B is covered.
+        #
+        # SVCN-1 reads 150 from its seed row, NOT the 650 sitting in the ERP
+        # ledger against the same SAP (strict decoupling, 2026-08-02).
         r = await ac.get("/sme/calculator", headers=H(hod_t),
                          params={"code": "9908", "sqm": 40})
         j = r.json() if r.status_code == 200 else {}
@@ -6337,23 +6364,30 @@ async def test_sme_sk_upgrades():
         l1 = next((x for x in lines if x["sap_code"] == "SVCN-1"), {})
         l2 = next((x for x in lines if x["sap_code"] == "SVCN-2"), {})
         l3 = next((x for x in lines if x["sap_code"] == "SVCN-3"), {})
-        check("an: calculator — demand math, pack counts, material-pooled stock",
+        check("an: calculator — demand math, pack counts, PER-COMPONENT stock",
               r.status_code == 200 and len(lines) == 3
               and j.get("codes") == ["9908"] and j.get("mode") == "global"
               and l1.get("required_qty") == 100 and l1.get("packages_needed") == 4
               and l1.get("available_stock") == 150 and not l1.get("shortfall_qty")
               and l2.get("required_qty") == 16
-              and l2.get("available_stock") == 10 and l2.get("pooled_saps") == 2
-              and l2.get("shortfall_qty") == 6
               and l3.get("required_qty") == 4
-              and l3.get("available_stock") == 10 and not l3.get("shortfall_qty")
               and sysb.get("totals", {}).get("shortfall_lines") == 1
               and "2.5 KG/SQM × 40 SQM = 100 KG" in l1.get("explanation", ""),
               f"{r.status_code} l1={l1} l2={l2} l3={l3}")
-        check("an: calculator hides nothing the UI needs — material_code on "
-              "every line, SAP kept as internal id",
-              all(x.get("material_code", "").startswith("SVCN-M") for x in lines),
-              f"{[x.get('material_code') for x in lines]}")
+        check("an-component: the two drums of SVCN-M2 keep their OWN stock — "
+              "Comp-A has 0 on its shelf and is the full 16 short; it can no "
+              "longer be covered out of Comp-B's 10",
+              l2.get("available_stock") == 0 and l2.get("shortfall_qty") == 16
+              and l3.get("available_stock") == 10 and not l3.get("shortfall_qty"),
+              f"l2={l2} l3={l3}")
+        check("an-component: the DIRTY seed SAP 'SVCN - 3' still resolves onto "
+              "the recipe's 'SVCN-3' — normalized on both sides of the join",
+              l3.get("available_stock") == 10, f"l3={l3}")
+        check("an: calculator hides nothing the UI needs — material_code AND "
+              "the variant SAP on every line (the SAP is the component id now)",
+              all(x.get("material_code", "").startswith("SVCN-M") for x in lines)
+              and all(x.get("sap_code") for x in lines),
+              f"{[(x.get('material_code'), x.get('sap_code')) for x in lines]}")
 
         # multi-system, one global SQM — shared Primer line aggregates across
         # 9908 (2.5/SQM) + 9909 (1.0/SQM): 100 + 40 = 140 → 6 × 25 packs
@@ -9029,6 +9063,193 @@ async def test_sme_strict_decoupling():
         await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBA%\'')
 
 
+async def test_sme_tier_segregation():
+    """Suite BB — STRICT TIER SEGREGATION of Available (tier 1) from On Order
+    (tier 2), across the engine, the export builders and the analytics rollup.
+
+    The locked rule: "Feasibility judges the physical tier only. A tank cannot
+    be built with a purchase order."
+
+    The reported failure, on live CNCEC data: PHENACIN ACP POWDER (GI-8005761 /
+    SAP 1038) holds **0 available** and **56,350 on order**, and it is the only
+    material in lining systems 6 and 7 that is short. The ENGINE had this right
+    — SQM_Achievable_Now 0, status 🔴 Blocked — but every presentation layer
+    above it re-derived coverage as `Allocated_Qty / Demand_Qty`, and
+    `Allocated_Qty` is tier 1 PLUS tier 2. Measured over the live snapshot that
+    turned 18 of 85 (tag, code) units into green "100% Fully Ready" pills and
+    overstated buildable area by 9,118 m² — 21.5% of the remaining programme.
+
+    So this suite pins the ACP shape end to end: a material with ZERO physical
+    stock and MORE THAN ENOUGH on order must yield 0 immediate achievable SQM,
+    0 coverage, a BLOCKED status, and nothing on the buy list — while the
+    forward-looking twin of every one of those figures reads 100%.
+    """
+    from . import sme as _bbsme
+    from . import sme_engine as E
+
+    # One tag, one code, 100 m² remaining. TWO materials, both at 1.0/m²:
+    #   ACP  — 0 on the shelf, 500 on order (demand 100) → the reported case
+    #   OK   — 100 on the shelf, nothing on order
+    def mk(acp_available: float, acp_ordered: float):
+        return E.build_model(
+            [{"Equipment_Tag_No": "TK-ACP", "Name": "ACP tank",
+              "Lining_System_Code": "6", "Surface_Area_SQM": 100}],
+            [{"Lining_System_Code": "6", "Lining_System_Name": "ARTL30",
+              "Material_Code": "GI-ACP", "SAP_Code": "1038",
+              "Material_Name": "Phenacin ACP Powder", "UOM": "KG", "For_1_SQM": 1.0},
+             {"Lining_System_Code": "6", "Lining_System_Name": "ARTL30",
+              "Material_Code": "GI-OK", "SAP_Code": "9000",
+              "Material_Name": "Stocked material", "UOM": "KG", "For_1_SQM": 1.0}],
+            [{"material_code": "GI-ACP", "sap_code": "1038",
+              "material_name": "PHENACIN ACP POWDER", "uom": "KG",
+              "available_qty": acp_available, "ordered_qty": acp_ordered},
+             {"material_code": "GI-OK", "sap_code": "9000",
+              "material_name": "Stocked material", "uom": "KG",
+              "available_qty": 100, "ordered_qty": 0}],
+            [])
+
+    model = mk(0, 500)
+    plan = E.run_plan(model, ["TK-ACP"])
+    acp = next(ln for ln in plan["lines"] if ln["Material_Code"] == "GI-ACP")
+
+    # ── the allocation line keeps the two tiers apart ───────────────────────
+    check("bb-acp: 0 physical + 500 on order against a demand of 100 → tier 1 "
+          "allocates NOTHING and tier 2 allocates the lot",
+          acp["Alloc_Available"] == 0.0 and acp["Alloc_Ordered"] == 100.0
+          and acp["Allocated_Qty"] == 100.0, str(acp))
+    check("bb-acp: Fulfillment_Pct (readiness) is 0 while "
+          "Fulfillment_With_Ordered_Pct (forecast) is 100 — one line, two "
+          "clearly separate numbers",
+          acp["Fulfillment_Pct"] == 0.0
+          and acp["Fulfillment_With_Ordered_Pct"] == 100.0, str(acp))
+    check("bb-acp: the PHYSICAL gap is the full 100 even though there is "
+          "NOTHING left to buy — the two shortfalls must never collapse",
+          acp["Shortfall_Available_Qty"] == 100.0 and acp["Shortfall_Qty"] == 0.0,
+          str(acp))
+
+    # ── the readiness verdict ───────────────────────────────────────────────
+    unit = plan["sqm_units"][0]
+    check("bb-acp: SQM_Achievable_Now is 0 of 100 m² — a purchase order cannot "
+          "line a tank (THE reported bug)",
+          unit["SQM_Achievable_Now"] == 0.0 and unit["Coverage_Now_Pct"] == 0.0,
+          str(unit))
+    check("bb-acp: the deficit is measured against physical stock, so all "
+          "100 m² still count as deficit",
+          unit["SQM_Deficit"] == 100.0, str(unit))
+    check("bb-acp: the forecast is not lost — with the order it reads 100 m² "
+          "/ 100%, in its own fields",
+          unit["SQM_Achievable_With_Ordered"] == 100.0
+          and unit["Coverage_With_Ordered_Pct"] == 100.0, str(unit))
+    feas = plan["feasibility"][0]
+    check("bb-acp: the tag is BLOCKED at 0% complete, and the on-order figure "
+          "sits in Completion_With_Ordered_Pct where it cannot colour a status",
+          feas["Status"] == E.STATUS_BLOCKED and feas["Completion_Pct"] == 0.0
+          and feas["Completion_With_Ordered_Pct"] == 100.0, str(feas))
+    check("bb-acp: ACP is named as the bottleneck even though its NET "
+          "shortfall is zero — the blocker is the empty shelf, not the buy list",
+          feas["Bottleneck_Material_Code"] == "GI-ACP"
+          and feas["Bottleneck_SAP_Code"] == "1038"
+          and feas["Bottleneck_Shortfall"] == 100.0, str(feas))
+    check("bb-acp: nothing goes on the buy list — the PO already covers it, "
+          "and re-ordering is the expensive half of this bug",
+          not any(p["Material_Code"] == "GI-ACP" for p in plan["procurement"]),
+          str(plan["procurement"]))
+
+    # ── the code rollup the Session Report and exports render ───────────────
+    code = plan["sqm_by_code"][0]
+    check("bb-acp: the system-code rollup reports 0 achievable now and 100 "
+          "with ordered — never one merged 'coverage'",
+          code["SQM_Achievable_Now"] == 0.0 and code["Coverage_Now_Pct"] == 0.0
+          and code["SQM_Achievable_With_Ordered"] == 100.0
+          and code["Coverage_With_Ordered_Pct"] == 100.0,
+          str({k: v for k, v in code.items() if k != "Blocking_Materials"}))
+    blocking = {m["Material_Code"] for m in code["Blocking_Materials"]}
+    check("bb-acp: ACP still appears under Blocking_Materials — a material "
+          "covered only by a PO is exactly what blocks the code today",
+          blocking == {"GI-ACP"}, str(blocking))
+
+    # ── the server-rendered export builders ─────────────────────────────────
+    ov = _bbsme._overview_rows(model, plan)[0]
+    check("bb-export: the Total Overview export splits the tiers into their "
+          "own columns and keeps Fulfillment_Pct on tier 1",
+          ov["Available_Qty"] == 100.0 and ov["Ordered_Qty"] == 100.0
+          and ov["Fulfillment_Pct"] == 0.0
+          and ov["Shortfall_Qty"] == 100.0 and ov["Net_Shortfall_Qty"] == 0.0,
+          str(ov))
+    md = {r["Material_Code"]: r for r in _bbsme._material_demand_rows(plan)}
+    check("bb-export: the Total Material Demand sheet shows ACP as 0% covered "
+          "with 100 on order and 0 to buy",
+          md["GI-ACP"]["Available_Qty"] == 0.0
+          and md["GI-ACP"]["Ordered_Qty"] == 100.0
+          and md["GI-ACP"]["Fulfillment_Pct"] == 0.0
+          and md["GI-ACP"]["Net_Demand"] == 0.0, str(md.get("GI-ACP")))
+
+    # ── the analytics/executive-summary rollup ──────────────────────────────
+    from . import exec_summary as _bbes
+    eq, sy = _bbes._capacity_from_lines(model, plan["lines"])
+    check("bb-exec: the executive-summary capacity rollup agrees — 0 "
+          "achievable now, 100 with ordered, ACP named as the blocker",
+          eq[0]["Achievable_SQM"] == 0.0 and eq[0]["Coverage_Pct"] == 0.0
+          and eq[0]["Achievable_With_Ordered_SQM"] == 100.0
+          and eq[0]["Bottleneck"].startswith("GI-ACP")
+          and sy[0]["Achievable_SQM"] == 0.0, f"eq={eq} sy={sy}")
+
+    # ── the control: stock on the shelf DOES make it ready ──────────────────
+    ready = E.run_plan(mk(500, 0), ["TK-ACP"])
+    check("bb-control: move the SAME 500 units from 'on order' to 'available' "
+          "and the unit becomes fully ready — the rule is about WHERE the "
+          "stock is, not a blanket discount",
+          ready["sqm_units"][0]["SQM_Achievable_Now"] == 100.0
+          and ready["feasibility"][0]["Status"] == E.STATUS_FULL,
+          str(ready["feasibility"][0]))
+
+    # ── the revert-check: what the old presentation math produced ───────────
+    # Every layer above the engine used to divide Allocated_Qty by Demand_Qty.
+    old_rate = min(1.0, acp["Allocated_Qty"] / acp["Demand_Qty"])
+    check("bb-revert: the formula this suite outlaws returns 100% for a "
+          "material with ZERO physical stock — which is precisely how the "
+          "portal reported ACP Powder as ready to build",
+          old_rate == 1.0 and acp["Fulfillment_Pct"] == 0.0,
+          f"old={old_rate * 100}% new={acp['Fulfillment_Pct']}%")
+
+    # ── multi-component materials stay bottlenecked under the fixed logic ───
+    # (Component identity + tier segregation interact: the tier fix must not
+    # let a well-stocked sibling mask a starved one.)
+    RATES = (("77", 1.0), ("77-1", 1.0))
+    comp = E.build_model(
+        [{"Equipment_Tag_No": "TK-C", "Lining_System_Code": "8", "Surface_Area_SQM": 100}],
+        [{"Lining_System_Code": "8", "Lining_System_Name": "PU", "Material_Code": "M7",
+          "SAP_Code": sap, "Material_Name": "PU MF 300", "UOM": "KG",
+          "For_1_SQM": rate} for sap, rate in RATES],
+        # Comp A fully stocked; Comp B empty but fully on order.
+        [{"material_code": "M7", "sap_code": "77", "material_name": "PU A",
+          "uom": "KG", "available_qty": 500, "ordered_qty": 0},
+         {"material_code": "M7", "sap_code": "77-1", "material_name": "PU B",
+          "uom": "KG", "available_qty": 0, "ordered_qty": 500}], [])
+    cplan = E.run_plan(comp, ["TK-C"])
+    cu = cplan["sqm_units"][0]
+    check("bb-component: one Material_Code, two drums — A full, B empty but on "
+          "order. The unit is 0% ready (B is the bottleneck) and 100% with "
+          "ordered; A's stock cannot stand in for B",
+          cu["SQM_Achievable_Now"] == 0.0
+          and cu["SQM_Achievable_With_Ordered"] == 100.0,
+          str(cu))
+    cb = {ln["SAP_Code"]: ln for ln in cplan["lines"]}
+    check("bb-component: the two components keep their own tier split "
+          "(A: 100 available / 0 ordered · B: 0 available / 100 ordered)",
+          cb["77"]["Alloc_Available"] == 100.0 and cb["77"]["Alloc_Ordered"] == 0.0
+          and cb["77-1"]["Alloc_Available"] == 0.0
+          and cb["77-1"]["Alloc_Ordered"] == 100.0, str(cb))
+
+    # ── the decoupling from suite BA still holds under the tier split ───────
+    check("bb-decoupled: the tier fix reads only pool_init / pool_ordered_init, "
+          "both of which come from sme_inventory_seed — no ERP table is "
+          "reachable from either engine path",
+          model["pool_init"][E.mat_key("GI-ACP", "1038")] == 0.0
+          and model["pool_ordered_init"][E.mat_key("GI-ACP", "1038")] == 500.0,
+          str(model["pool_ordered_init"]))
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -9143,6 +9364,8 @@ async def main() -> int:
     await test_component_identity()
     print("\n BA. SME strict decoupling — the ERP ledger never moves an SME number")
     await test_sme_strict_decoupling()
+    print("\n BB. SME tier segregation — a purchase order never reads as readiness")
+    await test_sme_tier_segregation()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

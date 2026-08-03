@@ -21,9 +21,10 @@ import { allUnits, fcDot, locColor } from './insights'
 import KpiDrill from './KpiDrill'
 import PriorityList, { FulfilPill, StatusDot } from './PriorityList'
 import { useScenario } from './ScenarioContext'
-import { tagStats } from './session'
+import { scopeBottleneckCoverage, tagStats } from './session'
 import SuggestionPanel from './SuggestionPanel'
 import TagDetail from './TagDetail'
+import TierNote from './TierNote'
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
 const secHdr: React.CSSProperties = {
@@ -139,6 +140,12 @@ function ScopeSection({ model, order, onOrder, siteId, scopeTitle, slug, showSug
               <b style={{ ...mono, fontSize: '0.78rem' }}>{tag}</b>
               <span style={{ fontSize: '0.72rem', opacity: 0.7 }}>{st.name.slice(0, 26)}</span>
               <FulfilPill pct={st.fulfillPct} />
+              {st.fulfillWithOrderedPct > st.fulfillPct && (
+                <span style={{ ...mono, fontSize: '0.64rem', color: '#F59E0B' }}
+                  title="Coverage once the open purchase orders land">
+                  → {st.fulfillWithOrderedPct.toFixed(1)}% ordered
+                </span>
+              )}
             </Space>
           ),
           extra: (
@@ -193,6 +200,7 @@ export default function LocationReport({ siteId }: { siteId?: string }) {
 
   return (
     <div>
+      <TierNote style={{ marginBottom: 12 }} />
       <Radio.Group value={mode} onChange={(e) => setMode(e.target.value)}
         optionType="button" buttonStyle="solid" style={{ marginBottom: 14 }}
         options={[{ label: '📍 Location Based', value: 'loc' },
@@ -241,11 +249,19 @@ function AllEquipmentMode({ model, order, onOrder, siteId }: {
   const plan = useMemo(() => runPlan(model, order), [model, order])
   const stats = useMemo(() => tagStats(model, plan.lines), [model, plan])
   const all = [...stats.values()]
-  const sqm = all.reduce((s, t) => s + t.sqm, 0)
-  const can = all.reduce((s, t) => s + t.canSqm, 0)
-  const demand = all.reduce((s, t) => s + t.demand, 0)
-  const alloc = all.reduce((s, t) => s + t.alloc, 0)
-  const cov = demand > 0 ? Math.min(100, (alloc / demand) * 100) : 100
+  // 2026-08-03 STRICT TIER SEGREGATION. `canSqm` is the TIER-1 bottleneck — it
+  // used to include stock on order, so a KPI literally titled "Available SQM"
+  // counted material that was still on a truck.
+  //
+  // 2026-08-04 AREA-WEIGHTED BOTTLENECK. `cov` was `Σ Available ÷ Σ Demand`, a
+  // quantity average across unlike materials: 100% of Part A and 0% of Part B
+  // read as 50% coverage when nothing could be built. It is now
+  // Σ buildable m² ÷ Σ remaining m², so it can never exceed the scarcest
+  // component's rate. Shared with the Session Report via one helper.
+  const scope = scopeBottleneckCoverage(all)
+  const { sqm, canSqm: can, canSqmWithOrdered: canOrd } = scope
+  const cov = scope.coveragePct
+  const covOrd = scope.coverageWithOrderedPct
 
   return (
     <div>
@@ -254,21 +270,38 @@ function AllEquipmentMode({ model, order, onOrder, siteId }: {
           drillTitle="All Equipment (cascade order)"
           rows={order.filter((t) => stats.has(t)).map((t, i) => ({
             '#': i + 1, Tag: t, Name: stats.get(t)!.name, Location: stats.get(t)!.location,
-            'Coverage %': stats.get(t)!.fulfillPct,
+            'Ready now %': stats.get(t)!.fulfillPct,
+            'With ordered %': stats.get(t)!.fulfillWithOrderedPct,
           }))} help="Every equipment tag, cascaded in the order below." /></Col>
         <Col flex="1 1 150px"><KpiDrill title="Total SQM" value={nf(sqm)}
           drillTitle="SQM by Equipment" rows={all.map((t) => ({ Tag: t.tag, SQM: t.sqm }))} /></Col>
-        <Col flex="1 1 150px"><KpiDrill title="Available SQM" value={nf(can)}
-          drillTitle="Coverable SQM by Equipment"
-          rows={all.map((t) => ({ Tag: t.tag, 'Coverable SQM': t.canSqm, 'Coverage %': t.fulfillPct }))} /></Col>
+        <Col flex="1 1 150px"><KpiDrill title="Buildable now SQM" value={nf(can)}
+          accent="#10B981" drillTitle="Buildable today (physical stock only)"
+          help="Bottlenecked by stock ON THE SHELF. Material on an open purchase order is excluded — it cannot line a tank today."
+          rows={all.map((t) => ({
+            Tag: t.tag, 'Buildable now': t.canSqm, 'Ready now %': t.fulfillPct,
+          }))} /></Col>
+        <Col flex="1 1 150px"><KpiDrill title="With ordered SQM" value={nf(canOrd)}
+          accent="#F59E0B" drillTitle="Buildable once purchase orders arrive"
+          help="Forecast only — adds stock already on order."
+          rows={all.filter((t) => t.canSqmWithOrdered > t.canSqm).map((t) => ({
+            Tag: t.tag, 'Buildable now': t.canSqm, 'With ordered': t.canSqmWithOrdered,
+          }))} /></Col>
         <Col flex="1 1 150px"><KpiDrill title="Deficit SQM" value={nf(sqm - can)}
           accent={sqm - can > 0 ? '#EF4444' : undefined}
-          drillTitle="SQM Deficit by Equipment"
+          drillTitle="SQM Deficit by Equipment (against physical stock)"
           rows={all.filter((t) => t.sqm - t.canSqm > 0.005)
             .map((t) => ({ Tag: t.tag, 'Deficit SQM': Math.round((t.sqm - t.canSqm) * 100) / 100 }))} /></Col>
-        <Col flex="1 1 150px"><KpiDrill title="Overall Coverage" value={`${cov.toFixed(1)}%`}
-          drillTitle="Coverage by Equipment"
-          rows={all.map((t) => ({ Tag: t.tag, 'Coverage %': t.fulfillPct }))} /></Col>
+        <Col flex="1 1 150px"><KpiDrill title="Coverage now" value={`${cov.toFixed(1)}%`}
+          drillTitle="Coverage by Equipment — physical vs with ordered"
+          help={`Buildable m² ÷ remaining m², where each unit is capped by its `
+            + `SCARCEST component — never a quantity average across materials. `
+            + `Physical stock only; with stock on order it would read `
+            + `${covOrd.toFixed(1)}%.`}
+          rows={all.map((t) => ({
+            Tag: t.tag, 'Ready now %': t.fulfillPct,
+            'With ordered %': t.fulfillWithOrderedPct,
+          }))} /></Col>
       </Row>
       <Card size="small" title={<span style={secHdr}>{fcDot(cov)} All equipment — drag to re-cascade</span>}>
         <ScopeSection model={model} order={order} onOrder={onOrder} siteId={siteId}

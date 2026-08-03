@@ -25,6 +25,7 @@ import KpiDrill from './KpiDrill'
 import { FulfilPill } from './PriorityList'
 import { useScenario } from './ScenarioContext'
 import { codeStats } from './session'
+import TierNote from './TierNote'
 import { materialCodeCol, materialNameCol } from './materialCols'
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
@@ -38,18 +39,36 @@ const CodePill = ({ code }: { code: string }) => (
   }}>Code {code}</span>
 )
 
+// 2026-08-03 STRICT TIER SEGREGATION: "Allocated" summed physical stock and
+// stock on order in one column. Split, so a line covered ONLY by an open PO is
+// visibly not on the shelf.
 const shortageCols: ColumnsType<AllocationLine> = [
   materialCodeCol<AllocationLine>({ width: 150 }),
   materialNameCol<AllocationLine>({ title: 'Name', width: 240 }),
   { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
   { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
-  { title: 'Allocated', dataIndex: 'Allocated_Qty', key: 'a', align: 'right', render: (v: number) => nf(v) },
   {
-    title: 'To Order', dataIndex: 'Shortfall_Qty', key: 's', align: 'right',
-    render: (v: number) => <b style={{ color: '#EF4444' }}>{nf(v)}</b>,
+    title: 'Available', dataIndex: 'Alloc_Available', key: 'av', align: 'right',
+    render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
   },
   {
-    title: 'Fulfillment', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 100,
+    title: 'On Order', dataIndex: 'Alloc_Ordered', key: 'or', align: 'right',
+    render: (v: number) => (
+      <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v)}</span>
+    ),
+  },
+  {
+    title: 'Short (physical)', dataIndex: 'Shortfall_Available_Qty', key: 'sp', align: 'right',
+    render: (v: number) => (
+      <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v)}</span>
+    ),
+  },
+  {
+    title: 'To Order', dataIndex: 'Shortfall_Qty', key: 's', align: 'right',
+    render: (v: number) => <b style={{ color: v > 0 ? '#EF4444' : '#10B981' }}>{nf(v)}</b>,
+  },
+  {
+    title: 'Ready now', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 100,
     render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
   },
 ]
@@ -107,13 +126,26 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
     - (perCode.get(unitKey(selTag!, b))?.fulfillPct ?? 100))[0]
   const selCode = critical && tagCodes.includes(critical) ? critical : worst
   const cs = selCode ? perCode.get(unitKey(selTag!, selCode)) : undefined
+  // `Shortfall_Qty` is the NET gap — the BUY list, correctly net of stock
+  // already on order. But a line with zero net shortfall can still be
+  // physically blocking (0 on the shelf, the whole demand on an open PO), and
+  // it used to vanish from this plan entirely while the page claimed the code
+  // was "fully covered by current stock". Both sets are tracked now.
   const critLines = plan.lines.filter((l) =>
     l.Equipment_Tag_No === selTag && l.Lining_System_Code === selCode && l.Shortfall_Qty > 0)
+  const critBlocked = plan.lines.filter((l) =>
+    l.Equipment_Tag_No === selTag && l.Lining_System_Code === selCode
+    && l.Shortfall_Available_Qty > 0)
+  const critAwaiting = critBlocked.filter((l) => l.Shortfall_Qty <= 0)
   const otherCodes = tagCodes.filter((c) => c !== selCode)
   const allShort = plan.lines.filter((l) => l.Equipment_Tag_No === selTag && l.Shortfall_Qty > 0)
+  const allBlocked = plan.lines.filter((l) =>
+    l.Equipment_Tag_No === selTag && l.Shortfall_Available_Qty > 0)
+  const awaitingDelivery = allBlocked.filter((l) => l.Shortfall_Qty <= 0)
 
   return (
     <div>
+      <TierNote style={{ marginBottom: 12 }} />
       <Space wrap style={{ marginBottom: 12 }}>
         <Select style={{ width: 300 }} value={selTag} onChange={setTag}
           options={sessionTags.map((t) => ({
@@ -132,10 +164,20 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
             <span><CodePill code={cs.code} /> <b>{cs.shortName || '—'}</b></span>
             <span style={mono}>{nf(cs.sqm, 1)} SQM</span>
             <FulfilPill pct={cs.fulfillPct} />
+            {cs.fulfillWithOrderedPct > cs.fulfillPct && (
+              <span style={{ ...mono, fontSize: '0.68rem', color: '#F59E0B' }}>
+                → {cs.fulfillWithOrderedPct.toFixed(1)}% once ordered stock lands
+              </span>
+            )}
+            {/* This sentence used to read "fully covered by current stock"
+                whenever the NET shortfall was zero — i.e. it said "covered"
+                about material sitting on a purchase order. */}
             <span style={{ fontSize: '0.8rem', opacity: 0.8 }}>
-              {critLines.length === 0
-                ? 'This system code is fully covered by current stock.'
-                : `${critLines.length} material${critLines.length > 1 ? 's' : ''} short — procure these FIRST to unblock the critical code.`}
+              {critLines.length > 0
+                ? `${critLines.length} material${critLines.length > 1 ? 's' : ''} still to buy — procure these FIRST to unblock the critical code.`
+                : critAwaiting.length > 0
+                  ? `Nothing left to buy, but ${critAwaiting.length} material${critAwaiting.length > 1 ? 's are' : ' is'} still ON ORDER and not on site — this code cannot be built today.`
+                  : 'This system code is fully covered by stock ON HAND.'}
             </span>
           </Space>
         </Card>
@@ -145,11 +187,23 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
       <Card size="small" style={{ borderColor: 'rgba(239,68,68,.6)', marginBottom: 12 }}
         title={<span style={{ color: '#EF4444', fontWeight: 700 }}>1️⃣ Critical — Code {selCode}</span>}>
         {critLines.length === 0 ? (
-          <Alert type="success" showIcon title="No shortages — fully covered ✅" />
+          critAwaiting.length > 0 ? (
+            <Alert type="warning" showIcon
+              message="Nothing left to buy — but not buildable today"
+              description={`${critAwaiting.length} material${critAwaiting.length > 1 ? 's are' : ' is'} covered entirely by an OPEN PURCHASE ORDER. Wait for delivery; do not re-order.`} />
+          ) : (
+            <Alert type="success" showIcon title="No shortages — fully covered by stock on hand ✅" />
+          )
         ) : (
           <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Key}`}
             columns={shortageCols} dataSource={critLines} pagination={false}
             scroll={{ x: 'max-content' }} />
+        )}
+        {/* Physically blocking but already ordered — invisible before, because
+            the plan only ever listed lines with a NET shortfall. */}
+        {critAwaiting.length > 0 && critLines.length > 0 && (
+          <Alert type="warning" showIcon style={{ marginTop: 8, fontSize: '0.76rem' }}
+            message={`Plus ${critAwaiting.length} material${critAwaiting.length > 1 ? 's' : ''} already on order (nothing to buy, but not on site yet)`} />
         )}
       </Card>
 
@@ -157,6 +211,11 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
       {otherCodes.map((c, i) => {
         const ls = plan.lines.filter((l) =>
           l.Equipment_Tag_No === selTag && l.Lining_System_Code === c && l.Shortfall_Qty > 0)
+        // Same distinction as the critical section: nothing to buy is not the
+        // same as nothing missing from the shelf.
+        const lsAwaiting = plan.lines.filter((l) =>
+          l.Equipment_Tag_No === selTag && l.Lining_System_Code === c
+          && l.Shortfall_Available_Qty > 0 && l.Shortfall_Qty <= 0)
         const st = perCode.get(unitKey(selTag!, c))
         return (
           <Card key={c} size="small" style={{ borderColor: 'rgba(245,158,11,.5)', marginBottom: 12 }}
@@ -165,10 +224,20 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
                 <span style={{ color: '#F59E0B', fontWeight: 700 }}>{i + 2}️⃣ Code {c}</span>
                 <span style={{ fontSize: '0.75rem', opacity: 0.75 }}>{st?.shortName}</span>
                 {st && <FulfilPill pct={st.fulfillPct} />}
+                {st && st.fulfillWithOrderedPct > st.fulfillPct && (
+                  <span style={{ ...mono, fontSize: '0.64rem', color: '#F59E0B' }}>
+                    → {st.fulfillWithOrderedPct.toFixed(1)}% ordered
+                  </span>
+                )}
               </Space>
             )}>
             {ls.length === 0 ? (
-              <Alert type="success" showIcon title="No shortages — fully covered ✅" />
+              lsAwaiting.length > 0 ? (
+                <Alert type="warning" showIcon
+                  message={`Nothing to buy — ${lsAwaiting.length} material${lsAwaiting.length > 1 ? 's are' : ' is'} on order and not yet on site`} />
+              ) : (
+                <Alert type="success" showIcon title="No shortages — fully covered by stock on hand ✅" />
+              )
             ) : (
               <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Key}`}
                 columns={shortageCols} dataSource={ls} pagination={false}
@@ -190,8 +259,17 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
         border: '1px solid rgba(212,175,55,.45)', background: 'rgba(212,175,55,.07)',
         borderRadius: 8, padding: '10px 14px', fontSize: '0.8rem',
       }}>
-        {allShort.length === 0 ? (
-          <>✅ <b style={mono}>{selTag}</b> is fully buildable with current stock — no procurement needed.</>
+        {allShort.length === 0 && awaitingDelivery.length > 0 ? (
+          // This branch is the reported bug in words: with the whole gap on an
+          // open PO, allShort is empty and the page used to declare the tag
+          // "fully buildable with current stock".
+          <>⏳ <b style={mono}>{selTag}</b> has <b>nothing left to buy</b>, but{' '}
+            <b style={{ color: '#F59E0B' }}>{awaitingDelivery.length} material
+              {awaitingDelivery.length > 1 ? 's are' : ' is'} still on order</b> and not
+            on site — it is <b>not buildable today</b>. Wait for delivery rather than
+            re-ordering.</>
+        ) : allShort.length === 0 ? (
+          <>✅ <b style={mono}>{selTag}</b> is fully buildable with stock ON HAND — no procurement needed.</>
         ) : (
           <>
             Procurement strategy for <b style={mono}>{selTag}</b>: order the{' '}

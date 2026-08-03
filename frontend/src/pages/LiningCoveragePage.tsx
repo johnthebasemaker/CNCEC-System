@@ -22,6 +22,7 @@ interface Family {
 interface SystemRow {
   System_Code: string; System_Name: string; families: string[]
   Remaining_SQM: number; Achievable_SQM: number; Coverage_Pct: number
+  Achievable_With_Ordered_SQM: number; Coverage_With_Ordered_Pct: number
 }
 interface MaterialRow {
   material_code: string; material_name: string; uom: string; family: string
@@ -62,9 +63,18 @@ export default function LiningCoveragePage() {
       render: (fams: string[]) => fams.map((f) => <Tag key={f} color={FAMILY_COLOR[f]}>{f}</Tag>),
     },
     { title: 'Remaining SQM', dataIndex: 'Remaining_SQM', key: 'r', align: 'right' },
-    { title: 'Achievable SQM', dataIndex: 'Achievable_SQM', key: 'a', align: 'right' },
+    // 2026-08-03 tier segregation: "Achievable now" is live stock ON HAND.
+    // It used to include material on an open purchase order.
+    { title: 'Achievable now', dataIndex: 'Achievable_SQM', key: 'a', align: 'right' },
     {
-      title: 'Coverage', dataIndex: 'Coverage_Pct', key: 'p', width: 170,
+      title: 'With ordered', dataIndex: 'Achievable_With_Ordered_SQM', key: 'ao', align: 'right',
+      render: (v: number, r) => (
+        <span style={{ color: v > r.Achievable_SQM ? '#F59E0B' : undefined,
+          opacity: v > r.Achievable_SQM ? 1 : 0.5 }}>{v}</span>
+      ),
+    },
+    {
+      title: 'Coverage now', dataIndex: 'Coverage_Pct', key: 'p', width: 170,
       render: (v: number) => (
         <Progress percent={v} size="small"
           status={v >= 100 ? 'success' : v > 25 ? 'active' : 'exception'} />

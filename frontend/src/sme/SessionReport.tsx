@@ -19,11 +19,12 @@ import { fc } from './insights'
 import KpiDrill from './KpiDrill'
 import PriorityList, { FulfilPill, StatusDot } from './PriorityList'
 import { useScenario } from './ScenarioContext'
-import { tagStats, weightedProcurement } from './session'
+import { scopeBottleneckCoverage, tagStats, weightedProcurement } from './session'
 import type { WeightedProcurementRow } from './session'
 import type { SqmCodeRow } from './engine'
 import SuggestionPanel from './SuggestionPanel'
 import TagDetail from './TagDetail'
+import TierNote from './TierNote'
 import { materialCodeCol, materialNameCol } from './materialCols'
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
@@ -133,11 +134,25 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
   }
 
   const totDemand = combined.reduce((s, r) => s + r.Demand_Qty, 0)
-  const totAlloc = combined.reduce((s, r) => s + r.Allocated_Qty, 0)
+  const totAvail = combined.reduce((s, r) => s + r.Available_Qty, 0)
+  const totOrdered = combined.reduce((s, r) => s + r.Ordered_Qty, 0)
   const totShort = combined.reduce((s, r) => s + r.Shortfall_Qty, 0)
-  const cov = totDemand > 0 ? Math.min(100, (totAlloc / totDemand) * 100) : 100
   const shortOnly = combined.filter((r) => r.Shortfall_Qty > 0)
   const sessionTags = scenario.order.filter((t) => stats.has(t))
+
+  // 2026-08-03 STRICT TIER SEGREGATION: this was Σ Allocated_Qty ÷ Σ Demand —
+  // physical stock PLUS stock on order — so a session whose whole gap sat on an
+  // open PO headlined 100%.
+  //
+  // 2026-08-04 AREA-WEIGHTED BOTTLENECK: it was then still a QUANTITY average
+  // (Σ Available ÷ Σ Demand) across unlike materials, which reads 50% when you
+  // hold all of Part A and none of Part B — and can therefore sit well above
+  // the scarcest component, the very thing the strict-bottleneck ruling
+  // forbids one level down. Coverage is now Σ buildable m² ÷ Σ remaining m²
+  // over the session's tags, each already capped by its own bottleneck.
+  const scope = scopeBottleneckCoverage(sessionTags.map((t) => stats.get(t)!))
+  const cov = scope.coveragePct
+  const covOrd = scope.coverageWithOrderedPct
 
   const combinedCols: ColumnsType<WeightedProcurementRow> = [
     materialCodeCol<WeightedProcurementRow>({ width: 150, fixed: 'left' }),
@@ -172,7 +187,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
       ],
     },
     {
-      title: 'Coverage', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 100,
+      title: 'Ready now', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 100,
       render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
     },
   ]
@@ -215,16 +230,26 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
       ),
     },
     {
-      title: 'Coverage', dataIndex: 'Coverage_Now_Pct', key: 'p', width: 130, align: 'right',
+      title: 'Coverage now', dataIndex: 'Coverage_Now_Pct', key: 'p', width: 130, align: 'right',
       render: (v: number) => (
         <Progress percent={v} size="small" strokeColor={fc(v)}
           format={(pc) => <span style={{ ...mono, fontSize: '0.7rem' }}>{(pc ?? 0).toFixed(1)}%</span>} />
+      ),
+    },
+    {
+      title: 'With ordered', dataIndex: 'Coverage_With_Ordered_Pct', key: 'pw',
+      width: 110, align: 'right',
+      render: (v: number, r) => (
+        <span style={{ ...mono, fontSize: '0.72rem',
+          color: v > r.Coverage_Now_Pct ? '#F59E0B' : undefined,
+          opacity: v > r.Coverage_Now_Pct ? 1 : 0.5 }}>{v.toFixed(1)}%</span>
       ),
     },
   ]
 
   return (
     <div>
+      <TierNote style={{ marginBottom: 12 }} />
       {/* KPI strip */}
       <Row gutter={[12, 12]}>
         <Col flex="1 1 160px"><KpiDrill title="Equipment" value={String(sessionTags.length)}
@@ -238,20 +263,35 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
         <Col flex="1 1 160px"><KpiDrill title="Materials" value={String(combined.length)}
           drillTitle="Session Materials" rows={combined.map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
-            Demand: r.Demand_Qty, Allocated: r.Allocated_Qty, 'Coverage %': r.Fulfillment_Pct,
+            Demand: r.Demand_Qty, Available: r.Available_Qty,
+            'On Order': r.Ordered_Qty, 'Ready now %': r.Fulfillment_Pct,
           }))} help="Material components demanded by the session — one row per physical drum (Material_Code + variant SAP)." /></Col>
         <Col flex="1 1 160px"><KpiDrill title="Need to Order" value={String(shortOnly.length)}
           accent={shortOnly.length > 0 ? '#EF4444' : '#10B981'}
-          drillTitle="Order List (shortfall > 0)" rows={shortOnly.map((r) => ({
+          drillTitle="Order List (net shortfall > 0)" rows={shortOnly.map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
-            'To Order': r.Shortfall_Qty, 'Coverage %': r.Fulfillment_Pct,
-          }))} help="Components that must be procured to fully build the session." /></Col>
-        <Col flex="1 1 160px"><KpiDrill title="Overall Coverage" value={`${cov.toFixed(1)}%`}
-          accent={fc(cov)} drillTitle="Coverage by Material"
-          rows={combined.map((r) => ({
+            Available: r.Available_Qty, 'On Order': r.Ordered_Qty,
+            'To Order': r.Shortfall_Qty, 'Ready now %': r.Fulfillment_Pct,
+          }))} help="Components still to procure AFTER counting stock already on order." /></Col>
+        {/* Area-weighted bottleneck over the session's tags — drill down per
+            EQUIPMENT, because that is the grain the number is computed at. */}
+        <Col flex="1 1 160px"><KpiDrill title="Coverage now" value={`${cov.toFixed(1)}%`}
+          accent={fc(cov)} drillTitle="Coverage by Equipment — physical vs with ordered"
+          rows={sessionTags.map((t) => {
+            const st = stats.get(t)!
+            return {
+              Tag: t, Name: st.name, 'Remaining m²': st.sqm,
+              'Buildable now m²': st.canSqm, 'Ready now %': st.fulfillPct,
+              'With ordered %': st.fulfillWithOrderedPct,
+            }
+          })} help={`Buildable m² ÷ remaining m² (${scope.canSqm} / ${scope.sqm}), each unit capped by its SCARCEST component — never a quantity average across materials. PHYSICAL stock only; counting stock on order it would be ${covOrd.toFixed(1)}%.`} /></Col>
+        <Col flex="1 1 160px"><KpiDrill title="With ordered" value={`${covOrd.toFixed(1)}%`}
+          accent="#F59E0B" drillTitle="Components covered only by an open PO"
+          rows={combined.filter((r) => r.Ordered_Qty > 0).map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
-            'Coverage %': r.Fulfillment_Pct,
-          }))} help="Allocated ÷ Demand across the whole session." /></Col>
+            Available: r.Available_Qty, 'On Order': r.Ordered_Qty,
+            'Ready now %': r.Fulfillment_Pct,
+          }))} help="Forecast once the open purchase orders land. Never a readiness figure." /></Col>
       </Row>
 
       {/* Priority reorder (same shared scenario as the builder) */}
@@ -316,8 +356,17 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           <span>Equipment: <b style={mono}>{sessionTags.length}</b></span>
           <span>Components: <b style={mono}>{combined.length}</b></span>
           <span>Total demand: <b style={mono}>{nf(totDemand)}</b></span>
+          <span>Available: <b style={{ ...mono, color: '#10B981' }}>{nf(totAvail)}</b></span>
+          <span>On order: <b style={{ ...mono, color: totOrdered > 0 ? '#F59E0B' : undefined }}>{nf(totOrdered)}</b></span>
           <span>To procure: <b style={{ ...mono, color: totShort > 0 ? '#EF4444' : undefined }}>{nf(totShort)}</b></span>
-          <span style={{ marginLeft: 'auto' }}>Coverage: <FulfilPill pct={cov} /></span>
+          <span style={{ marginLeft: 'auto' }}>
+            Ready now: <FulfilPill pct={cov} />
+            {covOrd > cov && (
+              <span style={{ ...mono, fontSize: '0.7rem', color: '#F59E0B', marginLeft: 6 }}>
+                (with ordered {covOrd.toFixed(1)}%)
+              </span>
+            )}
+          </span>
         </SummaryStrip>
       </Card>
 

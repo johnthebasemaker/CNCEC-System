@@ -12,11 +12,13 @@ import { Table } from '../lib/smartTable'
 import { FileExcelOutlined, FilePdfOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { postDownloadDocument, useSmeSnapshot } from '../api/hooks'
-import { buildModel, runPlan, syscodeCompare, unitKey } from './engine'
+import { buildModel, matKey, runPlan, syscodeCompare, unitKey } from './engine'
 import { allUnits, fc, fcBg } from './insights'
+import { codeStats } from './session'
 import KpiDrill from './KpiDrill'
 import { ScopedExport } from './MatrixReports'
 import { FulfilPill } from './PriorityList'
+import TierNote from './TierNote'
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
 const nf = (v: number, d = 1) =>
@@ -36,12 +38,24 @@ interface OverviewRow {
   doneSqm: number
   remainingSqm: number
   demand: number
-  allocated: number
+  /** TIER 1 — physically allocated. */
+  available: number
+  /** TIER 2 — covered by an open PO. */
+  ordered: number
+  /** PHYSICAL gap — what blocks the build today. */
   shortfall: number
+  /** NET gap — what still has to be bought. */
+  toBuy: number
+  /** TIER 1 bottleneck %. Drives status, filter and row tint. */
   pct: number
+  /** TIER 1 + 2 bottleneck %. Forward-looking. */
+  pctOrdered: number
 }
 
-const STATUS_OPTS = ['All', 'Fully Ready (100%)', 'Partial (50-99%)', 'Blocked (<50%)']
+// Every threshold here is measured on TIER 1. "Fully Ready" means the drums
+// are on the shelf; a unit whose only cover is an open PO is NOT ready.
+const STATUS_OPTS = ['All', 'Ready now (100% physical)', 'Partial (50-99% physical)',
+  'Blocked (<50% physical)']
 
 export default function TotalOverview({ siteId }: { siteId?: string }) {
   const { message } = App.useApp()
@@ -56,21 +70,17 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
     () => (snap ? buildModel(snap.equipment, snap.recipes, snap.materials, snap.progress) : null),
     [snap])
 
+  // 2026-08-03 STRICT TIER SEGREGATION. `pct` used to be Allocated_Qty ÷
+  // Demand — physical stock PLUS stock on order — so a unit whose only gap was
+  // covered by an open PO showed 100%, tinted green, and passed the "Fully
+  // Ready (100%)" filter. It is now the codeStats TIER-1 bottleneck, exactly
+  // what the server-rendered overview export has always used (_overview_rows).
   const { rows, lines } = useMemo(() => {
     if (!model) return { rows: [] as OverviewRow[], lines: [] }
     const plan = runPlan(model, model.defaultOrder)
-    const acc = new Map<string, { demand: number; alloc: number; short: number }>()
-    for (const ln of plan.lines) {
-      const k = unitKey(ln.Equipment_Tag_No, ln.Lining_System_Code)
-      const a = acc.get(k) ?? { demand: 0, alloc: 0, short: 0 }
-      a.demand += ln.Demand_Qty
-      a.alloc += ln.Allocated_Qty
-      a.short += ln.Shortfall_Qty
-      acc.set(k, a)
-    }
+    const stats = codeStats(plan.lines)
     const out: OverviewRow[] = allUnits(model).map((u) => {
-      const a = acc.get(unitKey(u.tag, u.code)) ?? { demand: 0, alloc: 0, short: 0 }
-      const pct = a.demand > 0 ? Math.min(100, (a.alloc / a.demand) * 100) : 100
+      const s = stats.get(unitKey(u.tag, u.code))
       return {
         key: unitKey(u.tag, u.code), sno: 0,
         tag: u.tag, name: u.name, substrate: u.substrate, type: u.type,
@@ -78,10 +88,13 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
         totalSqm: Math.round(u.original * 100) / 100,
         doneSqm: Math.round(u.done * 100) / 100,
         remainingSqm: Math.round(u.remaining * 100) / 100,
-        demand: Math.round(a.demand * 1000) / 1000,
-        allocated: Math.round(a.alloc * 1000) / 1000,
-        shortfall: Math.round(a.short * 1000) / 1000,
-        pct: Math.round(pct * 10) / 10,
+        demand: Math.round((s?.demand ?? 0) * 1000) / 1000,
+        available: Math.round((s?.allocAvailable ?? 0) * 1000) / 1000,
+        ordered: Math.round((s?.allocOrdered ?? 0) * 1000) / 1000,
+        shortfall: Math.round((s?.shortfallAvailable ?? 0) * 1000) / 1000,
+        toBuy: Math.round((s?.shortfall ?? 0) * 1000) / 1000,
+        pct: s?.fulfillPct ?? 100,
+        pctOrdered: s?.fulfillWithOrderedPct ?? 100,
       }
     })
     return { rows: out, lines: plan.lines }
@@ -98,9 +111,12 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
     (!locs.length || locs.includes(r.location)) && (!types.length || types.includes(r.type)))
     .map((r) => r.code))].sort(syscodeCompare)
 
+  // `p` is r.pct — the TIER-1 bottleneck. Before the tier fix this filter ran
+  // on Allocated_Qty ÷ Demand, so a unit with zero physical stock and a full
+  // purchase order was listed under "Fully Ready".
   const statusPass = (p: number) =>
     status === 'All' ? true
-      : status.startsWith('Fully') ? p >= 100
+      : status.startsWith('Ready') ? p >= 100
         : status.startsWith('Partial') ? p >= 50 && p < 100
           : p < 50
 
@@ -114,8 +130,13 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
   const totSqm = filtered.reduce((s, r) => s + r.totalSqm, 0)
   const doneSqm = filtered.reduce((s, r) => s + r.doneSqm, 0)
   const remSqm = filtered.reduce((s, r) => s + r.remainingSqm, 0)
-  const shortSqm = filtered.reduce((s, r) => s + r.remainingSqm * (1 - r.pct / 100), 0)
+  // TIER 1 — buildable today. TIER 1+2 — buildable once the POs land.
+  const canSqm = filtered.reduce((s, r) => s + r.remainingSqm * (r.pct / 100), 0)
+  const canSqmOrd = filtered.reduce((s, r) => s + r.remainingSqm * (r.pctOrdered / 100), 0)
+  const shortSqm = remSqm - canSqm
   const avgCov = filtered.length ? filtered.reduce((s, r) => s + r.pct, 0) / filtered.length : 100
+  const avgCovOrd = filtered.length
+    ? filtered.reduce((s, r) => s + r.pctOrdered, 0) / filtered.length : 100
 
   const cols: ColumnsType<OverviewRow> = [
     { title: 'S.No', dataIndex: 'sno', key: 'sn', width: 60, fixed: 'left' },
@@ -130,14 +151,38 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
     { title: 'Done SQM', dataIndex: 'doneSqm', key: 'ds', width: 100, align: 'right', render: (v: number) => nf(v) },
     { title: 'Remaining', dataIndex: 'remainingSqm', key: 'rs', width: 100, align: 'right', render: (v: number) => nf(v) },
     { title: 'Demand', dataIndex: 'demand', key: 'd', width: 110, align: 'right', render: (v: number) => nf(v, 2) },
-    { title: 'Allocated', dataIndex: 'allocated', key: 'a', width: 110, align: 'right', render: (v: number) => nf(v, 2) },
+    // TIER 1 and TIER 2 never share a column. "Available" is on the shelf;
+    // "On Order" is on a truck and cannot line a tank today. The single
+    // "Allocated" column this replaces summed both.
     {
-      title: 'Shortfall', dataIndex: 'shortfall', key: 'sh', width: 110, align: 'right',
+      title: 'Available', dataIndex: 'available', key: 'av', width: 110, align: 'right',
+      render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v, 2)}</span>,
+    },
+    {
+      title: 'On Order', dataIndex: 'ordered', key: 'or', width: 110, align: 'right',
+      render: (v: number) => (
+        <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v, 2)}</span>
+      ),
+    },
+    {
+      title: 'Short (physical)', dataIndex: 'shortfall', key: 'sh', width: 130, align: 'right',
       render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v, 2)}</span>,
     },
     {
-      title: 'Fulfil %', dataIndex: 'pct', key: 'p', width: 90, align: 'right',
+      title: 'To buy (net)', dataIndex: 'toBuy', key: 'tb', width: 120, align: 'right',
+      render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : '#10B981' }}>{nf(v, 2)}</span>,
+    },
+    {
+      title: 'Ready now %', dataIndex: 'pct', key: 'p', width: 110, align: 'right',
       render: (v: number) => <b style={{ color: fc(v) }}>{v.toFixed(1)}%</b>,
+    },
+    {
+      title: 'With ordered %', dataIndex: 'pctOrdered', key: 'po', width: 125, align: 'right',
+      render: (v: number, r) => (
+        <span style={{ color: v > r.pct ? '#F59E0B' : undefined, opacity: v > r.pct ? 1 : 0.5 }}>
+          {v.toFixed(1)}%
+        </span>
+      ),
     },
   ]
 
@@ -155,10 +200,18 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
   // Per-code material expanders over the FILTERED tag set.
   const filteredTagCodes = new Set(filtered.map((r) => r.key))
   const codesInView = [...new Set(filtered.map((r) => r.code))].sort(syscodeCompare)
-  const availOf = new Map(snap.materials.map((m) => [String(m.material_code).trim(), Number(m.available_qty ?? 0) || 0]))
+  // Keyed by matKey() = `${Material_Code}|${SAP_Code}`, the component identity.
+  // Keying on Material_Code alone let each of the four Comp-A/B/C/D drums of a
+  // multi-part system overwrite the last, so one component's stock stood in for
+  // all four. `ordered` rides along so the expander can show both tiers.
+  const availOf = new Map(snap.materials.map((m) =>
+    [matKey(m.material_code, m.sap_code), Number(m.available_qty ?? 0) || 0]))
+  const orderedOf = new Map(snap.materials.map((m) =>
+    [matKey(m.material_code, m.sap_code), Number(m.ordered_qty ?? 0) || 0]))
 
   return (
     <div>
+      <TierNote style={{ marginBottom: 12 }} />
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
         <Col xs={24} sm={12} lg={6}>
           <Select mode="multiple" allowClear placeholder="All locations" style={{ width: '100%' }}
@@ -184,7 +237,8 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
         <Col flex="1 1 140px"><KpiDrill title="No. of Items" value={String(filtered.length)}
           drillTitle="Filtered items" rows={filtered.map((r) => ({
-            '#': r.sno, Tag: r.tag, Code: r.code, 'Fulfil %': r.pct,
+            '#': r.sno, Tag: r.tag, Code: r.code,
+            'Ready now %': r.pct, 'With ordered %': r.pctOrdered,
           }))} /></Col>
         <Col flex="1 1 140px"><KpiDrill title="Total SQM" value={nf(totSqm)}
           drillTitle="SQM (desc)" rows={[...filtered].sort((a, b) => b.totalSqm - a.totalSqm)
@@ -195,18 +249,42 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
         <Col flex="1 1 140px"><KpiDrill title="Remaining SQM" value={nf(remSqm)}
           drillTitle="Remaining (desc)" rows={[...filtered].sort((a, b) => b.remainingSqm - a.remainingSqm)
             .map((r) => ({ Tag: r.tag, Code: r.code, Remaining: r.remainingSqm }))} /></Col>
+        {/* TIER 1 — what the site can physically build today. */}
+        <Col flex="1 1 140px"><KpiDrill title="Buildable now SQM" value={nf(canSqm)}
+          accent="#10B981" drillTitle="Buildable today (physical stock only)"
+          help="Remaining SQM × the unit's TIER-1 bottleneck. Stock on a purchase order is excluded — it cannot line a tank today."
+          rows={[...filtered].sort((a, b) => a.pct - b.pct).map((r) => ({
+            Tag: r.tag, Code: r.code,
+            'Buildable now': Math.round(r.remainingSqm * (r.pct / 100) * 100) / 100,
+            'Ready now %': r.pct,
+          }))} /></Col>
+        {/* TIER 1 + 2 — what it can build once the open POs land. */}
+        <Col flex="1 1 140px"><KpiDrill title="With ordered SQM" value={nf(canSqmOrd)}
+          accent="#F59E0B" drillTitle="Buildable once purchase orders arrive"
+          help="Adds stock already on order. FORECAST ONLY — never a readiness figure."
+          rows={[...filtered].filter((r) => r.pctOrdered > r.pct)
+            .sort((a, b) => a.pctOrdered - b.pctOrdered).map((r) => ({
+              Tag: r.tag, Code: r.code,
+              'With ordered': Math.round(r.remainingSqm * (r.pctOrdered / 100) * 100) / 100,
+              'Ready now %': r.pct, 'With ordered %': r.pctOrdered,
+            }))} /></Col>
         <Col flex="1 1 140px"><KpiDrill title="Shortfall SQM" value={nf(shortSqm)}
           accent={shortSqm > 0.005 ? '#EF4444' : undefined}
-          drillTitle="Shortfall SQM (fulfillment-weighted)"
+          drillTitle="Shortfall SQM (physical gap)"
+          help="Remaining − Buildable now. Measured against PHYSICAL stock, because that is what procurement has to close."
           rows={filtered.filter((r) => r.pct < 100)
             .map((r) => ({
               Tag: r.tag, Code: r.code,
               'Shortfall SQM': Math.round(r.remainingSqm * (1 - r.pct / 100) * 100) / 100,
             }))} /></Col>
-        <Col flex="1 1 140px"><KpiDrill title="Avg Coverage" value={`${avgCov.toFixed(1)}%`}
-          accent={fc(avgCov)} drillTitle="Coverage (asc)"
+        <Col flex="1 1 140px"><KpiDrill title="Avg Coverage (now)" value={`${avgCov.toFixed(1)}%`}
+          accent={fc(avgCov)} drillTitle="Coverage (asc) — physical vs with ordered"
+          help={`Physical stock only. With stock on order it would read ${avgCovOrd.toFixed(1)}%.`}
           rows={[...filtered].sort((a, b) => a.pct - b.pct)
-            .map((r) => ({ Tag: r.tag, Code: r.code, 'Fulfil %': r.pct }))} /></Col>
+            .map((r) => ({
+              Tag: r.tag, Code: r.code,
+              'Ready now %': r.pct, 'With ordered %': r.pctOrdered,
+            }))} /></Col>
       </Row>
 
       <Card size="small"
@@ -233,19 +311,32 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
         const codeRows = filtered.filter((r) => r.code === code)
         const codeLines = lines.filter((l) =>
           l.Lining_System_Code === code && filteredTagCodes.has(unitKey(l.Equipment_Tag_No, l.Lining_System_Code)))
-        const mats = new Map<string, { name: string; uom: string; demand: number; alloc: number; short: number }>()
+        // Grouped by Material_Key (component identity), not Material_Code —
+        // the latter merged the four drums of a multi-part system into one row.
+        const mats = new Map<string, {
+          code: string; sap: string; name: string; uom: string
+          demand: number; allocAv: number; allocOr: number
+          shortPhys: number; toBuy: number
+        }>()
         for (const l of codeLines) {
-          const m = mats.get(l.Material_Code) ?? { name: l.Material_Name, uom: l.UOM, demand: 0, alloc: 0, short: 0 }
+          const m = mats.get(l.Material_Key) ?? {
+            code: l.Material_Code, sap: l.SAP_Code, name: l.Material_Name, uom: l.UOM,
+            demand: 0, allocAv: 0, allocOr: 0, shortPhys: 0, toBuy: 0,
+          }
           m.demand += l.Demand_Qty
-          m.alloc += l.Allocated_Qty
-          m.short += l.Shortfall_Qty
-          mats.set(l.Material_Code, m)
+          m.allocAv += l.Alloc_Available
+          m.allocOr += l.Alloc_Ordered
+          m.shortPhys += l.Shortfall_Available_Qty
+          m.toBuy += l.Shortfall_Qty
+          mats.set(l.Material_Key, m)
         }
         const sqm = codeRows.reduce((s, r) => s + r.totalSqm, 0)
         const done = codeRows.reduce((s, r) => s + r.doneSqm, 0)
-        const demand = codeLines.reduce((s, l) => s + l.Demand_Qty, 0)
-        const alloc = codeLines.reduce((s, l) => s + l.Allocated_Qty, 0)
-        const cov = demand > 0 ? Math.min(100, (alloc / demand) * 100) : 100
+        // The header pill is a READINESS claim → the TIER-1 bottleneck across
+        // this code's units (it used to be Σ Allocated_Qty ÷ Σ Demand, which
+        // both averaged away the bottleneck AND counted stock on order).
+        const cov = codeRows.length ? Math.min(...codeRows.map((r) => r.pct)) : 100
+        const covOrd = codeRows.length ? Math.min(...codeRows.map((r) => r.pctOrdered)) : 100
         return {
           key: code,
           label: (
@@ -259,31 +350,60 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
                 {nf(sqm)} SQM · done {nf(done)}
               </span>
               <FulfilPill pct={Math.round(cov * 10) / 10} />
+              {covOrd > cov && (
+                <span style={{ ...mono, fontSize: '0.66rem', color: '#F59E0B' }}>
+                  → {covOrd.toFixed(1)}% with ordered
+                </span>
+              )}
             </Space>
           ),
           children: (
             <Table sticky={{ offsetHeader: 64 }} size="small" rowKey="mat" pagination={false} scroll={{ x: 'max-content' }}
               columns={[
-                { title: 'Material', dataIndex: 'mat', key: 'm', width: 130 },
+                { title: 'Material', dataIndex: 'code', key: 'm', width: 130 },
+                { title: 'SAP', dataIndex: 'sap', key: 'sap', width: 90,
+                  render: (v: string) => <span style={{ ...mono, opacity: 0.75 }}>{v || '—'}</span> },
                 { title: 'Name', dataIndex: 'name', key: 'n', ellipsis: true },
                 { title: 'UOM', dataIndex: 'uom', key: 'u', width: 60 },
-                { title: 'Available', dataIndex: 'avail', key: 'av', align: 'right' as const, render: (v: number) => nf(v, 3) },
+                { title: 'Stock available', dataIndex: 'avail', key: 'av', align: 'right' as const,
+                  render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v, 3)}</span> },
+                { title: 'Stock on order', dataIndex: 'onOrder', key: 'oo', align: 'right' as const,
+                  render: (v: number) => (
+                    <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v, 3)}</span>
+                  ) },
                 { title: 'Total Demand', dataIndex: 'demand', key: 'd', align: 'right' as const, render: (v: number) => nf(v, 3) },
                 {
-                  title: 'Shortfall', dataIndex: 'short', key: 's', align: 'right' as const,
+                  title: 'Short (physical)', dataIndex: 'shortPhys', key: 's', align: 'right' as const,
                   render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v, 3)}</span>,
                 },
                 {
-                  title: 'Coverage %', dataIndex: 'pct', key: 'p', align: 'right' as const, width: 100,
+                  title: 'To buy (net)', dataIndex: 'toBuy', key: 'tb', align: 'right' as const,
+                  render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : '#10B981' }}>{nf(v, 3)}</span>,
+                },
+                {
+                  title: 'Ready now %', dataIndex: 'pct', key: 'p', align: 'right' as const, width: 110,
                   render: (v: number) => <b style={{ color: fc(v) }}>{v.toFixed(1)}%</b>,
+                },
+                {
+                  title: 'With ordered %', dataIndex: 'pctOrdered', key: 'po', align: 'right' as const, width: 125,
+                  render: (v: number, r) => (
+                    <span style={{ color: v > r.pct ? '#F59E0B' : undefined, opacity: v > r.pct ? 1 : 0.5 }}>
+                      {v.toFixed(1)}%
+                    </span>
+                  ),
                 },
               ]}
               dataSource={[...mats.entries()].map(([mat, m]) => ({
-                mat, name: m.name, uom: m.uom,
+                mat, code: m.code, sap: m.sap, name: m.name, uom: m.uom,
                 avail: availOf.get(mat) ?? 0,
+                onOrder: orderedOf.get(mat) ?? 0,
                 demand: Math.round(m.demand * 1000) / 1000,
-                short: Math.round(m.short * 1000) / 1000,
-                pct: m.demand > 0 ? Math.round(Math.min(100, (m.alloc / m.demand) * 100) * 10) / 10 : 100,
+                shortPhys: Math.round(m.shortPhys * 1000) / 1000,
+                toBuy: Math.round(m.toBuy * 1000) / 1000,
+                pct: m.demand > 0
+                  ? Math.round(Math.min(100, (m.allocAv / m.demand) * 100) * 10) / 10 : 100,
+                pctOrdered: m.demand > 0
+                  ? Math.round(Math.min(100, ((m.allocAv + m.allocOr) / m.demand) * 100) * 10) / 10 : 100,
               }))}
               onRow={(r) => ({ style: { background: fcBg(r.pct) } })} />
           ),

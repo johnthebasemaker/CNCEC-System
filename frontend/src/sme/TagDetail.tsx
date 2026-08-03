@@ -20,19 +20,43 @@ const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
 const nf = (v: number, d = 3) =>
   v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: d })
 
+// 2026-08-03 STRICT TIER SEGREGATION: the single "Allocated" column summed
+// physical stock and stock on order, sitting next to a physical-only
+// "Fulfillment" — two different meanings, one row, no way to tell them apart.
 const matColumns: ColumnsType<AllocationLine> = [
   materialCodeCol<AllocationLine>({ width: 150 }),
   materialNameCol<AllocationLine>({ title: 'Name', width: 240 }),
   { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 64 },
   { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
-  { title: 'Allocated', dataIndex: 'Allocated_Qty', key: 'a', align: 'right', render: (v: number) => nf(v) },
   {
-    title: 'Shortfall', dataIndex: 'Shortfall_Qty', key: 's', align: 'right',
+    title: 'Available', dataIndex: 'Alloc_Available', key: 'av', align: 'right',
+    render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
+  },
+  {
+    title: 'On Order', dataIndex: 'Alloc_Ordered', key: 'or', align: 'right',
+    render: (v: number) => (
+      <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v)}</span>
+    ),
+  },
+  {
+    title: 'Short (physical)', dataIndex: 'Shortfall_Available_Qty', key: 'sp', align: 'right',
     render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v)}</span>,
   },
   {
-    title: 'Fulfillment', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 110,
+    title: 'To buy (net)', dataIndex: 'Shortfall_Qty', key: 's', align: 'right',
+    render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : '#10B981' }}>{nf(v)}</span>,
+  },
+  {
+    title: 'Ready now', dataIndex: 'Fulfillment_Pct', key: 'f', align: 'right', width: 100,
     render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
+  },
+  {
+    title: 'With ordered', dataIndex: 'Fulfillment_With_Ordered_Pct', key: 'fo',
+    align: 'right', width: 110,
+    render: (v: number, r) => (
+      <span style={{ color: v > r.Fulfillment_Pct ? '#F59E0B' : undefined,
+        opacity: v > r.Fulfillment_Pct ? 1 : 0.5 }}>{v.toFixed(1)}%</span>
+    ),
   },
 ]
 
@@ -73,6 +97,12 @@ export default function TagDetail({ lines, stat, preview }: {
               {nf(cs.canSqm, 1)} / {nf(cs.sqm, 1)} SQM
             </span>
             <FulfilPill pct={cs.fulfillPct} />
+            {cs.fulfillWithOrderedPct > cs.fulfillPct && (
+              <span style={{ ...mono, fontSize: '0.64rem', color: '#F59E0B', whiteSpace: 'nowrap' }}
+                title="Coverage once the open purchase orders land — not buildable today">
+                → {cs.fulfillWithOrderedPct.toFixed(1)}% ordered
+              </span>
+            )}
           </div>
           <Table sticky={{ offsetHeader: 64 }} size="small" rowKey={(r) => `${r.Lining_System_Code}|${r.Material_Key}`}
             columns={matColumns} pagination={false} scroll={{ x: 'max-content' }}
@@ -86,8 +116,17 @@ export default function TagDetail({ lines, stat, preview }: {
       }}>
         <span>System codes: <b style={mono}>{codes.length}</b></span>
         <span>Total demand: <b style={mono}>{nf(stat.demand)}</b></span>
-        <span>Allocated: <b style={mono}>{nf(stat.alloc)}</b></span>
-        <span style={{ marginLeft: 'auto' }}>Coverage: <FulfilPill pct={stat.fulfillPct} /></span>
+        <span>Available: <b style={{ ...mono, color: '#10B981' }}>{nf(stat.allocAvailable)}</b></span>
+        <span>On order: <b style={{ ...mono, color: stat.allocOrdered > 0 ? '#F59E0B' : undefined }}>{nf(stat.allocOrdered)}</b></span>
+        <span>To buy: <b style={{ ...mono, color: stat.shortfall > 0 ? '#EF4444' : undefined }}>{nf(stat.shortfall)}</b></span>
+        <span style={{ marginLeft: 'auto' }}>
+          Ready now: <FulfilPill pct={stat.fulfillPct} />
+          {stat.fulfillWithOrderedPct > stat.fulfillPct && (
+            <span style={{ ...mono, fontSize: '0.7rem', color: '#F59E0B', marginLeft: 6 }}>
+              (with ordered {stat.fulfillWithOrderedPct.toFixed(1)}%)
+            </span>
+          )}
+        </span>
       </div>
     </div>
   )
