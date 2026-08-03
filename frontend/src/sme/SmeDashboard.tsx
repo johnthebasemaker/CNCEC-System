@@ -35,10 +35,10 @@ import { materialCodeCol, materialNameCol } from './materialCols'
 import TierNote from './TierNote'
 
 // Legacy dashboard_material_balance export columns (same frame as the CSV).
-const balanceExportCols = ['Code', 'Material Name', 'UOM', 'Available', 'On Order',
+const balanceExportCols = ['Code', 'Material Name', 'UOM', 'Available', 'Pending Delivery',
   'Total Demand', 'Shortfall', 'Net Shortfall', 'Coverage %']
 const balanceExportRow = (r: BalanceRow) => [
-  r.Material_Code, r.Material_Name, r.UOM, r.Available_Qty, r.Ordered_Qty,
+  r.Material_Code, r.Material_Name, r.UOM, r.Available_Qty, r.Pending_Delivery_Qty,
   r.Demand_Qty, r.Shortfall, r.Net_Shortfall, r.Coverage_Pct,
 ]
 
@@ -120,8 +120,8 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
   const dCovSqm: DrillRow[] = [...pairs].sort((a, b) => a.coveragePct - b.coveragePct)
     .map((p) => ({ 'Equipment Tag': p.tag, 'System Code': p.code, 'Total SQM': p.sqm,
       'Ready now %': p.coveragePct, 'Buildable now SQM': p.coverableSqm,
-      'With ordered %': p.coverageWithOrderedPct,
-      'With ordered SQM': p.coverableWithOrderedSqm }))
+      'When delivered %': p.coverageWithOrderedPct,
+      'When delivered SQM': p.coverableWithOrderedSqm }))
   const dDefSqm: DrillRow[] = [...pairs].filter((p) => p.deficitSqm > 0)
     .sort((a, b) => b.deficitSqm - a.deficitSqm)
     .map((p) => ({ 'Equipment Tag': p.tag, 'System Code': p.code, 'Total SQM': p.sqm, 'Coverable SQM': p.coverableSqm, 'SQM Deficit': p.deficitSqm }))
@@ -137,7 +137,8 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
     materialNameCol<BalanceRow>({ width: 260 }),
     { title: 'UOM', dataIndex: 'UOM', key: 'uom', width: 70 },
     { title: 'Available', dataIndex: 'Available_Qty', key: 'avail', align: 'right', render: (v: number) => nf(v, 3) },
-    { title: 'On Order', dataIndex: 'Ordered_Qty', key: 'ord', align: 'right', render: (v: number) => nf(v, 3) },
+    { title: 'Pending Delivery', dataIndex: 'Pending_Delivery_Qty', key: 'ord', align: 'right', render: (v: number) => nf(v, 3) },
+    { title: 'Total Procured', dataIndex: 'Total_Procured_Qty', key: 'proc', align: 'right', render: (v: number) => nf(v, 3) },
     { title: 'Total Demand', dataIndex: 'Demand_Qty', key: 'dem', align: 'right', render: (v: number) => nf(v, 3) },
     { title: 'Short (physical)', dataIndex: 'Shortfall', key: 'short', align: 'right', render: (v: number) => nf(v, 3) },
     { title: 'To buy (net)', dataIndex: 'Net_Shortfall', key: 'net', align: 'right', render: (v: number) => nf(v, 3) },
@@ -153,7 +154,7 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
     { title: 'SQM Total', dataIndex: 'sqm', key: 't', align: 'right', render: (v: number) => nf(v, 1) },
     { title: 'Buildable now SQM', dataIndex: 'canSqm', key: 'a', align: 'right',
       render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v, 1)}</span> },
-    { title: 'With ordered SQM', dataIndex: 'canSqmWithOrdered', key: 'ao', align: 'right',
+    { title: 'When delivered SQM', dataIndex: 'canSqmWithOrdered', key: 'ao', align: 'right',
       render: (v: number, r) => (
         <span style={{ color: v > r.canSqm ? '#F59E0B' : undefined, opacity: v > r.canSqm ? 1 : 0.5 }}>{nf(v, 1)}</span>
       ) },
@@ -163,7 +164,7 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
       render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
     },
     {
-      title: 'With ordered %', dataIndex: 'coverageWithOrderedPct', key: 'po', align: 'right',
+      title: 'When delivered %', dataIndex: 'coverageWithOrderedPct', key: 'po', align: 'right',
       render: (v: number, r) => (
         <span style={{ color: v > r.coveragePct ? '#F59E0B' : undefined, opacity: v > r.coveragePct ? 1 : 0.5 }}>{v.toFixed(1)}%</span>
       ),
@@ -225,9 +226,9 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
             <Col flex="1 1 160px"><KpiDrill title="Buildable now SQM" value={nf(canSqm, 2)}
               accent="#10B981" drillTitle="Buildable today (physical stock only)" rows={dCovSqm}
               help="Area (m²) coverable with stock ON THE SHELF. Stock on an open purchase order is excluded." /></Col>
-            <Col flex="1 1 160px"><KpiDrill title="With ordered SQM" value={nf(canSqmOrd, 2)}
+            <Col flex="1 1 160px"><KpiDrill title="When delivered SQM" value={nf(canSqmOrd, 2)}
               accent="#F59E0B" drillTitle="Buildable once purchase orders arrive" rows={dCovSqm}
-              help="Forecast only — adds stock already on order. Never a readiness figure." /></Col>
+              help="Coverage against the TOTAL procured quantity (arrived + pending delivery = the whole PO). Forecast only — never a readiness figure." /></Col>
             <Col flex="1 1 160px"><KpiDrill title="SQM Deficit" value={nf(shortSqm, 2)}
               accent={shortSqm > 0 ? '#EF4444' : undefined}
               drillTitle="SQM Deficit by Equipment & System Code" rows={dDefSqm}
@@ -248,9 +249,9 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
         <Col flex="1 1 145px"><KpiDrill title="Buildable now SQM" value={nf(canSqm, 2)}
           accent="#10B981" drillTitle="Buildable today (physical stock only)" rows={dCovSqm}
           help="Area (m²) coverable with stock ON THE SHELF = Total SQM × Ready-now %. Stock on an open purchase order is excluded — it cannot line a tank today." /></Col>
-        <Col flex="1 1 145px"><KpiDrill title="With ordered SQM" value={nf(canSqmOrd, 2)}
+        <Col flex="1 1 145px"><KpiDrill title="When delivered SQM" value={nf(canSqmOrd, 2)}
           accent="#F59E0B" drillTitle="Buildable once purchase orders arrive" rows={dCovSqm}
-          help="Forecast only — adds stock already on order. Never a readiness figure." /></Col>
+          help="Coverage against the TOTAL procured quantity (arrived + pending delivery = the whole PO). Forecast only — never a readiness figure." /></Col>
         <Col flex="1 1 145px"><KpiDrill title="SQM Deficit" value={nf(shortSqm, 2)}
           accent={shortSqm > 0 ? '#EF4444' : undefined}
           drillTitle="SQM Deficit by Equipment & System Code" rows={dDefSqm}
@@ -258,15 +259,15 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
         <Col flex="1 1 145px"><KpiDrill title="Coverage now" value={`${fCov.toFixed(1)}%`}
           accent={fc(fCov)} delta={`${(fCov - 100).toFixed(1)}%`} deltaColor={fc(fCov)}
           drillTitle="Coverable SQM by Equipment & System Code" rows={dCovSqm}
-          help={`Available Qty ÷ Demand Qty across all filtered materials — PHYSICAL stock only. Counting stock on order it would be ${fCovOrd.toFixed(1)}%.`} /></Col>
-        <Col flex="1 1 145px"><KpiDrill title="With ordered" value={`${fCovOrd.toFixed(1)}%`}
+          help={`Available Qty ÷ Demand Qty across all filtered materials — ARRIVED stock only. Against the total procured quantity it would be ${fCovOrd.toFixed(1)}%.`} /></Col>
+        <Col flex="1 1 145px"><KpiDrill title="When delivered" value={`${fCovOrd.toFixed(1)}%`}
           accent="#F59E0B"
           drillTitle="Coverable SQM by Equipment & System Code" rows={dCovSqm}
           help="Coverage once the open purchase orders land. Forecast only." /></Col>
         <Col flex="1 1 145px"><KpiDrill title="Critical (<50%)" value={String(critCount)}
           accent={critCount > 0 ? '#EF4444' : '#10B981'}
           drillTitle="Critical Materials (physical coverage < 50%)" rows={dCrit}
-          help="Materials where AVAILABLE Qty covers less than 50% of total demand. Stock on order does not lift a material out of this list." /></Col>
+          help="Materials where ARRIVED Qty covers less than 50% of total demand. A pending delivery does not lift a material out of this list." /></Col>
       </Row>
 
       {/* ── Gauge + demand-vs-available | per-location bars ───────────────── */}
@@ -357,7 +358,8 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
               onClick={() => downloadCsv('sme-material-balance.csv',
                 balanceSorted.map((r) => ({
                   Code: r.Material_Code, 'Material Name': r.Material_Name, UOM: r.UOM,
-                  Available: r.Available_Qty, 'On Order': r.Ordered_Qty,
+                  Available: r.Available_Qty, 'Pending Delivery': r.Pending_Delivery_Qty,
+                  'Total Procured': r.Total_Procured_Qty,
                   'Total Demand': r.Demand_Qty, Shortfall: r.Shortfall,
                   'Net Shortfall': r.Net_Shortfall, 'Coverage %': r.Coverage_Pct,
                 })))}>CSV</Button>
@@ -389,7 +391,8 @@ export default function SmeDashboard({ siteId }: { siteId?: string }) {
                 materialNameCol({ width: 240 }),
                 { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 70 },
                 { title: 'Available', dataIndex: 'Available_Qty', key: 'a', align: 'right', render: (v: number) => nf(v, 3) },
-                { title: 'On Order', dataIndex: 'Ordered_Qty', key: 'o', align: 'right', render: (v: number) => nf(v, 3) },
+                { title: 'Pending Delivery', dataIndex: 'Pending_Delivery_Qty', key: 'o', align: 'right', render: (v: number) => nf(v, 3) },
+                { title: 'Total Procured', dataIndex: 'Total_Procured_Qty', key: 'tp', align: 'right', render: (v: number) => nf(v, 3) },
               ]}
               dataSource={stockOnly} />
           ),

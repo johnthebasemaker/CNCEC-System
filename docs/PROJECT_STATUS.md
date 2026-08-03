@@ -253,6 +253,16 @@ _Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
   `(Material_Code, SAP_Code)`. New gate `npm run test:ui-math` (20 checks)
   covers `session.ts` + `insights.ts`, which had no tests at all. See
   `docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md`.
+- **THE SUBSET RULE (2026-08-05):** in the source workbook `Ordered_Qty` is
+  the TOTAL procured for the project and `Available_Qty` is the part of it that
+  has ARRIVED — a SUBSET, not a second bucket. Tier 2 is therefore
+  `max(ordered − available, 0)` (the PENDING DELIVERY) and the ceiling is
+  `max(available, ordered)`. Adding the two double-counted every delivered unit:
+  22 of 30 report rows had an understated buy list (22,951 units), and
+  GI-8005763 — 143,000 arrived of 143,000 ordered — read 286,000 and hid a
+  9,685-unit shortage. Suite **BC** + `test:ui-math` §E; see
+  `docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`. UI wording: "Pending Delivery" for
+  the quantity, "When delivered" for the coverage.
 - **STRICT TIER SEGREGATION (2026-08-03):** readiness is TIER 1 only.
   `Alloc_Available` drives `Status`, `Completion_Pct`, `SQM_Achievable_Now`,
   `Coverage_Now_Pct` and `Fulfillment_Pct`; `Alloc_Ordered` drives ONLY the

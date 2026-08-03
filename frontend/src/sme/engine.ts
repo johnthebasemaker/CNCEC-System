@@ -18,10 +18,17 @@
  * pool, its own shortfall and its own report row. `Material_Key` (see matKey) is
  * the grouping key everywhere a material used to be keyed by code.
  *
+ * 2026-08-05 THE SUBSET RULE — full rationale in sme_engine.py. `Ordered_Qty`
+ * is the TOTAL procured for the project; `Available_Qty` is the part that has
+ * ARRIVED, i.e. a SUBSET of it. So tier 2 is `max(ordered − available, 0)` —
+ * the PENDING DELIVERY — and tier1 + tier2 = max(available, ordered), the
+ * procured ceiling. Treating raw `ordered_qty` as tier 2 double-counted every
+ * unit already on the shelf.
+ *
  * 2026-08-03 STRICT TIER SEGREGATION (locked) — full rationale in
  * sme_engine.py. TIER 1 (`Alloc_Available`) is the ONLY input to readiness:
  * Status, Completion_Pct, SQM_Achievable_Now, Coverage_Now_Pct,
- * Fulfillment_Pct. TIER 2 (`Alloc_Ordered`) feeds ONLY the forward-looking
+ * Fulfillment_Pct. TIER 2 (`Alloc_Pending`) feeds ONLY the forward-looking
  * twins — Completion_With_Ordered_Pct, SQM_Achievable_With_Ordered,
  * Coverage_With_Ordered_Pct, Fulfillment_With_Ordered_Pct — and the NET buy
  * list. `Allocated_Qty` (tier 1 + tier 2) is a CONSERVATION field so that
@@ -92,14 +99,14 @@ export interface AllocationLine {
   For_1_SQM: number
   Demand_Qty: number
   Alloc_Available: number
-  Alloc_Ordered: number
+  Alloc_Pending: number
   Allocated_Qty: number
   Shortfall_Available_Qty: number
   Shortfall_Qty: number
   Pool_Before: number
   Pool_After: number
-  Ordered_Pool_Before: number
-  Ordered_Pool_After: number
+  Pending_Pool_Before: number
+  Pending_Pool_After: number
   Fulfillment_Pct: number
   Fulfillment_With_Ordered_Pct: number
 }
@@ -110,7 +117,7 @@ export interface FeasibilityRow {
   Total_Demand_Qty: number
   Total_Allocated_Qty: number
   Total_Alloc_Available: number
-  Total_Alloc_Ordered: number
+  Total_Alloc_Pending: number
   Total_Shortfall_Qty: number
   Total_Net_Shortfall_Qty: number
   Completion_Pct: number
@@ -137,7 +144,10 @@ export interface ProcurementRow {
   Material_Name: string
   UOM: string
   Available_Qty: number
-  Ordered_Qty: number
+  /** UNRECEIVED part of the purchase order — max(ordered − available, 0). */
+  Pending_Delivery_Qty: number
+  /** The whole PO: available + pending = max(available, ordered). */
+  Total_Procured_Qty: number
   Gross_Shortfall_Qty: number
   Shortage_Qty_To_Buy: number
 }
@@ -149,7 +159,7 @@ export interface MaterialTotal {
   Demand_Qty: number
   Allocated_Qty: number
   Alloc_Available: number
-  Alloc_Ordered: number
+  Alloc_Pending: number
   Shortfall_Available_Qty: number
   Shortfall_Qty: number
 }
@@ -178,7 +188,7 @@ export interface BlockingMaterial {
   UOM: string
   Demand_Qty: number
   Alloc_Available: number
-  Alloc_Ordered: number
+  Alloc_Pending: number
   Shortfall_Available_Qty: number
   Shortfall_Qty: number
 }
@@ -220,7 +230,7 @@ export interface SmeModel {
     Material_Name: string; UOM: string; For_1_SQM: number }[]>
   /** Keyed by matKey() — one pool per COMPONENT, not per Material_Code. */
   poolInit: Map<string, number>
-  poolOrderedInit: Map<string, number>
+  poolPendingInit: Map<string, number>
   matMeta: Map<string, { Material_Code: string; SAP_Code: string; Material_Name: string; UOM: string }>
   tagMeta: Map<string, { Name: string; Location: string; Type: string; Substrate: string }>
   defaultOrder: string[]
@@ -333,20 +343,25 @@ export function buildModel(
   for (const codes of codesByTag.values()) codes.sort(syscodeCompare)
 
   const poolInit = new Map<string, number>()
-  const poolOrderedInit = new Map<string, number>()
+  const poolPendingInit = new Map<string, number>()
   const matMeta: SmeModel['matMeta'] = new Map()
   for (const m of materials) {
     // 2026-07-30 COMPONENT IDENTITY: one pool per (code, SAP), not per code.
     const mat = matKey(m.material_code, m.sap_code)
-    poolInit.set(mat, num(m.available_qty))
-    // 2026-08-02 STRICT DECOUPLING supersedes the 2026-07-28 effective-ordered
-    // netting (Q2a) — mirrors sme_engine.py. That netting subtracted receipts
-    // because they flowed into available_qty; the ERP ledger no longer reaches
-    // this model, so subtracting them would strip units from the order that
-    // were never added to availability. A `received_qty` on the input is
-    // IGNORED. Clamped at zero because a workbook cell can be negative.
-    const ordered = num(m.ordered_qty)
-    poolOrderedInit.set(mat, ordered > 0 ? ordered : 0)
+    const available = num(m.available_qty)
+    poolInit.set(mat, available)
+    // 2026-08-05 SUBSET RULE (mirrors sme_engine.py). `Ordered_Qty` in the
+    // workbook is the TOTAL procured for the project and `Available_Qty` is the
+    // part that has ARRIVED — available is a SUBSET of ordered, not a bucket
+    // beside it. Tier 2 is therefore the PENDING DELIVERY, and
+    //   tier1 + tier2 = available + max(ordered - available, 0)
+    //                 = max(available, ordered)   <- the total procured ceiling
+    // Using raw `ordered_qty` here double-counted every unit already landed:
+    // GI-8005763 (143,000 delivered of 143,000 ordered) read 286,000 and
+    // reported nothing to buy against a demand of 152,685.
+    // Clamped at zero so a fully-delivered material has an EMPTY pipeline.
+    const pending = num(m.ordered_qty) - available
+    poolPendingInit.set(mat, pending > 0 ? pending : 0)
     matMeta.set(mat, {
       Material_Code: s(m.material_code), SAP_Code: sapNorm(m.sap_code),
       Material_Name: s(m.material_name), UOM: s(m.uom),
@@ -354,7 +369,7 @@ export function buildModel(
   }
 
   return {
-    units, codesByTag, recipesByCode, poolInit, poolOrderedInit, matMeta, tagMeta,
+    units, codesByTag, recipesByCode, poolInit, poolPendingInit, matMeta, tagMeta,
     defaultOrder: [...codesByTag.keys()].sort(strCompare),
   }
 }
@@ -372,7 +387,7 @@ function dedupe(order: string[]): string[] {
 // ─── Cascade allocation (legacy cascade_allocate port) ───────────────────────
 export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLine[] {
   const pool = new Map(model.poolInit)
-  const poolOrdered = new Map(model.poolOrderedInit)
+  const poolPending = new Map(model.poolPendingInit)
   const lines: AllocationLine[] = []
   const raw: { demand: number; avail: number }[] = []
   // ── pass 1: PHYSICAL stock, priority order (identical to the single-tier
@@ -409,14 +424,14 @@ export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLin
           For_1_SQM: r.For_1_SQM,
           Demand_Qty: d4,
           Alloc_Available: a4,
-          Alloc_Ordered: 0,
+          Alloc_Pending: 0,
           Allocated_Qty: a4,
           Shortfall_Available_Qty: roundN(demand - alloc, 4),
           Shortfall_Qty: roundN(demand - alloc, 4),
           Pool_Before: roundN(before, 4),
           Pool_After: roundN(after, 4),
-          Ordered_Pool_Before: 0,
-          Ordered_Pool_After: 0,
+          Pending_Pool_Before: 0,
+          Pending_Pool_After: 0,
           Fulfillment_Pct: d4 > 0 ? roundN(clip((a4 / d4) * 100, 0, 100), 2) : 100,
           Fulfillment_With_Ordered_Pct: d4 > 0 ? roundN(clip((a4 / d4) * 100, 0, 100), 2) : 100,
         })
@@ -428,18 +443,18 @@ export function cascadeAllocate(model: SmeModel, order: string[]): AllocationLin
     const ln = lines[i]
     const mat = ln.Material_Key
     const gap = raw[i].demand - raw[i].avail
-    const before = poolOrdered.get(mat) ?? 0
+    const before = poolPending.get(mat) ?? 0
     const alloc = gap > 0 ? Math.min(gap, before) : 0
     const after = Math.max(0, before - alloc)
-    poolOrdered.set(mat, after)
+    poolPending.set(mat, after)
     const total = raw[i].avail + alloc
     const d4 = ln.Demand_Qty
     const t4 = roundN(total, 4)
-    ln.Alloc_Ordered = roundN(alloc, 4)
+    ln.Alloc_Pending = roundN(alloc, 4)
     ln.Allocated_Qty = t4
     ln.Shortfall_Qty = roundN(raw[i].demand - total, 4)
-    ln.Ordered_Pool_Before = roundN(before, 4)
-    ln.Ordered_Pool_After = roundN(after, 4)
+    ln.Pending_Pool_Before = roundN(before, 4)
+    ln.Pending_Pool_After = roundN(after, 4)
     ln.Fulfillment_With_Ordered_Pct = d4 > 0 ? roundN(clip((t4 / d4) * 100, 0, 100), 2) : 100
   }
   return lines
@@ -469,7 +484,7 @@ export function computeFeasibility(
       demand += r.Demand_Qty
       alloc += r.Allocated_Qty
       allocAv += r.Alloc_Available
-      allocOr += r.Alloc_Ordered
+      allocOr += r.Alloc_Pending
       short += r.Shortfall_Available_Qty
       shortNet += r.Shortfall_Qty
     }
@@ -501,7 +516,7 @@ export function computeFeasibility(
       Total_Demand_Qty: roundN(demand, 4),
       Total_Allocated_Qty: roundN(alloc, 4),
       Total_Alloc_Available: roundN(allocAv, 4),
-      Total_Alloc_Ordered: roundN(allocOr, 4),
+      Total_Alloc_Pending: roundN(allocOr, 4),
       Total_Shortfall_Qty: roundN(short, 4),
       Total_Net_Shortfall_Qty: roundN(shortNet, 4),
       Completion_Pct: completion,
@@ -584,7 +599,13 @@ export function buildProcurementList(model: SmeModel, lines: AllocationLine[]): 
       Material_Name: meta?.Material_Name || ln.Material_Name,
       UOM: meta?.UOM || ln.UOM,
       Available_Qty: model.poolInit.get(mat) ?? 0,
-      Ordered_Qty: model.poolOrderedInit.get(mat) ?? 0,
+      // 2026-08-05 SUBSET RULE: the pipeline and the ceiling, separately. The
+      // old `Ordered_Qty` column carried the raw order beside `Available_Qty`,
+      // which reads as "and this much more is coming" — the double-count in
+      // one column.
+      Pending_Delivery_Qty: model.poolPendingInit.get(mat) ?? 0,
+      Total_Procured_Qty: (model.poolInit.get(mat) ?? 0)
+        + (model.poolPendingInit.get(mat) ?? 0),
       Gross_Shortfall_Qty: roundN(gross.get(mat) ?? 0, 3),
       Shortage_Qty_To_Buy: roundN(v, 3),
     })
@@ -603,7 +624,7 @@ export function buildTotals(lines: AllocationLine[]): MaterialTotal[] {
       t = {
         Material_Code: ln.Material_Code, SAP_Code: ln.SAP_Code,
         Material_Name: ln.Material_Name, UOM: ln.UOM,
-        Demand_Qty: 0, Allocated_Qty: 0, Alloc_Available: 0, Alloc_Ordered: 0,
+        Demand_Qty: 0, Allocated_Qty: 0, Alloc_Available: 0, Alloc_Pending: 0,
         Shortfall_Available_Qty: 0, Shortfall_Qty: 0,
       }
       totals.set(ln.Material_Key, t)
@@ -611,7 +632,7 @@ export function buildTotals(lines: AllocationLine[]): MaterialTotal[] {
     t.Demand_Qty += ln.Demand_Qty
     t.Allocated_Qty += ln.Allocated_Qty
     t.Alloc_Available += ln.Alloc_Available
-    t.Alloc_Ordered += ln.Alloc_Ordered
+    t.Alloc_Pending += ln.Alloc_Pending
     t.Shortfall_Available_Qty += ln.Shortfall_Available_Qty
     t.Shortfall_Qty += ln.Shortfall_Qty
   }
@@ -622,7 +643,7 @@ export function buildTotals(lines: AllocationLine[]): MaterialTotal[] {
       Demand_Qty: roundN(t.Demand_Qty, 3),
       Allocated_Qty: roundN(t.Allocated_Qty, 3),
       Alloc_Available: roundN(t.Alloc_Available, 3),
-      Alloc_Ordered: roundN(t.Alloc_Ordered, 3),
+      Alloc_Pending: roundN(t.Alloc_Pending, 3),
       Shortfall_Available_Qty: roundN(t.Shortfall_Available_Qty, 3),
       Shortfall_Qty: roundN(t.Shortfall_Qty, 3),
     }
@@ -711,7 +732,7 @@ export function buildSqmByCode(
     for (const f of SUM) a[f] += r[f]
   }
   const block = new Map<string, Map<string, BlockingMaterial>>()
-  const BSUM = ['Demand_Qty', 'Alloc_Available', 'Alloc_Ordered',
+  const BSUM = ['Demand_Qty', 'Alloc_Available', 'Alloc_Pending',
     'Shortfall_Available_Qty', 'Shortfall_Qty'] as const
   for (const ln of lines) {
     if (!block.has(ln.Lining_System_Code)) block.set(ln.Lining_System_Code, new Map())
@@ -721,7 +742,7 @@ export function buildSqmByCode(
       b = {
         Material_Code: ln.Material_Code, SAP_Code: ln.SAP_Code,
         Material_Name: ln.Material_Name, UOM: ln.UOM,
-        Demand_Qty: 0, Alloc_Available: 0, Alloc_Ordered: 0,
+        Demand_Qty: 0, Alloc_Available: 0, Alloc_Pending: 0,
         Shortfall_Available_Qty: 0, Shortfall_Qty: 0,
       }
       m.set(ln.Material_Key, b)

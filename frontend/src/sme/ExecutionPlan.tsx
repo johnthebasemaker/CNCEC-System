@@ -52,7 +52,7 @@ const shortageCols: ColumnsType<AllocationLine> = [
     render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
   },
   {
-    title: 'On Order', dataIndex: 'Alloc_Ordered', key: 'or', align: 'right',
+    title: 'Pending Delivery', dataIndex: 'Alloc_Pending', key: 'or', align: 'right',
     render: (v: number) => (
       <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v)}</span>
     ),

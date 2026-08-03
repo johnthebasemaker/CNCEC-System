@@ -271,7 +271,7 @@ function AllEquipmentMode({ model, order, onOrder, siteId }: {
           rows={order.filter((t) => stats.has(t)).map((t, i) => ({
             '#': i + 1, Tag: t, Name: stats.get(t)!.name, Location: stats.get(t)!.location,
             'Ready now %': stats.get(t)!.fulfillPct,
-            'With ordered %': stats.get(t)!.fulfillWithOrderedPct,
+            'When delivered %': stats.get(t)!.fulfillWithOrderedPct,
           }))} help="Every equipment tag, cascaded in the order below." /></Col>
         <Col flex="1 1 150px"><KpiDrill title="Total SQM" value={nf(sqm)}
           drillTitle="SQM by Equipment" rows={all.map((t) => ({ Tag: t.tag, SQM: t.sqm }))} /></Col>
@@ -281,11 +281,11 @@ function AllEquipmentMode({ model, order, onOrder, siteId }: {
           rows={all.map((t) => ({
             Tag: t.tag, 'Buildable now': t.canSqm, 'Ready now %': t.fulfillPct,
           }))} /></Col>
-        <Col flex="1 1 150px"><KpiDrill title="With ordered SQM" value={nf(canOrd)}
+        <Col flex="1 1 150px"><KpiDrill title="When delivered SQM" value={nf(canOrd)}
           accent="#F59E0B" drillTitle="Buildable once purchase orders arrive"
-          help="Forecast only — adds stock already on order."
+          help="Coverage against the TOTAL procured quantity — arrived stock plus the pending part of the order. Forecast only."
           rows={all.filter((t) => t.canSqmWithOrdered > t.canSqm).map((t) => ({
-            Tag: t.tag, 'Buildable now': t.canSqm, 'With ordered': t.canSqmWithOrdered,
+            Tag: t.tag, 'Buildable now': t.canSqm, 'When delivered': t.canSqmWithOrdered,
           }))} /></Col>
         <Col flex="1 1 150px"><KpiDrill title="Deficit SQM" value={nf(sqm - can)}
           accent={sqm - can > 0 ? '#EF4444' : undefined}
@@ -293,14 +293,14 @@ function AllEquipmentMode({ model, order, onOrder, siteId }: {
           rows={all.filter((t) => t.sqm - t.canSqm > 0.005)
             .map((t) => ({ Tag: t.tag, 'Deficit SQM': Math.round((t.sqm - t.canSqm) * 100) / 100 }))} /></Col>
         <Col flex="1 1 150px"><KpiDrill title="Coverage now" value={`${cov.toFixed(1)}%`}
-          drillTitle="Coverage by Equipment — physical vs with ordered"
+          drillTitle="Coverage by Equipment — physical vs when delivered"
           help={`Buildable m² ÷ remaining m², where each unit is capped by its `
             + `SCARCEST component — never a quantity average across materials. `
-            + `Physical stock only; with stock on order it would read `
+            + `Arrived stock only; against the total procured quantity it would read `
             + `${covOrd.toFixed(1)}%.`}
           rows={all.map((t) => ({
             Tag: t.tag, 'Ready now %': t.fulfillPct,
-            'With ordered %': t.fulfillWithOrderedPct,
+            'When delivered %': t.fulfillWithOrderedPct,
           }))} /></Col>
       </Row>
       <Card size="small" title={<span style={secHdr}>{fcDot(cov)} All equipment — drag to re-cascade</span>}>

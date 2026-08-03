@@ -28,8 +28,8 @@ export interface CodeStat {
   alloc: number
   /** TIER 1 — physically allocated. */
   allocAvailable: number
-  /** TIER 2 — covered by an open purchase order. */
-  allocOrdered: number
+  /** TIER 2 — covered by the PENDING (unreceived) part of the purchase order. */
+  allocPending: number
   /** NET gap: what still has to be bought. */
   shortfall: number
   /** PHYSICAL gap: what blocks the build today. */
@@ -50,7 +50,7 @@ export interface TagStat {
   demand: number
   alloc: number
   allocAvailable: number
-  allocOrdered: number
+  allocPending: number
   shortfall: number
   shortfallAvailable: number
   fulfillPct: number
@@ -88,7 +88,7 @@ export function codeStats(lines: AllocationLine[]): Map<string, CodeStat> {
         tag: ln.Equipment_Tag_No, code: ln.Lining_System_Code,
         shortName: ln.Lining_System_Short_Name, sqm: ln.Total_SQM,
         canSqm: 0, canSqmWithOrdered: 0, shortSqm: 0, demand: 0, alloc: 0,
-        allocAvailable: 0, allocOrdered: 0, shortfall: 0, shortfallAvailable: 0,
+        allocAvailable: 0, allocPending: 0, shortfall: 0, shortfallAvailable: 0,
         fulfillPct: 100, fulfillWithOrderedPct: 100,
       }
       out.set(k, s)
@@ -98,7 +98,7 @@ export function codeStats(lines: AllocationLine[]): Map<string, CodeStat> {
     s.demand += ln.Demand_Qty
     s.alloc += ln.Allocated_Qty
     s.allocAvailable += ln.Alloc_Available
-    s.allocOrdered += ln.Alloc_Ordered
+    s.allocPending += ln.Alloc_Pending
     s.shortfall += ln.Shortfall_Qty
     s.shortfallAvailable += ln.Shortfall_Available_Qty
     // TIER 1 — readiness.
@@ -132,7 +132,7 @@ export function tagStats(model: SmeModel, lines: AllocationLine[]): Map<string, 
       t = {
         tag: s.tag, name: meta?.Name ?? '', location: meta?.Location ?? '',
         type: meta?.Type ?? '', substrate: meta?.Substrate ?? '',
-        codes: [], demand: 0, alloc: 0, allocAvailable: 0, allocOrdered: 0,
+        codes: [], demand: 0, alloc: 0, allocAvailable: 0, allocPending: 0,
         shortfall: 0, shortfallAvailable: 0, fulfillPct: 100,
         fulfillWithOrderedPct: 100, sqm: 0, canSqm: 0, canSqmWithOrdered: 0,
       }
@@ -142,7 +142,7 @@ export function tagStats(model: SmeModel, lines: AllocationLine[]): Map<string, 
     t.demand += s.demand
     t.alloc += s.alloc
     t.allocAvailable += s.allocAvailable
-    t.allocOrdered += s.allocOrdered
+    t.allocPending += s.allocPending
     t.shortfall += s.shortfall
     t.shortfallAvailable += s.shortfallAvailable
     t.sqm += s.sqm
@@ -237,7 +237,8 @@ export interface WeightedProcurementRow {
   UOM: string
   Demand_Qty: number
   Available_Qty: number
-  Ordered_Qty: number
+  /** TIER 2 — the PENDING (unreceived) part of the order. */
+  Pending_Delivery_Qty: number
   Allocated_Qty: number
   Shortfall_Qty: number
   Fulfillment_Pct: number
@@ -259,7 +260,7 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
         Material_Code: ln.Material_Code, SAP_Code: ln.SAP_Code,
         Material_Key: ln.Material_Key,
         Material_Name: ln.Material_Name, UOM: ln.UOM,
-        Demand_Qty: 0, Available_Qty: 0, Ordered_Qty: 0,
+        Demand_Qty: 0, Available_Qty: 0, Pending_Delivery_Qty: 0,
         Allocated_Qty: 0, Shortfall_Qty: 0, Fulfillment_Pct: 100,
         SQM_Total: 0, SQM_Done: 0, SQM_Deficit: 0,
       }
@@ -267,7 +268,7 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
     }
     r.Demand_Qty += ln.Demand_Qty
     r.Available_Qty += ln.Alloc_Available
-    r.Ordered_Qty += ln.Alloc_Ordered
+    r.Pending_Delivery_Qty += ln.Alloc_Pending
     r.Allocated_Qty += ln.Allocated_Qty
     r.Shortfall_Qty += ln.Shortfall_Qty
     r.SQM_Total += ln.Total_SQM
@@ -277,7 +278,7 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
     ...r,
     Demand_Qty: roundN(r.Demand_Qty, 3),
     Available_Qty: roundN(r.Available_Qty, 3),
-    Ordered_Qty: roundN(r.Ordered_Qty, 3),
+    Pending_Delivery_Qty: roundN(r.Pending_Delivery_Qty, 3),
     Allocated_Qty: roundN(r.Allocated_Qty, 3),
     Shortfall_Qty: roundN(r.Shortfall_Qty, 3),
     // Coverage stays on PHYSICAL stock (mirrors computeFeasibility): on-order

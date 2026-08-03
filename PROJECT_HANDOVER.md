@@ -1,6 +1,6 @@
 # PROJECT HANDOVER — read this first
 
-> **Updated 2026-08-04.** This is the fresh-session entry point: what is locked,
+> **Updated 2026-08-05.** This is the fresh-session entry point: what is locked,
 > where we are, and what happens next. Read this file, then
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the system brain), then
 > [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state + gotchas) and
@@ -91,6 +91,43 @@ absent from the payload.
 Decoupled is not frozen — editing `sme_inventory_seed` (what the Excel sync writes)
 still moves every SME number at once. Suite BA pins that too.
 
+### 1c. THE SUBSET RULE — Available is part OF Ordered, not extra to it
+
+*Locked 2026-08-05 (operator correction on the shape of the source data).*
+
+In `Materials_DetailsAvailable_Qty.xlsx`, **`Ordered_Qty` is the TOTAL quantity
+PROCURED for the project** and **`Available_Qty` is the portion of it that has
+physically ARRIVED**. Available is a SUBSET of Ordered, never a second bucket
+beside it.
+
+```
+tier 1  = available_qty
+tier 2  = max(ordered_qty − available_qty, 0)     the PENDING DELIVERY
+ceiling = tier1 + tier2 = max(available, ordered) = Allocated_Qty
+to buy  = max(demand − max(available, ordered), 0) = Shortfall_Qty
+```
+
+Everything but tier 2 falls out of the existing cascade arithmetic; only
+`build_model` changed in each engine.
+
+**Why it is not negotiable:** the engine added the two buckets, double-counting
+every unit already on the shelf. Verified on all 32 workbook rows — `available ≤
+ordered` everywhere, **14 of 32 fully delivered**. Reconciled against
+`dashboard_material_balance.xlsx`: **22 of 30 report rows had an understated buy
+list, 22,951 units in total**. `GI-8005763` (143,000 arrived of 143,000 ordered)
+read **286,000**, reported **nothing to buy** against a demand of 152,685, and
+hid a **9,685-unit shortage** entirely. Suite **BC** (16 checks, two of which
+read the live workbook) and `test:ui-math` §E pin it.
+
+**Naming:** the tier-2 quantity fields are `Alloc_Pending` /
+`pool_pending_init` / `Pending_Delivery_Qty`, and every report states
+`Total_Procured_Qty` beside them. The `*_With_Ordered_*` coverage fields keep
+their names — they measure against the *total procured*, which is what they
+always meant — and the UI labels them **"When delivered"**. UI wording: second-
+tier quantities read **"Pending Delivery"**, second-tier coverage reads **"When
+delivered"**.
+Full account: [`docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`](docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md).
+
 ### 1b. STRICT TIER SEGREGATION — a purchase order is never readiness
 
 *Locked 2026-08-03.*
@@ -99,7 +136,7 @@ still moves every SME number at once. Suite BA pins that too.
 `Status`, `Completion_Pct`, `SQM_Achievable_Now`, `Coverage_Now_Pct`,
 `Fulfillment_Pct`, `SQM_Deficit`, and every "can we build it today" answer.
 
-**TIER 2** (`Alloc_Ordered` / `pool_ordered_init`) feeds ONLY the forward-looking
+**TIER 2** (`Alloc_Pending` / `pool_pending_init`) feeds ONLY the forward-looking
 twins — `Completion_With_Ordered_Pct`, `SQM_Achievable_With_Ordered`,
 `Coverage_With_Ordered_Pct`, `Fulfillment_With_Ordered_Pct` — and the NET buy
 list (`Shortfall_Qty`), so stock already ordered is not ordered twice.
@@ -130,7 +167,7 @@ Companion field contract, conserved on every line:
 
 ```
 Demand_Qty      = Allocated_Qty + Shortfall_Qty
-Allocated_Qty   = Alloc_Available + Alloc_Ordered
+Allocated_Qty   = Alloc_Available + Alloc_Pending   (= the total procured)
 Shortfall_Available_Qty = the PHYSICAL gap  → drives feasibility / "Ready to Build"
 Shortfall_Qty           = the NET gap       → drives the buy list
 ```
@@ -282,10 +319,10 @@ All green locally at commit `fae0b3f` (main), verified 2026-07-30.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1001 / 0** (suites A…BB) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1018 / 0** (suites A…BC) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **53 / 53** (~28 s, own throwaway DB) | `cd tests/e2e && npm test` |
-| SME TS↔PY parity | **1,289 comparisons** | `npm run parity:sme --prefix frontend` |
-| **SME UI math** (session.ts + insights.ts) | **20 / 0** | `npm run test:ui-math --prefix frontend` |
+| SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
+| **SME UI math** (session.ts + insights.ts) | **27 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
@@ -303,6 +340,7 @@ recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/RE
 
 | PR | Commit | What |
 |---|---|---|
+| — | `fix/sme-ordered-subset-rule` | **The subset rule** (rule 1c) — `Ordered_Qty` is the TOTAL procured and `Available_Qty` a subset of it, so tier 2 is `max(ordered − available, 0)`; the additive reading understated the buy list by 22,951 units and hid a 9,685-unit shortage on GI-8005763. Suite **BC** (16) + `test:ui-math` §E (7) |
 | — | `fix/sme-final-math-alignment` | **Final math alignment** — scope-wide coverage → area-weighted bottleneck (57.7% → 7.8% on live data); Smart Calculator → `(Material_Code, SAP_Code)`; new `npm run test:ui-math` gate (20 checks) for the previously untested presentation layer |
 | — | `fix/sme-strict-tier-segregation` | **SME tier segregation** (rule 1b) — readiness is TIER 1 everywhere; `session.ts codeStats`, Total Overview, Location Report, Execution Plan, Dashboard, exec summary + PDF, Smart Calculator, location export all split; `insights.ts` Material_Key lookup bug fixed; suite **BB** (18) + 4 E2E |
 | — | `feat/sme-strict-decoupling` | **SME ⇄ ERP strict decoupling** (rule 1a) — ledger stripped from `SQL_SME_MATERIALS` + Smart Calculator, effective-ordered netting removed from both engines, golden regenerated, suite **BA** (11 checks), `pg_excel_sync` defaults to SME-only, `Available Qty` header alias |
@@ -414,6 +452,7 @@ revert-verification and the caveats:
 
 | Log | Covers |
 |---|---|
+| [`docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`](docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md) | Rule 1c: the double-count, the 22,951-unit buy-list correction, suite BC |
 | [`docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md`](docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md) | The last two loopholes: scope-wide bottleneck + calculator component identity |
 | [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md) | Rule 1b: the six layers that merged the tiers, the 21.5% measurement, the per-tab audit |
 | [`docs/SME_STRICT_DECOUPLING_RUNLOG.md`](docs/SME_STRICT_DECOUPLING_RUNLOG.md) | Rule 1a: the two ledger leaks, suite BA, the CLI + header fixes, the re-sync |

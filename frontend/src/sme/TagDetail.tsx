@@ -33,7 +33,7 @@ const matColumns: ColumnsType<AllocationLine> = [
     render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
   },
   {
-    title: 'On Order', dataIndex: 'Alloc_Ordered', key: 'or', align: 'right',
+    title: 'Pending Delivery', dataIndex: 'Alloc_Pending', key: 'or', align: 'right',
     render: (v: number) => (
       <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v)}</span>
     ),
@@ -51,7 +51,7 @@ const matColumns: ColumnsType<AllocationLine> = [
     render: (v: number) => <span style={{ color: fc(v), fontWeight: 700 }}>{v.toFixed(1)}%</span>,
   },
   {
-    title: 'With ordered', dataIndex: 'Fulfillment_With_Ordered_Pct', key: 'fo',
+    title: 'When delivered', dataIndex: 'Fulfillment_With_Ordered_Pct', key: 'fo',
     align: 'right', width: 110,
     render: (v: number, r) => (
       <span style={{ color: v > r.Fulfillment_Pct ? '#F59E0B' : undefined,
@@ -117,13 +117,13 @@ export default function TagDetail({ lines, stat, preview }: {
         <span>System codes: <b style={mono}>{codes.length}</b></span>
         <span>Total demand: <b style={mono}>{nf(stat.demand)}</b></span>
         <span>Available: <b style={{ ...mono, color: '#10B981' }}>{nf(stat.allocAvailable)}</b></span>
-        <span>On order: <b style={{ ...mono, color: stat.allocOrdered > 0 ? '#F59E0B' : undefined }}>{nf(stat.allocOrdered)}</b></span>
+        <span>On order: <b style={{ ...mono, color: stat.allocPending > 0 ? '#F59E0B' : undefined }}>{nf(stat.allocPending)}</b></span>
         <span>To buy: <b style={{ ...mono, color: stat.shortfall > 0 ? '#EF4444' : undefined }}>{nf(stat.shortfall)}</b></span>
         <span style={{ marginLeft: 'auto' }}>
           Ready now: <FulfilPill pct={stat.fulfillPct} />
           {stat.fulfillWithOrderedPct > stat.fulfillPct && (
             <span style={{ ...mono, fontSize: '0.7rem', color: '#F59E0B', marginLeft: 6 }}>
-              (with ordered {stat.fulfillWithOrderedPct.toFixed(1)}%)
+              (when delivered {stat.fulfillWithOrderedPct.toFixed(1)}%)
             </span>
           )}
         </span>

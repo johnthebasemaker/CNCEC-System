@@ -304,11 +304,11 @@ export default function ExecutiveSummaryPage() {
                   columns={[col('Equipment', 'Equipment_Tag'), col('Name', 'Name'),
                     col('Remaining SQM', 'Remaining_SQM'),
                     col('Achievable now', 'Achievable_SQM'),
-                    col('With ordered', 'Achievable_With_Ordered_SQM'),
+                    col('When delivered', 'Achievable_With_Ordered_SQM'),
                     { title: 'Coverage now', dataIndex: 'Coverage_Pct',
                       render: (v) => <Progress percent={Number(v) || 0} size="small"
                         status={Number(v) >= 100 ? 'success' : Number(v) > 0 ? 'active' : 'exception'} /> },
-                    col('With ordered %', 'Coverage_With_Ordered_Pct'),
+                    col('When delivered %', 'Coverage_With_Ordered_Pct'),
                     col('Bottleneck material', 'Bottleneck')]} />
               </Card>
             </Col>
@@ -318,11 +318,11 @@ export default function ExecutiveSummaryPage() {
                   columns={[col('System', 'System_Code'), col('Name', 'System_Name'),
                     col('Remaining SQM', 'Remaining_SQM'),
                     col('Achievable now', 'Achievable_SQM'),
-                    col('With ordered', 'Achievable_With_Ordered_SQM'),
+                    col('When delivered', 'Achievable_With_Ordered_SQM'),
                     { title: 'Coverage now', dataIndex: 'Coverage_Pct',
                       render: (v) => <Progress percent={Number(v) || 0} size="small"
                         status={Number(v) >= 100 ? 'success' : Number(v) > 0 ? 'active' : 'exception'} /> },
-                    col('With ordered %', 'Coverage_With_Ordered_Pct')]} />
+                    col('When delivered %', 'Coverage_With_Ordered_Pct')]} />
               </Card>
             </Col>
 
