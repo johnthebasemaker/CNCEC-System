@@ -26,12 +26,21 @@ import {
   ToolOutlined, ControlOutlined, UserAddOutlined,
 } from '@ant-design/icons'
 import type { User } from '../auth/AuthContext'
+import { isReadOnly } from '../auth/readOnly'
 import { READ_ENTITIES, WRITE_ENTITIES, type ReadEntity } from './entities'
 
 // An access rule: either an exact set of roles (admin implicitly allowed), or a
 // minimum hierarchy level. `minLevel` reproduces the legacy cascading checks;
 // `anyRole` reproduces the exact-locks.
-export type AccessRule = { anyRole: string[] } | { minLevel: number }
+//
+// `writes` marks a page whose PURPOSE is changing data — a form, an approval
+// queue, an importer, a CRUD editor. A view-only role (Auditor) cannot open
+// one at all, which is what removes the great majority of Edit/Upload/Sync/
+// Delete controls from its UI without touching a single page component. Pages
+// that merely CONTAIN an action (Documents has an upload button) are NOT
+// marked; those controls are disabled individually via useReadOnly().
+export type AccessRule = ({ anyRole: string[] } | { minLevel: number })
+  & { writes?: boolean }
 
 export interface NavNode {
   key: string          // route path (also the antd menu key)
@@ -48,6 +57,10 @@ export interface NavGroup {
   access?: AccessRule  // group-level gate; a node still needs its own rule
   children: NavNode[]
 }
+
+/** Convenience: an access rule that also forbids view-only roles. */
+const w = <T extends object>(rule: T): T & { writes: true } =>
+  ({ ...rule, writes: true })
 
 // ── the manifest ────────────────────────────────────────────────────────────
 // Access rules chosen to reproduce legacy exactly (see config.py PAGE_ACCESS /
@@ -66,7 +79,7 @@ export const NAV: NavGroup[] = [
   {
     id: 'entry',
     label: 'Data Entry',
-    access: { anyRole: ['store_keeper'] },   // Entry Log exact-locked to SK
+    access: w({ anyRole: ['store_keeper'] }),   // Entry Log exact-locked to SK
     children: [
       { key: '/entry/receive', label: 'Receive Stock', icon: <FormOutlined />, access: { anyRole: ['store_keeper'] } },
       { key: '/entry/issue', label: 'Issue Stock', icon: <FormOutlined />, access: { anyRole: ['store_keeper'] } },
@@ -97,7 +110,7 @@ export const NAV: NavGroup[] = [
     access: { anyRole: ['hod'] },   // HOD Portal exact-locked {hod, admin}
     children: [
       { key: '/hod/executive-summary', label: 'Executive Summary', icon: <FundProjectionScreenOutlined />, access: { anyRole: ['hod'] } },
-      { key: '/hod/approvals', label: 'Approvals', icon: <AuditOutlined />, access: { anyRole: ['hod'] }, badge: 'approvals' },
+      { key: '/hod/approvals', label: 'Approvals', icon: <AuditOutlined />, access: w({ anyRole: ['hod'] }), badge: 'approvals' },
       { key: '/hod/burn-rate', label: 'Burn Rate', icon: <FireOutlined />, access: { anyRole: ['hod'] } },
       { key: '/hod/lining-coverage', label: 'Lining Coverage', icon: <ExperimentOutlined />, access: { anyRole: ['hod', 'logistics'] } },
       { key: '/hod/documents', label: 'Document Library', icon: <FileSearchOutlined />, access: { anyRole: ['hod'] } },
@@ -106,7 +119,7 @@ export const NAV: NavGroup[] = [
       { key: '/hod/requests', label: 'Cross-Site Requests', icon: <SolutionOutlined />, access: { anyRole: ['hod'] } },
       // Bulk Excel import — SME kinds for HOD; inventory/ledger cards appear
       // for admin only (server enforces both).
-      { key: '/bulk-import', label: 'Bulk Excel Import', icon: <FileExcelOutlined />, access: { anyRole: ['hod'] } },
+      { key: '/bulk-import', label: 'Bulk Excel Import', icon: <FileExcelOutlined />, access: w({ anyRole: ['hod'] }) },
     ],
   },
   {
@@ -138,7 +151,7 @@ export const NAV: NavGroup[] = [
     label: 'Logistics',
     access: { minLevel: 3 },   // {logistics, admin} (hod level 2 < 3)
     children: [
-      { key: '/logistics', label: 'Procurement', icon: <CarOutlined />, access: { minLevel: 3 } },
+      { key: '/logistics', label: 'Procurement', icon: <CarOutlined />, access: w({ minLevel: 3 }) },
       // same page as /hod/lining-coverage — distinct route key so the two nav
       // groups never share an antd menu key (admin "All areas" shows both)
       { key: '/logistics/lining-coverage', label: 'Lining Coverage', icon: <ExperimentOutlined />, access: { minLevel: 3 } },
@@ -147,27 +160,27 @@ export const NAV: NavGroup[] = [
   {
     id: 'supervisor',
     label: 'Supervisor',
-    access: { anyRole: ['supervisor'] },
+    access: w({ anyRole: ['supervisor'] }),
     children: [
-      { key: '/supervisor', label: 'Material Requests', icon: <SolutionOutlined />, access: { anyRole: ['supervisor'] } },
+      { key: '/supervisor', label: 'Material Requests', icon: <SolutionOutlined />, access: w({ anyRole: ['supervisor'] }) },
     ],
   },
   {
     id: 'warehouse',
     label: 'Warehouse',
-    access: { anyRole: ['warehouse_user'] },   // exact {warehouse_user, admin}
+    access: w({ anyRole: ['warehouse_user'] }),   // exact {warehouse_user, admin}
     children: [
-      { key: '/warehouse', label: 'Receiving & DN', icon: <InboxOutlined />, access: { anyRole: ['warehouse_user'] }, badge: 'warehouse' },
+      { key: '/warehouse', label: 'Receiving & DN', icon: <InboxOutlined />, access: w({ anyRole: ['warehouse_user'] }), badge: 'warehouse' },
     ],
   },
   {
     id: 'master',
     label: 'Master Data',
-    access: { minLevel: 3 },
+    access: w({ minLevel: 3 }),
     children: WRITE_ENTITIES.map((e) => ({
       key: `/master/${e.key}`,
       label: e.label,
-      access: { minLevel: 3 } as AccessRule,
+      access: w({ minLevel: 3 }) as AccessRule,
     })),
   },
   {
@@ -175,12 +188,12 @@ export const NAV: NavGroup[] = [
     label: 'Admin',
     access: { minLevel: 4 },
     children: [
-      { key: '/admin/users', label: 'Users', icon: <TeamOutlined />, access: { minLevel: 4 } },
-      { key: '/admin/pending', label: 'Access Requests', icon: <UserAddOutlined />, access: { minLevel: 4 } },
+      { key: '/admin/users', label: 'Users', icon: <TeamOutlined />, access: w({ minLevel: 4 }) },
+      { key: '/admin/pending', label: 'Access Requests', icon: <UserAddOutlined />, access: w({ minLevel: 4 }) },
       { key: '/admin/overdue', label: 'Overdue Actions', icon: <AlertOutlined />, access: { minLevel: 4 }, redBadge: true },
       { key: '/admin/inventory', label: 'Inventory', icon: <DatabaseOutlined />, access: { minLevel: 4 } },
       { key: '/admin/audit', label: 'Audit Log', icon: <FileSearchOutlined />, access: { minLevel: 4 } },
-      { key: '/admin/console', label: 'Console', icon: <ControlOutlined />, access: { minLevel: 4 } },
+      { key: '/admin/console', label: 'Console', icon: <ControlOutlined />, access: w({ minLevel: 4 }) },
     ],
   },
   {
@@ -209,6 +222,7 @@ export const ADMIN_DEFAULT_GROUPS = new Set([
 // The group each role works in most — opened by default in the sidebar
 // (progressive disclosure: your workspace first, everything else collapsed).
 export const PRIMARY_GROUP: Record<string, string> = {
+  auditor: 'records',
   store_keeper: 'entry',
   warehouse_user: 'warehouse',
   supervisor: 'supervisor',
@@ -219,6 +233,9 @@ export const PRIMARY_GROUP: Record<string, string> = {
 
 // Where each role lands when it hits a page it cannot see (and the "/" index).
 export const ROLE_HOME: Record<string, string> = {
+  // An auditor lands on the Dashboard: it is the broadest read-only view, and
+  // every write-purpose portal the other roles land on is closed to them.
+  auditor: '/',
   store_keeper: '/entry/issue',
   warehouse_user: '/warehouse',
   supervisor: '/supervisor',
@@ -235,6 +252,11 @@ export function roleHome(user: User | null): string {
 // Route-guard permission: may this user OPEN this page? Admin → always (shadow).
 export function canAccess(user: User | null, rule: AccessRule): boolean {
   if (!user) return false
+  // Checked BEFORE the admin shadow: a view-only account is never an admin,
+  // but putting the test first makes the precedence explicit — `writes` is a
+  // capability gate, not another rung on the role ladder, so no amount of
+  // seniority opens a page whose only purpose is changing data.
+  if (rule.writes && isReadOnly(user)) return false
   if (user.role === 'admin') return true
   if ('anyRole' in rule) return rule.anyRole.includes(user.role)
   return (user.level ?? 0) >= rule.minLevel
@@ -275,7 +297,7 @@ export function canAccessPath(user: User | null, pathname: string): boolean {
     const ent = READ_ENTITIES.find((e: ReadEntity) => e.key === key)
     return ent ? canAccess(user, ent.access) : canAccess(user, { minLevel: 2 })
   }
-  if (path.startsWith('/master/')) return canAccess(user, { minLevel: 3 })
+  if (path.startsWith('/master/')) return canAccess(user, w({ minLevel: 3 }))
   // The QR-scan Material Intelligence page is open to ANY signed-in user:
   // store keepers (level 0) are the ones holding the scanner, and its endpoint
   // is get_current_user + site_scope — not the level-1 gate the /stock LIST

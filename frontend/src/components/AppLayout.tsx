@@ -1,11 +1,12 @@
 import { Suspense, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Alert, Badge, Button, ConfigProvider, Drawer, Grid, Layout, Menu, Skeleton, Space, Switch, Tooltip, Typography } from 'antd'
+import { Alert, App, Badge, Button, ConfigProvider, Drawer, Grid, Layout, Menu, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd'
 import type { MenuProps } from 'antd'
-import { AppstoreOutlined, LogoutOutlined, MenuOutlined, MoonOutlined, QrcodeOutlined, SearchOutlined, SunOutlined, UserOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, EyeOutlined, LogoutOutlined, MenuOutlined, MoonOutlined, QrcodeOutlined, SearchOutlined, SunOutlined, UserOutlined } from '@ant-design/icons'
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useHealth, useOverdueActions, useWorkQueues } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
+import { READ_ONLY_REASON } from '../auth/useReadOnly'
 import type { User } from '../auth/AuthContext'
 import { NAV, ADMIN_DEFAULT_GROUPS, PRIMARY_GROUP, canAccess, canAccessPath, groupOfPath, roleHome } from '../config/nav'
 import type { NavGroup, NavNode } from '../config/nav'
@@ -100,8 +101,9 @@ export default function AppLayout() {
   const location = useLocation()
   const { data: health } = useHealth()
   const { data: queues } = useWorkQueues()
-  const { user, logout } = useAuth()
+  const { user, logout, readOnly } = useAuth()
   const { mode, toggle } = useThemeMode()
+  const { message } = App.useApp()
   const level = user?.level ?? 0
   const isAdmin = user?.role === 'admin'
   // Admin "All areas" toggle — reveals operational groups beyond the curated
@@ -153,6 +155,15 @@ export default function AppLayout() {
   const isMobile = !screens.md
   const [navOpen, setNavOpen] = useState(false)
   useEffect(() => { setNavOpen(false) }, [location.pathname])
+
+  // A view-only account tried to change something. The API client rejects the
+  // request before it is sent (auth/readOnly.ts) and fires this; without a
+  // toast the click would look like it simply did nothing.
+  useEffect(() => {
+    const onBlocked = () => message.warning(READ_ONLY_REASON, 5)
+    window.addEventListener('gi-read-only-blocked', onBlocked)
+    return () => window.removeEventListener('gi-read-only-blocked', onBlocked)
+  }, [message])
 
   const navBody = (
     <div className="gi-sider-scroll">
@@ -239,6 +250,11 @@ export default function AppLayout() {
             <SyncControls />
             <OfflineSyncBadge />
             <NotificationBell />
+            {readOnly && (
+              <Tooltip title="Your account is view-only — you can read everything your role reaches, but nothing can be changed.">
+                <Tag color="blue" icon={<EyeOutlined />} style={{ marginInlineEnd: 0 }}>View only</Tag>
+              </Tooltip>
+            )}
             {user && (
               <Tooltip title="My profile — update phone number">
                 <Button type="text" className="gi-user-label" icon={<UserOutlined />}

@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { App } from 'antd'
-import { api, detectClientType, setAuthToken, TOKEN_KEY } from '../api/client'
+import { api, detectClientType, setAuthRole, setAuthToken, TOKEN_KEY } from '../api/client'
+import { isReadOnly as roleIsReadOnly } from './readOnly'
 
 export interface User {
   username: string
@@ -14,6 +15,8 @@ export interface User {
 
 interface AuthState {
   user: User | null
+  /** True for view-only accounts (Auditor) — see auth/readOnly.ts. */
+  readOnly: boolean
   login: (username: string, password: string) => Promise<{ mfa: boolean; mfaToken?: string }>
   loginMfa: (mfaToken: string, code: string) => Promise<void>
   logout: () => void
@@ -81,7 +84,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }
 
-  const value = useMemo(() => ({ user, login, loginMfa, logout }), [user])
+  // Keep the API client's copy of the role in step, so its request interceptor
+  // can refuse a mutating call from a view-only account without importing
+  // React state. Runs on every user change, including sign-out (null).
+  useEffect(() => { setAuthRole(user?.role ?? null) }, [user])
+
+  const value = useMemo(
+    () => ({ user, readOnly: roleIsReadOnly(user), login, loginMfa, logout }),
+    [user],
+  )
   if (!ready) return null
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

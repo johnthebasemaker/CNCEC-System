@@ -47,6 +47,7 @@ from .logistics import router as logistics_router  # noqa: E402
 from .manhours import router as manhours_router  # noqa: E402
 from .ai.router import router as ai_router  # noqa: E402
 from .notifications import router as notifications_router  # noqa: E402
+from .readonly import read_only_guard  # noqa: E402
 from .console import admin as console_admin_router  # noqa: E402
 from .sla import router as sla_router  # noqa: E402
 from .console import oversight as console_oversight_router  # noqa: E402
@@ -156,6 +157,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _read_only_role_middleware(request, call_next):
+    """View-only roles (Auditor) may not change anything. Enforced by HTTP
+    method for EVERY route at once — including routes that do not exist yet —
+    rather than per-endpoint, which would fail open on the next @router.post
+    somebody adds. Rules and the exception list: readonly.py."""
+    return await read_only_guard(request, call_next)
 
 
 @app.middleware("http")

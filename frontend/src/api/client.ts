@@ -1,4 +1,14 @@
 import axios from 'axios'
+import { blocksRequest } from '../auth/readOnly'
+
+/** Rejection raised when a view-only account attempts a mutating request. */
+export class ReadOnlyError extends Error {
+  readonly isReadOnly = true
+  constructor() {
+    super('Your account is view-only — this action changes data and is not permitted.')
+    this.name = 'ReadOnlyError'
+  }
+}
 
 // API base URL. Web builds leave VITE_API_URL unset and use the relative
 // '/api' prefix (Vite dev proxy → uvicorn :8000; nginx in production). The
@@ -116,8 +126,20 @@ export function deliveryHeaders(): Record<string, string> {
   return pref === 'evening' ? { 'X-Delivery-Preference': pref } : {}
 }
 
+// The role of the signed-in user, kept here so the request interceptor can see
+// it without importing React state. Set by AuthContext on every user change.
+let _role: string | null = null
+export function setAuthRole(role: string | null) { _role = role }
+
 api.interceptors.request.use((cfg) => {
   if (_token) cfg.headers.Authorization = `Bearer ${_token}`
+  // View-only roles (Auditor): stop a mutating request before it is sent, so
+  // the user gets an immediate, legible refusal instead of a round trip that
+  // comes back 403. The SERVER is the actual boundary (backend/api/readonly.py)
+  // — this only makes the refusal fast and readable.
+  if (blocksRequest(_role, cfg.method ?? 'get', cfg.url ?? '')) {
+    return Promise.reject(new ReadOnlyError())
+  }
   return cfg
 })
 
@@ -220,6 +242,13 @@ api.interceptors.response.use(
     const cfg = err?.config
     const url: string = cfg?.url ?? ''
     const status: number | undefined = err?.response?.status
+    // A view-only refusal never reached the network, so it has no response —
+    // without this it would be misread below as "the API is unreachable" and
+    // log a backend-is-down diagnostic. Surface it as its own toast instead.
+    if (err?.isReadOnly) {
+      window.dispatchEvent(new CustomEvent('gi-read-only-blocked', { detail: { url } }))
+      return Promise.reject(err)
+    }
     // Deep diagnostics for the failure classes that are never "user error":
     // network-level failures, 403 (Cloudflare Access / WAF) and 5xx. Routine
     // 401/422/429 stay quiet — they have their own handlers below.

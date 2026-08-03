@@ -21,7 +21,8 @@
 # child and Vite's node child down with their parent. A pattern sweep scoped to
 # THIS repo and THIS user then catches anything orphaned by an earlier crash.
 #
-# ⚠️ What this script deliberately does NOT touch:
+# ⚠️ What this script deliberately does NOT touch (both belong to bin/power.sh,
+#    which sleeps and wakes the always-on services for battery life):
 #   • Postgres — a durable, autostarting brew service shared with the legacy
 #     app and every test suite. `stop` leaves it running; use `--db` to include.
 #   • The ROOT cloudflared LaunchDaemon (`com.cloudflare.cloudflared`), which is
@@ -246,7 +247,8 @@ cmd_start() { # cmd_start <env>
       say "  ${bold}Open https://$GI_HOSTNAME${off}"
       say "  ${dim}Served by the ROOT cloudflared LaunchDaemon — no connector was started here.${off}"
       pgrep -f 'cloudflared tunnel run --token' >/dev/null 2>&1 \
-        || warn "that root daemon is NOT running: sudo launchctl kickstart -k system/com.cloudflare.cloudflared"
+        || warn "that root daemon is NOT running — it may simply be asleep:
+   ${bold}./bin/power.sh wake${off}   (or: sudo launchctl kickstart -k system/com.cloudflare.cloudflared)"
       warn "$GI_HOSTNAME becomes the PRODUCTION hostname once Hetzner is live —
    from that day, serving it from this Mac is a hijack, not a mirror." ;;
   esac
@@ -347,6 +349,11 @@ ${bold}GI Hub — unified dev stack${off}
 Only ONE mode runs at a time — all three want :$WEB_PORT, and Vite's strictPort
 makes a second one fail loudly instead of drifting to :5174.
 Postgres is a shared brew service: 'stop' leaves it running unless you pass --db.
+
+For the ALWAYS-ON services (Postgres + the root cloudflared daemon), use the
+power manager — ${bold}./bin/power.sh sleep${off} when you close the lid, ${bold}wake${off} when you
+sit down. ${bold}./bin/power.sh status${off} also reports the stale legacy LaunchAgents
+that respawn on a timer and are the biggest idle battery cost.
 EOF
 }
 

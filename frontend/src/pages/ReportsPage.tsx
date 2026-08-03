@@ -12,6 +12,7 @@ import {
   useReportArchive, useReports, useScheduleMutation, useSchedules, useSites,
 } from '../api/hooks'
 import { streamSse } from '../api/sse'
+import { useReadOnly } from '../auth/useReadOnly'
 import { api } from '../api/client'
 import type { Row } from '../api/client'
 
@@ -28,6 +29,7 @@ const FORMATS: { key: string; label: string; icon: React.ReactNode }[] = [
 
 function ReportCard({ report }: { report: Row }) {
   const { message } = App.useApp()
+  const ro = useReadOnly()
   const { data: sites } = useSites()
   const filters = (report.filters as string[]) ?? []
   const [site, setSite] = useState<string | undefined>()
@@ -117,10 +119,11 @@ function ReportCard({ report }: { report: Row }) {
               {f.label}
             </Button>
           ))}
-          <Button icon={<InboxOutlined />} loading={archive.isPending} onClick={doArchive}>
+          <Button icon={<InboxOutlined />} loading={archive.isPending} onClick={doArchive}
+            {...ro.guard()}>
             Archive
           </Button>
-          <Button onClick={() => { setWaOpen(true); setWaTo('') }}>WhatsApp</Button>
+          <Button onClick={() => { setWaOpen(true); setWaTo('') }} {...ro.guard()}>WhatsApp</Button>
         </Space>
       </div>
       <Modal open={waOpen} title={`Send "${report.label}" via WhatsApp`} onOk={doWhatsApp}
@@ -137,6 +140,7 @@ function ReportCard({ report }: { report: Row }) {
 
 function ArchiveTab() {
   const { message } = App.useApp()
+  const ro = useReadOnly()
   const { data: items, isFetching } = useReportArchive()
   const del = useDeleteArchived()
 
@@ -157,12 +161,14 @@ function ArchiveTab() {
         <Space>
           <Button size="small" icon={<DownloadOutlined />}
             onClick={() => downloadArchived(Number(r.id), String(r.name)).catch(() => message.error('Download failed'))} />
-          <Popconfirm title="Delete this archived file?" onConfirm={async () => {
-            try { await del.mutateAsync(Number(r.id)); message.success('Deleted') }
-            catch (e) { message.error(errMsg(e)) }
-          }}>
-            <Button size="small" danger>Delete</Button>
-          </Popconfirm>
+          {!ro.hidden && (
+            <Popconfirm title="Delete this archived file?" onConfirm={async () => {
+              try { await del.mutateAsync(Number(r.id)); message.success('Deleted') }
+              catch (e) { message.error(errMsg(e)) }
+            }}>
+              <Button size="small" danger>Delete</Button>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -175,6 +181,7 @@ function ArchiveTab() {
 
 function SchedulesTab() {
   const { message } = App.useApp()
+  const ro = useReadOnly()
   const { data: reports } = useReports()
   const { data: items, isFetching } = useSchedules()
   const { create, toggle, remove, run } = useScheduleMutation()
@@ -204,7 +211,7 @@ function SchedulesTab() {
     {
       title: 'Active', dataIndex: 'active', width: 80,
       render: (v, r) => (
-        <Switch size="small" checked={!!v}
+        <Switch size="small" checked={!!v} {...ro.guard()}
           onChange={() => toggle.mutateAsync(Number(r.id)).catch((e) => message.error(errMsg(e)))} />
       ),
     },
@@ -212,19 +219,21 @@ function SchedulesTab() {
       title: 'Action', key: '__a', width: 160,
       render: (_: unknown, r: Row) => (
         <Space>
-          <Button size="small" icon={<PlayCircleOutlined />} loading={run.isPending}
+          <Button size="small" icon={<PlayCircleOutlined />} loading={run.isPending} {...ro.guard()}
             onClick={async () => {
               try { const res = await run.mutateAsync(Number(r.id)); message.success(`Ran — archived #${res.archive?.id}`) }
               catch (e) { message.error(errMsg(e)) }
             }}>
             Run now
           </Button>
-          <Popconfirm title="Delete this schedule?" onConfirm={async () => {
-            try { await remove.mutateAsync(Number(r.id)); message.success('Deleted') }
-            catch (e) { message.error(errMsg(e)) }
-          }}>
-            <Button size="small" danger>Delete</Button>
-          </Popconfirm>
+          {!ro.hidden && (
+            <Popconfirm title="Delete this schedule?" onConfirm={async () => {
+              try { await remove.mutateAsync(Number(r.id)); message.success('Deleted') }
+              catch (e) { message.error(errMsg(e)) }
+            }}>
+              <Button size="small" danger>Delete</Button>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -232,7 +241,8 @@ function SchedulesTab() {
 
   return (
     <div>
-      <Button type="primary" style={{ marginBottom: 12 }} onClick={() => setOpen(true)}>
+      <Button type="primary" style={{ marginBottom: 12 }} onClick={() => setOpen(true)}
+        {...ro.guard()}>
         New schedule
       </Button>
       <Table sticky={{ offsetHeader: 64 }} size="small" loading={isFetching} columns={columns} dataSource={items ?? []}
