@@ -90,21 +90,6 @@ def _fit(pdf: FPDF, txt: str, w: float) -> str:
     return t + ".."
 
 
-def _col_widths(pdf: FPDF, columns: list[str], rows: list[list], font_size: float) -> list[float]:
-    """Content-proportional widths that sum exactly to the printable width, so
-    a table can never overflow the page. Sampled over the first 300 rows."""
-    pdf.set_font("helvetica", "", font_size)
-    needs = []
-    for i, col in enumerate(columns):
-        w = pdf.get_string_width(_latin(str(col))) * 1.15  # bold header allowance
-        for r in rows[:300]:
-            w = max(w, pdf.get_string_width(_latin(_fmt(r[i]))))
-        needs.append(min(max(w + 3.0, 13.0), 90.0))
-    total = sum(needs)
-    epw = pdf.w - pdf.l_margin - pdf.r_margin
-    return [n * epw / total for n in needs] if total > 0 else [epw / len(columns)] * len(columns)
-
-
 def _ensure_room(pdf: FPDF, needed: float):
     if pdf.get_y() + needed > pdf.page_break_trigger:
         pdf.add_page()
@@ -127,53 +112,19 @@ def _section_title(pdf: FPDF, title: str, sub: str = ""):
     pdf.set_text_color(0, 0, 0)
 
 
-def _table_header(pdf: FPDF, columns: list[str], widths: list[float]):
-    pdf.set_font("helvetica", "B", 7)
-    pdf.set_fill_color(*_NAVY)
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_draw_color(*_BORDER)
-    for col, w in zip(columns, widths):
-        pdf.cell(w, _HDR_H, _fit(pdf, str(col).replace("_", " "), w), border=1,
-                 fill=True, align="C")
-    pdf.ln(_HDR_H)
-    pdf.set_text_color(0, 0, 0)
-
-
-_NUMERIC = (int, float)
-
-
 def _table(pdf: FPDF, title: str, columns: list[str], rows: list[list],
            sub: str = "", font_size: float = 7.0):
-    """Full-width bordered table: measured columns, zebra rows, repeated
-    header after page breaks, rows never split across pages."""
+    """Full-width bordered table, rendered by the shared engine in
+    `pdf_tables`: measured proportional columns, WRAPPED cells, zebra rows,
+    header repeated after every page break, rows never split.
+
+    This used to measure widths here and then `_fit`-truncate anything that
+    still did not fit — so a long `Equipment_Description` lost its tail even
+    though the layout was otherwise sound. Wrapping keeps the whole value.
+    """
     _section_title(pdf, title, sub)
-    if not rows:
-        pdf.set_font("helvetica", "I", 8)
-        pdf.set_text_color(*_MUTED)
-        pdf.cell(0, 6, "No data for this period.", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_text_color(0, 0, 0)
-        return
-    widths = _col_widths(pdf, columns, rows, font_size)
-    aligns = ["R" if all(isinstance(r[i], _NUMERIC) or r[i] in (None, "")
-                         for r in rows[:50]) else "L"
-              for i in range(len(columns))]
-    _table_header(pdf, columns, widths)
-    pdf.set_font("helvetica", "", font_size)
-    for n, row in enumerate(rows):
-        if pdf.get_y() + _ROW_H > pdf.page_break_trigger:
-            pdf.add_page()
-            _table_header(pdf, columns, widths)
-            pdf.set_font("helvetica", "", font_size)
-        fill = n % 2 == 1
-        if fill:
-            pdf.set_fill_color(*_ZEBRA)
-        for v, w, a in zip(row, widths, aligns):
-            pdf.cell(w, _ROW_H, _fit(pdf, _fmt(v), w), border=1, fill=fill, align=a)
-        pdf.ln(_ROW_H)
-    pdf.set_font("helvetica", "", 6.5)
-    pdf.set_text_color(*_MUTED)
-    pdf.cell(0, 4.5, f"{len(rows):,} row(s)", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_text_color(0, 0, 0)
+    from .pdf_tables import draw_table
+    draw_table(pdf, columns, rows)
 
 
 def _kpi_box(pdf: FPDF, x: float, y: float, w: float, h: float,

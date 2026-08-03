@@ -46,6 +46,7 @@ export const roleColors: Record<string, string> = {
   warehouse_user: '#10B981',
   supervisor: brand.navyLight,
   store_keeper: dark.textMuted,
+  auditor: '#8B5CF6',
 }
 
 // CHART_COLORS in config.py — keep chart hues identical across both apps.

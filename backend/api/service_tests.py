@@ -8344,22 +8344,33 @@ async def test_session_report_summary():
               rx.status_code == 200
               and wb.sheetnames[:2] == ["Total Material Demand", "Equipment Breakdown"],
               f"{rx.status_code} {wb.sheetnames}")
+        # Geometry note: every xlsx now renders in the premium GI layout
+        # (xlsx_style.py) — rows 1-4 logo + meta, row 5 title bar, row 6 the
+        # header, data from row 7. It used to be a bare header on row 1.
+        from .xlsx_style import DATA_ROW as _XD, HEADER_ROW as _XH
         ws = wb[wb.sheetnames[0]]
         check("ax: the summary sheet carries the documented columns",
-              [c.value for c in ws[1]] == _sme._MATERIAL_DEMAND_COLS,
-              str([c.value for c in ws[1]]))
+              [c.value for c in ws[_XH]][:len(_sme._MATERIAL_DEMAND_COLS)]
+              == _sme._MATERIAL_DEMAND_COLS,
+              str([c.value for c in ws[_XH]]))
+        check("ax: the summary sheet is branded — GI logo, the generated-by "
+              "meta band and a title bar above the table",
+              len(ws._images) == 1 and ws.cell(_XH - 1, 1).value == "Total Material Demand"
+              and ws.cell(2, max(len(_sme._MATERIAL_DEMAND_COLS) - 1, 1)).value
+              == "Report Generated:",
+              f"images={len(ws._images)} title={ws.cell(_XH - 1, 1).value!r}")
         check("ax: the summary sheet is an aggregate — strictly fewer rows than "
               "the per-equipment detail it summarises",
-              1 < ws.max_row < wb["Equipment Breakdown"].max_row,
+              _XD <= ws.max_row < wb["Equipment Breakdown"].max_row,
               f"summary={ws.max_row} detail={wb['Equipment Breakdown'].max_row}")
         # Conservation: the rollup must not invent or lose quantity.
         cols = _sme._MATERIAL_DEMAND_COLS
         s_need = sum(float(ws.cell(r, cols.index("Total_Needed") + 1).value or 0)
-                     for r in range(2, ws.max_row + 1))
+                     for r in range(_XD, ws.max_row + 1))
         wd = wb["Equipment Breakdown"]
-        dhdr = [c.value for c in wd[1]]
+        dhdr = [c.value for c in wd[_XH]]
         d_need = sum(float(wd.cell(r, dhdr.index("Demand_Qty") + 1).value or 0)
-                     for r in range(2, wd.max_row + 1))
+                     for r in range(_XD, wd.max_row + 1))
         check("ax: summed Total_Needed equals the detail's summed Demand_Qty "
               "(the rollup conserves quantity)", abs(s_need - d_need) < 0.05,
               f"summary={s_need} detail={d_need}")
@@ -8590,9 +8601,12 @@ async def test_sqm_bottleneck():
               rx.status_code == 200
               and wb.sheetnames == ["SQM by System Code", "Blocking Materials",
                                     "Equipment Detail"], f"{rx.status_code} {wb.sheetnames}")
+        # Header sits on xlsx_style.HEADER_ROW now, under the branded band.
+        from .xlsx_style import HEADER_ROW as _AYH
         check("ay: the rollup sheet exposes both achievable figures and the deficit",
-              [c.value for c in wb["SQM by System Code"][1]] == _sme._SEGREGATED_CODE_COLS,
-              str([c.value for c in wb["SQM by System Code"][1]]))
+              [c.value for c in wb["SQM by System Code"][_AYH]][
+                  :len(_sme._SEGREGATED_CODE_COLS)] == _sme._SEGREGATED_CODE_COLS,
+              str([c.value for c in wb["SQM by System Code"][_AYH]]))
         rp = await exp("pdf")
         # fpdf compresses its content streams, so the section titles have to be
         # inflated before they can be searched (same approach as suite AX).
@@ -8622,7 +8636,7 @@ async def test_sqm_bottleneck():
         rs = await ac.post("/sme/plan/export", headers=H, json={
             "priority_order": order, "key": "session-full", "format": "xlsx"})
         wbs = _px.load_workbook(_io.BytesIO(rs.content))
-        hdr = [c.value for c in wbs["Total Material Demand"][1]]
+        hdr = [c.value for c in wbs["Total Material Demand"][_AYH]]
         check("ay: the Total Material Demand sheet segregates Available from "
               "Pending Delivery and states the Total Procured ceiling",
               "Available_Qty" in hdr and "Pending_Delivery_Qty" in hdr
@@ -9414,6 +9428,217 @@ async def test_sme_ordered_subset_rule():
               f"{len(delivered)} of {len(pairs)} rows have available == ordered")
 
 
+# --- Suite BD: the view-only (Auditor) role ----------------------------------
+async def test_auditor_read_only():
+    """Suite BD — an Auditor reads everything its level reaches, writes nothing.
+
+    The enforcement lives in ONE place: `readonly.read_only_guard`, ASGI
+    middleware keyed on the HTTP method. That shape is the point. A
+    per-endpoint dependency would have to be remembered on all 143 mutating
+    routes, and the one that got forgotten would fail OPEN — the write would
+    succeed and nothing would look wrong. Keying on the method inverts the
+    failure: an endpoint nobody has thought about yet is already closed.
+
+    So this suite does not spot-check a handful of endpoints. It enumerates
+    EVERY mutating route the app publishes, and requires that each one is
+    either blocked or on the documented exception list — which means a new
+    `@router.post` added next month fails this suite until someone decides,
+    deliberately, which side of the line it belongs on.
+
+    It also pins the other half of the contract, which is easier to break by
+    accident: the six existing roles must be COMPLETELY unaffected. The
+    operator was explicit — SK keeps its entry forms, and supervisor, HOD,
+    logistics, warehouse and admin keep their portals without restriction.
+    """
+    import bcrypt as _bc
+    from sqlalchemy import text as _sqt
+
+    from . import ratelimit as _bdrl
+    from .auth import ROLE_META
+    from .readonly import (SAFE_METHODS, blocks_request, is_allowed_write,
+                           is_read_only_role, normalize_path)
+
+    # ── 1. the pure decision function, every branch ──────────────────────────
+    check("bd: the auditor role exists and is level 3 (global READ reach — a "
+          "site-scoped auditor would fail closed and see nothing)",
+          ROLE_META.get("auditor", {}).get("level") == 3,
+          str(ROLE_META.get("auditor")))
+    check("bd: is_read_only_role is exact — 'auditor' yes, no one else, and a "
+          "near-miss string never slips through",
+          is_read_only_role("auditor")
+          and not any(is_read_only_role(r) for r in
+                      ("admin", "hod", "logistics", "store_keeper",
+                       "supervisor", "warehouse_user", "Auditor", "auditors",
+                       "", None)),
+          "read-only role set drifted")
+    check("bd: safe methods are never blocked (OPTIONS included — blocking the "
+          "CORS preflight would break the browser before it ever asked)",
+          all(not blocks_request("auditor", m, "/entry/receive")
+              for m in ("GET", "HEAD", "OPTIONS", "TRACE")),
+          "a safe method was blocked")
+    check("bd: the /api/v1 mount is normalised, so a rule written once covers "
+          "both the bare and the proxied form of a route",
+          normalize_path("/api/v1/entry/receive") == "/entry/receive"
+          and normalize_path("/entry/receive/") == "/entry/receive"
+          and blocks_request("auditor", "POST", "/api/v1/entry/receive"),
+          "path normalisation drifted")
+    check("bd: the allowlist matches whole paths, never substrings — a route "
+          "that merely CONTAINS an allowed path is still blocked",
+          not is_allowed_write("/sme/plan/cascade/delete")
+          and not is_allowed_write("/evil/auth/login")
+          and is_allowed_write("/auth/login"),
+          "allowlist is matching too loosely")
+
+    # ── 2. EVERY mutating route in the app ──────────────────────────────────
+    spec = app.openapi()          # forces FastAPI's deferred routers to expand
+    mutating = sorted({(m.upper(), p) for p, ops in spec["paths"].items()
+                       for m in ops if m.upper() not in SAFE_METHODS})
+    blocked = [r for r in mutating if blocks_request("auditor", *r)]
+    allowed = [r for r in mutating if not blocks_request("auditor", *r)]
+    check("bd: the app still publishes a large mutating surface (if this "
+          "collapses, the enumeration below is silently proving nothing)",
+          len(mutating) >= 100, f"only {len(mutating)} mutating routes found")
+
+    # The exception list, stated here independently of the module so a change
+    # to it has to be made TWICE — once in the code, once in this expectation.
+    EXPECTED_ALLOWED = {
+        ("POST", "/auth/login"), ("POST", "/auth/login/2fa"),
+        ("POST", "/auth/refresh"), ("POST", "/auth/logout"),
+        ("POST", "/auth/2fa/enroll"), ("POST", "/auth/2fa/verify"),
+        ("POST", "/auth/2fa/disable"),
+        ("POST", "/auth/phone/request-otp"), ("POST", "/auth/phone/verify-otp"),
+        ("POST", "/sme/plan/cascade"), ("POST", "/sme/plan/export"),
+        ("POST", "/sme/export/rows"),
+        ("POST", "/ai/assistant"), ("POST", "/ai/query"),
+        ("POST", "/ai/nl-search"), ("POST", "/ai/insights"),
+        ("POST", "/ai/eod-summary"),
+    }
+    check("bd: EVERY mutating route is blocked for an auditor except the "
+          "documented read-only/self-service exceptions — a new @router.post "
+          "lands on the blocked side by default and fails this check if it "
+          "should not have",
+          set(allowed) == EXPECTED_ALLOWED,
+          f"unexpected allowed: {sorted(set(allowed) - EXPECTED_ALLOWED)} · "
+          f"missing: {sorted(EXPECTED_ALLOWED - set(allowed))}")
+    check("bd: the blocked set is the overwhelming majority — entries, "
+          "approvals, imports, master-data CRUD, admin, deletes",
+          len(blocked) >= 100 and len(blocked) == len(mutating) - len(allowed),
+          f"{len(blocked)} blocked of {len(mutating)}")
+
+    # ── 3. the OTHER roles are untouched (the operator's explicit constraint) ─
+    for role in ("admin", "hod", "logistics", "store_keeper", "supervisor",
+                 "warehouse_user", None, "", "nonsense"):
+        n = sum(1 for r in mutating if blocks_request(role, *r))
+        check(f"bd: role {role!r} is completely unaffected — 0 of "
+              f"{len(mutating)} mutating routes blocked", n == 0,
+              f"{n} routes blocked for {role!r}")
+
+    # ── 4. real HTTP, end to end ────────────────────────────────────────────
+    users = ledger._MD.tables["users"]
+    PW = "svc-bd-auditor-2026"
+    HASH = _bc.hashpw(PW.encode(), _bc.gensalt(rounds=4)).decode()
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCBD-%'"))
+        for uname, role in (("SVCBD-auditor", "auditor"), ("SVCBD-sk", "store_keeper")):
+            await s.execute(_sqt(
+                'INSERT INTO users (username, password_hash, role, "Site_ID") '
+                "VALUES (:u, :h, :r, 'CNCEC')"), {"u": uname, "h": HASH, "r": role})
+        await s.commit()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            # This suite runs last, behind every other suite's logins from the
+            # same in-process client, and /auth/login is 10-per-minute per IP.
+            # Clear the window so a 429 cannot masquerade as a role failure.
+            _bdrl._hits.clear()
+            r = await ac.post("/auth/login",
+                              json={"username": "SVCBD-auditor", "password": PW})
+            check("bd: an auditor can SIGN IN — the session endpoints are on "
+                  "the allowlist, so a view-only account is not locked out",
+                  r.status_code == 200 and "access_token" in r.json(),
+                  f"{r.status_code} {r.text[:200]}")
+            body = r.json()
+            H = {"Authorization": f"Bearer {body['access_token']}"}
+            check("bd: the login payload carries the role and its level, so "
+                  "the SPA can switch to view-only mode immediately",
+                  body["user"]["role"] == "auditor" and body["user"]["level"] == 3,
+                  str(body.get("user")))
+
+            _bdrl._hits.clear()
+            r = await ac.post("/auth/login",
+                              json={"username": "SVCBD-sk", "password": PW})
+            SK = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+            # READS work.
+            for path in ("/auth/me", "/stock", "/dashboard/metrics"):
+                r = await ac.get(path, headers=H)
+                check(f"bd: auditor READ {path} → not forbidden",
+                      r.status_code != 403, f"{r.status_code} {r.text[:120]}")
+
+            # WRITES are refused, with a message that names the reason.
+            writes = [
+                ("post", "/entry/receipts", {"SAP_Code": "X", "Quantity": 1}),
+                ("post", "/entry/consumption", {"SAP_Code": "X", "Quantity": 1}),
+                ("post", "/entry/adjustments", {"SAP_Code": "X", "Quantity": 1}),
+                ("post", "/bulk-import/inventory", {}),
+                ("post", "/reports/stock/whatsapp", {"to": "966500000000"}),
+                ("post", "/admin/users", {"username": "x", "role": "admin"}),
+                ("patch", "/admin/users/SVCBD-sk", {"role": "admin"}),
+                ("delete", "/admin/users/SVCBD-sk", None),
+                ("delete", "/entry/attachments/1", None),
+            ]
+            for method, path, payload in writes:
+                fn = getattr(ac, method)
+                r = (await fn(path, headers=H, json=payload) if payload is not None
+                     else await fn(path, headers=H))
+                detail = ""
+                try:
+                    detail = str(r.json().get("detail", ""))
+                except Exception:  # noqa: BLE001
+                    detail = r.text[:120]
+                check(f"bd: auditor {method.upper()} {path} → 403 view-only",
+                      r.status_code == 403 and "view-only" in detail.lower(),
+                      f"{r.status_code} {detail[:140]}")
+
+            # The guard must not have collateral damage: the SK's own write
+            # surface has to behave exactly as it did before this role existed.
+            r = await ac.post("/entry/receipts", headers=SK, json={})
+            check("bd: a STORE KEEPER posting the same endpoint is NOT stopped "
+                  "by the view-only guard — it reaches the endpoint's own "
+                  "validation (422), which is what it did before",
+                  r.status_code == 422, f"{r.status_code} {r.text[:140]}")
+
+            # An expired/garbage token must not be treated as a read-only role
+            # (fail toward the route's own 401, never toward a silent allow).
+            r = await ac.post("/entry/receipts",
+                              headers={"Authorization": "Bearer not.a.token"},
+                              json={})
+            check("bd: a bad token is the ROUTE's problem (401), not the "
+                  "guard's — the middleware never authenticates anyone",
+                  r.status_code == 401, f"{r.status_code} {r.text[:120]}")
+
+            # The guard runs BEFORE routing, so an auditor probing a path that
+            # does not exist is refused rather than told whether it exists.
+            # Fail-closed, and it leaks nothing about the URL space.
+            r = await ac.post("/entry/no-such-endpoint", headers=H, json={})
+            check("bd: the guard runs before routing — an auditor gets 403 on "
+                  "an unknown path, not a 404 that maps the URL space",
+                  r.status_code == 403, f"{r.status_code} {r.text[:120]}")
+
+        # ── 5. revert check ────────────────────────────────────────────────
+        check("bd-revert: the guard is actually REGISTERED on the app — "
+              "removing the middleware is the one change that would make "
+              "every check above pass while the role leaks writes",
+              any("read_only" in repr(m).lower() or "readonly" in repr(m).lower()
+                  for m in app.user_middleware),
+              f"middleware stack: {[repr(m)[:60] for m in app.user_middleware]}")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCBD-%'"))
+            await s.commit()
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -9532,6 +9757,8 @@ async def main() -> int:
     await test_sme_tier_segregation()
     print("\n BC. SME subset rule — Available is part OF Ordered, not extra to it")
     await test_sme_ordered_subset_rule()
+    print("\n BD. Auditor role — reads everything its level reaches, writes nothing")
+    await test_auditor_read_only()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

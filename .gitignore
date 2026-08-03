@@ -60,6 +60,11 @@ reports_archive/
 # bin/dev.sh scratch: pidfiles + per-component logs for the local dev stack.
 .dev/
 
+# bin/backup_db.sh snapshots — pg_dump of `gihub` + a read-only copy of the
+# frozen legacy SQLite. Local safety net only; these are full data dumps and
+# must never reach the remote.
+.backups/
+
 # Live operational tracking workbooks (operator-owned, synced via
 # tools/excel_sync.py — never commit; archived snapshots in data-archive/
 # and legacy/scripts/sme_seed_data/ predate this rule and stay tracked).

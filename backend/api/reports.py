@@ -14,7 +14,6 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import io
-from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -436,16 +435,6 @@ REPORTS = {
 
 
 # --- renderers (all take title, columns, rows, username) ---------------------
-def _xl_val(v):
-    if v is None:
-        return ""
-    if isinstance(v, Decimal):
-        return float(v)
-    if isinstance(v, (int, float, str)):
-        return v
-    return str(v)
-
-
 def _latin(s: str) -> str:
     return s.encode("latin-1", "ignore").decode("latin-1")
 
@@ -459,69 +448,19 @@ def to_csv(title, columns, rows, username) -> bytes:
 
 
 def to_xlsx(title, columns, rows, username) -> bytes:
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-    wb = Workbook()
-    ws = wb.active
-    ws.title = (title[:31] or "Report")
-    ws.append(columns)
-    fill = PatternFill("solid", fgColor="0A192F")
-    font = Font(bold=True, color="FFFFFF")
-    for c in ws[1]:
-        c.fill = fill
-        c.font = font
-        c.alignment = Alignment(horizontal="center")
-    for r in rows:
-        ws.append([_xl_val(v) for v in r])
-    for i, col in enumerate(columns, 1):
-        widths = [len(str(col))] + [len(str(r[i - 1])) for r in rows[:200]]
-        ws.column_dimensions[get_column_letter(i)].width = min(max(max(widths) + 2, 10), 45)
-    ws.freeze_panes = "A2"
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+    """Single-sheet workbook in the premium GI layout (logo + meta band + title
+    bar + framed table). See xlsx_style.py — this used to write a bare header
+    row, so every non-SME export looked nothing like the SME workbooks."""
+    from .xlsx_style import premium_xlsx
+    return premium_xlsx(title, columns, rows, username)
 
 
 def to_xlsx_sheets(sheets, username) -> bytes:
-    """Multi-sheet workbook — legacy SME parity (one sheet per report section).
-    `sheets` is a list of (sheet_title, columns, rows); styling matches
-    to_xlsx(). Sheet titles are trimmed to Excel's 31-char limit and deduped."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-    wb = Workbook()
-    wb.remove(wb.active)
-    if not sheets:
-        sheets = [("Report", [], [])]
-    seen: set[str] = set()
-    for sheet_title, columns, rows in sheets:
-        name = str(sheet_title or "Sheet")
-        for ch in "[]:*?/\\":
-            name = name.replace(ch, "-")
-        name = name[:31] or "Sheet"
-        base, n = name, 2
-        while name in seen:
-            suffix = f" ({n})"
-            name, n = base[:31 - len(suffix)] + suffix, n + 1
-        seen.add(name)
-        ws = wb.create_sheet(title=name)
-        ws.append(list(columns))
-        fill = PatternFill("solid", fgColor="0A192F")
-        font = Font(bold=True, color="FFFFFF")
-        for c in ws[1]:
-            c.fill = fill
-            c.font = font
-            c.alignment = Alignment(horizontal="center")
-        for r in rows:
-            ws.append([_xl_val(v) for v in r])
-        for i, col in enumerate(columns, 1):
-            widths = [len(str(col))] + [len(str(r[i - 1])) for r in rows[:200]]
-            ws.column_dimensions[get_column_letter(i)].width = min(max(max(widths) + 2, 10), 45)
-        ws.freeze_panes = "A2"
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+    """Multi-sheet workbook — one branded sheet per report section. `sheets` is
+    a list of (sheet_title, columns, rows); sheet titles are trimmed to Excel's
+    31-char limit and deduped."""
+    from .xlsx_style import premium_xlsx_sheets
+    return premium_xlsx_sheets(sheets, username)
 
 
 def to_pdf_sheets(title, sheets, username, *,
@@ -532,77 +471,22 @@ def to_pdf_sheets(title, sheets, username, *,
     Default False so existing callers keep their compact flow; the SME session
     report opts in, because its lead summary must own the FIRST pages rather
     than sharing one with the detail table that happens to fit beside it.
+
+    Layout lives in `pdf_tables.render_table_pdf`: measured proportional
+    columns and wrapped cells. This used to divide the page into EQUAL column
+    widths and hard-truncate to `[:18]`/`[:24]`, which both overlapped the
+    neighbouring column (fpdf's `cell` does not clip) and silently ate the tail
+    of every long description. See pdf_tables.py for the measurements.
     """
-    from fpdf import FPDF
-    pdf = FPDF(orientation="L", unit="mm", format="A4")
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, _latin(str(title).upper()), new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("helvetica", "", 9)
-    stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    pdf.cell(0, 6, _latin(f"Generated by {username}  ·  {stamp}"),
-             new_x="LMARGIN", new_y="NEXT")
-    for n, (sheet_title, columns, rows) in enumerate(sheets):
-        pdf.ln(4)
-        if page_break_between and n:
-            pdf.add_page()
-        elif pdf.get_y() > 170:
-            pdf.add_page()
-        pdf.set_font("helvetica", "B", 11)
-        pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 8, _latin(str(sheet_title)), new_x="LMARGIN", new_y="NEXT")
-        if not rows:
-            pdf.set_font("helvetica", "", 8)
-            pdf.cell(0, 6, "No data.", new_x="LMARGIN", new_y="NEXT")
-            continue
-        col_w = pdf.epw / max(len(columns), 1)
-        pdf.set_font("helvetica", "B", 8)
-        pdf.set_fill_color(10, 25, 47)
-        pdf.set_text_color(255, 255, 255)
-        for c in columns:
-            pdf.cell(col_w, 7, _latin(str(c))[:18], border=1, fill=True, align="C")
-        pdf.ln(7)
-        pdf.set_font("helvetica", "", 7)
-        pdf.set_text_color(0, 0, 0)
-        for row in rows:
-            if pdf.get_y() > 190:
-                pdf.add_page()
-            for v in row:
-                pdf.cell(col_w, 6, _latin("" if v is None else str(v))[:24], border=1, align="C")
-            pdf.ln(6)
-    return bytes(pdf.output())
+    from .pdf_tables import render_table_pdf
+    return render_table_pdf(title, sheets, username,
+                            page_break_between=page_break_between)
 
 
 def to_pdf(title, columns, rows, username) -> bytes:
-    from fpdf import FPDF
-    pdf = FPDF(orientation="L", unit="mm", format="A4")
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, _latin(title.upper()), new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("helvetica", "", 9)
-    stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    pdf.cell(0, 6, _latin(f"Generated by {username}  ·  {stamp}  ·  {len(rows)} rows"),
-             new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
-    if not rows:
-        pdf.cell(0, 10, "No data for this report.", new_x="LMARGIN", new_y="NEXT")
-        return bytes(pdf.output())
-    col_w = pdf.epw / max(len(columns), 1)
-    pdf.set_font("helvetica", "B", 8)
-    pdf.set_fill_color(10, 25, 47)
-    pdf.set_text_color(255, 255, 255)
-    for c in columns:
-        pdf.cell(col_w, 7, _latin(str(c))[:18], border=1, fill=True, align="C")
-    pdf.ln(7)
-    pdf.set_font("helvetica", "", 7)
-    pdf.set_text_color(0, 0, 0)
-    for row in rows:
-        if pdf.get_y() > 190:
-            pdf.add_page()
-        for v in row:
-            pdf.cell(col_w, 6, _latin("" if v is None else str(v))[:24], border=1, align="C")
-        pdf.ln(6)
-    return bytes(pdf.output())
+    """Single-table PDF — the one-section case of to_pdf_sheets."""
+    from .pdf_tables import render_table_pdf
+    return render_table_pdf(title, [(str(title), columns, rows)], username)
 
 
 _FORMATS = {

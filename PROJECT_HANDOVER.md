@@ -256,6 +256,51 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
 (truncation was eating the single character that distinguishes
 `CUMICRETE PU MF 300 (1MM) C` from its three siblings).
 
+### 7. Exports render through ONE engine each; Auditor is view-only
+
+*Added 2026-08-03 (`feat/exports-roles-and-sysadmin`).*
+
+* **Every tabular PDF goes through `backend/api/pdf_tables.py`.** Columns are
+  measured and allocated MAX-MIN FAIR (water-filling), cells WRAP, and nothing
+  is truncated. The old `reports.to_pdf` split the page into equal widths and
+  cut at `[:18]`/`[:24]` — fpdf's `cell()` does not clip, so a long description
+  was drawn **4.1 mm on top of its neighbour** while `Date` wasted 20 mm, and
+  28 characters were destroyed outright. `exec_pdf` delegates its tables here.
+  ⚠️ `multi_cell` reserves `pdf.c_margin` on each side that `get_string_width`
+  does not know about; the wrap width must add it back.
+* **Every xlsx goes through `backend/api/xlsx_style.py`** (openpyxl) or
+  `sme_export_layouts.py` (xlsxwriter) — same geometry, same palette, both
+  branded: rows 1-4 logo + meta, row 5 title bar, row 6 header, row 7+ data.
+  **Header is row 6, data row 7** — tests that read row 1 will fail.
+  No GRAND TOTAL on the generic path: summing `Days_Overdue` is a wrong number
+  stated confidently.
+* **`auditor` (level 3) reads what its level reaches and writes NOTHING.**
+  Enforced once, in `backend/api/readonly.py`, as method-keyed ASGI middleware —
+  **never per-endpoint**, because a forgotten annotation fails OPEN. 126 of 143
+  mutating routes blocked; the 17 exceptions are session/self-service/compute
+  and are listed in that module. Level 3 is required, not generous: an unscoped
+  account carries `site_id = ''`, so a level-2 auditor would fail closed and see
+  nothing. In the UI, `writes: true` on a nav rule makes a page unreachable for
+  the role; `useReadOnly()` disables the rest. Suite **BD** (36 checks)
+  enumerates every mutating route, so a new `@router.post` fails it by default.
+* **`legacy/config.py` stays frozen at six roles.** The auditor is new-stack
+  only.
+
+### 8. Local operations: `bin/power.sh` and `bin/backup_db.sh`
+
+* `./bin/power.sh sleep|wake` stops/starts Postgres + the root cloudflared
+  daemon for battery. Measured: those two cost **0.0 %** and **0.1 %** CPU idle.
+  The real drain is `com.gi.whatsapp-worker` and two sibling LaunchAgents from
+  the pre-cutover stack — their programs were deleted on 2026-07-13 but
+  `KeepAlive{Crashed:true}` keeps respawning them: **~2,880 failed Python
+  launches a day**. `./bin/power.sh reap` unloads them (`restore` undoes it).
+* `./bin/backup_db.sh` snapshots `gihub` (plain-SQL pg_dump, gzipped) plus a
+  read-only copy of `gi_database.db`, into gitignored `.backups/`, keeping 14 of
+  each. Verified by restoring into a throwaway DB: 74 tables and every row count
+  exact. `--install` runs it daily at 02:00 as `com.gi.hub-backup`, **replacing
+  `com.gi.backup`, which had been failing silently for 25 nights** — there were
+  no local backups at all.
+
 ### 6. Standing rules that predate this session (still binding)
 
 * **Both SME engines change together.** `backend/api/sme_engine.py` and
@@ -319,7 +364,7 @@ All green locally at commit `fae0b3f` (main), verified 2026-07-30.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1018 / 0** (suites A…BC) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1054 / 0** (suites A…BD) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **53 / 53** (~28 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **27 / 0** | `npm run test:ui-math --prefix frontend` |
@@ -452,6 +497,7 @@ revert-verification and the caveats:
 
 | Log | Covers |
 |---|---|
+| [`docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md`](docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md) | Rules 7-8: the PDF overlap measurements, the global xlsx template, the Auditor role, power.sh + backup_db.sh |
 | [`docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`](docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md) | Rule 1c: the double-count, the 22,951-unit buy-list correction, suite BC |
 | [`docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md`](docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md) | The last two loopholes: scope-wide bottleneck + calculator component identity |
 | [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md) | Rule 1b: the six layers that merged the tiers, the 21.5% measurement, the per-tab audit |

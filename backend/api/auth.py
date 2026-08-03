@@ -76,9 +76,21 @@ REFRESH_COOKIE = "gi_refresh"
 MFA_TTL = _dt.timedelta(minutes=5)
 
 # Role label + hierarchy level (from config.py ROLES / ROLE_HIERARCHY).
+#
+# `auditor` is NEW-STACK ONLY and has no legacy counterpart — legacy/config.py
+# is frozen at its six roles and stays that way.
+#
+# It sits at level 3 deliberately. Read scoping keys off the level ladder
+# (SITE_SCOPE_MIN_LEVEL = 3), and an auditor who could only see one site — or,
+# because unscoped accounts carry site_id '', fail closed and see NOTHING — is
+# useless. Level 3 buys global READ reach; every write is refused by the
+# read-only guard in readonly.py regardless of level, so the level grants no
+# mutation power at all. See readonly.py for why the guard is method-based
+# rather than a per-endpoint annotation.
 ROLE_META = {
     "admin":          {"label": "Admin",              "level": 4},
     "logistics":      {"label": "Logistics",          "level": 3},
+    "auditor":        {"label": "Auditor (view-only)", "level": 3},
     "hod":            {"label": "Head of Department", "level": 2},
     "warehouse_user": {"label": "Warehouse",          "level": 1},
     "supervisor":     {"label": "Supervisor",         "level": 1},
@@ -94,7 +106,9 @@ _REGISTERABLE_ROLES = set(ROLE_META) - {"admin"}
 #   site; unscoped (global) roles must NOT carry a site — they may give a
 #   free-text Location instead.
 _SCOPED_REG_ROLES = {"store_keeper", "supervisor", "hod"}
-_UNSCOPED_REG_ROLES = {"warehouse_user", "logistics"}
+# auditor is unscoped: it reads across every site, so binding it to one would
+# contradict the reason it exists.
+_UNSCOPED_REG_ROLES = {"warehouse_user", "logistics", "auditor"}
 
 _bearer = HTTPBearer(auto_error=False)
 _DUMMY_HASH = "$2b$12$0000000000000000000000000000000000000000000000000000"

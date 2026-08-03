@@ -117,19 +117,31 @@ def _draw_bin_label(pdf, cx, cy, cw, ch, item):
     pdf.set_text_color(10, 25, 47)
     pdf.set_xy(cx + 1, cy + 4 + qr_size + 2)
     pdf.cell(cw - 2, 5, _latin(str(item.get("SAP_Code", ""))), align="C")
+    # Wrap to the space actually left under the QR rather than cutting at a
+    # fixed 60 characters — the 52-char chemical names lost their tail.
     pdf.set_font("helvetica", "", 6)
     pdf.set_text_color(80, 80, 80)
-    pdf.set_xy(cx + 1, cy + 4 + qr_size + 8)
-    pdf.multi_cell(cw - 2, 3, _latin(str(item.get("Equipment_Description", "") or ""))[:60], align="C")
+    body_y = cy + 4 + qr_size + 8
+    pdf.set_xy(cx + 1, body_y)
+    for ln in _wrap_lines(pdf, _latin(str(item.get("Equipment_Description", "") or "")),
+                          cw - 2, max(int((ch - (body_y - cy) - 2) / 3), 1)):
+        pdf.set_x(cx + 1)
+        pdf.cell(cw - 2, 3, ln, align="C")
+        pdf.ln(3)
 
 
 def _draw_badge(pdf, cx, cy, cw, ch, item):
     qr_size = 38
-    name = _latin(str(item.get("Name", "")))[:32]
-    pdf.set_font("helvetica", "B", 9)
+    # `cell` does not clip, so a long name drawn at a fixed 9pt ran 4.3mm past
+    # the sticker edge and over its neighbour. Shrink to fit, then wrap.
+    name = _latin(str(item.get("Name", "")))
     pdf.set_text_color(10, 25, 47)
+    for size in (9, 8, 7, 6.5):
+        pdf.set_font("helvetica", "B", size)
+        if len(_wrap_lines(pdf, name, cw - 2, 99)) <= 1:
+            break
     pdf.set_xy(cx + 1, cy + 3)
-    pdf.cell(cw - 2, 5, name, align="C")
+    pdf.cell(cw - 2, 5, _wrap_lines(pdf, name, cw - 2, 1)[0], align="C")
     buf = _qr_png(str(item.get("ID_Number", "")))
     qr_y = cy + 10
     pdf.image(buf, x=cx + (cw - qr_size) / 2, y=qr_y, w=qr_size, h=qr_size)
@@ -139,7 +151,8 @@ def _draw_badge(pdf, cx, cy, cw, ch, item):
     pdf.set_font("helvetica", "", 7)
     pdf.set_text_color(110, 110, 110)
     pdf.set_xy(cx + 1, qr_y + qr_size + 7)
-    pdf.cell(cw - 2, 4, _latin(str(item.get("Department", "") or ""))[:32], align="C")
+    pdf.cell(cw - 2, 4, _wrap_lines(pdf, _latin(str(item.get("Department", "") or "")),
+                                    cw - 2, 1)[0], align="C")
 
 
 def _wrap_lines(pdf, text: str, width: float, max_lines: int) -> list[str]:

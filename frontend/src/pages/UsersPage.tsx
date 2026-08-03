@@ -20,6 +20,7 @@ function errMsg(e: unknown): string {
 const ROLE_COLOR: Record<string, string> = {
   admin: 'gold', logistics: 'cyan', hod: 'geekblue',
   warehouse_user: 'green', supervisor: 'blue', store_keeper: 'default',
+  auditor: 'purple',
 }
 
 type ModalMode = 'create' | 'edit' | 'password' | null

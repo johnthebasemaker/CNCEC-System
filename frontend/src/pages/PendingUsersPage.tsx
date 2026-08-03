@@ -16,6 +16,7 @@ const ROLE_OPTIONS = [
   { value: 'hod', label: 'Head of Department' },
   { value: 'warehouse_user', label: 'Warehouse' },
   { value: 'logistics', label: 'Logistics' },
+  { value: 'auditor', label: 'Auditor (view-only)' },
   { value: 'admin', label: 'Admin' },
 ]
 

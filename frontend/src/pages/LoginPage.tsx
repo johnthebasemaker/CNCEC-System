@@ -19,6 +19,7 @@ const REGISTER_ROLES = [
   { value: 'hod', label: 'Head of Department' },
   { value: 'warehouse_user', label: 'Warehouse' },
   { value: 'logistics', label: 'Logistics' },
+  { value: 'auditor', label: 'Auditor (view-only)' },
 ]
 
 // T4 — scoped roles MUST pick an admin-created site; unscoped (global) roles
