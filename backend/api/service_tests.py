@@ -6344,11 +6344,18 @@ async def test_sme_sk_upgrades():
         check("an: calculator is HOD+ (SK level 0 → 403)",
               r.status_code == 403, f"got {r.status_code}")
 
-        # single system via the legacy `code` param — new payload shape;
-        # M2's stock must POOL the SME seed rows SVCN-2 (0) and the
-        # whitespace-variant 'SVCN - 3' (10) because both share Material_Code
-        # SVCN-M2. SVCN-1 reads 150 from its seed row, NOT the 650 sitting in
-        # the ERP ledger against the same SAP (strict decoupling).
+        # Single system via the legacy `code` param.
+        #
+        # 2026-08-04 COMPONENT IDENTITY (overturns the 2026-07-18 pooling rule
+        # here too). SVCN-M2 is TWO physical drums: Comp-A at SAP 'SVCN-2' with
+        # a seed of 0, and Comp-B at the whitespace-variant 'SVCN - 3' with 10.
+        # They USED to share one pooled figure of 10, so Comp-A — which has
+        # nothing on its shelf — reported 10 available and only 6 short out of
+        # its sibling's stock. Each drum now reads its own seed row: Comp-A is
+        # 0 available and the FULL 16 short; Comp-B is covered.
+        #
+        # SVCN-1 reads 150 from its seed row, NOT the 650 sitting in the ERP
+        # ledger against the same SAP (strict decoupling, 2026-08-02).
         r = await ac.get("/sme/calculator", headers=H(hod_t),
                          params={"code": "9908", "sqm": 40})
         j = r.json() if r.status_code == 200 else {}
@@ -6357,23 +6364,30 @@ async def test_sme_sk_upgrades():
         l1 = next((x for x in lines if x["sap_code"] == "SVCN-1"), {})
         l2 = next((x for x in lines if x["sap_code"] == "SVCN-2"), {})
         l3 = next((x for x in lines if x["sap_code"] == "SVCN-3"), {})
-        check("an: calculator — demand math, pack counts, material-pooled stock",
+        check("an: calculator — demand math, pack counts, PER-COMPONENT stock",
               r.status_code == 200 and len(lines) == 3
               and j.get("codes") == ["9908"] and j.get("mode") == "global"
               and l1.get("required_qty") == 100 and l1.get("packages_needed") == 4
               and l1.get("available_stock") == 150 and not l1.get("shortfall_qty")
               and l2.get("required_qty") == 16
-              and l2.get("available_stock") == 10 and l2.get("pooled_saps") == 2
-              and l2.get("shortfall_qty") == 6
               and l3.get("required_qty") == 4
-              and l3.get("available_stock") == 10 and not l3.get("shortfall_qty")
               and sysb.get("totals", {}).get("shortfall_lines") == 1
               and "2.5 KG/SQM × 40 SQM = 100 KG" in l1.get("explanation", ""),
               f"{r.status_code} l1={l1} l2={l2} l3={l3}")
-        check("an: calculator hides nothing the UI needs — material_code on "
-              "every line, SAP kept as internal id",
-              all(x.get("material_code", "").startswith("SVCN-M") for x in lines),
-              f"{[x.get('material_code') for x in lines]}")
+        check("an-component: the two drums of SVCN-M2 keep their OWN stock — "
+              "Comp-A has 0 on its shelf and is the full 16 short; it can no "
+              "longer be covered out of Comp-B's 10",
+              l2.get("available_stock") == 0 and l2.get("shortfall_qty") == 16
+              and l3.get("available_stock") == 10 and not l3.get("shortfall_qty"),
+              f"l2={l2} l3={l3}")
+        check("an-component: the DIRTY seed SAP 'SVCN - 3' still resolves onto "
+              "the recipe's 'SVCN-3' — normalized on both sides of the join",
+              l3.get("available_stock") == 10, f"l3={l3}")
+        check("an: calculator hides nothing the UI needs — material_code AND "
+              "the variant SAP on every line (the SAP is the component id now)",
+              all(x.get("material_code", "").startswith("SVCN-M") for x in lines)
+              and all(x.get("sap_code") for x in lines),
+              f"{[(x.get('material_code'), x.get('sap_code')) for x in lines]}")
 
         # multi-system, one global SQM — shared Primer line aggregates across
         # 9908 (2.5/SQM) + 9909 (1.0/SQM): 100 + 40 = 140 → 6 × 25 packs

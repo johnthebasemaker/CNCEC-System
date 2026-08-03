@@ -35,12 +35,18 @@ test.describe('sme-tiers:hod', () => {
   test.use({ storageState: storageStatePath('hod') })
 
   /** Open the tab and return ITS panel — antd keeps every visited tab mounted,
-   *  so page-wide text locators hit the Dashboard's copy too. */
+   *  so page-wide text locators hit the Dashboard's copy too.
+   *
+   *  The generous timeout is not papering over a bug: this tab fetches the
+   *  whole model snapshot and then runs the FULL cascade over ~78 units on the
+   *  browser's main thread, which under four parallel workers legitimately
+   *  overruns the 10s default. */
   async function totalOverview(page: Page) {
     await page.goto('/sme')
     await page.getByRole('tab', { name: /Total Overview/ }).click()
     const panel = page.getByRole('tabpanel', { name: /Total Overview/ })
-    await expect(panel.getByText('MASTER TABLE — EQUIPMENT × SYSTEM CODE')).toBeVisible()
+    await expect(panel.getByText('MASTER TABLE — EQUIPMENT × SYSTEM CODE'))
+      .toBeVisible({ timeout: 30_000 })
     return panel
   }
 

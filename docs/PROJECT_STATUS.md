@@ -244,6 +244,15 @@ _Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
   covered. `Material_Name + UOM` is NOT a usable discriminator (all four PU
   recipe rows share both). SAP codes are whitespace-normalized on both
   sides of every join (`"1043 - 2"` ≡ `"1043-2"`).
+- **SCOPE-WIDE BOTTLENECK (2026-08-04):** a scope's coverage is
+  `Σ buildable m² ÷ Σ remaining m²` (`session.ts scopeBottleneckCoverage`),
+  never a quantity average across unlike materials. The Session and Location
+  reports used the average and read **57.7%** where the truth is **7.8%**
+  (TRAIN K: 54.6% vs a real 0.4%). Same commit overturned the last
+  `Material_Code` pooling holdout — the Smart Calculator now keys stock on
+  `(Material_Code, SAP_Code)`. New gate `npm run test:ui-math` (20 checks)
+  covers `session.ts` + `insights.ts`, which had no tests at all. See
+  `docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md`.
 - **STRICT TIER SEGREGATION (2026-08-03):** readiness is TIER 1 only.
   `Alloc_Available` drives `Status`, `Completion_Pct`, `SQM_Achievable_Now`,
   `Coverage_Now_Pct` and `Fulfillment_Pct`; `Alloc_Ordered` drives ONLY the

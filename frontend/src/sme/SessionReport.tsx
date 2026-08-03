@@ -19,7 +19,7 @@ import { fc } from './insights'
 import KpiDrill from './KpiDrill'
 import PriorityList, { FulfilPill, StatusDot } from './PriorityList'
 import { useScenario } from './ScenarioContext'
-import { tagStats, weightedProcurement } from './session'
+import { scopeBottleneckCoverage, tagStats, weightedProcurement } from './session'
 import type { WeightedProcurementRow } from './session'
 import type { SqmCodeRow } from './engine'
 import SuggestionPanel from './SuggestionPanel'
@@ -134,18 +134,25 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
   }
 
   const totDemand = combined.reduce((s, r) => s + r.Demand_Qty, 0)
-  // 2026-08-03 STRICT TIER SEGREGATION: `cov` was Σ Allocated_Qty ÷ Σ Demand —
-  // physical stock PLUS stock on order — and drove both the "Overall Coverage"
-  // KPI and the green summary pill. A session whose gap was entirely on an open
-  // PO read 100%. Coverage is now TIER 1; the forecast is shown beside it.
   const totAvail = combined.reduce((s, r) => s + r.Available_Qty, 0)
   const totOrdered = combined.reduce((s, r) => s + r.Ordered_Qty, 0)
   const totShort = combined.reduce((s, r) => s + r.Shortfall_Qty, 0)
-  const cov = totDemand > 0 ? Math.min(100, (totAvail / totDemand) * 100) : 100
-  const covOrd = totDemand > 0
-    ? Math.min(100, ((totAvail + totOrdered) / totDemand) * 100) : 100
   const shortOnly = combined.filter((r) => r.Shortfall_Qty > 0)
   const sessionTags = scenario.order.filter((t) => stats.has(t))
+
+  // 2026-08-03 STRICT TIER SEGREGATION: this was Σ Allocated_Qty ÷ Σ Demand —
+  // physical stock PLUS stock on order — so a session whose whole gap sat on an
+  // open PO headlined 100%.
+  //
+  // 2026-08-04 AREA-WEIGHTED BOTTLENECK: it was then still a QUANTITY average
+  // (Σ Available ÷ Σ Demand) across unlike materials, which reads 50% when you
+  // hold all of Part A and none of Part B — and can therefore sit well above
+  // the scarcest component, the very thing the strict-bottleneck ruling
+  // forbids one level down. Coverage is now Σ buildable m² ÷ Σ remaining m²
+  // over the session's tags, each already capped by its own bottleneck.
+  const scope = scopeBottleneckCoverage(sessionTags.map((t) => stats.get(t)!))
+  const cov = scope.coveragePct
+  const covOrd = scope.coverageWithOrderedPct
 
   const combinedCols: ColumnsType<WeightedProcurementRow> = [
     materialCodeCol<WeightedProcurementRow>({ width: 150, fixed: 'left' }),
@@ -266,13 +273,18 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
             Available: r.Available_Qty, 'On Order': r.Ordered_Qty,
             'To Order': r.Shortfall_Qty, 'Ready now %': r.Fulfillment_Pct,
           }))} help="Components still to procure AFTER counting stock already on order." /></Col>
+        {/* Area-weighted bottleneck over the session's tags — drill down per
+            EQUIPMENT, because that is the grain the number is computed at. */}
         <Col flex="1 1 160px"><KpiDrill title="Coverage now" value={`${cov.toFixed(1)}%`}
-          accent={fc(cov)} drillTitle="Coverage by Material — physical vs with ordered"
-          rows={combined.map((r) => ({
-            Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
-            Available: r.Available_Qty, 'On Order': r.Ordered_Qty,
-            'Ready now %': r.Fulfillment_Pct,
-          }))} help={`Available ÷ Demand across the session — PHYSICAL stock only. Counting stock on order it would be ${covOrd.toFixed(1)}%, but that cannot be applied to a tank today.`} /></Col>
+          accent={fc(cov)} drillTitle="Coverage by Equipment — physical vs with ordered"
+          rows={sessionTags.map((t) => {
+            const st = stats.get(t)!
+            return {
+              Tag: t, Name: st.name, 'Remaining m²': st.sqm,
+              'Buildable now m²': st.canSqm, 'Ready now %': st.fulfillPct,
+              'With ordered %': st.fulfillWithOrderedPct,
+            }
+          })} help={`Buildable m² ÷ remaining m² (${scope.canSqm} / ${scope.sqm}), each unit capped by its SCARCEST component — never a quantity average across materials. PHYSICAL stock only; counting stock on order it would be ${covOrd.toFixed(1)}%.`} /></Col>
         <Col flex="1 1 160px"><KpiDrill title="With ordered" value={`${covOrd.toFixed(1)}%`}
           accent="#F59E0B" drillTitle="Components covered only by an open PO"
           rows={combined.filter((r) => r.Ordered_Qty > 0).map((r) => ({

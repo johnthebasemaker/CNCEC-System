@@ -173,6 +173,60 @@ export function tagStats(model: SmeModel, lines: AllocationLine[]): Map<string, 
   return out
 }
 
+/** Scope-wide coverage over a set of tags — the AREA-WEIGHTED BOTTLENECK.
+ *
+ *  2026-08-04. The Session Report and Location Report used to headline
+ *  `Σ Available ÷ Σ Demand` across every material in scope. That is a
+ *  QUANTITY average, and quantities of unlike materials are not commensurable:
+ *  100% of Part A and 0% of Part B reads as 50% coverage when in truth nothing
+ *  can be built. It could therefore report well above the scarcest component —
+ *  the exact thing the 2026-07-07 STRICT BOTTLENECK ruling forbids at unit
+ *  level, leaking back in one aggregation higher up.
+ *
+ *  The honest aggregate is area: each unit already carries its own strict
+ *  bottleneck rate (`fulfillPct`) and therefore its own buildable area
+ *  (`canSqm = sqm × rate`), so a scope's coverage is
+ *
+ *      Σ buildable m²  ÷  Σ remaining m²
+ *
+ *  which is exactly what the Dashboard does in insights.ts `bottleneckScope`.
+ *  A unit blocked by one component contributes 0 m² and cannot be averaged
+ *  back up by a well-stocked neighbour's spare quantity.
+ *
+ *  DELIBERATE DIFFERENCE from the Dashboard: these tags come from a CASCADED
+ *  plan (priority order, pool drains as it goes), while the Dashboard scores
+ *  every unit against the full pool. Same formula, different pool assumption —
+ *  that is intended, not drift. Do not "reconcile" them.
+ */
+export interface ScopeCoverage {
+  /** Remaining m² in scope. */
+  sqm: number
+  /** TIER 1 — m² buildable today. */
+  canSqm: number
+  /** TIER 1 + 2 — m² buildable once the open POs land. */
+  canSqmWithOrdered: number
+  /** canSqm ÷ sqm × 100. Never exceeds the scarcest component's rate. */
+  coveragePct: number
+  coverageWithOrderedPct: number
+}
+
+export function scopeBottleneckCoverage(tags: Iterable<TagStat>): ScopeCoverage {
+  let sqm = 0, canSqm = 0, canSqmWithOrdered = 0
+  for (const t of tags) {
+    sqm += t.sqm
+    canSqm += t.canSqm
+    canSqmWithOrdered += t.canSqmWithOrdered
+  }
+  const pct = (v: number) => (sqm > 0 ? Math.min(100, (v / sqm) * 100) : 100)
+  return {
+    sqm: roundN(sqm, 2),
+    canSqm: roundN(canSqm, 2),
+    canSqmWithOrdered: roundN(canSqmWithOrdered, 2),
+    coveragePct: roundN(pct(canSqm), 1),
+    coverageWithOrderedPct: roundN(pct(canSqmWithOrdered), 1),
+  }
+}
+
 export interface WeightedProcurementRow {
   Material_Code: string
   /** Variant SAP — the component discriminator (2026-07-30 ruling). */

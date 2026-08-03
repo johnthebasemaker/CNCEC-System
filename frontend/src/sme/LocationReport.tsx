@@ -21,7 +21,7 @@ import { allUnits, fcDot, locColor } from './insights'
 import KpiDrill from './KpiDrill'
 import PriorityList, { FulfilPill, StatusDot } from './PriorityList'
 import { useScenario } from './ScenarioContext'
-import { tagStats } from './session'
+import { scopeBottleneckCoverage, tagStats } from './session'
 import SuggestionPanel from './SuggestionPanel'
 import TagDetail from './TagDetail'
 import TierNote from './TierNote'
@@ -249,19 +249,19 @@ function AllEquipmentMode({ model, order, onOrder, siteId }: {
   const plan = useMemo(() => runPlan(model, order), [model, order])
   const stats = useMemo(() => tagStats(model, plan.lines), [model, plan])
   const all = [...stats.values()]
-  const sqm = all.reduce((s, t) => s + t.sqm, 0)
-  // 2026-08-03 STRICT TIER SEGREGATION. `can` comes from tagStats.canSqm, which
-  // is now the TIER-1 bottleneck — it used to include stock on order, so a KPI
-  // literally titled "Available SQM" counted material that was still on a
-  // truck. `cov` likewise was Σ Allocated_Qty ÷ Σ demand.
-  const can = all.reduce((s, t) => s + t.canSqm, 0)
-  const canOrd = all.reduce((s, t) => s + t.canSqmWithOrdered, 0)
-  const demand = all.reduce((s, t) => s + t.demand, 0)
-  const availQty = all.reduce((s, t) => s + t.allocAvailable, 0)
-  const orderedQty = all.reduce((s, t) => s + t.allocOrdered, 0)
-  const cov = demand > 0 ? Math.min(100, (availQty / demand) * 100) : 100
-  const covOrd = demand > 0
-    ? Math.min(100, ((availQty + orderedQty) / demand) * 100) : 100
+  // 2026-08-03 STRICT TIER SEGREGATION. `canSqm` is the TIER-1 bottleneck — it
+  // used to include stock on order, so a KPI literally titled "Available SQM"
+  // counted material that was still on a truck.
+  //
+  // 2026-08-04 AREA-WEIGHTED BOTTLENECK. `cov` was `Σ Available ÷ Σ Demand`, a
+  // quantity average across unlike materials: 100% of Part A and 0% of Part B
+  // read as 50% coverage when nothing could be built. It is now
+  // Σ buildable m² ÷ Σ remaining m², so it can never exceed the scarcest
+  // component's rate. Shared with the Session Report via one helper.
+  const scope = scopeBottleneckCoverage(all)
+  const { sqm, canSqm: can, canSqmWithOrdered: canOrd } = scope
+  const cov = scope.coveragePct
+  const covOrd = scope.coverageWithOrderedPct
 
   return (
     <div>
@@ -294,7 +294,10 @@ function AllEquipmentMode({ model, order, onOrder, siteId }: {
             .map((t) => ({ Tag: t.tag, 'Deficit SQM': Math.round((t.sqm - t.canSqm) * 100) / 100 }))} /></Col>
         <Col flex="1 1 150px"><KpiDrill title="Coverage now" value={`${cov.toFixed(1)}%`}
           drillTitle="Coverage by Equipment — physical vs with ordered"
-          help={`Physical stock only. With stock on order it would read ${covOrd.toFixed(1)}%.`}
+          help={`Buildable m² ÷ remaining m², where each unit is capped by its `
+            + `SCARCEST component — never a quantity average across materials. `
+            + `Physical stock only; with stock on order it would read `
+            + `${covOrd.toFixed(1)}%.`}
           rows={all.map((t) => ({
             Tag: t.tag, 'Ready now %': t.fulfillPct,
             'With ordered %': t.fulfillWithOrderedPct,

@@ -15,7 +15,9 @@ interface CalcLine {
   sap_code: string | null; material_code: string | null; component: string
   material_name: string; uom: string; for_1_sqm: number; required_qty: number
   package_size: number | null; packages_needed: number | null
-  available_stock: number | null; ordered_stock: number | null; pooled_saps: number
+  available_stock: number | null; ordered_stock: number | null
+  /** Retained at 1 for payload compatibility — stock is per component now. */
+  pooled_saps: number
   /** PHYSICAL gap — what blocks the job today. */
   shortfall_qty: number | null
   /** Gap after stock already on order — what to raise a PR for. */
@@ -45,13 +47,17 @@ const fmt = (v: number | null | undefined) =>
 // Header cells must never truncate (Phase-4 polish) — reserve the full title.
 const noWrapHeader = () => ({ style: { whiteSpace: 'nowrap' as const } })
 
-// Availability is pooled per Material Code across every variant SAP (the SAP
-// code is an internal id and is deliberately NOT displayed).
+// 2026-08-04 COMPONENT IDENTITY: availability is this line's OWN component —
+// (Material_Code, SAP_Code) — not a pool summed across every variant SAP under
+// the material code. Four Comp-A/B/C/D drums are four different shelves, and
+// pooling them let one component be reported as covered out of another's stock.
+// The variant SAP is therefore now DISPLAYED: without it the four rows of a
+// multi-part system are indistinguishable.
 //
 // 2026-08-03 STRICT TIER SEGREGATION: this cell shows stock ON HAND only. A
 // material with nothing on the shelf reads red even when the whole quantity is
 // on an open PO — the "On Order" column beside it carries that, and says so.
-const stockCell = (v: number | null, r: { shortfall_qty: number | null; pooled_saps: number }) =>
+const stockCell = (v: number | null, r: { shortfall_qty: number | null }) =>
   v == null ? '—'
     : r.shortfall_qty
       ? <Tag color="red">{fmt(v)} (short {fmt(r.shortfall_qty)})</Tag>
@@ -108,10 +114,20 @@ export default function SmartCalculator({ siteId, stickyTop }:
     }
   }
 
-  // Shared display columns — Material Code instead of SAP (internal id).
+  // Shared display columns — Material Code AND the variant SAP: since
+  // 2026-08-04 the SAP is the component identity, not an internal id.
   const aggColumns: ColumnsType<AggLine> = [
     { title: 'Material Code', dataIndex: 'material_code', width: 130,
       onHeaderCell: noWrapHeader, render: (v) => v ?? '—' },
+    // The component discriminator. Stock is looked up per (code, SAP), so the
+    // SAP has to be visible or two rows of a multi-part system look identical.
+    { title: 'SAP', dataIndex: 'sap_code', width: 100,
+      onHeaderCell: noWrapHeader,
+      render: (v: string | null) => (
+        <span style={{ fontFamily: 'JetBrains Mono, monospace', opacity: 0.75 }}>
+          {v ?? '—'}
+        </span>
+      ) },
     { title: 'Component', dataIndex: 'component', width: 160,
       onHeaderCell: noWrapHeader, render: (v, r) => v || r.material_name || '—' },
     { title: 'Material', dataIndex: 'material_name', ellipsis: true,
@@ -137,6 +153,15 @@ export default function SmartCalculator({ siteId, stickyTop }:
   const sysColumns: ColumnsType<CalcLine> = [
     { title: 'Material Code', dataIndex: 'material_code', width: 130,
       onHeaderCell: noWrapHeader, render: (v) => v ?? '—' },
+    // The component discriminator. Stock is looked up per (code, SAP), so the
+    // SAP has to be visible or two rows of a multi-part system look identical.
+    { title: 'SAP', dataIndex: 'sap_code', width: 100,
+      onHeaderCell: noWrapHeader,
+      render: (v: string | null) => (
+        <span style={{ fontFamily: 'JetBrains Mono, monospace', opacity: 0.75 }}>
+          {v ?? '—'}
+        </span>
+      ) },
     { title: 'Component', dataIndex: 'component', width: 160,
       onHeaderCell: noWrapHeader, render: (v, r) => v || r.material_name || '—' },
     { title: 'Material', dataIndex: 'material_name', ellipsis: true,

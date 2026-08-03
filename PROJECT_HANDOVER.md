@@ -1,6 +1,6 @@
 # PROJECT HANDOVER — read this first
 
-> **Updated 2026-08-03.** This is the fresh-session entry point: what is locked,
+> **Updated 2026-08-04.** This is the fresh-session entry point: what is locked,
 > where we are, and what happens next. Read this file, then
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the system brain), then
 > [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state + gotchas) and
@@ -33,6 +33,13 @@ different shelf.
   writes `"1043 - 2"` for the recipe's `"1043-2"` (`sap_norm()` / `sapNorm()`).
 * `sme_inventory_seed`'s primary key is **`(Material_Code, SAP_Code)`**
   (alembic `a4e9b1c73f28`).
+* **No exceptions remain.** The Smart Calculator was the last holdout — it kept
+  the 2026-07-18 `Material_Code` pooling until **2026-08-04**, when the operator
+  authorized overturning it there too. `_CALC_POOL_SQL` now groups and joins on
+  `(Material_Code, SAP_Code)`, and the UI displays the variant SAP. Live proof:
+  on `GI-8005766` at 1,000 m², the catalyst `1042-3` holds 50.5 against a demand
+  of 67.34 — pooled it saw 3,080.5 and the whole system reported **0 shortfall
+  lines**.
 
 **Why it is not negotiable:** pooling summed four unlike drums into one bucket, so
 earlier recipe lines drained stock belonging to later ones. Measured on real data,
@@ -221,10 +228,13 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
 * **Half-up rounding** `floor(x·10ⁿ + 0.5)` is shared verbatim across both
   languages. Never "fix" it to half-even.
 * **STRICT BOTTLENECK** (2026-07-07): a unit's coverage is its least-available
-  material's rate, never the Σalloc/Σdemand average. ⚠️ The Session Report's and
-  Location Report's *scope-wide* "Overall Coverage" KPI is still a quantity
-  average (`Σ Available ÷ Σ Demand`), not the Dashboard's area-weighted
-  bottleneck — pre-existing, flagged in the tier run log §7, awaiting a ruling.
+  material's rate, never the Σalloc/Σdemand average. **Extended 2026-08-04 to
+  every SCOPE-wide KPI**: a scope's coverage is `Σ buildable m² ÷ Σ remaining m²`
+  (`session.ts scopeBottleneckCoverage`), never a quantity average across unlike
+  materials. The Session and Location reports used the quantity average and read
+  **57.7 %** on the live model where the true figure is **7.8 %** — TRAIN K read
+  54.6 % against a real 0.4 %. Both now call one shared helper. Gated by
+  `npm run test:ui-math`.
 * **Unmodelled is never 100%** (ruling Q5): a system code with no recipe rows
   scores 0 SQM achievable, never a silent full-ready.
 * **FEFO + over-issue stay allow-and-log** — never add a hard block.
@@ -272,9 +282,10 @@ All green locally at commit `fae0b3f` (main), verified 2026-07-30.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **999 / 0** (suites A…BB) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **53 / 53** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **1001 / 0** (suites A…BB) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **53 / 53** (~28 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,289 comparisons** | `npm run parity:sme --prefix frontend` |
+| **SME UI math** (session.ts + insights.ts) | **20 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
@@ -292,6 +303,7 @@ recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/RE
 
 | PR | Commit | What |
 |---|---|---|
+| — | `fix/sme-final-math-alignment` | **Final math alignment** — scope-wide coverage → area-weighted bottleneck (57.7% → 7.8% on live data); Smart Calculator → `(Material_Code, SAP_Code)`; new `npm run test:ui-math` gate (20 checks) for the previously untested presentation layer |
 | — | `fix/sme-strict-tier-segregation` | **SME tier segregation** (rule 1b) — readiness is TIER 1 everywhere; `session.ts codeStats`, Total Overview, Location Report, Execution Plan, Dashboard, exec summary + PDF, Smart Calculator, location export all split; `insights.ts` Material_Key lookup bug fixed; suite **BB** (18) + 4 E2E |
 | — | `feat/sme-strict-decoupling` | **SME ⇄ ERP strict decoupling** (rule 1a) — ledger stripped from `SQL_SME_MATERIALS` + Smart Calculator, effective-ordered netting removed from both engines, golden regenerated, suite **BA** (11 checks), `pg_excel_sync` defaults to SME-only, `Available Qty` header alias |
 | #15 | `7868e8d` | **Project-wide table sorting + filtering** — `smartTable.tsx`, 99 tables / 45 files, +3 E2E specs |
@@ -402,6 +414,7 @@ revert-verification and the caveats:
 
 | Log | Covers |
 |---|---|
+| [`docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md`](docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md) | The last two loopholes: scope-wide bottleneck + calculator component identity |
 | [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md) | Rule 1b: the six layers that merged the tiers, the 21.5% measurement, the per-tab audit |
 | [`docs/SME_STRICT_DECOUPLING_RUNLOG.md`](docs/SME_STRICT_DECOUPLING_RUNLOG.md) | Rule 1a: the two ledger leaks, suite BA, the CLI + header fixes, the re-sync |
 | [`docs/SME_COMPONENT_POOLING_RUNLOG.md`](docs/SME_COMPONENT_POOLING_RUNLOG.md) | The `(Material_Code, SAP_Code)` ruling, end to end |
