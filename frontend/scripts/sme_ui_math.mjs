@@ -42,12 +42,15 @@ const near = (a, b, tol = 1e-6) => Math.abs(a - b) <= tol
 
 // ── The fixture: ONE tank, ONE system code, 100 m² remaining, two materials
 // at 1.0 per m² — so demand is 100 each.
-//   PART-A : 100 available, 0 on order   → fully stocked
-//   PART-B :   0 available, 500 on order → the blocker (the ACP Powder shape)
+//   PART-A : 100 arrived of 100 procured → fully delivered, empty pipeline
+//   PART-B :   0 arrived of 500 procured → the blocker (the ACP Powder shape)
+// 2026-08-05 SUBSET RULE: `ordered_qty` is the TOTAL procured and
+// `available_qty` is the arrived part OF it, so Part A's pipeline is 0 (not
+// another 100) and Part B's is the full 500.
 // Quantity average  = (100 + 0) / (100 + 100) = 50%
 // Area bottleneck   = 0%   ← nothing can be built without Part B
 const RATE = 1.0
-function model({ aAvail = 100, aOrd = 0, bAvail = 0, bOrd = 500 } = {}) {
+function model({ aAvail = 100, aOrd = 100, bAvail = 0, bOrd = 500 } = {}) {
   return buildModel(
     [{ Equipment_Tag_No: 'TK-1', Name: 'Tank 1', Location: 'L1',
       Lining_System_Code: '1', Surface_Area_SQM: 100 }],
@@ -79,9 +82,10 @@ console.log('\n A. session.ts codeStats / tagStats — TIER SEGREGATION')
   check('the two shortfalls stay apart — 100 physically short, 0 left to buy',
     cs.shortfallAvailable === 100 && cs.shortfall === 0,
     `phys=${cs.shortfallAvailable} net=${cs.shortfall}`)
-  check('the tiers are reported as their own quantities (100 available, 100 ordered)',
-    cs.allocAvailable === 100 && cs.allocOrdered === 100,
-    `av=${cs.allocAvailable} ord=${cs.allocOrdered}`)
+  check('the tiers are reported as their own quantities — 100 arrived, and '
+    + "100 drawn from Part B's pipeline",
+  cs.allocAvailable === 100 && cs.allocPending === 100,
+  `av=${cs.allocAvailable} pending=${cs.allocPending}`)
 
   // The formula this gate exists to outlaw.
   const outlawed = Math.min(1, cs.alloc / cs.demand) * 100
@@ -177,6 +181,74 @@ console.log('\n D. insights.ts — the pool must be keyed by Material_Key')
     byKey[matKey('M', 'B')].Shortfall === 100
     && byKey[matKey('M', 'B')].Net_Shortfall === 0,
     JSON.stringify(byKey[matKey('M', 'B')]))
+}
+
+console.log('\n E. THE SUBSET RULE — available is part OF ordered, not extra to it')
+{
+  // 2026-08-05. `insights.ts` carried the additive assumption in two places:
+  // the "with ordered" bottleneck pooled `avail + rawOrdered`, and
+  // materialBalance computed `Net_Shortfall = demand − avail − rawOrdered`.
+  // Both double-counted every unit already on the shelf.
+  const units = allUnits(model())
+  const m = model()
+
+  // ONE material, 100 m² of demand, FULLY DELIVERED: 60 arrived of 60 ordered.
+  const oneMat = buildModel(
+    [{ Equipment_Tag_No: 'TK-S', Lining_System_Code: '1', Surface_Area_SQM: 100 }],
+    [{ Lining_System_Code: '1', Lining_System_Name: 'SYS', Material_Code: 'M',
+      SAP_Code: 'S', Material_Name: 'Mat', UOM: 'KG', For_1_SQM: 1.0 }],
+    [{ material_code: 'M', sap_code: 'S', material_name: 'Mat', uom: 'KG',
+      available_qty: 60, ordered_qty: 60 }], [])
+  const mats = [{ material_code: 'M', sap_code: 'S', material_name: 'Mat',
+    uom: 'KG', available_qty: 60, ordered_qty: 60 }]
+  const bal = materialBalance(oneMat, allUnits(oneMat), mats)
+  const row = bal.rows[0]
+
+  check('materialBalance splits the PO into arrived and pending — 60 of 60 '
+    + 'delivered leaves an EMPTY pipeline, not another 60',
+  row.Pending_Delivery_Qty === 0 && row.Total_Procured_Qty === 60,
+  `pending=${row.Pending_Delivery_Qty} procured=${row.Total_Procured_Qty}`)
+  check('the buy list measures against the PROCURED ceiling: 100 − 60 = 40. '
+    + 'The additive reading (100 − 60 − 60) clamped to 0 and asked for nothing',
+  row.Net_Shortfall === 40 && Math.max(100 - 60 - 60, 0) === 0,
+  `net=${row.Net_Shortfall}`)
+  check('the PHYSICAL gap is unaffected by any of this — 100 − 60 = 40',
+    row.Shortfall === 40, `short=${row.Shortfall}`)
+
+  const cov = scopeCoverage(oneMat, allUnits(oneMat), mats)
+  check('the "when delivered" bottleneck tops out at the PROCURED ceiling '
+    + '(60%), not at available + ordered (which would read 100%)',
+  near(cov.coverageWithOrderedPct, 60) && near(cov.coveragePct, 60),
+  `now=${cov.coveragePct} delivered=${cov.coverageWithOrderedPct}`)
+
+  // Partly delivered: 20 arrived of 80 procured against 100 demand.
+  const partMats = [{ material_code: 'M', sap_code: 'S', material_name: 'Mat',
+    uom: 'KG', available_qty: 20, ordered_qty: 80 }]
+  const partModel = buildModel(
+    [{ Equipment_Tag_No: 'TK-S', Lining_System_Code: '1', Surface_Area_SQM: 100 }],
+    [{ Lining_System_Code: '1', Lining_System_Name: 'SYS', Material_Code: 'M',
+      SAP_Code: 'S', Material_Name: 'Mat', UOM: 'KG', For_1_SQM: 1.0 }],
+    partMats, [])
+  const pc = scopeCoverage(partModel, allUnits(partModel), partMats)
+  const pr = materialBalance(partModel, allUnits(partModel), partMats).rows[0]
+  check('partly delivered: 20 arrived of 80 procured → 20% ready now, 80% when '
+    + 'delivered (not 100% from 20 + 80)',
+  near(pc.coveragePct, 20) && near(pc.coverageWithOrderedPct, 80),
+  `now=${pc.coveragePct} delivered=${pc.coverageWithOrderedPct}`)
+  check('…and 60 is still in the pipeline, with 20 left to buy',
+    pr.Pending_Delivery_Qty === 60 && pr.Net_Shortfall === 20,
+    `pending=${pr.Pending_Delivery_Qty} buy=${pr.Net_Shortfall}`)
+
+  // Over-delivery must not produce a negative pipeline.
+  const overMats = [{ material_code: 'M', sap_code: 'S', material_name: 'Mat',
+    uom: 'KG', available_qty: 120, ordered_qty: 100 }]
+  const over = materialBalance(partModel, allUnits(partModel), overMats).rows[0]
+  check('more arrived than ordered leaves an EMPTY pipeline and a ceiling of '
+    + 'the larger figure — never a negative pending quantity',
+  over.Pending_Delivery_Qty === 0 && over.Total_Procured_Qty === 120,
+  `pending=${over.Pending_Delivery_Qty} procured=${over.Total_Procured_Qty}`)
+
+  void units; void m
 }
 
 console.log(`\n== SME UI MATH: ${failures.length ? '❌ FAIL' : '✅ PASS'} `

@@ -135,7 +135,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
 
   const totDemand = combined.reduce((s, r) => s + r.Demand_Qty, 0)
   const totAvail = combined.reduce((s, r) => s + r.Available_Qty, 0)
-  const totOrdered = combined.reduce((s, r) => s + r.Ordered_Qty, 0)
+  const totOrdered = combined.reduce((s, r) => s + r.Pending_Delivery_Qty, 0)
   const totShort = combined.reduce((s, r) => s + r.Shortfall_Qty, 0)
   const shortOnly = combined.filter((r) => r.Shortfall_Qty > 0)
   const sessionTags = scenario.order.filter((t) => stats.has(t))
@@ -164,7 +164,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
       render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
     },
     {
-      title: 'On Order', dataIndex: 'Ordered_Qty', key: 'or', align: 'right',
+      title: 'Pending Delivery', dataIndex: 'Pending_Delivery_Qty', key: 'or', align: 'right',
       render: (v: number) => (
         <span style={{ opacity: v > 0 ? 1 : 0.4, color: v > 0 ? '#F59E0B' : undefined }}>{nf(v)}</span>
       ),
@@ -216,7 +216,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
       render: (v: number) => <span style={{ color: '#10B981', fontWeight: 700 }}>{nf(v, 1)}</span>,
     },
     {
-      title: 'With ordered', dataIndex: 'SQM_Achievable_With_Ordered', key: 'ao', align: 'right',
+      title: 'When delivered', dataIndex: 'SQM_Achievable_With_Ordered', key: 'ao', align: 'right',
       render: (v: number, r) => (
         <span style={{ color: v > r.SQM_Achievable_Now ? '#F59E0B' : undefined, opacity: v > r.SQM_Achievable_Now ? 1 : 0.5 }}>
           {nf(v, 1)}
@@ -237,7 +237,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
       ),
     },
     {
-      title: 'With ordered', dataIndex: 'Coverage_With_Ordered_Pct', key: 'pw',
+      title: 'When delivered', dataIndex: 'Coverage_With_Ordered_Pct', key: 'pw',
       width: 110, align: 'right',
       render: (v: number, r) => (
         <span style={{ ...mono, fontSize: '0.72rem',
@@ -264,34 +264,34 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           drillTitle="Session Materials" rows={combined.map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
             Demand: r.Demand_Qty, Available: r.Available_Qty,
-            'On Order': r.Ordered_Qty, 'Ready now %': r.Fulfillment_Pct,
+            'Pending Delivery': r.Pending_Delivery_Qty, 'Ready now %': r.Fulfillment_Pct,
           }))} help="Material components demanded by the session — one row per physical drum (Material_Code + variant SAP)." /></Col>
         <Col flex="1 1 160px"><KpiDrill title="Need to Order" value={String(shortOnly.length)}
           accent={shortOnly.length > 0 ? '#EF4444' : '#10B981'}
           drillTitle="Order List (net shortfall > 0)" rows={shortOnly.map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
-            Available: r.Available_Qty, 'On Order': r.Ordered_Qty,
+            Available: r.Available_Qty, 'Pending Delivery': r.Pending_Delivery_Qty,
             'To Order': r.Shortfall_Qty, 'Ready now %': r.Fulfillment_Pct,
-          }))} help="Components still to procure AFTER counting stock already on order." /></Col>
+          }))} help="Components still to procure once the ENTIRE purchase order has landed." /></Col>
         {/* Area-weighted bottleneck over the session's tags — drill down per
             EQUIPMENT, because that is the grain the number is computed at. */}
         <Col flex="1 1 160px"><KpiDrill title="Coverage now" value={`${cov.toFixed(1)}%`}
-          accent={fc(cov)} drillTitle="Coverage by Equipment — physical vs with ordered"
+          accent={fc(cov)} drillTitle="Coverage by Equipment — physical vs when delivered"
           rows={sessionTags.map((t) => {
             const st = stats.get(t)!
             return {
               Tag: t, Name: st.name, 'Remaining m²': st.sqm,
               'Buildable now m²': st.canSqm, 'Ready now %': st.fulfillPct,
-              'With ordered %': st.fulfillWithOrderedPct,
+              'When delivered %': st.fulfillWithOrderedPct,
             }
-          })} help={`Buildable m² ÷ remaining m² (${scope.canSqm} / ${scope.sqm}), each unit capped by its SCARCEST component — never a quantity average across materials. PHYSICAL stock only; counting stock on order it would be ${covOrd.toFixed(1)}%.`} /></Col>
-        <Col flex="1 1 160px"><KpiDrill title="With ordered" value={`${covOrd.toFixed(1)}%`}
+          })} help={`Buildable m² ÷ remaining m² (${scope.canSqm} / ${scope.sqm}), each unit capped by its SCARCEST component — never a quantity average across materials. PHYSICAL stock only; against the total procured quantity it would be ${covOrd.toFixed(1)}%.`} /></Col>
+        <Col flex="1 1 160px"><KpiDrill title="When delivered" value={`${covOrd.toFixed(1)}%`}
           accent="#F59E0B" drillTitle="Components covered only by an open PO"
-          rows={combined.filter((r) => r.Ordered_Qty > 0).map((r) => ({
+          rows={combined.filter((r) => r.Pending_Delivery_Qty > 0).map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
-            Available: r.Available_Qty, 'On Order': r.Ordered_Qty,
+            Available: r.Available_Qty, 'Pending Delivery': r.Pending_Delivery_Qty,
             'Ready now %': r.Fulfillment_Pct,
-          }))} help="Forecast once the open purchase orders land. Never a readiness figure." /></Col>
+          }))} help="Coverage against the TOTAL procured quantity, i.e. once the whole order has landed. Forecast only — never a readiness figure." /></Col>
       </Row>
 
       {/* Priority reorder (same shared scenario as the builder) */}
@@ -340,11 +340,12 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
                 dataKey={(r: WeightedProcurementRow) => (r.SAP_Code ? `${r.Material_Code} · ${r.SAP_Code}` : r.Material_Code)} />
               <Tooltip formatter={(v) => nf(Number(v))} />
               <Legend wrapperStyle={{ fontSize: 11, fontFamily: 'JetBrains Mono, monospace' }} />
-              {/* Split the allocated segment the way the table below splits it:
-                  `Allocated_Qty` is stock PLUS stock on order, so plotting it as
-                  one bar named "Available" overstated what is on the shelf. */}
+              {/* Split the allocated segment the way the table below splits it.
+                  The amber bar is the PENDING part of the order (2026-08-05
+                  subset rule) — stacking the RAW order on top of `Available`
+                  would draw a fully-delivered material at twice its size. */}
               <Bar dataKey="Available_Qty" name="Available" stackId="p" fill="#10B981" fillOpacity={0.8} />
-              <Bar dataKey="Ordered_Qty" name="On Order" stackId="p" fill="#F59E0B" fillOpacity={0.8} />
+              <Bar dataKey="Pending_Delivery_Qty" name="Pending Delivery" stackId="p" fill="#F59E0B" fillOpacity={0.8} />
               <Bar dataKey="Shortfall_Qty" name="To Order" stackId="p" fill="#EF4444" fillOpacity={0.8} />
             </BarChart>
           </ResponsiveContainer>
@@ -363,7 +364,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
             Ready now: <FulfilPill pct={cov} />
             {covOrd > cov && (
               <span style={{ ...mono, fontSize: '0.7rem', color: '#F59E0B', marginLeft: 6 }}>
-                (with ordered {covOrd.toFixed(1)}%)
+                (when delivered {covOrd.toFixed(1)}%)
               </span>
             )}
           </span>
@@ -376,7 +377,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
         extra={<SegregatedExportButtons order={scenario.order} siteId={siteId} />}>
         <Alert type="info" showIcon style={{ marginBottom: 10, fontSize: '0.76rem' }}
           message="Achievable SQM is limited by the scarcest material in each system's recipe — the bottleneck, not the average."
-          description={'"Now" counts physical stock on hand. "With ordered" adds stock already on purchase order (net of what has already been delivered). Deficit is measured against physical stock, because that is what procurement has to close.'} />
+          description={'"Now" counts stock that has ARRIVED. "When delivered" measures against the TOTAL procured quantity — available plus the pending part of the order, which is the whole PO, not the order on top of the stock. Deficit is measured against arrived stock, because that is what procurement has to close.'} />
         <Table<SqmCodeRow> size="small" rowKey="Lining_System_Code"
           columns={segregatedCols} dataSource={plan.sqm_by_code}
           pagination={{ pageSize: 10, showTotal: (t) => `${t} system codes` }}
@@ -397,7 +398,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
                     render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v)}</span>,
                   },
                   {
-                    title: 'On Order', dataIndex: 'Alloc_Ordered', key: 'or', align: 'right',
+                    title: 'Pending Delivery', dataIndex: 'Alloc_Pending', key: 'or', align: 'right',
                     render: (v: number) => <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v)}</span>,
                   },
                   {
@@ -412,7 +413,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
         <SummaryStrip>
           <span>Remaining: <b style={mono}>{nf(sqmTot.rem, 1)}</b> m²</span>
           <span>Achievable now: <b style={{ ...mono, color: '#10B981' }}>{nf(sqmTot.now, 1)}</b> m²</span>
-          <span>With ordered: <b style={{ ...mono, color: '#F59E0B' }}>{nf(sqmTot.ord, 1)}</b> m²</span>
+          <span>When delivered: <b style={{ ...mono, color: '#F59E0B' }}>{nf(sqmTot.ord, 1)}</b> m²</span>
           <span>Deficit: <b style={{ ...mono, color: sqmTot.def > 0 ? '#EF4444' : undefined }}>{nf(sqmTot.def, 1)}</b> m²</span>
         </SummaryStrip>
       </Card>

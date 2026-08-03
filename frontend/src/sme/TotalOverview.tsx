@@ -90,7 +90,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
         remainingSqm: Math.round(u.remaining * 100) / 100,
         demand: Math.round((s?.demand ?? 0) * 1000) / 1000,
         available: Math.round((s?.allocAvailable ?? 0) * 1000) / 1000,
-        ordered: Math.round((s?.allocOrdered ?? 0) * 1000) / 1000,
+        ordered: Math.round((s?.allocPending ?? 0) * 1000) / 1000,
         shortfall: Math.round((s?.shortfallAvailable ?? 0) * 1000) / 1000,
         toBuy: Math.round((s?.shortfall ?? 0) * 1000) / 1000,
         pct: s?.fulfillPct ?? 100,
@@ -159,7 +159,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
       render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v, 2)}</span>,
     },
     {
-      title: 'On Order', dataIndex: 'ordered', key: 'or', width: 110, align: 'right',
+      title: 'Pending Delivery', dataIndex: 'ordered', key: 'or', width: 110, align: 'right',
       render: (v: number) => (
         <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v, 2)}</span>
       ),
@@ -177,7 +177,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
       render: (v: number) => <b style={{ color: fc(v) }}>{v.toFixed(1)}%</b>,
     },
     {
-      title: 'With ordered %', dataIndex: 'pctOrdered', key: 'po', width: 125, align: 'right',
+      title: 'When delivered %', dataIndex: 'pctOrdered', key: 'po', width: 125, align: 'right',
       render: (v: number, r) => (
         <span style={{ color: v > r.pct ? '#F59E0B' : undefined, opacity: v > r.pct ? 1 : 0.5 }}>
           {v.toFixed(1)}%
@@ -238,7 +238,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
         <Col flex="1 1 140px"><KpiDrill title="No. of Items" value={String(filtered.length)}
           drillTitle="Filtered items" rows={filtered.map((r) => ({
             '#': r.sno, Tag: r.tag, Code: r.code,
-            'Ready now %': r.pct, 'With ordered %': r.pctOrdered,
+            'Ready now %': r.pct, 'When delivered %': r.pctOrdered,
           }))} /></Col>
         <Col flex="1 1 140px"><KpiDrill title="Total SQM" value={nf(totSqm)}
           drillTitle="SQM (desc)" rows={[...filtered].sort((a, b) => b.totalSqm - a.totalSqm)
@@ -259,14 +259,14 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
             'Ready now %': r.pct,
           }))} /></Col>
         {/* TIER 1 + 2 — what it can build once the open POs land. */}
-        <Col flex="1 1 140px"><KpiDrill title="With ordered SQM" value={nf(canSqmOrd)}
+        <Col flex="1 1 140px"><KpiDrill title="When delivered SQM" value={nf(canSqmOrd)}
           accent="#F59E0B" drillTitle="Buildable once purchase orders arrive"
-          help="Adds stock already on order. FORECAST ONLY — never a readiness figure."
+          help="Coverage against the TOTAL procured quantity — arrived stock plus the pending part of the order. FORECAST ONLY — never a readiness figure."
           rows={[...filtered].filter((r) => r.pctOrdered > r.pct)
             .sort((a, b) => a.pctOrdered - b.pctOrdered).map((r) => ({
               Tag: r.tag, Code: r.code,
-              'With ordered': Math.round(r.remainingSqm * (r.pctOrdered / 100) * 100) / 100,
-              'Ready now %': r.pct, 'With ordered %': r.pctOrdered,
+              'When delivered': Math.round(r.remainingSqm * (r.pctOrdered / 100) * 100) / 100,
+              'Ready now %': r.pct, 'When delivered %': r.pctOrdered,
             }))} /></Col>
         <Col flex="1 1 140px"><KpiDrill title="Shortfall SQM" value={nf(shortSqm)}
           accent={shortSqm > 0.005 ? '#EF4444' : undefined}
@@ -278,12 +278,12 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
               'Shortfall SQM': Math.round(r.remainingSqm * (1 - r.pct / 100) * 100) / 100,
             }))} /></Col>
         <Col flex="1 1 140px"><KpiDrill title="Avg Coverage (now)" value={`${avgCov.toFixed(1)}%`}
-          accent={fc(avgCov)} drillTitle="Coverage (asc) — physical vs with ordered"
-          help={`Physical stock only. With stock on order it would read ${avgCovOrd.toFixed(1)}%.`}
+          accent={fc(avgCov)} drillTitle="Coverage (asc) — physical vs when delivered"
+          help={`Arrived stock only. Against the total procured quantity it would read ${avgCovOrd.toFixed(1)}%.`}
           rows={[...filtered].sort((a, b) => a.pct - b.pct)
             .map((r) => ({
               Tag: r.tag, Code: r.code,
-              'Ready now %': r.pct, 'With ordered %': r.pctOrdered,
+              'Ready now %': r.pct, 'When delivered %': r.pctOrdered,
             }))} /></Col>
       </Row>
 
@@ -325,7 +325,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
           }
           m.demand += l.Demand_Qty
           m.allocAv += l.Alloc_Available
-          m.allocOr += l.Alloc_Ordered
+          m.allocOr += l.Alloc_Pending
           m.shortPhys += l.Shortfall_Available_Qty
           m.toBuy += l.Shortfall_Qty
           mats.set(l.Material_Key, m)
@@ -352,7 +352,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
               <FulfilPill pct={Math.round(cov * 10) / 10} />
               {covOrd > cov && (
                 <span style={{ ...mono, fontSize: '0.66rem', color: '#F59E0B' }}>
-                  → {covOrd.toFixed(1)}% with ordered
+                  → {covOrd.toFixed(1)}% when delivered
                 </span>
               )}
             </Space>
@@ -367,7 +367,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
                 { title: 'UOM', dataIndex: 'uom', key: 'u', width: 60 },
                 { title: 'Stock available', dataIndex: 'avail', key: 'av', align: 'right' as const,
                   render: (v: number) => <span style={{ color: '#10B981' }}>{nf(v, 3)}</span> },
-                { title: 'Stock on order', dataIndex: 'onOrder', key: 'oo', align: 'right' as const,
+                { title: 'Pending delivery', dataIndex: 'onOrder', key: 'oo', align: 'right' as const,
                   render: (v: number) => (
                     <span style={{ color: v > 0 ? '#F59E0B' : undefined, opacity: v > 0 ? 1 : 0.4 }}>{nf(v, 3)}</span>
                   ) },
@@ -385,7 +385,7 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
                   render: (v: number) => <b style={{ color: fc(v) }}>{v.toFixed(1)}%</b>,
                 },
                 {
-                  title: 'With ordered %', dataIndex: 'pctOrdered', key: 'po', align: 'right' as const, width: 125,
+                  title: 'When delivered %', dataIndex: 'pctOrdered', key: 'po', align: 'right' as const, width: 125,
                   render: (v: number, r) => (
                     <span style={{ color: v > r.pct ? '#F59E0B' : undefined, opacity: v > r.pct ? 1 : 0.5 }}>
                       {v.toFixed(1)}%

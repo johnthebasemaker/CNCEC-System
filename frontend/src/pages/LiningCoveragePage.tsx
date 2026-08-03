@@ -67,7 +67,7 @@ export default function LiningCoveragePage() {
     // It used to include material on an open purchase order.
     { title: 'Achievable now', dataIndex: 'Achievable_SQM', key: 'a', align: 'right' },
     {
-      title: 'With ordered', dataIndex: 'Achievable_With_Ordered_SQM', key: 'ao', align: 'right',
+      title: 'When delivered', dataIndex: 'Achievable_With_Ordered_SQM', key: 'ao', align: 'right',
       render: (v: number, r) => (
         <span style={{ color: v > r.Achievable_SQM ? '#F59E0B' : undefined,
           opacity: v > r.Achievable_SQM ? 1 : 0.5 }}>{v}</span>

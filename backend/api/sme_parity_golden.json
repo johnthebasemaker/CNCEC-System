@@ -32,11 +32,11 @@
         "Pool_Before": 100.0,
         "Pool_After": 70.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 30.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 100.0,
-        "Ordered_Pool_After": 100.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -56,11 +56,11 @@
         "Pool_Before": 20.0,
         "Pool_After": 5.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 15.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 40.0,
-        "Ordered_Pool_After": 40.0,
+        "Pending_Pool_Before": 20.0,
+        "Pending_Pool_After": 20.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -80,11 +80,11 @@
         "Pool_Before": 70.0,
         "Pool_After": 70.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 100.0,
-        "Ordered_Pool_After": 100.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -104,11 +104,11 @@
         "Pool_Before": 0.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 30.0,
-        "Ordered_Pool_After": 30.0,
+        "Pending_Pool_Before": 30.0,
+        "Pending_Pool_After": 30.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -128,11 +128,11 @@
         "Pool_Before": 70.0,
         "Pool_After": 10.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 60.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 100.0,
-        "Ordered_Pool_After": 100.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -152,12 +152,12 @@
         "Pool_Before": 5.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 16.67,
-        "Alloc_Ordered": 25.0,
-        "Allocated_Qty": 30.0,
-        "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 40.0,
-        "Ordered_Pool_After": 15.0,
-        "Fulfillment_With_Ordered_Pct": 100.0
+        "Alloc_Pending": 20.0,
+        "Allocated_Qty": 25.0,
+        "Shortfall_Qty": 5.0,
+        "Pending_Pool_Before": 20.0,
+        "Pending_Pool_After": 0.0,
+        "Fulfillment_With_Ordered_Pct": 83.33
       },
       {
         "Equipment_Tag_No": "TK-C",
@@ -176,11 +176,11 @@
         "Pool_Before": 0.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 0.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 5.0,
-        "Ordered_Pool_Before": 0.0,
-        "Ordered_Pool_After": 0.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 0.0
       },
       {
@@ -200,12 +200,12 @@
         "Pool_Before": 0.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 0.0,
-        "Alloc_Ordered": 4.0,
-        "Allocated_Qty": 4.0,
-        "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 15.0,
-        "Ordered_Pool_After": 11.0,
-        "Fulfillment_With_Ordered_Pct": 100.0
+        "Alloc_Pending": 0.0,
+        "Allocated_Qty": 0.0,
+        "Shortfall_Qty": 4.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
+        "Fulfillment_With_Ordered_Pct": 0.0
       },
       {
         "Equipment_Tag_No": "TK-C",
@@ -224,11 +224,11 @@
         "Pool_Before": -5.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 0.0,
-        "Alloc_Ordered": 7.0,
+        "Alloc_Pending": 7.0,
         "Allocated_Qty": 2.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 10.0,
-        "Ordered_Pool_After": 3.0,
+        "Pending_Pool_Before": 15.0,
+        "Pending_Pool_After": 8.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -248,11 +248,11 @@
         "Pool_Before": 10.0,
         "Pool_After": 10.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 100.0,
-        "Ordered_Pool_After": 100.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -272,11 +272,11 @@
         "Pool_Before": 0.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 11.0,
-        "Ordered_Pool_After": 11.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -296,11 +296,11 @@
         "Pool_Before": 40.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 80.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 40.0,
         "Shortfall_Qty": 10.0,
-        "Ordered_Pool_Before": 0.0,
-        "Ordered_Pool_After": 0.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 80.0
       },
       {
@@ -320,11 +320,11 @@
         "Pool_Before": 40.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 80.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 40.0,
         "Shortfall_Qty": 10.0,
-        "Ordered_Pool_Before": 0.0,
-        "Ordered_Pool_After": 0.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 80.0
       },
       {
@@ -344,12 +344,12 @@
         "Pool_Before": 20.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 20.0,
-        "Alloc_Ordered": 30.0,
-        "Allocated_Qty": 50.0,
-        "Shortfall_Qty": 50.0,
-        "Ordered_Pool_Before": 30.0,
-        "Ordered_Pool_After": 0.0,
-        "Fulfillment_With_Ordered_Pct": 50.0
+        "Alloc_Pending": 10.0,
+        "Allocated_Qty": 30.0,
+        "Shortfall_Qty": 70.0,
+        "Pending_Pool_Before": 10.0,
+        "Pending_Pool_After": 0.0,
+        "Fulfillment_With_Ordered_Pct": 30.0
       },
       {
         "Equipment_Tag_No": "TK-E",
@@ -368,11 +368,11 @@
         "Pool_Before": 30.0,
         "Pool_After": 20.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 10.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 0.0,
-        "Ordered_Pool_After": 0.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       }
     ],
@@ -384,7 +384,7 @@
         "Total_Demand_Qty": 45.0,
         "Total_Allocated_Qty": 45.0,
         "Total_Alloc_Available": 45.0,
-        "Total_Alloc_Ordered": 0.0,
+        "Total_Alloc_Pending": 0.0,
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
@@ -400,13 +400,13 @@
         "Equipment_Tag_No": "TK-B",
         "Name": "Tank B",
         "Total_Demand_Qty": 90.0,
-        "Total_Allocated_Qty": 90.0,
+        "Total_Allocated_Qty": 85.0,
         "Total_Alloc_Available": 65.0,
-        "Total_Alloc_Ordered": 25.0,
+        "Total_Alloc_Pending": 20.0,
         "Total_Shortfall_Qty": 25.0,
-        "Total_Net_Shortfall_Qty": 0.0,
+        "Total_Net_Shortfall_Qty": 5.0,
         "Completion_Pct": 16.67,
-        "Completion_With_Ordered_Pct": 100.0,
+        "Completion_With_Ordered_Pct": 83.33,
         "Status": "\ud83d\udfe1 Partially Ready (16.7%)",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
@@ -418,11 +418,11 @@
         "Equipment_Tag_No": "TK-C",
         "Name": "Tank C",
         "Total_Demand_Qty": 11.0,
-        "Total_Allocated_Qty": 6.0,
+        "Total_Allocated_Qty": 2.0,
         "Total_Alloc_Available": -5.0,
-        "Total_Alloc_Ordered": 11.0,
+        "Total_Alloc_Pending": 7.0,
         "Total_Shortfall_Qty": 16.0,
-        "Total_Net_Shortfall_Qty": 5.0,
+        "Total_Net_Shortfall_Qty": 9.0,
         "Completion_Pct": 0.0,
         "Completion_With_Ordered_Pct": 0.0,
         "Status": "\ud83d\udd34 Blocked by Shortages",
@@ -438,7 +438,7 @@
         "Total_Demand_Qty": 0.0,
         "Total_Allocated_Qty": 0.0,
         "Total_Alloc_Available": 0.0,
-        "Total_Alloc_Ordered": 0.0,
+        "Total_Alloc_Pending": 0.0,
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
@@ -454,13 +454,13 @@
         "Equipment_Tag_No": "TK-E",
         "Name": "Tank E",
         "Total_Demand_Qty": 210.0,
-        "Total_Allocated_Qty": 140.0,
+        "Total_Allocated_Qty": 120.0,
         "Total_Alloc_Available": 110.0,
-        "Total_Alloc_Ordered": 30.0,
+        "Total_Alloc_Pending": 10.0,
         "Total_Shortfall_Qty": 100.0,
-        "Total_Net_Shortfall_Qty": 70.0,
+        "Total_Net_Shortfall_Qty": 90.0,
         "Completion_Pct": 20.0,
-        "Completion_With_Ordered_Pct": 50.0,
+        "Completion_With_Ordered_Pct": 30.0,
         "Status": "\ud83d\udfe1 Partially Ready (20.0%)",
         "Bottleneck_Material_Code": "M7",
         "Bottleneck_SAP_Code": "77-2",
@@ -477,7 +477,7 @@
         "Demand_Qty": 90.0,
         "Allocated_Qty": 90.0,
         "Alloc_Available": 90.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 0.0,
         "Shortfall_Qty": 0.0
       },
@@ -487,11 +487,11 @@
         "Material_Name": "Hardener",
         "UOM": "KG",
         "Demand_Qty": 49.0,
-        "Allocated_Qty": 49.0,
+        "Allocated_Qty": 40.0,
         "Alloc_Available": 20.0,
-        "Alloc_Ordered": 29.0,
+        "Alloc_Pending": 20.0,
         "Shortfall_Available_Qty": 29.0,
-        "Shortfall_Qty": 0.0
+        "Shortfall_Qty": 9.0
       },
       {
         "Material_Code": "M3",
@@ -501,7 +501,7 @@
         "Demand_Qty": 0.0,
         "Allocated_Qty": 0.0,
         "Alloc_Available": 0.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 0.0,
         "Shortfall_Qty": 0.0
       },
@@ -513,7 +513,7 @@
         "Demand_Qty": 5.0,
         "Allocated_Qty": 0.0,
         "Alloc_Available": 0.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 5.0,
         "Shortfall_Qty": 5.0
       },
@@ -525,7 +525,7 @@
         "Demand_Qty": 2.0,
         "Allocated_Qty": 2.0,
         "Alloc_Available": -5.0,
-        "Alloc_Ordered": 7.0,
+        "Alloc_Pending": 7.0,
         "Shortfall_Available_Qty": 7.0,
         "Shortfall_Qty": 0.0
       },
@@ -537,7 +537,7 @@
         "Demand_Qty": 50.0,
         "Allocated_Qty": 40.0,
         "Alloc_Available": 40.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 10.0,
         "Shortfall_Qty": 10.0
       },
@@ -549,7 +549,7 @@
         "Demand_Qty": 50.0,
         "Allocated_Qty": 40.0,
         "Alloc_Available": 40.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 10.0,
         "Shortfall_Qty": 10.0
       },
@@ -559,11 +559,11 @@
         "Material_Name": "PU MF 300 (3MM) C",
         "UOM": "KG",
         "Demand_Qty": 100.0,
-        "Allocated_Qty": 50.0,
+        "Allocated_Qty": 30.0,
         "Alloc_Available": 20.0,
-        "Alloc_Ordered": 30.0,
+        "Alloc_Pending": 10.0,
         "Shortfall_Available_Qty": 80.0,
-        "Shortfall_Qty": 50.0
+        "Shortfall_Qty": 70.0
       },
       {
         "Material_Code": "M7",
@@ -573,7 +573,7 @@
         "Demand_Qty": 10.0,
         "Allocated_Qty": 10.0,
         "Alloc_Available": 10.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 0.0,
         "Shortfall_Qty": 0.0
       }
@@ -585,9 +585,10 @@
         "Material_Name": "PU MF 300 (3MM) C",
         "UOM": "KG",
         "Available_Qty": 20.0,
-        "Ordered_Qty": 30.0,
+        "Pending_Delivery_Qty": 10.0,
+        "Total_Procured_Qty": 30.0,
         "Gross_Shortfall_Qty": 80.0,
-        "Shortage_Qty_To_Buy": 50.0
+        "Shortage_Qty_To_Buy": 70.0
       },
       {
         "Material_Code": "M7",
@@ -595,7 +596,8 @@
         "Material_Name": "PU MF 300 (3MM) A",
         "UOM": "KG",
         "Available_Qty": 40.0,
-        "Ordered_Qty": 0.0,
+        "Pending_Delivery_Qty": 0.0,
+        "Total_Procured_Qty": 40.0,
         "Gross_Shortfall_Qty": 10.0,
         "Shortage_Qty_To_Buy": 10.0
       },
@@ -605,9 +607,21 @@
         "Material_Name": "PU MF 300 (3MM) B",
         "UOM": "KG",
         "Available_Qty": 40.0,
-        "Ordered_Qty": 0.0,
+        "Pending_Delivery_Qty": 0.0,
+        "Total_Procured_Qty": 40.0,
         "Gross_Shortfall_Qty": 10.0,
         "Shortage_Qty_To_Buy": 10.0
+      },
+      {
+        "Material_Code": "M2",
+        "SAP_Code": "S2",
+        "Material_Name": "Hardener",
+        "UOM": "KG",
+        "Available_Qty": 20.0,
+        "Pending_Delivery_Qty": 20.0,
+        "Total_Procured_Qty": 40.0,
+        "Gross_Shortfall_Qty": 29.0,
+        "Shortage_Qty_To_Buy": 9.0
       },
       {
         "Material_Code": "M5",
@@ -615,7 +629,8 @@
         "Material_Name": "Rubber Sheet",
         "UOM": "SQM",
         "Available_Qty": 0.0,
-        "Ordered_Qty": 0.0,
+        "Pending_Delivery_Qty": 0.0,
+        "Total_Procured_Qty": 0.0,
         "Gross_Shortfall_Qty": 5.0,
         "Shortage_Qty_To_Buy": 5.0
       }
@@ -660,10 +675,10 @@
         "Done_SQM": 0.0,
         "Remaining_SQM": 30.0,
         "SQM_Achievable_Now": 5.0,
-        "SQM_Achievable_With_Ordered": 30.0,
+        "SQM_Achievable_With_Ordered": 25.0,
         "SQM_Deficit": 25.0,
         "Coverage_Now_Pct": 16.67,
-        "Coverage_With_Ordered_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 83.33,
         "Has_Recipe": true
       },
       {
@@ -690,10 +705,10 @@
         "Done_SQM": 0.0,
         "Remaining_SQM": 8.0,
         "SQM_Achievable_Now": 0.0,
-        "SQM_Achievable_With_Ordered": 8.0,
+        "SQM_Achievable_With_Ordered": 0.0,
         "SQM_Deficit": 8.0,
         "Coverage_Now_Pct": 0.0,
-        "Coverage_With_Ordered_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 0.0,
         "Has_Recipe": true
       },
       {
@@ -735,10 +750,10 @@
         "Done_SQM": 0.0,
         "Remaining_SQM": 100.0,
         "SQM_Achievable_Now": 20.0,
-        "SQM_Achievable_With_Ordered": 50.0,
+        "SQM_Achievable_With_Ordered": 30.0,
         "SQM_Deficit": 80.0,
         "Coverage_Now_Pct": 20.0,
-        "Coverage_With_Ordered_Pct": 50.0,
+        "Coverage_With_Ordered_Pct": 30.0,
         "Has_Recipe": true
       }
     ],
@@ -764,7 +779,7 @@
             "UOM": "SQM",
             "Demand_Qty": 5.0,
             "Alloc_Available": 0.0,
-            "Alloc_Ordered": 0.0,
+            "Alloc_Pending": 0.0,
             "Shortfall_Available_Qty": 5.0,
             "Shortfall_Qty": 5.0
           }
@@ -778,11 +793,11 @@
         "Done_SQM": 0.0,
         "Remaining_SQM": 100.0,
         "SQM_Achievable_Now": 20.0,
-        "SQM_Achievable_With_Ordered": 50.0,
+        "SQM_Achievable_With_Ordered": 30.0,
         "SQM_Deficit": 80.0,
         "Equipment_Tags": "TK-E",
         "Coverage_Now_Pct": 20.0,
-        "Coverage_With_Ordered_Pct": 50.0,
+        "Coverage_With_Ordered_Pct": 30.0,
         "Blocking_Materials": [
           {
             "Material_Code": "M7",
@@ -791,9 +806,9 @@
             "UOM": "KG",
             "Demand_Qty": 100.0,
             "Alloc_Available": 20.0,
-            "Alloc_Ordered": 30.0,
+            "Alloc_Pending": 10.0,
             "Shortfall_Available_Qty": 80.0,
-            "Shortfall_Qty": 50.0
+            "Shortfall_Qty": 70.0
           },
           {
             "Material_Code": "M7",
@@ -802,7 +817,7 @@
             "UOM": "KG",
             "Demand_Qty": 50.0,
             "Alloc_Available": 40.0,
-            "Alloc_Ordered": 0.0,
+            "Alloc_Pending": 0.0,
             "Shortfall_Available_Qty": 10.0,
             "Shortfall_Qty": 10.0
           },
@@ -813,7 +828,7 @@
             "UOM": "KG",
             "Demand_Qty": 50.0,
             "Alloc_Available": 40.0,
-            "Alloc_Ordered": 0.0,
+            "Alloc_Pending": 0.0,
             "Shortfall_Available_Qty": 10.0,
             "Shortfall_Qty": 10.0
           }
@@ -827,11 +842,11 @@
         "Done_SQM": 10.0,
         "Remaining_SQM": 45.0,
         "SQM_Achievable_Now": 20.0,
-        "SQM_Achievable_With_Ordered": 45.0,
+        "SQM_Achievable_With_Ordered": 40.0,
         "SQM_Deficit": 25.0,
         "Equipment_Tags": "TK-A, TK-B, TK-D",
         "Coverage_Now_Pct": 44.44,
-        "Coverage_With_Ordered_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 88.89,
         "Blocking_Materials": [
           {
             "Material_Code": "M2",
@@ -840,9 +855,9 @@
             "UOM": "KG",
             "Demand_Qty": 45.0,
             "Alloc_Available": 20.0,
-            "Alloc_Ordered": 25.0,
+            "Alloc_Pending": 20.0,
             "Shortfall_Available_Qty": 25.0,
-            "Shortfall_Qty": 0.0
+            "Shortfall_Qty": 5.0
           }
         ]
       },
@@ -884,11 +899,11 @@
         "Done_SQM": 0.0,
         "Remaining_SQM": 8.0,
         "SQM_Achievable_Now": 0.0,
-        "SQM_Achievable_With_Ordered": 8.0,
+        "SQM_Achievable_With_Ordered": 0.0,
         "SQM_Deficit": 8.0,
         "Equipment_Tags": "TK-C",
         "Coverage_Now_Pct": 0.0,
-        "Coverage_With_Ordered_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 0.0,
         "Blocking_Materials": [
           {
             "Material_Code": "M2",
@@ -897,9 +912,9 @@
             "UOM": "KG",
             "Demand_Qty": 4.0,
             "Alloc_Available": 0.0,
-            "Alloc_Ordered": 4.0,
+            "Alloc_Pending": 0.0,
             "Shortfall_Available_Qty": 4.0,
-            "Shortfall_Qty": 0.0
+            "Shortfall_Qty": 4.0
           },
           {
             "Material_Code": "M6",
@@ -908,7 +923,7 @@
             "UOM": "KG",
             "Demand_Qty": 2.0,
             "Alloc_Available": -5.0,
-            "Alloc_Ordered": 7.0,
+            "Alloc_Pending": 7.0,
             "Shortfall_Available_Qty": 7.0,
             "Shortfall_Qty": 0.0
           }
@@ -952,7 +967,7 @@
         "Total_Demand_Qty": 45.0,
         "Total_Allocated_Qty": 45.0,
         "Total_Alloc_Available": 45.0,
-        "Total_Alloc_Ordered": 0.0,
+        "Total_Alloc_Pending": 0.0,
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
@@ -971,7 +986,7 @@
         "Total_Demand_Qty": 11.0,
         "Total_Allocated_Qty": 6.0,
         "Total_Alloc_Available": -1.0,
-        "Total_Alloc_Ordered": 7.0,
+        "Total_Alloc_Pending": 7.0,
         "Total_Shortfall_Qty": 12.0,
         "Total_Net_Shortfall_Qty": 5.0,
         "Completion_Pct": 0.0,
@@ -990,7 +1005,7 @@
         "Total_Demand_Qty": 0.0,
         "Total_Allocated_Qty": 0.0,
         "Total_Alloc_Available": 0.0,
-        "Total_Alloc_Ordered": 0.0,
+        "Total_Alloc_Pending": 0.0,
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,
@@ -1007,13 +1022,13 @@
         "Equipment_Tag_No": "TK-E",
         "Name": "Tank E",
         "Total_Demand_Qty": 210.0,
-        "Total_Allocated_Qty": 140.0,
+        "Total_Allocated_Qty": 120.0,
         "Total_Alloc_Available": 110.0,
-        "Total_Alloc_Ordered": 30.0,
+        "Total_Alloc_Pending": 10.0,
         "Total_Shortfall_Qty": 100.0,
-        "Total_Net_Shortfall_Qty": 70.0,
+        "Total_Net_Shortfall_Qty": 90.0,
         "Completion_Pct": 20.0,
-        "Completion_With_Ordered_Pct": 50.0,
+        "Completion_With_Ordered_Pct": 30.0,
         "Status": "\ud83d\udfe1 Partially Ready (20.0%)",
         "Bottleneck_Material_Code": "M7",
         "Bottleneck_SAP_Code": "77-2",
@@ -1046,11 +1061,11 @@
         "Pool_Before": 100.0,
         "Pool_After": 40.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 60.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 100.0,
-        "Ordered_Pool_After": 100.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1070,11 +1085,11 @@
         "Pool_Before": 20.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 66.67,
-        "Alloc_Ordered": 10.0,
+        "Alloc_Pending": 10.0,
         "Allocated_Qty": 30.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 40.0,
-        "Ordered_Pool_After": 30.0,
+        "Pending_Pool_Before": 20.0,
+        "Pending_Pool_After": 10.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1094,11 +1109,11 @@
         "Pool_Before": 40.0,
         "Pool_After": 10.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 30.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 100.0,
-        "Ordered_Pool_After": 100.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1118,12 +1133,12 @@
         "Pool_Before": 0.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 0.0,
-        "Alloc_Ordered": 15.0,
-        "Allocated_Qty": 15.0,
-        "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 30.0,
-        "Ordered_Pool_After": 15.0,
-        "Fulfillment_With_Ordered_Pct": 100.0
+        "Alloc_Pending": 10.0,
+        "Allocated_Qty": 10.0,
+        "Shortfall_Qty": 5.0,
+        "Pending_Pool_Before": 10.0,
+        "Pending_Pool_After": 0.0,
+        "Fulfillment_With_Ordered_Pct": 66.67
       },
       {
         "Equipment_Tag_No": "TK-A",
@@ -1142,11 +1157,11 @@
         "Pool_Before": 10.0,
         "Pool_After": 10.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 100.0,
-        "Ordered_Pool_After": 100.0,
+        "Pending_Pool_Before": 0.0,
+        "Pending_Pool_After": 0.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       },
       {
@@ -1166,11 +1181,11 @@
         "Pool_Before": 0.0,
         "Pool_After": 0.0,
         "Fulfillment_Pct": 100.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Allocated_Qty": 0.0,
         "Shortfall_Qty": 0.0,
-        "Ordered_Pool_Before": 30.0,
-        "Ordered_Pool_After": 30.0,
+        "Pending_Pool_Before": 30.0,
+        "Pending_Pool_After": 30.0,
         "Fulfillment_With_Ordered_Pct": 100.0
       }
     ],
@@ -1182,7 +1197,7 @@
         "Total_Demand_Qty": 90.0,
         "Total_Allocated_Qty": 90.0,
         "Total_Alloc_Available": 80.0,
-        "Total_Alloc_Ordered": 10.0,
+        "Total_Alloc_Pending": 10.0,
         "Total_Shortfall_Qty": 10.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 66.67,
@@ -1198,13 +1213,13 @@
         "Equipment_Tag_No": "TK-A",
         "Name": "Tank A",
         "Total_Demand_Qty": 45.0,
-        "Total_Allocated_Qty": 45.0,
+        "Total_Allocated_Qty": 40.0,
         "Total_Alloc_Available": 30.0,
-        "Total_Alloc_Ordered": 15.0,
+        "Total_Alloc_Pending": 10.0,
         "Total_Shortfall_Qty": 15.0,
-        "Total_Net_Shortfall_Qty": 0.0,
+        "Total_Net_Shortfall_Qty": 5.0,
         "Completion_Pct": 0.0,
-        "Completion_With_Ordered_Pct": 100.0,
+        "Completion_With_Ordered_Pct": 66.67,
         "Status": "\ud83d\udd34 Blocked by Shortages",
         "Bottleneck_Material_Code": "M2",
         "Bottleneck_SAP_Code": "S2",
@@ -1221,7 +1236,7 @@
         "Demand_Qty": 90.0,
         "Allocated_Qty": 90.0,
         "Alloc_Available": 90.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 0.0,
         "Shortfall_Qty": 0.0
       },
@@ -1231,11 +1246,11 @@
         "Material_Name": "Hardener",
         "UOM": "KG",
         "Demand_Qty": 45.0,
-        "Allocated_Qty": 45.0,
+        "Allocated_Qty": 40.0,
         "Alloc_Available": 20.0,
-        "Alloc_Ordered": 25.0,
+        "Alloc_Pending": 20.0,
         "Shortfall_Available_Qty": 25.0,
-        "Shortfall_Qty": 0.0
+        "Shortfall_Qty": 5.0
       },
       {
         "Material_Code": "M3",
@@ -1245,12 +1260,24 @@
         "Demand_Qty": 0.0,
         "Allocated_Qty": 0.0,
         "Alloc_Available": 0.0,
-        "Alloc_Ordered": 0.0,
+        "Alloc_Pending": 0.0,
         "Shortfall_Available_Qty": 0.0,
         "Shortfall_Qty": 0.0
       }
     ],
-    "procurement": [],
+    "procurement": [
+      {
+        "Material_Code": "M2",
+        "SAP_Code": "S2",
+        "Material_Name": "Hardener",
+        "UOM": "KG",
+        "Available_Qty": 20.0,
+        "Pending_Delivery_Qty": 20.0,
+        "Total_Procured_Qty": 40.0,
+        "Gross_Shortfall_Qty": 25.0,
+        "Shortage_Qty_To_Buy": 5.0
+      }
+    ],
     "sqm_units": [
       {
         "Equipment_Tag_No": "TK-B",
@@ -1276,10 +1303,10 @@
         "Done_SQM": 10.0,
         "Remaining_SQM": 15.0,
         "SQM_Achievable_Now": 0.0,
-        "SQM_Achievable_With_Ordered": 15.0,
+        "SQM_Achievable_With_Ordered": 10.0,
         "SQM_Deficit": 15.0,
         "Coverage_Now_Pct": 0.0,
-        "Coverage_With_Ordered_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 66.67,
         "Has_Recipe": true
       },
       {
@@ -1307,11 +1334,11 @@
         "Done_SQM": 10.0,
         "Remaining_SQM": 45.0,
         "SQM_Achievable_Now": 20.0,
-        "SQM_Achievable_With_Ordered": 45.0,
+        "SQM_Achievable_With_Ordered": 40.0,
         "SQM_Deficit": 25.0,
         "Equipment_Tags": "TK-B, TK-A",
         "Coverage_Now_Pct": 44.44,
-        "Coverage_With_Ordered_Pct": 100.0,
+        "Coverage_With_Ordered_Pct": 88.89,
         "Blocking_Materials": [
           {
             "Material_Code": "M2",
@@ -1320,9 +1347,9 @@
             "UOM": "KG",
             "Demand_Qty": 45.0,
             "Alloc_Available": 20.0,
-            "Alloc_Ordered": 25.0,
+            "Alloc_Pending": 20.0,
             "Shortfall_Available_Qty": 25.0,
-            "Shortfall_Qty": 0.0
+            "Shortfall_Qty": 5.0
           }
         ]
       },
@@ -1370,7 +1397,7 @@
         "Total_Demand_Qty": 45.0,
         "Total_Allocated_Qty": 45.0,
         "Total_Alloc_Available": 45.0,
-        "Total_Alloc_Ordered": 0.0,
+        "Total_Alloc_Pending": 0.0,
         "Total_Shortfall_Qty": 0.0,
         "Total_Net_Shortfall_Qty": 0.0,
         "Completion_Pct": 100.0,

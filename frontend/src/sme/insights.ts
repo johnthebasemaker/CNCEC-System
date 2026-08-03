@@ -118,9 +118,14 @@ export interface BalanceRow {
   Material_Name: string
   UOM: string
   Available_Qty: number
-  Ordered_Qty: number
+  /** UNRECEIVED part of the PO — max(ordered − available, 0). */
+  Pending_Delivery_Qty: number
+  /** The whole PO — max(ordered, available). The buy list measures against this. */
+  Total_Procured_Qty: number
   Demand_Qty: number
+  /** PHYSICAL gap — demand − available. */
   Shortfall: number
+  /** Gap after the WHOLE order lands — demand − Total_Procured_Qty. */
   Net_Shortfall: number
   Coverage_Pct: number
 }
@@ -139,7 +144,13 @@ export interface ScopeTotals {
 
 function materialMaps(materials: SnapshotMaterial[]) {
   const avail = new Map<string, number>()
-  const ordered = new Map<string, number>()
+  // 2026-08-05 SUBSET RULE: this map holds the PENDING DELIVERY —
+  // max(ordered − available, 0) — not the raw `Ordered_Qty`, because the
+  // workbook's Ordered_Qty is the TOTAL procured and Available_Qty is the part
+  // of it that has already arrived. Same derivation as engine.buildModel().
+  const pending = new Map<string, number>()
+  /** Raw workbook `Ordered_Qty` = the TOTAL procured (= available + pending). */
+  const procured = new Map<string, number>()
   const meta = new Map<string, { name: string; uom: string }>()
   for (const m of materials) {
     // 2026-07-30 COMPONENT IDENTITY: keyed per (Material_Code, SAP_Code).
@@ -149,10 +160,13 @@ function materialMaps(materials: SnapshotMaterial[]) {
     // for all four.
     const key = matKey(m.material_code, m.sap_code)
     avail.set(key, Number(m.available_qty ?? 0) || 0)
-    ordered.set(key, Number((m as { ordered_qty?: number | null }).ordered_qty ?? 0) || 0)
+    const ord = Number((m as { ordered_qty?: number | null }).ordered_qty ?? 0) || 0
+    const av = Number(m.available_qty ?? 0) || 0
+    procured.set(key, Math.max(ord, av))
+    pending.set(key, Math.max(ord - av, 0))
     meta.set(key, { name: String(m.material_name ?? ''), uom: String(m.uom ?? '') })
   }
-  return { avail, ordered, meta }
+  return { avail, pending, procured, meta }
 }
 
 /** Aggregate demand per material over the given units (raw, unrounded). */
@@ -204,13 +218,15 @@ function unitBottleneckRate(
  *  by accident. */
 function unitBottleneckRateWithOrdered(
   model: SmeModel, u: UnitRef, avail: Map<string, number>,
-  ordered: Map<string, number>,
+  pending: Map<string, number>,
 ): number {
   let minRate = 1
   for (const r of model.recipesByCode.get(u.code) ?? []) {
     const rowDemand = r.For_1_SQM * u.remaining
     if (rowDemand <= 0) continue
-    const pool = (avail.get(r.Material_Key) ?? 0) + (ordered.get(r.Material_Key) ?? 0)
+    // available + PENDING = max(available, ordered) = the total procured.
+    // Adding the RAW ordered figure here counted every delivered unit twice.
+    const pool = (avail.get(r.Material_Key) ?? 0) + (pending.get(r.Material_Key) ?? 0)
     const rate = Math.min(1, pool / rowDemand)
     if (rate < minRate) minRate = rate
   }
@@ -219,7 +235,7 @@ function unitBottleneckRateWithOrdered(
 
 function bottleneckScope(
   model: SmeModel, units: UnitRef[], avail: Map<string, number>,
-  ordered: Map<string, number>,
+  pending: Map<string, number>,
 ): {
   coveragePct: number; coverableSqm: number; totalSqm: number
   coverageWithOrderedPct: number; coverableWithOrderedSqm: number
@@ -228,7 +244,7 @@ function bottleneckScope(
   for (const u of units) {
     total += u.remaining
     coverable += u.remaining * unitBottleneckRate(model, u, avail)
-    coverableOrd += u.remaining * unitBottleneckRateWithOrdered(model, u, avail, ordered)
+    coverableOrd += u.remaining * unitBottleneckRateWithOrdered(model, u, avail, pending)
   }
   return {
     coveragePct: total > 0 ? (coverable / total) * 100 : 100,
@@ -242,15 +258,20 @@ export function materialBalance(
   model: SmeModel, units: UnitRef[], materials: SnapshotMaterial[],
 ): { rows: BalanceRow[]; totals: ScopeTotals } {
   const { demand, names } = demandByMaterial(model, units)
-  const { avail, ordered, meta } = materialMaps(materials)
+  const { avail, pending, procured, meta } = materialMaps(materials)
   const rows: BalanceRow[] = []
   let tDemand = 0, tAvail = 0, tShort = 0, tNet = 0
   for (const mat of [...demand.keys()].sort()) {
     const d = demand.get(mat)!
     const a = avail.get(mat) ?? 0
-    const o = ordered.get(mat) ?? 0
+    const pend = pending.get(mat) ?? 0
+    const proc = procured.get(mat) ?? 0
     const short = Math.max(d - a, 0)
-    const net = Math.max(d - a - o, 0)
+    // 2026-08-05 SUBSET RULE: the buy list is measured against the TOTAL
+    // PROCURED, not available + ordered. `d - a - o` on the raw order
+    // subtracted every delivered unit twice and understated the buy list by
+    // exactly the available quantity — 22,951 units across the live workbook.
+    const net = Math.max(d - proc, 0)
     tDemand += d
     tAvail += Math.min(a, d)
     tShort += short
@@ -264,7 +285,8 @@ export function materialBalance(
       Material_Name: meta.get(mat)?.name || names.get(mat)?.name || '',
       UOM: names.get(mat)?.uom || meta.get(mat)?.uom || '',
       Available_Qty: a,
-      Ordered_Qty: o,
+      Pending_Delivery_Qty: pend,
+      Total_Procured_Qty: proc,
       Demand_Qty: roundN(d, 3),
       Shortfall: roundN(short, 3),
       Net_Shortfall: roundN(net, 3),
@@ -273,7 +295,7 @@ export function materialBalance(
   }
   // Scope coverage = strict bottleneck area ratio (NOT the qty-weighted
   // tAvail/tDemand average — that could report above the worst component).
-  const bs = bottleneckScope(model, units, avail, ordered)
+  const bs = bottleneckScope(model, units, avail, pending)
   return {
     rows,
     totals: {
@@ -310,11 +332,11 @@ export interface PairCoverage {
 export function pairCoverage(
   model: SmeModel, units: UnitRef[], materials: SnapshotMaterial[],
 ): PairCoverage[] {
-  const { avail, ordered } = materialMaps(materials)
+  const { avail, pending } = materialMaps(materials)
   return units.map((u) => {
     // Strict bottleneck: the pair's coverage is its least-available material.
     const cov = unitBottleneckRate(model, u, avail) * 100
-    const covOrd = unitBottleneckRateWithOrdered(model, u, avail, ordered) * 100
+    const covOrd = unitBottleneckRateWithOrdered(model, u, avail, pending) * 100
     const coverable = roundN(u.remaining * (Math.min(cov, 100) / 100), 2)
     return {
       tag: u.tag, code: u.code, shortName: u.shortName,
@@ -401,7 +423,8 @@ export function systemCodeRows(
 export function stockOnlyRows(
   model: SmeModel, units: UnitRef[], materials: SnapshotMaterial[],
 ): { Material_Code: string; SAP_Code: string; Material_Name: string; UOM: string;
-     Available_Qty: number; Ordered_Qty: number }[] {
+     Available_Qty: number; Pending_Delivery_Qty: number;
+     Total_Procured_Qty: number }[] {
   const { demand } = demandByMaterial(model, units)
   const recipeMats = new Set<string>()
   for (const rows of model.recipesByCode.values()) {
@@ -418,6 +441,12 @@ export function stockOnlyRows(
       Material_Name: String(m.material_name ?? ''),
       UOM: String(m.uom ?? ''),
       Available_Qty: Number(m.available_qty ?? 0) || 0,
-      Ordered_Qty: Number((m as { ordered_qty?: number | null }).ordered_qty ?? 0) || 0,
+      // Pipeline and ceiling, per the subset rule.
+      Pending_Delivery_Qty: Math.max(
+        (Number((m as { ordered_qty?: number | null }).ordered_qty ?? 0) || 0)
+        - (Number(m.available_qty ?? 0) || 0), 0),
+      Total_Procured_Qty: Math.max(
+        Number((m as { ordered_qty?: number | null }).ordered_qty ?? 0) || 0,
+        Number(m.available_qty ?? 0) || 0),
     }))
 }

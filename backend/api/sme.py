@@ -545,12 +545,12 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
     for ln in plan["lines"]:
         k = (ln["Equipment_Tag_No"], ln["Lining_System_Code"])
         a = acc.setdefault(k, {"demand": 0.0, "alloc": 0.0, "short": 0.0,
-                               "avail": 0.0, "ordered": 0.0, "net": 0.0,
+                               "avail": 0.0, "pending": 0.0, "net": 0.0,
                                "min_rate": 1.0})
         a["demand"] += ln["Demand_Qty"]
         a["alloc"] += ln["Allocated_Qty"]
         a["avail"] += ln["Alloc_Available"]
-        a["ordered"] += ln["Alloc_Ordered"]
+        a["pending"] += ln["Alloc_Pending"]
         a["short"] += ln["Shortfall_Available_Qty"]
         a["net"] += ln["Shortfall_Qty"]
         # 2026-07-07 STRICT BOTTLENECK ruling: the unit's coverage is its
@@ -567,7 +567,7 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
         for code in model["codes_by_tag"].get(tag, []):
             u = model["units"][(tag, code)]
             a = acc.get((tag, code), {"demand": 0.0, "alloc": 0.0, "short": 0.0,
-                                      "avail": 0.0, "ordered": 0.0, "net": 0.0,
+                                      "avail": 0.0, "pending": 0.0, "net": 0.0,
                                       "min_rate": 1.0})
             pct = a["min_rate"] * 100.0 if a["demand"] > 0 else 100.0
             sno += 1
@@ -582,7 +582,8 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
                 "Total_Demand": round(a["demand"], 3),
                 "Allocated": round(a["alloc"], 3),
                 "Available_Qty": round(a["avail"], 3),
-                "Ordered_Qty": round(a["ordered"], 3),
+                "Pending_Delivery_Qty": round(a["pending"], 3),
+                "Total_Procured_Qty": round(a["avail"] + a["pending"], 3),
                 "Shortfall_Qty": round(a["short"], 3),
                 "Net_Shortfall_Qty": round(a["net"], 3),
                 "Fulfillment_Pct": round(pct, 1),
@@ -602,7 +603,8 @@ def _overview_rows(model: dict, plan: dict) -> list[dict]:
 # SAP_Code sits right after Material_Code: for a multi-part system the code
 # repeats on four rows and the SAP is what says WHICH component this is.
 _MATERIAL_DEMAND_COLS = ["S_No", "Material_Code", "SAP_Code", "Material_Name",
-                         "UOM", "Total_Needed", "Available_Qty", "Ordered_Qty",
+                         "UOM", "Total_Needed", "Available_Qty",
+                         "Pending_Delivery_Qty", "Total_Procured_Qty",
                          "Allocated_Qty", "Net_Demand", "Fulfillment_Pct"]
 
 # Material-Wise Segregated Report (2026-07-28), grouped by system code.
@@ -612,8 +614,8 @@ _SEGREGATED_CODE_COLS = ["Lining_System_Code", "System_Name", "Equipment_Count",
                          "SQM_Deficit", "Coverage_Now_Pct", "Equipment_Tags"]
 _SEGREGATED_BLOCK_COLS = ["Lining_System_Code", "System_Name", "Material_Code",
                           "SAP_Code", "Material_Name", "UOM", "Demand_Qty",
-                          "Available_Qty", "Ordered_Qty", "Shortfall_Qty",
-                          "Net_Shortfall_Qty"]
+                          "Available_Qty", "Pending_Delivery_Qty",
+                          "Shortfall_Qty", "Net_Shortfall_Qty"]
 _SEGREGATED_UNIT_COLS = ["Equipment_Tag_No", "Name", "Lining_System_Code",
                          "System_Name", "Remaining_SQM", "SQM_Achievable_Now",
                          "SQM_Achievable_With_Ordered", "SQM_Deficit",
@@ -636,7 +638,7 @@ def _segregated_sections(plan: dict) -> list[tuple[str, list[str], list[list]]]:
                 "Material_Name": m["Material_Name"], "UOM": m["UOM"],
                 "Demand_Qty": m["Demand_Qty"],
                 "Available_Qty": m["Alloc_Available"],
-                "Ordered_Qty": m["Alloc_Ordered"],
+                "Pending_Delivery_Qty": m["Alloc_Pending"],
                 "Shortfall_Qty": m["Shortfall_Available_Qty"],
                 "Net_Shortfall_Qty": m["Shortfall_Qty"]})
     return [
@@ -669,7 +671,7 @@ def _material_demand_rows(plan: dict) -> list[dict]:
     for ln in plan["lines"]:
         key = str(ln["Material_Key"])
         a = acc.setdefault(key, {"demand": 0.0, "alloc": 0.0, "short": 0.0,
-                                 "avail": 0.0, "ordered": 0.0,
+                                 "avail": 0.0, "pending": 0.0,
                                  "code": str(ln["Material_Code"]),
                                  "sap": str(ln.get("SAP_Code") or ""),
                                  "name": str(ln.get("Material_Name") or ""),
@@ -677,7 +679,7 @@ def _material_demand_rows(plan: dict) -> list[dict]:
         a["demand"] += ln["Demand_Qty"]
         a["alloc"] += ln["Allocated_Qty"]
         a["avail"] += ln["Alloc_Available"]
-        a["ordered"] += ln["Alloc_Ordered"]
+        a["pending"] += ln["Alloc_Pending"]
         a["short"] += ln["Shortfall_Qty"]
     out = []
     for a in acc.values():
@@ -689,7 +691,8 @@ def _material_demand_rows(plan: dict) -> list[dict]:
                     "Material_Name": a["name"],
                     "UOM": a["uom"], "Total_Needed": round(a["demand"], 3),
                     "Available_Qty": round(a["avail"], 3),
-                    "Ordered_Qty": round(a["ordered"], 3),
+                    "Pending_Delivery_Qty": round(a["pending"], 3),
+                    "Total_Procured_Qty": round(a["avail"] + a["pending"], 3),
                     "Allocated_Qty": round(a["alloc"], 3),
                     "Net_Demand": round(a["short"], 3),
                     "Fulfillment_Pct": round(pct, 1)})
@@ -792,7 +795,7 @@ async def plan_export(body: PlanExportBody,
             cols = ["Equipment_Tag_No", "Lining_System_Code",
                     "Lining_System_Short_Name", "Total_SQM", "Material_Code",
                     "SAP_Code", "Material_Name", "UOM", "Demand_Qty",
-                    "Alloc_Available", "Alloc_Ordered",
+                    "Alloc_Available", "Alloc_Pending",
                     "Shortfall_Available_Qty", "Shortfall_Qty",
                     "Fulfillment_Pct", "Fulfillment_With_Ordered_Pct"]
             data = location_report_xlsx(
@@ -1283,14 +1286,17 @@ _CALC_POOL_SQL = text('''
         SELECT TRIM("Material_Code") AS mat,
                REPLACE(TRIM("SAP_Code"), ' ', '') AS sap,
                SUM(COALESCE("Initial_Available_Qty", 0)) AS stock,
-               SUM(COALESCE("Initial_Ordered_Qty", 0))   AS on_order
+               -- 2026-08-05 SUBSET RULE: Initial_Ordered_Qty is the TOTAL
+               -- procured and `stock` is the ARRIVED part of it, so the
+               -- pending delivery is derived as max(procured - stock, 0).
+               SUM(COALESCE("Initial_Ordered_Qty", 0))   AS procured
         FROM sme_inventory_seed
         WHERE TRIM(COALESCE("SAP_Code", '')) <> ''
         GROUP BY TRIM("Material_Code"), REPLACE(TRIM("SAP_Code"), ' ', '')
     )
     SELECT m.mat, m.sap,
            s.stock    AS stock,
-           s.on_order AS on_order
+           s.procured AS procured
     FROM mats m
     LEFT JOIN seed s ON s.sap = m.sap AND s.mat = m.mat''')
 
@@ -1361,7 +1367,7 @@ async def smart_calculator(code: Optional[str] = None,
     if mats:
         pool = {sme_engine.mat_key(p.mat, p.sap): {
                     "stock": (float(p.stock) if p.stock is not None else None),
-                    "on_order": (float(p.on_order) if p.on_order is not None else None)}
+                    "procured": (float(p.procured) if p.procured is not None else None)}
                 for p in (await session.execute(_CALC_POOL_SQL,
                                                 {"mats": mats})).all()}
 
@@ -1381,15 +1387,23 @@ async def smart_calculator(code: Optional[str] = None,
                     else None)
         p = pool.get(sme_engine.mat_key(mat, sap)) if mat else None
         available = p["stock"] if p else None
-        on_order = p["on_order"] if p else None
+        # 2026-08-05 SUBSET RULE: the workbook's Ordered_Qty is the TOTAL
+        # procured and Available_Qty is the ARRIVED part of it, so the pipeline
+        # is the difference and the CEILING is the order itself. Subtracting
+        # `available + procured` (the old `available + on_order`) counted every
+        # delivered unit twice and understated the buy list by exactly the
+        # arrived quantity.
+        procured = (max(p["procured"] or 0.0, available)
+                    if p and available is not None else None)
+        pending = (max(procured - available, 0.0)
+                   if procured is not None else None)
         # 2026-08-03 STRICT TIER SEGREGATION: `shortfall_qty` stays the PHYSICAL
         # gap (what blocks the job today); `net_shortfall_qty` is what is left
-        # to BUY once stock already on order is counted. Two fields, never one.
+        # to BUY once the WHOLE order has landed. Two fields, never one.
         short = (sme_engine.round_n(max(required - available, 0.0), 4)
                  if available is not None else None)
-        net_short = (sme_engine.round_n(
-            max(required - available - (on_order or 0.0), 0.0), 4)
-            if available is not None else None)
+        net_short = (sme_engine.round_n(max(required - procured, 0.0), 4)
+                     if procured is not None else None)
         expl = f"{per:g} {uom or 'unit'}/SQM × {target:g} SQM = {required:g} {uom}".strip()
         if packages:
             expl += f" → {packages} × {pkg:g} {uom} pack(s)"
@@ -1397,8 +1411,9 @@ async def smart_calculator(code: Optional[str] = None,
             expl += f" · in stock: {available:g}"
             if short:
                 expl += f" (short {short:g}"
-                expl += (f", {net_short:g} to buy after {on_order:g} on order)"
-                         if on_order else ")")
+                expl += (f", {net_short:g} to buy after {pending:g} pending "
+                         f"delivery of {procured:g} procured)"
+                         if pending else ")")
             else:
                 expl += " ✓"
         return {"sap_code": sap, "material_code": mat,
@@ -1406,7 +1421,8 @@ async def smart_calculator(code: Optional[str] = None,
                 "material_name": (x["Material_Name"] or "").strip(),
                 "uom": uom, "for_1_sqm": per, "required_qty": required,
                 "package_size": pkg, "packages_needed": packages,
-                "available_stock": available, "ordered_stock": on_order,
+                "available_stock": available,
+                "pending_delivery": pending, "total_procured": procured,
                 # `pooled_saps` is retained at 1 for payload compatibility: as
                 # of 2026-08-04 a line's stock is its OWN component's, never a
                 # pool, so there is nothing left to count. Kept rather than
@@ -1447,7 +1463,8 @@ async def smart_calculator(code: Optional[str] = None,
                 "required_qty": 0.0, "package_size": ln["package_size"],
                 "packages_needed": None,
                 "available_stock": ln["available_stock"],
-                "ordered_stock": ln["ordered_stock"],
+                "pending_delivery": ln["pending_delivery"],
+                "total_procured": ln["total_procured"],
                 "pooled_saps": 1,
                 "shortfall_qty": None, "net_shortfall_qty": None,
                 "systems": [], "explanation": ""})
@@ -1461,15 +1478,14 @@ async def smart_calculator(code: Optional[str] = None,
     agg_lines, agg_short = [], 0
     for a in agg.values():
         req, pkg, avail = a["required_qty"], a["package_size"], a["available_stock"]
-        on_order = a["ordered_stock"]
+        procured = a["total_procured"]
         a["packages_needed"] = (int(-(-req // pkg))
                                 if pkg and pkg > 0 and req > 0 else None)
         # PHYSICAL gap vs NET gap, kept apart (2026-08-03 tier segregation).
         a["shortfall_qty"] = (sme_engine.round_n(max(req - avail, 0.0), 4)
                               if avail is not None else None)
         a["net_shortfall_qty"] = (sme_engine.round_n(
-            max(req - avail - (on_order or 0.0), 0.0), 4)
-            if avail is not None else None)
+            max(req - procured, 0.0), 4) if procured is not None else None)
         if a["shortfall_qty"]:
             agg_short += 1
         uom = a["uom"]
@@ -1482,7 +1498,9 @@ async def smart_calculator(code: Optional[str] = None,
             if a["shortfall_qty"]:
                 expl += f" (short {a['shortfall_qty']:g}"
                 expl += (f", {a['net_shortfall_qty']:g} to buy after "
-                         f"{on_order:g} on order)" if on_order else ")")
+                         f"{a['pending_delivery']:g} pending delivery of "
+                         f"{procured:g} procured)"
+                         if a["pending_delivery"] else ")")
             else:
                 expl += " ✓"
         a["explanation"] = expl

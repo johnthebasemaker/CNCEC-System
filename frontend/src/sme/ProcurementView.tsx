@@ -17,11 +17,11 @@ import { FulfilPill } from './PriorityList'
 import { RowsExportButtons } from './rowsExport'
 import { materialCodeCol, materialNameCol } from './materialCols'
 
-const procCols = ['Material', 'Name', 'UOM', 'Demand', 'Available', 'On Order',
+const procCols = ['Material', 'Name', 'UOM', 'Demand', 'Available', 'Pending Delivery',
   'Shortfall', 'Net Shortfall', 'Coverage %']
 const procRow = (r: BalanceRow) => [
   r.Material_Code, r.Material_Name, r.UOM, r.Demand_Qty, r.Available_Qty,
-  r.Ordered_Qty, r.Shortfall, r.Net_Shortfall, r.Coverage_Pct,
+  r.Pending_Delivery_Qty, r.Shortfall, r.Net_Shortfall, r.Coverage_Pct,
 ]
 
 const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
@@ -34,7 +34,7 @@ const balanceCols: ColumnsType<BalanceRow> = [
   { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 60 },
   { title: 'Demand', dataIndex: 'Demand_Qty', key: 'd', align: 'right', render: (v: number) => nf(v) },
   { title: 'Available', dataIndex: 'Available_Qty', key: 'a', align: 'right', render: (v: number) => nf(v) },
-  { title: 'On Order', dataIndex: 'Ordered_Qty', key: 'o', align: 'right', render: (v: number) => nf(v) },
+  { title: 'Pending Delivery', dataIndex: 'Pending_Delivery_Qty', key: 'o', align: 'right', render: (v: number) => nf(v) },
   {
     title: 'Shortfall', dataIndex: 'Shortfall', key: 's', align: 'right',
     render: (v: number) => <span style={{ color: v > 0 ? '#EF4444' : undefined, fontWeight: v > 0 ? 700 : 400 }}>{nf(v)}</span>,

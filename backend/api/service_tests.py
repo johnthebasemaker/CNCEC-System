@@ -4607,11 +4607,11 @@ async def test_executive_summary():
     lines = [
         {"Equipment_Tag_No": "TK-1", "Lining_System_Code": "1", "Material_Code": "M-A",
          "Material_Name": "Mat A", "Demand_Qty": 200.0,
-         "Alloc_Available": 100.0, "Alloc_Ordered": 100.0, "Allocated_Qty": 200.0,
+         "Alloc_Available": 100.0, "Alloc_Pending": 100.0, "Allocated_Qty": 200.0,
          "Shortfall_Available_Qty": 100.0, "Shortfall_Qty": 0.0},
         {"Equipment_Tag_No": "TK-1", "Lining_System_Code": "1", "Material_Code": "M-B",
          "Material_Name": "Mat B", "Demand_Qty": 50.0,
-         "Alloc_Available": 50.0, "Alloc_Ordered": 0.0, "Allocated_Qty": 50.0,
+         "Alloc_Available": 50.0, "Alloc_Pending": 0.0, "Allocated_Qty": 50.0,
          "Shortfall_Available_Qty": 0.0, "Shortfall_Qty": 0.0},
     ]
     eq, sy = esmod._capacity_from_lines(model, lines)
@@ -8269,7 +8269,7 @@ async def test_session_report_summary():
         return {"Equipment_Tag_No": tag, "Material_Code": code, "SAP_Code": sap,
                 "Material_Key": f"{code}|{sap}", "Material_Name": name,
                 "UOM": "KG", "Demand_Qty": dem, "Alloc_Available": av,
-                "Alloc_Ordered": od, "Allocated_Qty": av + od,
+                "Alloc_Pending": od, "Allocated_Qty": av + od,
                 "Shortfall_Qty": short}
 
     fake = {"lines": [
@@ -8289,7 +8289,7 @@ async def test_session_report_summary():
     check("ax: quantities sum across equipment (10+30 demand, 4+6 on hand, "
           "0+9 on order) — and do NOT absorb the sibling component's 8",
           m1.get("Total_Needed") == 40.0 and m1.get("Available_Qty") == 10.0
-          and m1.get("Ordered_Qty") == 9.0, str(m1))
+          and m1.get("Pending_Delivery_Qty") == 9.0, str(m1))
     check("ax: Allocated_Qty stays the derived sum of both tiers (10 + 9) and "
           "Net_Demand is what is genuinely left to buy (6 + 15)",
           m1.get("Allocated_Qty") == 19.0 and m1.get("Net_Demand") == 21.0, str(m1))
@@ -8443,17 +8443,17 @@ async def test_sqm_bottleneck():
           "workbook's Initial_Ordered_Qty verbatim (100, not 100 − 40): nothing "
           "adds receipts to availability any more, so netting them off the "
           "order would delete units that were never counted twice",
-          m["pool_ordered_init"][E.mat_key("A", "SA")] == 100.0,
-          str(m["pool_ordered_init"]))
+          m["pool_pending_init"][E.mat_key("A", "SA")] == 100.0,
+          str(m["pool_pending_init"]))
     check("ay-q2a: a received_qty on the INPUT is ignored outright, not merely "
           "absent — B keeps its full order of 10 against 25 'received'",
-          m["pool_ordered_init"][E.mat_key("B", "SB")] == 10.0,
-          str(m["pool_ordered_init"]))
+          m["pool_pending_init"][E.mat_key("B", "SB")] == 10.0,
+          str(m["pool_pending_init"]))
     check("ay-q2a: the pool still clamps at zero — a negative workbook cell "
           "must not create anti-stock",
           E.build_model([], [], [{"material_code": "N", "sap_code": "SN",
                                   "available_qty": 0, "ordered_qty": -12}],
-                        [])["pool_ordered_init"][E.mat_key("N", "SN")] == 0.0)
+                        [])["pool_pending_init"][E.mat_key("N", "SN")] == 0.0)
 
     # ── Q1/Q6: two-tier cascade + conservation ──────────────────────────────
     m = mk({"A": 5, "B": 10}, ordered={"A": 20})       # A: 5 on hand, 15 usable on order
@@ -8462,9 +8462,9 @@ async def test_sqm_bottleneck():
     check("ay-q1: tier 1 takes physical stock first (5 of 20 demanded)",
           la["Alloc_Available"] == 5.0, str(la))
     check("ay-q1: tier 2 then draws on-order stock for the remaining gap (15)",
-          la["Alloc_Ordered"] == 15.0, str(la))
+          la["Alloc_Pending"] == 15.0, str(la))
     check("ay-q6: Allocated_Qty stays the derived SUM of both tiers",
-          la["Allocated_Qty"] == la["Alloc_Available"] + la["Alloc_Ordered"], str(la))
+          la["Allocated_Qty"] == la["Alloc_Available"] + la["Alloc_Pending"], str(la))
     check("ay: Demand = Allocated + Shortfall is conserved",
           abs(la["Demand_Qty"] - (la["Allocated_Qty"] + la["Shortfall_Qty"])) < 1e-9,
           str(la))
@@ -8478,7 +8478,7 @@ async def test_sqm_bottleneck():
           "cannot line a tank with stock that is still on a truck",
           f["Status"] != E.STATUS_FULL and f["Completion_Pct"] == 25.0, str(f))
     check("ay: feasibility reports both tiers separately",
-          f["Total_Alloc_Available"] == 15.0 and f["Total_Alloc_Ordered"] == 15.0,
+          f["Total_Alloc_Available"] == 15.0 and f["Total_Alloc_Pending"] == 15.0,
           str(f))
 
     # ── Q3: SQM achievable is the BOTTLENECK, not the average ───────────────
@@ -8545,13 +8545,30 @@ async def test_sqm_bottleneck():
     check("ay: a material fully covered by an existing order drops OFF the "
           "buy list — the double-ordering this split exists to prevent",
           pa == [], str(pp["procurement"]))
-    mp2 = mk({"A": 5, "B": 10}, ordered={"A": 5})
+    # 2026-08-05 SUBSET RULE: `ordered` is the TOTAL procured, of which
+    # `available` has already arrived — so 10 procured with 5 on the shelf
+    # means 5 still in the pipeline, and 20 − 10 = 10 left to buy. Written as
+    # ordered={"A": 5} this material would be FULLY delivered (5 of 5) with
+    # nothing pending, and the answer would be 15.
+    mp2 = mk({"A": 5, "B": 10}, ordered={"A": 10})
     pa2 = next(r for r in E.run_plan(mp2, ["T1"])["procurement"]
                if r["Material_Code"] == "A")
     check("ay: a partly-covered material still lists the NET quantity to buy "
-          "(20 demand − 5 stock − 5 on order = 10) beside the gross 15",
-          pa2["Shortage_Qty_To_Buy"] == 10.0 and pa2["Gross_Shortfall_Qty"] == 15.0,
+          "(20 demand − 10 procured = 10) beside the gross 15",
+          pa2["Shortage_Qty_To_Buy"] == 10.0 and pa2["Gross_Shortfall_Qty"] == 15.0
+          and pa2["Pending_Delivery_Qty"] == 5.0
+          and pa2["Total_Procured_Qty"] == 10.0,
           str(pa2))
+    # The half this rule exists to stop: a FULLY DELIVERED material (available
+    # == ordered) has an EMPTY pipeline and must not be credited twice.
+    mp3 = mk({"A": 5, "B": 10}, ordered={"A": 5})
+    pa3 = next(r for r in E.run_plan(mp3, ["T1"])["procurement"]
+               if r["Material_Code"] == "A")
+    check("ay-subset: 5 available OF 5 ordered is fully delivered — pipeline 0, "
+          "ceiling 5, and the buy list is the full 15 (the old additive maths "
+          "read 5 + 5 and said 10)",
+          pa3["Pending_Delivery_Qty"] == 0.0 and pa3["Total_Procured_Qty"] == 5.0
+          and pa3["Shortage_Qty_To_Buy"] == 15.0, str(pa3))
 
     # ── the segregated export ───────────────────────────────────────────────
     transport = ASGITransport(app=app)
@@ -8606,9 +8623,10 @@ async def test_sqm_bottleneck():
             "priority_order": order, "key": "session-full", "format": "xlsx"})
         wbs = _px.load_workbook(_io.BytesIO(rs.content))
         hdr = [c.value for c in wbs["Total Material Demand"][1]]
-        check("ay: the Total Material Demand sheet now segregates Available "
-              "from On-Order while keeping Allocated_Qty",
-              "Available_Qty" in hdr and "Ordered_Qty" in hdr
+        check("ay: the Total Material Demand sheet segregates Available from "
+              "Pending Delivery and states the Total Procured ceiling",
+              "Available_Qty" in hdr and "Pending_Delivery_Qty" in hdr
+              and "Total_Procured_Qty" in hdr
               and "Allocated_Qty" in hdr, str(hdr))
 
 
@@ -8691,10 +8709,14 @@ async def test_component_identity():
           f'proc={[p["SAP_Code"] for p in plan["procurement"]]}')
 
     # ── the shortfalls are now truthful ──────────────────────────────────────
+    # 2026-08-05 SUBSET RULE: C's stock row is (available 20, ordered 30) —
+    # 30 PROCURED of which 20 has arrived, so only 10 is still in the pipeline
+    # and 100 - 30 = 70 must still be bought. The old additive maths read
+    # 20 + 30 = 50 allocated and asked for only 50.
     check("az: shortfall is per component — A and B are each 10 short of their "
-          "own 50, C is 50 short net of its order, D is fully stocked",
+          "own 50, C is 70 short of its 30 PROCURED, D is fully stocked",
           [by_sap[s]["Shortfall_Qty"] for s in ("77", "77-1", "77-2", "77-3")]
-          == [10.0, 10.0, 50.0, 0.0],
+          == [10.0, 10.0, 70.0, 0.0],
           str([(s, by_sap[s]["Shortfall_Qty"]) for s in by_sap]))
     check("az: conservation holds per component (demand = allocated + shortfall)",
           all(abs(ln["Demand_Qty"] - (ln["Allocated_Qty"] + ln["Shortfall_Qty"])) < 1e-9
@@ -8706,9 +8728,10 @@ async def test_component_identity():
           "of the 100 m² remaining, not A's or D's much larger ceiling",
           unit["SQM_Achievable_Now"] == 20.0 and unit["SQM_Deficit"] == 80.0,
           str(unit))
-    check("az: C's inbound order lifts achievable to 50 without claiming it is "
-          "buildable today",
-          unit["SQM_Achievable_With_Ordered"] == 50.0, str(unit))
+    check("az: C's PENDING delivery lifts achievable to 30 — the whole of its "
+          "PO, not its PO stacked on top of what already arrived — without "
+          "claiming any of it is buildable today",
+          unit["SQM_Achievable_With_Ordered"] == 30.0, str(unit))
     feas = plan["feasibility"][0]
     check("az: the bottleneck is reported as a specific drum (code + SAP + name)",
           feas["Bottleneck_Material_Code"] == "M7"
@@ -9115,7 +9138,7 @@ async def test_sme_tier_segregation():
     # ── the allocation line keeps the two tiers apart ───────────────────────
     check("bb-acp: 0 physical + 500 on order against a demand of 100 → tier 1 "
           "allocates NOTHING and tier 2 allocates the lot",
-          acp["Alloc_Available"] == 0.0 and acp["Alloc_Ordered"] == 100.0
+          acp["Alloc_Available"] == 0.0 and acp["Alloc_Pending"] == 100.0
           and acp["Allocated_Qty"] == 100.0, str(acp))
     check("bb-acp: Fulfillment_Pct (readiness) is 0 while "
           "Fulfillment_With_Ordered_Pct (forecast) is 100 — one line, two "
@@ -9172,7 +9195,7 @@ async def test_sme_tier_segregation():
     ov = _bbsme._overview_rows(model, plan)[0]
     check("bb-export: the Total Overview export splits the tiers into their "
           "own columns and keeps Fulfillment_Pct on tier 1",
-          ov["Available_Qty"] == 100.0 and ov["Ordered_Qty"] == 100.0
+          ov["Available_Qty"] == 100.0 and ov["Pending_Delivery_Qty"] == 100.0
           and ov["Fulfillment_Pct"] == 0.0
           and ov["Shortfall_Qty"] == 100.0 and ov["Net_Shortfall_Qty"] == 0.0,
           str(ov))
@@ -9180,7 +9203,7 @@ async def test_sme_tier_segregation():
     check("bb-export: the Total Material Demand sheet shows ACP as 0% covered "
           "with 100 on order and 0 to buy",
           md["GI-ACP"]["Available_Qty"] == 0.0
-          and md["GI-ACP"]["Ordered_Qty"] == 100.0
+          and md["GI-ACP"]["Pending_Delivery_Qty"] == 100.0
           and md["GI-ACP"]["Fulfillment_Pct"] == 0.0
           and md["GI-ACP"]["Net_Demand"] == 0.0, str(md.get("GI-ACP")))
 
@@ -9237,17 +9260,158 @@ async def test_sme_tier_segregation():
     cb = {ln["SAP_Code"]: ln for ln in cplan["lines"]}
     check("bb-component: the two components keep their own tier split "
           "(A: 100 available / 0 ordered · B: 0 available / 100 ordered)",
-          cb["77"]["Alloc_Available"] == 100.0 and cb["77"]["Alloc_Ordered"] == 0.0
+          cb["77"]["Alloc_Available"] == 100.0 and cb["77"]["Alloc_Pending"] == 0.0
           and cb["77-1"]["Alloc_Available"] == 0.0
-          and cb["77-1"]["Alloc_Ordered"] == 100.0, str(cb))
+          and cb["77-1"]["Alloc_Pending"] == 100.0, str(cb))
 
     # ── the decoupling from suite BA still holds under the tier split ───────
-    check("bb-decoupled: the tier fix reads only pool_init / pool_ordered_init, "
+    check("bb-decoupled: the tier fix reads only pool_init / pool_pending_init, "
           "both of which come from sme_inventory_seed — no ERP table is "
           "reachable from either engine path",
           model["pool_init"][E.mat_key("GI-ACP", "1038")] == 0.0
-          and model["pool_ordered_init"][E.mat_key("GI-ACP", "1038")] == 500.0,
-          str(model["pool_ordered_init"]))
+          and model["pool_pending_init"][E.mat_key("GI-ACP", "1038")] == 500.0,
+          str(model["pool_pending_init"]))
+
+
+async def test_sme_ordered_subset_rule():
+    """Suite BC — THE SUBSET RULE: Available is part OF Ordered, not extra to it.
+
+    Operator correction, 2026-08-05, on the shape of the source data. In
+    Materials_DetailsAvailable_Qty.xlsx `Ordered_Qty` is the TOTAL quantity
+    PROCURED for the project and `Available_Qty` is the portion of that order
+    which has physically ARRIVED. Available is a SUBSET of ordered. Verified on
+    all 32 workbook rows: available <= ordered everywhere, and 14 of the 32 are
+    fully delivered (available == ordered).
+
+    The engine used to treat them as two independent buckets and add them, which
+    double-counted every unit already on the shelf. Measured against the live
+    dashboard export: 22 of 30 report rows had an understated buy list, 22,951
+    units in total. The worst case was GI-8005763 — 143,000 arrived of 143,000
+    ordered — which read 286,000 and reported NOTHING to buy against a demand of
+    152,685, hiding a 9,685-unit shortage completely.
+
+    The contract, which the cascade then produces for free:
+        tier 1  = available
+        tier 2  = max(ordered - available, 0)      the PENDING DELIVERY
+        ceiling = tier1 + tier2 = max(available, ordered)
+        to buy  = max(demand - ceiling, 0)
+    """
+    from . import sme_engine as E
+
+    def mk(available: float, ordered: float, demand_sqm: float = 100.0):
+        """One tag, one material at 1.0 per m2, so demand == demand_sqm."""
+        return E.build_model(
+            [{"Equipment_Tag_No": "TK-S", "Lining_System_Code": "1",
+              "Surface_Area_SQM": demand_sqm}],
+            [{"Lining_System_Code": "1", "Lining_System_Name": "SYS",
+              "Material_Code": "M", "SAP_Code": "S", "Material_Name": "Mat",
+              "UOM": "KG", "For_1_SQM": 1.0}],
+            [{"material_code": "M", "sap_code": "S", "material_name": "Mat",
+              "uom": "KG", "available_qty": available, "ordered_qty": ordered}],
+            [])
+
+    K = E.mat_key("M", "S")
+
+    # ── the pipeline is the DIFFERENCE, never the raw order ─────────────────
+    m = mk(available=40, ordered=100)
+    check("bc: 40 arrived of 100 procured -> tier 1 is 40 and tier 2 is the 60 "
+          "still in the pipeline, NOT the raw 100",
+          m["pool_init"][K] == 40.0 and m["pool_pending_init"][K] == 60.0,
+          f'avail={m["pool_init"][K]} pending={m["pool_pending_init"][K]}')
+    check("bc: the two tiers sum to the TOTAL PROCURED, never more",
+          m["pool_init"][K] + m["pool_pending_init"][K] == 100.0)
+
+    # ── the case that hid a real shortage: fully delivered ──────────────────
+    full = mk(available=143000, ordered=143000, demand_sqm=152685)
+    ln = full["pool_init"][K], full["pool_pending_init"][K]
+    check("bc-delivered: 143,000 arrived OF 143,000 ordered is FULLY delivered "
+          "— the pipeline is EMPTY, not another 143,000 (this is GI-8005763, "
+          "the live material whose 9,685-unit shortage was invisible)",
+          ln == (143000.0, 0.0), str(ln))
+    plan = E.run_plan(full, ["TK-S"])
+    line = plan["lines"][0]
+    check("bc-delivered: the ceiling is 143,000, so 9,685 of the 152,685 demand "
+          "must still be BOUGHT — the additive maths saw 286,000 and asked for "
+          "nothing",
+          line["Allocated_Qty"] == 143000.0 and line["Shortfall_Qty"] == 9685.0,
+          str({k: line[k] for k in ("Alloc_Available", "Alloc_Pending",
+                                    "Allocated_Qty", "Shortfall_Qty")}))
+    proc = plan["procurement"][0]
+    check("bc-delivered: the buy list names it, with an empty pipeline and the "
+          "procured ceiling stated explicitly",
+          proc["Shortage_Qty_To_Buy"] == 9685.0
+          and proc["Pending_Delivery_Qty"] == 0.0
+          and proc["Total_Procured_Qty"] == 143000.0, str(proc))
+
+    # ── the exact contract, on a partly-delivered material ──────────────────
+    part = mk(available=30, ordered=80)
+    pl = E.run_plan(part, ["TK-S"])
+    L = pl["lines"][0]
+    check("bc-contract: tier 1 = available (30)",
+          L["Alloc_Available"] == 30.0, str(L))
+    check("bc-contract: tier 2 = max(ordered - available, 0) = 50",
+          L["Alloc_Pending"] == 50.0, str(L))
+    check("bc-contract: Allocated_Qty = max(ordered, available) = 80 (the "
+          "ceiling), NOT available + ordered = 110",
+          L["Allocated_Qty"] == 80.0, str(L))
+    check("bc-contract: Shortfall_Qty = max(demand - ceiling, 0) = 20",
+          L["Shortfall_Qty"] == 20.0, str(L))
+    check("bc-contract: the PHYSICAL gap is untouched by any of this — "
+          "demand - available = 70",
+          L["Shortfall_Available_Qty"] == 70.0, str(L))
+    u = pl["sqm_units"][0]
+    check("bc-contract: readiness still counts only what ARRIVED (30 of 100 m2) "
+          "while the forecast tops out at the procured ceiling (80 m2)",
+          u["SQM_Achievable_Now"] == 30.0
+          and u["SQM_Achievable_With_Ordered"] == 80.0, str(u))
+
+    # ── over-delivery: available may exceed ordered without going negative ──
+    over = mk(available=120, ordered=100)
+    check("bc-over: more arrived than the order says (120 of 100) leaves an "
+          "EMPTY pipeline, never a negative one, and the ceiling is the larger "
+          "of the two",
+          over["pool_init"][K] == 120.0 and over["pool_pending_init"][K] == 0.0,
+          f'avail={over["pool_init"][K]} pending={over["pool_pending_init"][K]}')
+
+    # ── nothing ordered at all ─────────────────────────────────────────────
+    none = mk(available=10, ordered=0)
+    check("bc-none: a material with no purchase order has an empty pipeline "
+          "and a ceiling equal to what is on the shelf",
+          none["pool_pending_init"][K] == 0.0
+          and none["pool_init"][K] == 10.0)
+
+    # ── the revert-check, stated as the arithmetic it outlaws ──────────────
+    a, o, dem = 143000.0, 143000.0, 152685.0
+    check("bc-revert: the ADDITIVE reading (available + ordered) returns "
+          "286,000 against a 143,000 ceiling and wipes a real 9,685 shortage "
+          "off the buy list",
+          a + o == 286000.0 and max(dem - (a + o), 0.0) == 0.0
+          and max(dem - max(a, o), 0.0) == 9685.0)
+
+    # ── the live workbook itself: the rule must actually hold in the data ───
+    import openpyxl as _bcx
+    from pathlib import Path as _P
+    book = _P(__file__).resolve().parents[2] / "Materials_DetailsAvailable_Qty.xlsx"
+    if book.exists():
+        wb = _bcx.load_workbook(book, read_only=True, data_only=True)
+        rows = list(wb["Materials"].iter_rows(values_only=True))
+        wb.close()
+        hdr = rows[0]
+        ia = hdr.index("Available Qty")
+        io = hdr.index("Ordered_Qty")
+        im = hdr.index("Material_Code")
+        pairs = [(float(r[ia] or 0), float(r[io] or 0))
+                 for r in rows[1:] if r[im]]
+        bad = [p for p in pairs if p[0] > p[1] + 1e-9]
+        delivered = [p for p in pairs if abs(p[0] - p[1]) < 1e-9]
+        check("bc-data: EVERY row of the live workbook satisfies the subset "
+              "rule (available <= ordered) — if this ever fails the operator's "
+              "data model has changed and this whole suite must be revisited",
+              not bad, f"{len(bad)} violation(s): {bad[:5]}")
+        check("bc-data: a large share of the workbook is FULLY delivered, which "
+              "is precisely where the additive maths doubled the stock",
+              len(delivered) >= 10,
+              f"{len(delivered)} of {len(pairs)} rows have available == ordered")
 
 
 async def main() -> int:
@@ -9366,6 +9530,8 @@ async def main() -> int:
     await test_sme_strict_decoupling()
     print("\n BB. SME tier segregation — a purchase order never reads as readiness")
     await test_sme_tier_segregation()
+    print("\n BC. SME subset rule — Available is part OF Ordered, not extra to it")
+    await test_sme_ordered_subset_rule()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

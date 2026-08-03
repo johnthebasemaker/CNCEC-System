@@ -15,12 +15,16 @@ interface CalcLine {
   sap_code: string | null; material_code: string | null; component: string
   material_name: string; uom: string; for_1_sqm: number; required_qty: number
   package_size: number | null; packages_needed: number | null
-  available_stock: number | null; ordered_stock: number | null
+  available_stock: number | null
+  /** UNRECEIVED part of the PO — max(procured − available, 0). */
+  pending_delivery: number | null
+  /** The whole PO — max(procured, available). The buy list measures against this. */
+  total_procured: number | null
   /** Retained at 1 for payload compatibility — stock is per component now. */
   pooled_saps: number
   /** PHYSICAL gap — what blocks the job today. */
   shortfall_qty: number | null
-  /** Gap after stock already on order — what to raise a PR for. */
+  /** Gap once the WHOLE order has landed — what to raise a PR for. */
   net_shortfall_qty: number | null
   explanation: string
 }
@@ -56,18 +60,27 @@ const noWrapHeader = () => ({ style: { whiteSpace: 'nowrap' as const } })
 //
 // 2026-08-03 STRICT TIER SEGREGATION: this cell shows stock ON HAND only. A
 // material with nothing on the shelf reads red even when the whole quantity is
-// on an open PO — the "On Order" column beside it carries that, and says so.
+// on an open PO — the "Pending Delivery" column beside it carries that.
+//
+// 2026-08-05 SUBSET RULE: that neighbouring column is the UNRECEIVED part of
+// the order (procured − available), NOT the raw order. Available and pending
+// together ARE the whole PO; showing the raw order beside the arrived stock
+// drew a fully-delivered material at twice its true size.
 const stockCell = (v: number | null, r: { shortfall_qty: number | null }) =>
   v == null ? '—'
     : r.shortfall_qty
       ? <Tag color="red">{fmt(v)} (short {fmt(r.shortfall_qty)})</Tag>
       : <Tag color="green">{fmt(v)} ✓</Tag>
 
-const orderedCell = (v: number | null, r: CalcLine | AggLine) =>
+const pendingCell = (v: number | null, r: CalcLine | AggLine) =>
   !v ? <span style={{ opacity: 0.4 }}>—</span>
     : r.net_shortfall_qty
       ? <Tag color="orange">{fmt(v)} (still buy {fmt(r.net_shortfall_qty)})</Tag>
       : <Tag color="gold">{fmt(v)} — covers the gap</Tag>
+
+// The whole PO: arrived + pending. This is what the buy list measures against.
+const procuredCell = (v: number | null) =>
+  v == null ? '—' : <span style={{ opacity: 0.8 }}>{fmt(v)}</span>
 
 // 🧮 Smart Calculator — "system codes + target SQM(s) → segregated material
 // list with explanations" (recipe demand model: For_1_SQM × SQM; live ERP
@@ -146,8 +159,10 @@ export default function SmartCalculator({ siteId, stickyTop }:
         ? `${v} × ${fmt(r.package_size)}` : '—' },
     { title: 'Available now', dataIndex: 'available_stock', width: 170,
       align: 'right', onHeaderCell: noWrapHeader, render: stockCell },
-    { title: 'On Order', dataIndex: 'ordered_stock', width: 190,
-      align: 'right', onHeaderCell: noWrapHeader, render: orderedCell },
+    { title: 'Pending Delivery', dataIndex: 'pending_delivery', width: 190,
+      align: 'right', onHeaderCell: noWrapHeader, render: pendingCell },
+    { title: 'Total Procured', dataIndex: 'total_procured', width: 130,
+      align: 'right', onHeaderCell: noWrapHeader, render: procuredCell },
   ]
 
   const sysColumns: ColumnsType<CalcLine> = [
@@ -177,8 +192,10 @@ export default function SmartCalculator({ siteId, stickyTop }:
         ? `${v} × ${fmt(r.package_size)}` : '—' },
     { title: 'Available now', dataIndex: 'available_stock', width: 170,
       align: 'right', onHeaderCell: noWrapHeader, render: stockCell },
-    { title: 'On Order', dataIndex: 'ordered_stock', width: 190,
-      align: 'right', onHeaderCell: noWrapHeader, render: orderedCell },
+    { title: 'Pending Delivery', dataIndex: 'pending_delivery', width: 190,
+      align: 'right', onHeaderCell: noWrapHeader, render: pendingCell },
+    { title: 'Total Procured', dataIndex: 'total_procured', width: 130,
+      align: 'right', onHeaderCell: noWrapHeader, render: procuredCell },
   ]
 
   return (

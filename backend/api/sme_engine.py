@@ -48,24 +48,42 @@ own demand rows but read the SAME pooled stock figure"):
   ERP carries entries like "1043 - 2" for the same component the recipe calls
   "1043-2" (same rule as _CALC_POOL_SQL in sme.py).
 
+2026-08-05 THE SUBSET RULE (operator correction — the shape of the input data).
+
+  In Materials_DetailsAvailable_Qty.xlsx, `Ordered_Qty` is the TOTAL quantity
+  PROCURED for the project, and `Available_Qty` is the portion of that order
+  which has physically ARRIVED. Available is a SUBSET of ordered, NOT a second
+  bucket standing beside it. Verified on all 32 workbook rows: available <=
+  ordered everywhere, and 14 of 32 are fully delivered (available == ordered).
+
+      TIER 1  Alloc_Available / pool_init          = available_qty
+      TIER 2  Alloc_Pending   / pool_pending_init  = max(ordered − available, 0)
+                                                     "still on the water"
+      ceiling Allocated_Qty                        = max(available, ordered)
+      buy     Shortfall_Qty                        = demand − Allocated_Qty
+
+  The ceiling and the buy list fall out of the cascade arithmetic for free once
+  tier 2 is the PENDING quantity — nothing else needed changing.
+
 2026-08-03 STRICT TIER SEGREGATION (locked). "Ready to build" is a claim about
-metal, drums and shelves. Stock on a purchase order is none of those.
+metal, drums and shelves. Stock still on a purchase order is none of those.
 
   TIER 1 — PHYSICAL, `Alloc_Available` / `pool_init`. The ONLY input to
     readiness: Status, Completion_Pct, SQM_Achievable_Now, Coverage_Now_Pct,
     Fulfillment_Pct, SQM_Deficit and every "can we build it today" answer.
-  TIER 2 — ON ORDER, `Alloc_Ordered` / `pool_ordered_init`. Feeds ONLY the
-    forward-looking twins — Completion_With_Ordered_Pct,
+  TIER 2 — PENDING DELIVERY, `Alloc_Pending` / `pool_pending_init`. Feeds ONLY
+    the forward-looking twins — Completion_With_Ordered_Pct,
     SQM_Achievable_With_Ordered, Coverage_With_Ordered_Pct,
-    Fulfillment_With_Ordered_Pct — and the NET buy list (`Shortfall_Qty`), so
-    stock already ordered is not ordered twice.
+    Fulfillment_With_Ordered_Pct, which measure coverage against the TOTAL
+    PROCURED quantity — and the NET buy list (`Shortfall_Qty`), so stock
+    already procured is not procured twice.
 
   `Allocated_Qty` (= tier 1 + tier 2) is a CONSERVATION field: it exists so
   `Demand = Allocated + Shortfall_Qty` holds. It is NOT a readiness quantity,
   and dividing it by `Demand_Qty` does NOT produce a coverage percentage
   anybody should colour green. Every tier-2 number a consumer might want is
   published as its own named field precisely so nobody re-derives one from it.
-  Suite BB pins this end to end.
+  Suites BB and BC pin this end to end.
 
 Deliberate, documented deviations from legacy:
   * non-numeric system codes sort after numeric ones instead of crashing
@@ -191,26 +209,37 @@ def build_model(equipment: list[dict], recipes: list[dict],
         codes_by_tag[tag].sort(key=syscode_sort_key)
 
     pool_init: dict[str, float] = {}
-    pool_ordered_init: dict[str, float] = {}
+    pool_pending_init: dict[str, float] = {}
     mat_meta: dict[str, dict] = {}
     for m in materials:
         # 2026-07-30 COMPONENT IDENTITY: one pool per (code, SAP), not per code.
         mat = mat_key(m.get("material_code"), m.get("sap_code"))
-        pool_init[mat] = _num(m.get("available_qty"))
-        # 2026-08-02 STRICT DECOUPLING supersedes the 2026-07-28 effective-
-        # ordered netting (ruling Q2a). That netting subtracted `received_qty`
-        # because ERP receipts flowed into `available_qty`, so counting the
-        # order as well double-counted every delivered unit. The ledger no
-        # longer reaches this module at all: `available_qty` is the workbook's
-        # Initial_Available_Qty and `ordered_qty` its Initial_Ordered_Qty, two
-        # independent workbook figures. Subtracting receipts now would remove
-        # units from the order that were never added to availability.
+        available = _num(m.get("available_qty"))
+        pool_init[mat] = available
+        # 2026-08-05 SUBSET RULE (operator correction). In
+        # Materials_DetailsAvailable_Qty.xlsx, `Ordered_Qty` is the TOTAL
+        # quantity procured for the project and `Available_Qty` is the part of
+        # it that has physically ARRIVED — so available is a SUBSET of ordered,
+        # not a separate bucket beside it.
         #
-        # `received_qty` is therefore IGNORED even when a caller supplies it —
-        # the parity fixture still carries values for it precisely to prove
-        # that. Clamped at zero because a workbook can hold a negative cell.
-        ordered = _num(m.get("ordered_qty"))
-        pool_ordered_init[mat] = ordered if ordered > 0.0 else 0.0
+        # Tier 2 is therefore the PENDING DELIVERY: what is still on the water.
+        # Treating raw `ordered_qty` as tier 2 double-counted every unit that
+        # had already landed. Measured on the live workbook: 22 of 30 report
+        # rows had an understated buy list, 22,951 units in total, and
+        # GI-8005763 (143,000 delivered of 143,000 ordered) read 286,000 and
+        # reported NOTHING to buy against a demand of 152,685 — a 9,685-unit
+        # shortage that was invisible.
+        #
+        # The rest of the contract falls out of the cascade for free:
+        #   tier1 + tier2 = available + max(ordered − available, 0)
+        #                 = max(available, ordered)      ← the total procured
+        #   Shortfall_Qty = demand − Allocated_Qty
+        #                 = max(demand − max(available, ordered), 0)
+        #
+        # Clamped at zero so a fully-delivered material (available == ordered)
+        # has an EMPTY pipeline rather than a negative one.
+        pending = _num(m.get("ordered_qty")) - available
+        pool_pending_init[mat] = pending if pending > 0.0 else 0.0
         mat_meta[mat] = {"Material_Code": _s(m.get("material_code")),
                          "SAP_Code": sap_norm(m.get("sap_code")),
                          "Material_Name": _s(m.get("material_name")),
@@ -218,7 +247,7 @@ def build_model(equipment: list[dict], recipes: list[dict],
 
     return {"units": units, "codes_by_tag": codes_by_tag,
             "recipes_by_code": recipes_by_code, "pool_init": pool_init,
-            "pool_ordered_init": pool_ordered_init,
+            "pool_pending_init": pool_pending_init,
             "mat_meta": mat_meta, "tag_meta": tag_meta,
             "default_order": sorted(codes_by_tag)}
 
@@ -242,22 +271,25 @@ def cascade_allocate(model: dict, order: list[str]) -> list[dict]:
     `Alloc_Available`, `Shortfall_Available_Qty`, `Pool_*` and `Fulfillment_Pct`
     keep their exact historical values.
 
-    Pass 2 then spends ON-ORDER stock (`pool_ordered_init`) against whatever is
-    still short, walking `lines` in the order pass 1 produced them — which IS
-    the priority order (ruling Q4: same order for both tiers).
+    Pass 2 then spends PENDING-DELIVERY stock (`pool_pending_init` =
+    max(ordered − available, 0), the part of the purchase order that has not
+    landed yet) against whatever is still short, walking `lines` in the order
+    pass 1 produced them — which IS the priority order (ruling Q4: same order
+    for both tiers).
 
     Field contract:
         Demand_Qty = Allocated_Qty + Shortfall_Qty          (conserved)
-        Allocated_Qty = Alloc_Available + Alloc_Ordered      (ruling Q6)
+        Allocated_Qty = Alloc_Available + Alloc_Pending      (ruling Q6)
         Shortfall_Available_Qty = the PHYSICAL gap — what feasibility and
             "Ready to Build" judge on; a unit is not buildable because stock is
             on a truck somewhere.
         Shortfall_Qty = the NET gap — what still has to be purchased.
-    With no on-order stock the two shortfalls are equal and every field above
-    collapses to the pre-ruling values.
+    With an empty pipeline — a fully-delivered material, available == ordered —
+    the two shortfalls are equal and every field above collapses to the
+    pre-ruling values.
     """
     pool = dict(model["pool_init"])
-    pool_ordered = dict(model.get("pool_ordered_init") or {})
+    pool_pending = dict(model.get("pool_pending_init") or {})
     lines: list[dict] = []
     # ── pass 1: physical stock ───────────────────────────────────────────────
     for tag in _dedupe(order):
@@ -300,22 +332,22 @@ def cascade_allocate(model: dict, order: list[str]) -> list[dict]:
                                        if d4 > 0 else 100.0,
                     "_demand": demand, "_avail": alloc,
                 })
-    # ── pass 2: on-order stock, same priority walk ──────────────────────────
+    # ── pass 2: pending-delivery stock, same priority walk ──────────────────
     for ln in lines:
         mat = ln["Material_Key"]
         gap = ln["_demand"] - ln["_avail"]
-        before = pool_ordered.get(mat, 0.0)
+        before = pool_pending.get(mat, 0.0)
         alloc = min(gap, before) if gap > 0.0 else 0.0
         after = max(0.0, before - alloc)
-        pool_ordered[mat] = after
+        pool_pending[mat] = after
         total = ln["_avail"] + alloc
         d4 = ln["Demand_Qty"]
         t4 = round_n(total, 4)
-        ln["Alloc_Ordered"] = round_n(alloc, 4)
+        ln["Alloc_Pending"] = round_n(alloc, 4)
         ln["Allocated_Qty"] = t4
         ln["Shortfall_Qty"] = round_n(ln["_demand"] - total, 4)
-        ln["Ordered_Pool_Before"] = round_n(before, 4)
-        ln["Ordered_Pool_After"] = round_n(after, 4)
+        ln["Pending_Pool_Before"] = round_n(before, 4)
+        ln["Pending_Pool_After"] = round_n(after, 4)
         ln["Fulfillment_With_Ordered_Pct"] = (
             round_n(_clip(t4 / d4 * 100.0, 0.0, 100.0), 2) if d4 > 0 else 100.0)
         del ln["_demand"], ln["_avail"]
@@ -339,7 +371,7 @@ def compute_feasibility(model: dict, lines: list[dict], order: list[str]) -> lis
         # cannot be applied to a tank today. Feasibility therefore judges on
         # tier 1 only, which also keeps every historical value intact.
         alloc_av = sum(r["Alloc_Available"] for r in rows)
-        alloc_or = sum(r["Alloc_Ordered"] for r in rows)
+        alloc_or = sum(r["Alloc_Pending"] for r in rows)
         short = sum(r["Shortfall_Available_Qty"] for r in rows)
         short_net = sum(r["Shortfall_Qty"] for r in rows)
         min_rate, bottleneck = 2.0, None
@@ -378,7 +410,7 @@ def compute_feasibility(model: dict, lines: list[dict], order: list[str]) -> lis
             "Total_Demand_Qty": round_n(demand, 4),
             "Total_Allocated_Qty": round_n(alloc, 4),
             "Total_Alloc_Available": round_n(alloc_av, 4),
-            "Total_Alloc_Ordered": round_n(alloc_or, 4),
+            "Total_Alloc_Pending": round_n(alloc_or, 4),
             "Total_Shortfall_Qty": round_n(short, 4),
             "Total_Net_Shortfall_Qty": round_n(short_net, 4),
             "Completion_Pct": completion,
@@ -489,9 +521,9 @@ def build_sqm_by_code(lines: list[dict], rollup: list[dict]) -> list[dict]:
             "Material_Code": ln["Material_Code"],
             "SAP_Code": ln["SAP_Code"],
             "Material_Name": ln["Material_Name"], "UOM": ln["UOM"],
-            "Demand_Qty": 0.0, "Alloc_Available": 0.0, "Alloc_Ordered": 0.0,
+            "Demand_Qty": 0.0, "Alloc_Available": 0.0, "Alloc_Pending": 0.0,
             "Shortfall_Available_Qty": 0.0, "Shortfall_Qty": 0.0})
-        for f in ("Demand_Qty", "Alloc_Available", "Alloc_Ordered",
+        for f in ("Demand_Qty", "Alloc_Available", "Alloc_Pending",
                   "Shortfall_Available_Qty", "Shortfall_Qty"):
             b[f] += ln[f]
     out = []
@@ -586,7 +618,16 @@ def build_procurement_list(model: dict, lines: list[dict]) -> list[dict]:
                     "Material_Name": meta.get("Material_Name") or ln["Material_Name"],
                     "UOM": meta.get("UOM") or ln["UOM"],
                     "Available_Qty": model["pool_init"].get(mat, 0.0),
-                    "Ordered_Qty": (model.get("pool_ordered_init") or {}).get(mat, 0.0),
+                    # 2026-08-05 SUBSET RULE: `Pending_Delivery_Qty` is the
+                    # UNRECEIVED part of the order; `Total_Procured_Qty` is the
+                    # whole PO. The old `Ordered_Qty` column carried the raw
+                    # order beside `Available_Qty`, which reads as "and this
+                    # much more is coming" — the double-count in one column.
+                    "Pending_Delivery_Qty":
+                        (model.get("pool_pending_init") or {}).get(mat, 0.0),
+                    "Total_Procured_Qty": (
+                        model["pool_init"].get(mat, 0.0)
+                        + (model.get("pool_pending_init") or {}).get(mat, 0.0)),
                     "Gross_Shortfall_Qty": round_n(gross.get(mat, 0.0), 3),
                     "Shortage_Qty_To_Buy": round_n(shortage[mat], 3)})
     out.sort(key=lambda r: (-r["Shortage_Qty_To_Buy"], r["Material_Code"],
@@ -602,14 +643,14 @@ def build_totals(lines: list[dict]) -> list[dict]:
             "SAP_Code": ln["SAP_Code"],
             "Material_Name": ln["Material_Name"], "UOM": ln["UOM"],
             "Demand_Qty": 0.0, "Allocated_Qty": 0.0, "Alloc_Available": 0.0,
-            "Alloc_Ordered": 0.0, "Shortfall_Available_Qty": 0.0,
+            "Alloc_Pending": 0.0, "Shortfall_Available_Qty": 0.0,
             "Shortfall_Qty": 0.0})
         for f in ("Demand_Qty", "Allocated_Qty", "Alloc_Available",
-                  "Alloc_Ordered", "Shortfall_Available_Qty", "Shortfall_Qty"):
+                  "Alloc_Pending", "Shortfall_Available_Qty", "Shortfall_Qty"):
             t[f] += ln[f]
     return [{**t, **{f: round_n(t[f], 3) for f in
                      ("Demand_Qty", "Allocated_Qty", "Alloc_Available",
-                      "Alloc_Ordered", "Shortfall_Available_Qty", "Shortfall_Qty")}}
+                      "Alloc_Pending", "Shortfall_Available_Qty", "Shortfall_Qty")}}
             for _, t in sorted(totals.items())]
 
 
