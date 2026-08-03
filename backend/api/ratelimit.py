@@ -160,3 +160,70 @@ class PenaltyBox:
 def client_ip(request: Request) -> str:
     """Public alias — same CF-Connecting-IP → X-Real-IP → peer resolution."""
     return _client_ip(request)
+
+
+# ── Per-ACCOUNT login throttle (2026-08-04) ──────────────────────────────────
+# `rate_limit(10, 60)` on /auth/login is keyed by IP, which stops one host
+# hammering the endpoint but does nothing about the attack that actually
+# matters: credential stuffing against ONE account from many hosts. Every
+# source IP gets its own fresh budget, so guesses against `admin` were
+# effectively unlimited given enough addresses.
+#
+# This layers a second budget keyed on the USERNAME, counting only FAILURES.
+# A user who types their own password wrong a few times is unaffected; an
+# attacker working through a password list is stopped at the account boundary
+# no matter how many IPs they have.
+#
+# ⚠️ The honest trade-off: any per-account throttle is a denial-of-service
+# vector — someone who knows a username can burn its budget deliberately. That
+# is why this THROTTLES rather than LOCKS: the window is short, it clears the
+# moment a correct password arrives, and it never disables the account or
+# requires an admin to intervene. OWASP prefers exactly this shape over
+# classic account lockout for the same reason.
+LOGIN_FAIL_MAX = 8            # failures per account…
+LOGIN_FAIL_WINDOW = 900       # …within 15 minutes → throttled
+_login_fails: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _account_key(username: str) -> str:
+    return (username or "").strip().lower()
+
+
+def assert_login_allowed(username: str) -> None:
+    """Raise 429 when this ACCOUNT has too many recent failures.
+
+    Called before the password is checked, so a throttled account costs an
+    attacker a bcrypt verify of nothing. No-op when strict limits are relaxed
+    (hermetic test runs) — see strict_limits_enabled().
+    """
+    if not strict_limits_enabled():
+        return
+    key = _account_key(username)
+    if not key:
+        return
+    now = time.monotonic()
+    dq = _login_fails[key]
+    while dq and dq[0] < now - LOGIN_FAIL_WINDOW:
+        dq.popleft()
+    if len(dq) >= LOGIN_FAIL_MAX:
+        retry = int(dq[0] + LOGIN_FAIL_WINDOW - now) + 1
+        raise HTTPException(
+            429,
+            "too many failed sign-in attempts for this account — "
+            "please wait a few minutes and try again",
+            headers={"Retry-After": str(retry)})
+
+
+def note_login_failure(username: str) -> None:
+    """Record one failed attempt against the account."""
+    if not strict_limits_enabled():
+        return
+    key = _account_key(username)
+    if key:
+        _login_fails[key].append(time.monotonic())
+
+
+def clear_login_failures(username: str) -> None:
+    """A correct password ends the throttle immediately — the legitimate owner
+    is never left waiting out a window an attacker filled."""
+    _login_fails.pop(_account_key(username), None)

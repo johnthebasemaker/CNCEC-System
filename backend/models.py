@@ -24,8 +24,8 @@ ARCHITECTURAL RULES honoured here (see handoff.md SME Canon):
 from __future__ import annotations
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer,
-    LargeBinary, Numeric, Text, UniqueConstraint, Uuid, text,
+    Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index,
+    Integer, LargeBinary, Numeric, Text, UniqueConstraint, Uuid, text,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -68,7 +68,14 @@ class Consumption(Base):
     Source_Ref = Column(Text)
     Requested_By = Column(Text)
     Approved_By = Column("Approved By", Text)
-
+    # Hot-path indexes (alembic e7c3b95a41d2). Stock maths filters this
+    # ledger by (SAP_Code, Site_ID) and every report windows it by Date;
+    # with primary keys alone both were sequential scans. NON-UNIQUE by
+    # rule — the same (date, SAP, quantity) line may legitimately repeat.
+    __table_args__ = (
+        Index("ix_consumption_sap_site", "SAP_Code", "Site_ID"),
+        Index("ix_consumption_date", "Date"),
+    )
 class CrossSiteViews(Base):
     __tablename__ = "cross_site_views"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -413,7 +420,14 @@ class Receipts(Base):
     DN_Number = Column(Text)
     Warehouse_ID = Column(Text)
     PO_Number_Source = Column(Text)
-
+    # Hot-path indexes (alembic e7c3b95a41d2). Stock maths filters this
+    # ledger by (SAP_Code, Site_ID) and every report windows it by Date;
+    # with primary keys alone both were sequential scans. NON-UNIQUE by
+    # rule — the same (date, SAP, quantity) line may legitimately repeat.
+    __table_args__ = (
+        Index("ix_receipts_sap_site", "SAP_Code", "Site_ID"),
+        Index("ix_receipts_date", "Date"),
+    )
 class RejectedIssuesArchive(Base):
     __tablename__ = "rejected_issues_archive"
     archive_id = Column(Integer, primary_key=True, autoincrement=True)
@@ -465,7 +479,14 @@ class Returns(Base):
     Reason = Column(Text)
     Remarks = Column(Text)
     Site_ID = Column(Text, server_default=text("'HQ'"))
-
+    # Hot-path indexes (alembic e7c3b95a41d2). Stock maths filters this
+    # ledger by (SAP_Code, Site_ID) and every report windows it by Date;
+    # with primary keys alone both were sequential scans. NON-UNIQUE by
+    # rule — the same (date, SAP, quantity) line may legitimately repeat.
+    __table_args__ = (
+        Index("ix_returns_sap_site", "SAP_Code", "Site_ID"),
+        Index("ix_returns_date", "Date"),
+    )
 class ReturnsHistory(Base):
     __tablename__ = "returns_history"
     archive_id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1346,6 +1367,13 @@ class SystemAuditLog(Base):
     action_type = Column(Text, nullable=False)
     target_table = Column(Text)
     details = Column(Text, nullable=False)
+    # Filtered by action_type on the audit page and by several suites. NOT
+    # indexed on (id DESC) or (username, id DESC): both were benchmarked at
+    # ~9.5 MB each for zero planner uses, because the primary key already
+    # serves "newest N" by scanning backwards. See alembic e7c3b95a41d2.
+    __table_args__ = (
+        Index("ix_audit_action_type", "action_type"),
+    )
 
 
 # ==========================================================================

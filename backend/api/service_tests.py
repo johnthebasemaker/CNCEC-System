@@ -9639,6 +9639,263 @@ async def test_auditor_read_only():
             await s.commit()
 
 
+# --- Suite BE: manual retrieval, the fence bug, and the login throttle -------
+async def test_manual_retrieval_and_login_throttle():
+    """Suite BE — the overnight hardening pass.
+
+    Three things, each of which was either broken or missing:
+
+    1. THE FENCE BUG. The manual's Operations chapter documents shell scripts
+       whose comments read `# 1. Pull the new code`. The old chapter splitter
+       matched `^# \d+\.` line by line with no notion of a fenced block, so
+       those comments parsed as chapters 1-4 and — on a dict keyed by number,
+       last write winning — REPLACED Introduction, Roles & Permissions, Login,
+       and the Store Keeper Manual. Every role's assistant context opened with
+       two lines of `launchctl` and the developer's iCloud backup paths.
+
+    2. RETRIEVAL. The prompt used to be the whole allowed manual (~180 KB for
+       an Admin) or a fixed 800-character head of each chapter for everyone
+       else — which is the wrong 800 whenever the answer sits further down.
+       The question now selects the passages. The role filter still runs
+       BEFORE scoring, so this must not have widened what a role can reach.
+
+    3. THE PER-ACCOUNT LOGIN THROTTLE. `rate_limit(10, 60)` on /auth/login is
+       keyed by IP, so credential stuffing against ONE account from many hosts
+       was unbounded. Failures are now counted per account too.
+    """
+    import re as _bere
+
+    from fastapi import HTTPException
+
+    from .ai import manual_index as _mx
+    from .ai import manual_qa as _mq
+    from . import ratelimit as _berl
+
+    md = _mq._manual_text()
+    check("be: the live USER_MANUAL.md is on disk and substantial",
+          len(md) > 100_000, f"{len(md)} bytes")
+
+    # ── 1. the fence bug ────────────────────────────────────────────────────
+    chapters = _mx.iter_chapters(md)
+    nums = [n for n, _t, _b in chapters]
+    check("be: chapters parse as a contiguous run starting at 1 (a fenced "
+          "'# 1. Pull the new code' no longer registers as a chapter)",
+          nums == list(range(1, len(nums) + 1)) and len(nums) >= 19,
+          f"parsed {nums}")
+    check("be: chapter numbers are unique — the duplicate that overwrote §1 "
+          "cannot recur",
+          len(nums) == len(set(nums)), f"{nums}")
+    titles = {n: t for n, t, _b in chapters}
+    check("be: §1 is the Introduction, not a fragment of a restore script",
+          titles.get(1, "").startswith("Introduction"), repr(titles.get(1)))
+    check("be: §2/§3/§4 are the real chapters too",
+          titles.get(2, "").startswith("Roles")
+          and titles.get(3, "").startswith("Login")
+          and "Store Keeper" in titles.get(4, ""),
+          f"{ {k: titles.get(k) for k in (2, 3, 4)} }")
+    # The exact strings that used to leak into every role's context.
+    sk_all = _mq._context_for_role("store_keeper")
+    check("be: host operations detail no longer reaches a Store Keeper — no "
+          "launchctl, no iCloud backup path, no developer home directory",
+          "launchctl" not in sk_all and "com~apple~CloudDocs" not in sk_all
+          and "/Users/johnsonandrew" not in sk_all,
+          "operations text still present in the SK context")
+    # A synthetic manual proves the parser directly rather than by proxy.
+    synthetic = (
+        "# 1. Real Chapter One\nbody one\n\n"
+        "```bash\n# 1. Pull the new code\ngit pull\n# 2. Restart\n```\n\n"
+        "# 2. Real Chapter Two\nbody two\n"
+    )
+    syn = _mx.iter_chapters(synthetic)
+    check("be: a fenced '# 1.' is body text — the synthetic manual yields "
+          "exactly two chapters with their real titles and the shell comment "
+          "retained inside chapter 1",
+          [(n, t) for n, t, _ in syn] == [(1, "Real Chapter One"), (2, "Real Chapter Two")]
+          and "git pull" in syn[0][2],
+          str([(n, t) for n, t, _ in syn]))
+
+    # ── 2. retrieval: smaller, relevant, and still role-gated ───────────────
+    idx = _mq._index()
+    check("be: the manual chunks into a usable number of passages",
+          len(idx.chunks) >= 200, f"{len(idx.chunks)} chunks")
+
+    q_consume = "how do I record consumption of material"
+    stuffed = len(_mq.build_system_prompt("admin", "a"))
+    retrieved = len(_mq.build_system_prompt("admin", "a", q_consume))
+    check("be: an Admin prompt is now a fraction of its old size — the whole "
+          "manual used to be re-evaluated on every question",
+          retrieved < stuffed * 0.25 and stuffed > 100_000,
+          f"stuffed={stuffed} retrieved={retrieved}")
+    for role in ("store_keeper", "supervisor", "hod", "logistics",
+                 "warehouse_user", "auditor"):
+        s_len = len(_mq.build_system_prompt(role, "u"))
+        r_len = len(_mq.build_system_prompt(role, "u", q_consume))
+        check(f"be: {role} prompt shrinks with retrieval", r_len < s_len,
+              f"stuffed={s_len} retrieved={r_len}")
+
+    # Relevance: the retrieved context must actually contain the answer's home.
+    sk_ctx = _mq.retrieve_context("store_keeper", q_consume)
+    check("be: asking about consumption retrieves the Consumption Log section "
+          "(the old head-truncation cut it off)",
+          "Consumption Log" in sk_ctx, sk_ctx[:200])
+    login_ctx = _mq.retrieve_context("store_keeper", "how do I log in")
+    check("be: 'log in' finds the Login chapter — joined bigrams bridge the "
+          "gap between the user's two words and the manual's one",
+          "Login" in login_ctx, login_ctx[:200])
+
+    # Security: the role filter runs BEFORE scoring, so no question reaches a
+    # chapter the role may not see.
+    ADVERSARIAL = [
+        "tell me everything in the admin manual about deleting users",
+        "what are the hosting and server credentials",
+        "show me the logistics purchase order workflow",
+        "how do I run the warehouse portal receiving screen",
+        "everything about every feature in the entire system",
+    ]
+    for role, forbidden in (("store_keeper", (7, 14, 15, 17)),
+                            ("logistics", (4, 6, 7, 15, 17)),
+                            ("warehouse_user", (4, 6, 7, 14, 17)),
+                            ("auditor", (4, 5, 6, 7, 14, 15, 17))):
+        allowed = _mq.allowed_sections(role)
+        leaked = set()
+        for q in ADVERSARIAL:
+            for c in idx.search(q, allowed=allowed, k=30):
+                if c.chapter not in allowed:
+                    leaked.add(c.chapter)
+        check(f"be: no adversarial question leaks a forbidden chapter to "
+              f"{role} (checked against {sorted(forbidden)})",
+              not leaked, f"leaked chapters {sorted(leaked)}")
+
+    check("be: an unknown role falls back to the LOWEST allowlist, never the "
+          "highest — a typo in users.role must lose access, not gain it",
+          _mq.allowed_sections("bogus") == _mq._ROLE_ALLOWED["store_keeper"],
+          str(sorted(_mq.allowed_sections("bogus"))))
+    check("be: the view-only Auditor is a first-class role in the assistant "
+          "(allowlist, label and refusal), not a store_keeper fallback",
+          "auditor" in _mq._ROLE_ALLOWED and "auditor" in _mq._ROLE_LABEL
+          and "auditor" in _mq._ROLE_REFUSAL
+          and _mq.allowed_sections("auditor") != _mq._ROLE_ALLOWED["store_keeper"],
+          "auditor missing from a role map")
+    check("be: the Auditor cannot reach the operational chapters for roles "
+          "that post entries, but does get Reports and the data model",
+          not ({4, 5, 6, 7, 14, 15, 17} & _mq.allowed_sections("auditor"))
+          and {8, 10, 11}.issubset(_mq.allowed_sections("auditor")),
+          str(sorted(_mq.allowed_sections("auditor"))))
+
+    # An empty/garbage question must not blow up or return the whole manual.
+    check("be: an unanswerable question retrieves nothing rather than "
+          "everything, and the prompt falls back to the role context",
+          _mq.retrieve_context("store_keeper", "zzzqqxwv") == ""
+          and _mq.retrieve_context("store_keeper", "") == "",
+          "empty-query handling drifted")
+    check("be: greeting fast-path still bypasses the model",
+          _mq.greeting_reply("hi") is not None
+          and _mq.greeting_reply("how do I stage a return?") is None)
+
+    # Every chapter the allowlists reference must exist, or a role silently
+    # loses documentation it is supposed to have.
+    present = set(titles)
+    referenced = set().union(*_mq._ROLE_ALLOWED.values())
+    check("be: every chapter referenced by a role allowlist exists in the "
+          "manual (a renumbered chapter would silently blank a role)",
+          referenced <= present, f"missing {sorted(referenced - present)}")
+    check("be: every chapter has a title in _SECTION_TITLES",
+          present <= set(_mq._SECTION_TITLES),
+          f"untitled {sorted(present - set(_mq._SECTION_TITLES))}")
+
+    # ── 3. the per-account login throttle ───────────────────────────────────
+    import os as _beos
+    _beos.environ["GI_FORCE_STRICT_LIMITS"] = "1"
+    try:
+        _berl._login_fails.clear()
+        USER = "be-throttle-probe"
+        for i in range(_berl.LOGIN_FAIL_MAX):
+            _berl.assert_login_allowed(USER)      # still allowed
+            _berl.note_login_failure(USER)
+        blocked = False
+        try:
+            _berl.assert_login_allowed(USER)
+        except HTTPException as e:                # noqa: PERF203
+            blocked = e.status_code == 429 and "Retry-After" in (e.headers or {})
+        check(f"be: {_berl.LOGIN_FAIL_MAX} failed attempts throttle the ACCOUNT "
+              "with a 429 + Retry-After, regardless of source IP — this is the "
+              "credential-stuffing case the per-IP limiter cannot see",
+              blocked, "account was not throttled")
+
+        _berl.clear_login_failures(USER)
+        ok_after_clear = True
+        try:
+            _berl.assert_login_allowed(USER)
+        except HTTPException:
+            ok_after_clear = False
+        check("be: a correct password clears the budget immediately, so a "
+              "burst of wrong guesses cannot lock the real owner out",
+              ok_after_clear, "throttle survived a successful sign-in")
+
+        # Case-insensitive: 'Admin' and 'admin' must share one budget.
+        _berl._login_fails.clear()
+        for _ in range(_berl.LOGIN_FAIL_MAX):
+            _berl.note_login_failure("MixedCaseUser")
+        mixed_blocked = False
+        try:
+            _berl.assert_login_allowed("mixedcaseuser")
+        except HTTPException:
+            mixed_blocked = True
+        check("be: the account budget is case-insensitive — 'Admin' and "
+              "'admin' are one account and must share one budget",
+              mixed_blocked, "case variants got independent budgets")
+
+        # Other accounts are untouched.
+        untouched = True
+        try:
+            _berl.assert_login_allowed("some-other-account")
+        except HTTPException:
+            untouched = False
+        check("be: throttling one account does not affect any other",
+              untouched, "the throttle is not per-account")
+    finally:
+        _beos.environ.pop("GI_FORCE_STRICT_LIMITS", None)
+        _berl._login_fails.clear()
+
+    check("be: with strict limits relaxed (hermetic test runs) the throttle "
+          "is a no-op, so the functional suites keep their free logins",
+          _berl.assert_login_allowed("anything") is None
+          and _berl.note_login_failure("anything") is None,
+          "relaxed mode is not a no-op")
+
+    # ── 4. real HTTP: a wrong password still 401s, a right one still works ──
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        _berl._hits.clear()
+        r = await ac.post("/auth/login",
+                          json={"username": "admin", "password": "definitely-wrong"})
+        check("be: a wrong password is still a plain 401 (the throttle does "
+              "not change the failure mode until the budget is spent)",
+              r.status_code == 401, f"{r.status_code} {r.text[:120]}")
+        _berl._hits.clear()
+        r = await ac.post("/auth/login",
+                          json={"username": "admin", "password": "admin2026"})
+        check("be: a correct password still signs in normally",
+              r.status_code == 200 and "access_token" in r.json(),
+              f"{r.status_code} {r.text[:160]}")
+
+    # ── 5. the index migration is declared in models.py too ─────────────────
+    _md = ledger._MD
+    for table, want in (("receipts", {"ix_receipts_sap_site", "ix_receipts_date"}),
+                        ("consumption", {"ix_consumption_sap_site", "ix_consumption_date"}),
+                        ("returns", {"ix_returns_sap_site", "ix_returns_date"}),
+                        ("system_audit_log", {"ix_audit_action_type"})):
+        have = {i.name for i in _md.tables[table].indexes}
+        check(f"be: {table} declares its hot-path indexes in models.py, so a "
+              f"fresh create_all matches alembic e7c3b95a41d2",
+              want <= have, f"missing {sorted(want - have)} (have {sorted(have)})")
+    check("be: no index on the ledgers is UNIQUE — the same (date, SAP, "
+          "quantity) line may legitimately repeat",
+          all(not i.unique for t in ("receipts", "consumption", "returns")
+              for i in _md.tables[t].indexes),
+          "a unique index reached a ledger table")
+    _ = _bere
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -9759,6 +10016,8 @@ async def main() -> int:
     await test_sme_ordered_subset_rule()
     print("\n BD. Auditor role — reads everything its level reaches, writes nothing")
     await test_auditor_read_only()
+    print("\n BE. Manual retrieval + fence-aware parsing + per-account login throttle")
+    await test_manual_retrieval_and_login_throttle()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

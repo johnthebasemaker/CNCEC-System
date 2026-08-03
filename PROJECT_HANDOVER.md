@@ -301,6 +301,53 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
   `com.gi.backup`, which had been failing silently for 25 nights** — there were
   no local backups at all.
 
+### 9. Manual parsing is FENCE-AWARE; the assistant RETRIEVES
+
+*Added 2026-08-04 (`feat/overnight-autonomous-polish`).*
+
+* **Never parse `USER_MANUAL.md` chapters with a bare `^# \\d+\\.` match.** §17
+  documents shell scripts whose comments read `# 1. Pull the new code`, and a
+  line-by-line matcher read those as chapters 1-4 — overwriting Introduction,
+  Roles & Permissions, Login and the Store Keeper Manual for EVERY role, and
+  putting `launchctl` and the developer's iCloud paths into a Store Keeper's
+  assistant context. Use `ai/manual_index.iter_chapters()`, which tracks fences
+  and keeps the FIRST occurrence of a number. `build_manual_pdf` has its own
+  copy of the fence logic (it must stay importable without the backend package);
+  suite BE pins both.
+* **The Hub Assistant retrieves, it does not stuff.** BM25 over ~390 chunks,
+  no vector store and no new dependency. Admin prompts went 178 KB → 4 KB
+  (97.7%). The role filter runs BEFORE scoring — that is the security boundary,
+  and it must stay that way.
+* **Every role in ROLE_META needs an entry in `_ROLE_ALLOWED`.** `auditor` was
+  missing and silently inherited the Store Keeper's chapters. Unknown roles fall
+  back to the LOWEST allowlist, never the highest. Suite BE asserts both, and
+  asserts that every chapter any allowlist references actually exists.
+* Manual chapters are now **21**; §20 is the Auditor manual and §21 the 2026-08
+  feature update. Regenerate PDFs with `.venv/bin/python build_manual_pdf.py --role all`.
+
+### 10. Auth: idle sign-out + a PER-ACCOUNT login throttle
+
+* 30 minutes idle signs the user out; the client timer is the trigger but the
+  REVOCATION is what matters — it calls the ordinary logout, which kills the
+  refresh family server-side. Cross-tab via a localStorage timestamp.
+* `rate_limit(10, 60)` on `/auth/login` is keyed by **IP** and is therefore
+  blind to credential stuffing spread across hosts.
+  `ratelimit.assert_login_allowed()` adds a per-USERNAME failure budget (8 per
+  15 min), checked before the bcrypt verify, cleared by a correct password, and
+  applied to a wrong TOTP too. It THROTTLES rather than LOCKS on purpose — a
+  per-account limit is a DoS vector, so it must never need an admin to clear.
+  Relaxed under `GI_DOTENV=0` like the other strict limits.
+
+### 11. Indexes are benchmarked before they are added
+
+Alembic `e7c3b95a41d2` added 7 hot-path indexes (ledger `(SAP_Code, Site_ID)`
+and `Date`, audit `action_type`) after measuring on a clone inflated to 260k/
+240k/429k rows: 20x, 92x, 6x. **Four candidates were rejected on evidence** —
+`system_audit_log (id DESC)` and `(username, id DESC)` cost 9.5 MB each for ZERO
+planner uses (the pkey already scans backwards), the ledger `TRIM()` expression
+indexes lose to `(SAP_Code, Site_ID)`, and `inventory` is 442 rows. Mirror any
+new index in BOTH `models.py` and a migration. Ledger indexes are never UNIQUE.
+
 ### 6. Standing rules that predate this session (still binding)
 
 * **Both SME engines change together.** `backend/api/sme_engine.py` and
@@ -364,14 +411,14 @@ All green locally at commit `fae0b3f` (main), verified 2026-07-30.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1054 / 0** (suites A…BD) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **53 / 53** (~28 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **1094 / 0** (suites A…BE) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **57 / 57** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **27 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
-| Alembic | single head **`a4e9b1c73f28`** (`sme_component_pooling`) | see ARCHITECTURE §8 |
+| Alembic | single head **`e7c3b95a41d2`** (`hot_path_indexes`) | see ARCHITECTURE §8 |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 
 **Local Cloudflare tunnelling is resolved and stable.** Verified 2026-07-30: a
@@ -497,6 +544,7 @@ revert-verification and the caveats:
 
 | Log | Covers |
 |---|---|
+| [`OVERNIGHT_OPTIMIZATION_RUNLOG.md`](OVERNIGHT_OPTIMIZATION_RUNLOG.md) | Rules 9-11: the manual fence bug, BM25 retrieval, idle logout, per-account throttle, benchmarked indexes, ⌘K material search |
 | [`docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md`](docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md) | Rules 7-8: the PDF overlap measurements, the global xlsx template, the Auditor role, power.sh + backup_db.sh |
 | [`docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`](docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md) | Rule 1c: the double-count, the 22,951-unit buy-list correction, suite BC |
 | [`docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md`](docs/SME_FINAL_MATH_ALIGNMENT_RUNLOG.md) | The last two loopholes: scope-wide bottleneck + calculator component identity |

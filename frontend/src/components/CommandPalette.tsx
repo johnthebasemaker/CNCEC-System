@@ -1,14 +1,27 @@
 /**
- * frontend/src/components/CommandPalette.tsx — ⌘K / Ctrl-K launcher (Phase 3).
+ * frontend/src/components/CommandPalette.tsx — ⌘K / Ctrl-K launcher.
  *
- * A fuzzy jump-to-page over the nav manifest, respecting access (admin shadow
- * included). Lets us keep the sidebar lean without hiding capability: any page
- * a role can open is two keystrokes away. Keyboard: ⌘K/Ctrl-K to open,
- * type to filter, ↑/↓ to move, Enter to go, Esc to close.
+ * Two kinds of result in one list:
+ *
+ *   PAGES     a fuzzy jump over the nav manifest, respecting access (admin
+ *             shadow included). Keeps the sidebar lean without hiding
+ *             capability: any page a role can open is two keystrokes away.
+ *   MATERIALS live search over stock by SAP code, material code or
+ *             description (2026-08-04). Warehouse staff think in SAP codes,
+ *             not page names — "1042" now takes you straight to that
+ *             material's card instead of via Stock → filter → click.
+ *
+ * The material half reuses `/stock/by-site`, which already applies the
+ * caller's site scoping server-side, so the palette cannot become a way to
+ * see another site's inventory. Nothing here re-implements access control.
+ *
+ * Keyboard: ⌘K/Ctrl-K to open, type to filter, ↑/↓ to move, Enter to go,
+ * Esc to close.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Empty, Input, Modal, Tag } from 'antd'
+import { Empty, Input, Modal, Spin, Tag } from 'antd'
 import { useNavigate } from 'react-router-dom'
+import { api } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { accessibleNodes } from '../config/nav'
 import type { FlatNav } from '../config/nav'
@@ -26,19 +39,72 @@ function fuzzy(query: string, text: string): boolean {
   return false
 }
 
+interface MaterialHit {
+  SAP_Code: string
+  Equipment_Description?: string | null
+  Material_Code?: string | null
+  UOM?: string | null
+  Current_Stock?: number | null
+}
+
+type Row =
+  | { kind: 'page'; key: string; node: FlatNav }
+  | { kind: 'material'; key: string; hit: MaterialHit }
+
+const MIN_QUERY = 2
+const DEBOUNCE_MS = 200
+const MAX_PAGES = 6
+const MAX_MATERIALS = 6
+
 export default function CommandPalette() {
   const navigate = useNavigate()
   const { user } = useAuth()
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [active, setActive] = useState(0)
+  const [materials, setMaterials] = useState<MaterialHit[]>([])
+  const [searching, setSearching] = useState(false)
   const inputRef = useRef<import('antd').InputRef>(null)
 
   const nodes = useMemo(() => accessibleNodes(user), [user])
-  const results = useMemo(
-    () => nodes.filter((n) => fuzzy(q, `${n.group} ${n.label}`)).slice(0, 8),
+  const pages = useMemo(
+    () => nodes.filter((n) => fuzzy(q, `${n.group} ${n.label}`)).slice(0, MAX_PAGES),
     [nodes, q],
   )
+
+  // --- live material lookup -------------------------------------------------
+  // Debounced, and every in-flight request is aborted when the query moves on,
+  // so a slow response for "10" can never overwrite the results for "1042".
+  useEffect(() => {
+    const term = q.trim()
+    if (!open || term.length < MIN_QUERY) {
+      setMaterials([])
+      setSearching(false)
+      return
+    }
+    const ctl = new AbortController()
+    setSearching(true)
+    const t = window.setTimeout(() => {
+      api
+        .get('/stock/by-site', {
+          params: { q: term, limit: MAX_MATERIALS },
+          signal: ctl.signal,
+        })
+        .then((r) => setMaterials((r.data?.items ?? []) as MaterialHit[]))
+        .catch(() => { /* aborted, offline, or a role with no site — show pages only */ })
+        .finally(() => setSearching(false))
+    }, DEBOUNCE_MS)
+    return () => {
+      window.clearTimeout(t)
+      ctl.abort()
+    }
+  }, [q, open])
+
+  // One flat list so ↑/↓ crosses the section boundary naturally.
+  const rows = useMemo<Row[]>(() => [
+    ...pages.map((n) => ({ kind: 'page' as const, key: `p:${n.key}`, node: n })),
+    ...materials.map((m) => ({ kind: 'material' as const, key: `m:${m.SAP_Code}`, hit: m })),
+  ], [pages, materials])
 
   // Global ⌘K / Ctrl-K toggle + a custom event so the header button can open it.
   useEffect(() => {
@@ -62,24 +128,39 @@ export default function CommandPalette() {
     if (open) {
       setQ('')
       setActive(0)
+      setMaterials([])
       setTimeout(() => inputRef.current?.focus(), 50)
     }
   }, [open])
 
   useEffect(() => { setActive(0) }, [q])
 
-  const go = (n?: FlatNav) => {
-    const target = n ?? results[active]
+  const go = (row?: Row) => {
+    const target = row ?? rows[active]
     if (!target) return
     setOpen(false)
-    navigate(target.key)
+    if (target.kind === 'page') navigate(target.node.key)
+    else navigate(`/stock/material/${encodeURIComponent(target.hit.SAP_Code)}`)
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, results.length - 1)) }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, rows.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)) }
     else if (e.key === 'Enter') { e.preventDefault(); go() }
   }
+
+  const rowStyle = (i: number): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+    padding: '8px 12px', borderRadius: 6, cursor: 'pointer',
+    background: i === active ? 'var(--gi-palette-active, rgba(0,31,64,0.08))' : 'transparent',
+  })
+
+  const heading = (text: string) => (
+    <div style={{
+      fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase',
+      opacity: 0.5, padding: '8px 12px 4px',
+    }}>{text}</div>
+  )
 
   return (
     <Modal
@@ -94,31 +175,49 @@ export default function CommandPalette() {
       <Input
         ref={inputRef}
         size="large"
-        placeholder="Jump to…  (type a page name)"
+        placeholder="Jump to…  (page name, SAP code, or material)"
         value={q}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={onKeyDown}
         allowClear
+        suffix={searching ? <Spin size="small" /> : <span style={{ width: 14 }} />}
       />
       <div style={{ marginTop: 10 }}>
-        {results.length === 0 ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No matching pages" />
+        {rows.length === 0 ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={q.trim().length < MIN_QUERY
+              ? 'Type to search pages and materials'
+              : 'No matching pages or materials'}
+          />
         ) : (
-          results.map((n, i) => (
-            <div
-              key={n.key}
-              onMouseEnter={() => setActive(i)}
-              onClick={() => go(n)}
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '8px 12px', borderRadius: 6, cursor: 'pointer',
-                background: i === active ? 'var(--gi-palette-active, rgba(0,31,64,0.08))' : 'transparent',
-              }}
-            >
-              <span>{n.label}</span>
-              {n.group && <Tag style={{ marginInlineEnd: 0 }}>{n.group}</Tag>}
-            </div>
-          ))
+          <>
+            {pages.length > 0 && heading('Pages')}
+            {pages.map((n, i) => (
+              <div key={`p:${n.key}`} onMouseEnter={() => setActive(i)}
+                onClick={() => go(rows[i])} style={rowStyle(i)}>
+                <span>{n.label}</span>
+                {n.group && <Tag style={{ marginInlineEnd: 0 }}>{n.group}</Tag>}
+              </div>
+            ))}
+            {materials.length > 0 && heading('Materials')}
+            {materials.map((m, j) => {
+              const i = pages.length + j
+              return (
+                <div key={`m:${m.SAP_Code}`} onMouseEnter={() => setActive(i)}
+                  onClick={() => go(rows[i])} style={rowStyle(i)}>
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap' }}>
+                    <b style={{ fontFamily: 'JetBrains Mono, monospace' }}>{m.SAP_Code}</b>
+                    {m.Equipment_Description ? ` · ${m.Equipment_Description}` : ''}
+                  </span>
+                  <Tag style={{ marginInlineEnd: 0, flexShrink: 0 }}>
+                    {Number(m.Current_Stock ?? 0).toLocaleString()} {m.UOM ?? ''}
+                  </Tag>
+                </div>
+              )
+            })}
+          </>
         )}
       </div>
       <div style={{ marginTop: 8, fontSize: 11, opacity: 0.55, textAlign: 'right' }}>

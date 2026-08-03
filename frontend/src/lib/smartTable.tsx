@@ -200,6 +200,42 @@ function filterOptions<T>(
     .sort((a, b) => collator.compare(a.text, b.text))
 }
 
+/**
+ * Per-dataset memo for `filterOptions`, which is the only expensive thing this
+ * module does: it scans up to SAMPLE rows per column and, for a categorical
+ * column, calls the cell `render` once per row to label the options.
+ *
+ * Why it is needed: 28 of the 33 `<Table>` call sites build their `columns`
+ * array inline in the component body, so the array has a new identity on every
+ * render and the `useMemo` in `Table` below never hits. Without this cache
+ * those row scans re-ran on every keystroke, tab switch and poll tick.
+ *
+ * Keyed on the ROWS ARRAY IDENTITY (WeakMap, so a replaced dataset is collected
+ * with its cache) plus the column path. Deliberately NOT keyed on the `render`
+ * function, which is a fresh closure each render but maps a given raw value to
+ * the same label. The bounded consequence: if a render's output depends on
+ * state outside the row data, a filter dropdown can show the previous LABELS
+ * until the dataset changes. Filtering itself is unaffected — `onFilter`
+ * compares the raw value and is rebuilt every render.
+ */
+const _filterCache = new WeakMap<object, Map<string, { text: string; value: string }[] | null>>()
+
+function cachedFilterOptions<T>(
+  rows: readonly T[], path: Key | readonly Key[], render?: CellRender<T>,
+): { text: string; value: string }[] | null {
+  if (!Array.isArray(rows) || rows.length === 0) return filterOptions(rows, path, render)
+  let perDataset = _filterCache.get(rows as unknown as object)
+  if (!perDataset) {
+    perDataset = new Map()
+    _filterCache.set(rows as unknown as object, perDataset)
+  }
+  const key = Array.isArray(path) ? path.join(' ') : String(path)
+  if (perDataset.has(key)) return perDataset.get(key) ?? null
+  const opts = filterOptions(rows, path, render)
+  perDataset.set(key, opts)
+  return opts
+}
+
 function enhance<T>(col: AnyCol<T>, rows: readonly T[]): AnyCol<T> {
   if ('children' in col && Array.isArray(col.children)) {
     return { ...col, children: col.children.map((c) => enhance(c as AnyCol<T>, rows)) } as AnyCol<T>
@@ -216,7 +252,7 @@ function enhance<T>(col: AnyCol<T>, rows: readonly T[]): AnyCol<T> {
     out.showSorterTooltip = c.showSorterTooltip ?? false
   }
   if (c.filters === undefined && c.filterDropdown === undefined) {
-    const opts = filterOptions(rows, path, c.render)
+    const opts = cachedFilterOptions(rows, path, c.render)
     if (opts) {
       out.filters = opts
       out.filterSearch = c.filterSearch ?? opts.length >= FILTER_SEARCH_FROM
