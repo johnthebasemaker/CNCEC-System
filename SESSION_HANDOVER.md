@@ -88,6 +88,27 @@ written.
 
 ## 3. What was added most recently
 
+> **2026-08-05 — the overnight asset/SME programme.** Six phases on
+> `feat/overnight-asset-and-sme-upgrades`; the full account is
+> [`OVERNIGHT_ASSET_TRACKING_RUNLOG.md`](OVERNIGHT_ASSET_TRACKING_RUNLOG.md).
+> The headlines a fresh session needs:
+>
+> * **Surface-Shield consumption now lands in `sme_consumption_log`** and is
+>   shown as a SIDE NOTE beside the estimator. **Rule 1a is intact by ruling** —
+>   `sme_inventory_seed` is never written, and suite BF proves the SME payload
+>   is byte-identical across a routing write. Do not "fix" the estimator to
+>   subtract it.
+> * **`Tank No.` is ambiguous, not just dirty.** `TNK-091` matches both TRAIN J
+>   and TRAIN K. `sme_tank_alias` holds unresolved aliases for a human; nothing
+>   is ever guessed.
+> * **THE APP WINS on `Surface_Area_SQM`** — `SQM_Override` survives
+>   `--sme-reseed` and the sync reports the divergence.
+> * **New surfaces:** `/locator` (rack locator, minLevel 0), `/assets`
+>   (serialised units + GPS), SME → 🧾 Actual Consumption.
+> * **`For_1_SQM` is hidden from the UI and every export**, but is still in
+>   `/sme/snapshot` — the TS engine computes demand in the browser.
+> * **No engine change was made**, which is why parity is 1,313 unchanged.
+
 | Feature | Where | The short version |
 |---|---|---|
 | **BM25 chatbot retrieval** | `backend/api/ai/manual_index.py` | The assistant used to be handed its whole allowed manual per question (~180 KB for an Admin). It now retrieves ~6 relevant passages: **admin prompt 178,146 → 4,075 chars (97.7 %)**, 0.37 ms, no vector store and no new dependency. The role filter runs **before** scoring — that is the security boundary. |
@@ -106,13 +127,13 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1094 / 0** (suites A…BE) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1193 / 0** (suites A…BI) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** | `cd tests/e2e && npm test` |
-| SME UI math | **27 / 0** | `npm run test:ui-math --prefix frontend` |
+| SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Frontend | `tsc -b` + build + `oxlint` clean | `npm run build --prefix frontend` |
-| Alembic | single head **`e7c3b95a41d2`** | `cd backend && alembic heads` |
+| Alembic | single head **`a71e93b4c2f8`** | `cd backend && alembic heads` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 
 > `tools/parity_check.py` (5/5) is meaningful **only** on CI or a freshly

@@ -474,16 +474,30 @@ All green locally on **`main`**, verified **2026-08-04** at commit `2877888`
 (PR #25 merged). These are the LOCKED baselines — a change that lowers any
 of them is a regression, not a new normal.
 
+> **Updated 2026-08-05** by the overnight asset/SME programme (branch
+> `feat/overnight-asset-and-sme-upgrades`). Full account:
+> [`OVERNIGHT_ASSET_TRACKING_RUNLOG.md`](OVERNIGHT_ASSET_TRACKING_RUNLOG.md).
+> Three additions to the LOCKED set, all recorded there in full:
+>
+> * **Rule 1a extends to `sme_consumption_log`.** Observed Surface-Shield draw
+>   is logged and displayed BESIDE the plan; it must never be netted off
+>   `available_qty`. Suite BA now greps for that table by name too.
+> * **`Tank No.` is resolved by an operator, never by a matcher.** `TNK-091`
+>   suffix-matches TRAIN J *and* TRAIN K (39 rows). Ambiguous aliases park in
+>   `sme_tank_alias`.
+> * **THE APP WINS on SQM.** `sme_equipment.SQM_Override` survives the workbook
+>   sync and `--sme-reseed`; the divergence is reported, never resolved silently.
+
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1094 / 0** (suites A…BE) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1193 / 0** (suites A…BI) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
-| **SME UI math** (session.ts + insights.ts) | **27 / 0** | `npm run test:ui-math --prefix frontend` |
+| **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
-| Alembic | single head **`e7c3b95a41d2`** (`hot_path_indexes`) | see ARCHITECTURE §8 |
+| Alembic | single head **`a71e93b4c2f8`** (`users_email`) | see ARCHITECTURE §8 |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 
 **Local Cloudflare tunnelling is resolved and stable.** Verified 2026-07-30: a
