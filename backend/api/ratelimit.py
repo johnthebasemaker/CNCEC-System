@@ -227,3 +227,100 @@ def clear_login_failures(username: str) -> None:
     """A correct password ends the throttle immediately — the legitimate owner
     is never left waiting out a window an attacker filled."""
     _login_fails.pop(_account_key(username), None)
+
+
+# ─── the SHARED budget (2026-08-05) ──────────────────────────────────────────
+#
+# Everything above is per PROCESS, so N uvicorn workers means N × LOGIN_FAIL_MAX
+# — the same caveat the per-IP limiter carries, and harmless on a single-worker
+# box but a silent multiplier on anything larger.
+#
+# These three are the cross-worker authority, backed by one `login_attempts`
+# row per account (alembic f3c81d5a97e2). They run ALONGSIDE the in-process
+# budget rather than replacing it: the memory check costs nothing and trips
+# first inside a hot worker, and the row is what makes the ceiling true across
+# all of them.
+#
+# POSTGRES, NOT REDIS — the counter ticks a few times a minute, and Postgres is
+# already deployed, already backed up, already in the runbook and already holds
+# the users table this protects. One atomic `INSERT … ON CONFLICT DO UPDATE …
+# RETURNING` per failure, one `SELECT` per attempt.
+#
+# ⚠️ STILL THROTTLES, NEVER LOCKS (rule 10). The window rolls forward on its
+# own and a correct password DELETES the row. No administrator is ever in the
+# recovery path, because a budget a stranger can burn on your behalf must not
+# need a support ticket to undo.
+#
+# Every one of these is a no-op when strict limits are relaxed, and every one
+# swallows database errors: a throttle that takes sign-in down when its own
+# storage hiccups is worse than the attack it prevents.
+_SHARED_SQL_TOUCH = """
+    INSERT INTO login_attempts (username_lc, window_start, failures)
+    VALUES (:u, CURRENT_TIMESTAMP, 1)
+    ON CONFLICT (username_lc) DO UPDATE SET
+        -- A stale window is not decayed, it is RESTARTED: the budget is
+        -- "8 failures within 15 minutes", not a leaky bucket.
+        window_start = CASE
+            WHEN login_attempts.window_start < CURRENT_TIMESTAMP - (:w * INTERVAL '1 second')
+            THEN CURRENT_TIMESTAMP ELSE login_attempts.window_start END,
+        failures = CASE
+            WHEN login_attempts.window_start < CURRENT_TIMESTAMP - (:w * INTERVAL '1 second')
+            THEN 1 ELSE login_attempts.failures + 1 END
+    RETURNING failures
+"""
+
+_SHARED_SQL_READ = """
+    SELECT failures,
+           EXTRACT(EPOCH FROM (window_start + (:w * INTERVAL '1 second')
+                               - CURRENT_TIMESTAMP))::int AS retry_after
+    FROM login_attempts
+    WHERE username_lc = :u
+      AND window_start > CURRENT_TIMESTAMP - (:w * INTERVAL '1 second')
+"""
+
+
+async def assert_login_allowed_shared(session, username: str) -> None:
+    """Cross-worker half of `assert_login_allowed`. Raises the same 429."""
+    if not strict_limits_enabled():
+        return
+    key = _account_key(username)
+    if not key:
+        return
+    from sqlalchemy import text as _text
+    try:
+        row = (await session.execute(_text(_SHARED_SQL_READ),
+                                     {"u": key, "w": LOGIN_FAIL_WINDOW})).first()
+    except Exception:
+        return      # storage trouble must not deny sign-in
+    if row and row[0] >= LOGIN_FAIL_MAX:
+        raise HTTPException(
+            429,
+            "too many failed sign-in attempts for this account — "
+            "please wait a few minutes and try again",
+            headers={"Retry-After": str(max(1, int(row[1] or 1)))})
+
+
+async def note_login_failure_shared(session, username: str) -> None:
+    key = _account_key(username)
+    if not strict_limits_enabled() or not key:
+        return
+    from sqlalchemy import text as _text
+    try:
+        await session.execute(_text(_SHARED_SQL_TOUCH),
+                              {"u": key, "w": LOGIN_FAIL_WINDOW})
+        await session.commit()
+    except Exception:
+        await session.rollback()
+
+
+async def clear_login_failures_shared(session, username: str) -> None:
+    key = _account_key(username)
+    if not key:
+        return
+    from sqlalchemy import text as _text
+    try:
+        await session.execute(
+            _text("DELETE FROM login_attempts WHERE username_lc = :u"), {"u": key})
+        await session.commit()
+    except Exception:
+        await session.rollback()

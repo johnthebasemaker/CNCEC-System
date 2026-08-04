@@ -82,6 +82,56 @@ async def metrics(site_id: Optional[str] = None,
         WHERE b.daily > 0
         ORDER BY days_remaining ASC NULLS LAST LIMIT 10''', pc)
 
+    # ── Top 5 Expiring (2026-08-05) ───────────────────────────────────────────
+    # From `lots`, which already carries the FEFO expiry data. Consistent with
+    # the standing rule that FEFO is ALLOW-AND-LOG: this is a WARNING widget,
+    # never a block, and it deliberately includes lots that have already
+    # expired (negative days) because those are the ones somebody needs to look
+    # at today. Open lots only — a closed lot is not on a shelf.
+    lsite = ' AND COALESCE(l."Site_ID", \'HQ\') = :site' if scoped else ''
+    top_expiring = await rows(f'''
+        SELECT l."Lot_Number" AS lot, TRIM(l."SAP_Code") AS sap,
+               COALESCE(MAX(i."Equipment_Description"), '') AS name,
+               l."Expiry_Date" AS expiry_date,
+               (l."Expiry_Date"::date - CURRENT_DATE) AS days_left
+        FROM lots l
+        LEFT JOIN inventory i ON TRIM(i."SAP_Code") = TRIM(l."SAP_Code")
+        WHERE l."Expiry_Date" IS NOT NULL AND l."Expiry_Date" <> ''
+          AND COALESCE(l."Status", 'open') = 'open' {lsite}
+        GROUP BY l."Lot_Number", TRIM(l."SAP_Code"), l."Expiry_Date"
+        ORDER BY l."Expiry_Date"::date ASC
+        LIMIT 5''', p)
+
+    # ── Highest Value (2026-08-05) ────────────────────────────────────────────
+    # ⚠️ `Unit_Cost` DEFAULTS TO 0, so this is a partial picture by
+    # construction. The widget therefore reports its own COVERAGE — "N of M
+    # items have a unit cost" — rather than presenting a confidently wrong
+    # total. Same principle as the ruling that keeps a GRAND TOTAL off the
+    # generic xlsx path: a number stated without its caveat is worse than no
+    # number, because it gets quoted.
+    highest_value = await rows(f'''
+        SELECT s."SAP_Code" AS sap, COALESCE(s."Equipment_Description",'') AS name,
+               s."Current_Stock" AS qty, COALESCE(i."Unit_Cost",0) AS unit_cost,
+               ROUND(CAST(s."Current_Stock"*COALESCE(i."Unit_Cost",0) AS NUMERIC),2) AS value
+        FROM ({SQL_SITE_STOCK}) s
+        LEFT JOIN inventory i ON TRIM(i."SAP_Code") = s."SAP_Code"
+        WHERE COALESCE(i."Unit_Cost",0) > 0 {sfilter}
+        ORDER BY value DESC
+        LIMIT 5''', p)
+    value_coverage = await rows(f'''
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE COALESCE(i."Unit_Cost",0) > 0) AS priced
+        FROM ({SQL_SITE_STOCK}) s
+        LEFT JOIN inventory i ON TRIM(i."SAP_Code") = s."SAP_Code"
+        WHERE 1=1 {sfilter}''', p)
+    cov = value_coverage[0] if value_coverage else {"total": 0, "priced": 0}
+
     return {"valuation_total": float(valuation or 0), "site_id": site_id,
             "stock_vs_min": stock_vs_min, "top_consumed": top_consumed,
-            "burn_forecast": burn_forecast}
+            "burn_forecast": burn_forecast,
+            "top_expiring": top_expiring,
+            "highest_value": highest_value,
+            # The caveat travels WITH the data, so a consumer cannot render the
+            # figures without it.
+            "value_coverage": {"priced": int(cov.get("priced") or 0),
+                               "total": int(cov.get("total") or 0)}}

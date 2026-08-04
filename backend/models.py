@@ -588,6 +588,12 @@ class Users(Base):
     Site_ID = Column(Text, server_default=text("'HQ'"))
     Warehouse_ID = Column(Text)
     Phone_Number = Column(Text)
+    # Per-recipient address (alembic a71e93b4c2f8), for the weekly Executive
+    # Summary. Nullable and deliberately NOT unique — a shift account or a
+    # departmental mailbox is legitimately shared, and a UNIQUE would reject
+    # the second user for no benefit. Until it is filled in, weekly_report
+    # falls back to the configured inbox.
+    email = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     totp_secret = Column(Text)
     totp_enabled = Column(Integer, server_default=text('0'))
@@ -1213,6 +1219,27 @@ class Vendors(Base):
     status = Column(Text, server_default=text("'active'"))
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+class LoginAttempts(Base):
+    """The per-account failure budget, SHARED across workers (alembic
+    f3c81d5a97e2).
+
+    The in-process budget (ratelimit.LOGIN_FAIL_MAX) multiplies by the worker
+    count; this row is the cross-worker authority. Postgres rather than Redis:
+    the counter ticks a few times a minute and Postgres is already deployed,
+    backed up and holding the users table this protects.
+
+    ⚠️ Still THROTTLES, never LOCKS (rule 10). `window_start` rolls forward on
+    its own and a correct password deletes the row — recovery is the passage of
+    time, never an administrator, because a per-account limit someone else can
+    trip on your behalf must not need a support ticket to undo.
+    """
+    __tablename__ = "login_attempts"
+    username_lc = Column(Text, primary_key=True)
+    window_start = Column(DateTime, nullable=False,
+                          server_default=text('CURRENT_TIMESTAMP'))
+    failures = Column(Integer, nullable=False, server_default=text('0'))
+
 
 class AssetUnits(Base):
     """One row per PHYSICAL THING (alembic e9f2a4c68b71).

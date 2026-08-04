@@ -10669,6 +10669,223 @@ async def test_asset_tracking():
     await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBH%\'')
 
 
+async def test_shared_throttle_and_widgets():
+    """Suite BI — the cross-worker throttle, the exec-summary email, the widgets.
+
+    THE THROTTLE. The per-account budget lived in process memory, so N uvicorn
+    workers meant N × 8 attempts before an attacker was slowed down — the same
+    caveat the per-IP limiter carries, invisible on a single-worker box and a
+    silent multiplier on anything larger. `login_attempts` is now the shared
+    authority.
+
+    Two properties matter more than the counting, and both are rule 10:
+
+    · IT THROTTLES, NEVER LOCKS. The window rolls forward on its own and a
+      correct password DELETES the row. No administrator is ever in the
+      recovery path, because a budget a stranger can burn on your behalf must
+      not need a support ticket to undo.
+    · ITS OWN STORAGE FAILING MUST NOT DENY SIGN-IN. A throttle that takes
+      authentication down when a table is missing is worse than the attack it
+      prevents, so every path swallows database errors.
+
+    THE WIDGETS. `Unit_Cost` defaults to 0, so "Highest Value" is a partial
+    picture by construction and has to say so — the coverage travels WITH the
+    data rather than beside it in a docstring nobody reads.
+    """
+    from sqlalchemy import text as _sqt
+
+    from . import ratelimit as _birl
+
+    async def _exec(sql: str, **params):
+        async with SessionLocal() as s:
+            await s.execute(_sqt(sql), params)
+            await s.commit()
+
+    async def _scalar(sql: str, **params):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), params)).scalar()
+
+    USER = "svcbi-account"
+    await _exec("DELETE FROM login_attempts WHERE username_lc LIKE 'svcbi%'")
+
+    _strict = _birl.strict_limits_enabled
+    _birl.strict_limits_enabled = lambda: True      # the suite runs relaxed
+    try:
+        async with SessionLocal() as s:
+            for i in range(_birl.LOGIN_FAIL_MAX - 1):
+                await _birl.note_login_failure_shared(s, USER)
+            # Still under budget — a user who mistypes a few times is unaffected.
+            ok = True
+            try:
+                await _birl.assert_login_allowed_shared(s, USER)
+            except Exception:
+                ok = False
+            check(f"bi: {_birl.LOGIN_FAIL_MAX - 1} failures are still allowed "
+                  f"— the budget is for an attacker, not for someone who "
+                  f"mistypes their own password", ok, "throttled too early")
+
+            await _birl.note_login_failure_shared(s, USER)
+            n = await _scalar("SELECT failures FROM login_attempts "
+                              "WHERE username_lc = :u", u=USER)
+            check("bi: the count is SHARED state in Postgres, not per-process "
+                  "memory — this row is what stops N workers meaning N × 8",
+                  n == _birl.LOGIN_FAIL_MAX, f"failures={n}")
+
+            code = None
+            retry_after = None
+            try:
+                await _birl.assert_login_allowed_shared(s, USER)
+            except Exception as e:
+                code = getattr(e, "status_code", None)
+                retry_after = (getattr(e, "headers", None) or {}).get("Retry-After")
+            check("bi: the budget spent → 429 with a Retry-After the caller "
+                  "can act on", code == 429 and retry_after and int(retry_after) > 0,
+                  f"{code} retry={retry_after}")
+
+            # Case folding: one account, one budget.
+            await _birl.clear_login_failures_shared(s, USER)
+            await _birl.note_login_failure_shared(s, "SVCBI-Account")
+            n2 = await _scalar("SELECT COUNT(*) FROM login_attempts "
+                               "WHERE username_lc LIKE 'svcbi%'")
+            check("bi: 'SVCBI-Account' and 'svcbi-account' are ONE account "
+                  "with ONE budget — otherwise case is a free way to double it",
+                  n2 == 1, f"{n2} rows")
+
+            # THROTTLES, NEVER LOCKS.
+            await _birl.clear_login_failures_shared(s, USER)
+            gone = await _scalar("SELECT COUNT(*) FROM login_attempts "
+                                 "WHERE username_lc = :u", u=USER)
+            check("bi: a correct password DELETES the budget outright — the "
+                  "real owner never waits out a window an attacker filled, "
+                  "and no admin is ever in the recovery path (rule 10)",
+                  gone == 0, f"{gone} rows left")
+
+            # A stale window RESTARTS rather than decaying: the rule is
+            # "8 failures within 15 minutes", not a leaky bucket.
+            await _birl.note_login_failure_shared(s, USER)
+            await _exec("UPDATE login_attempts SET window_start = "
+                        "CURRENT_TIMESTAMP - INTERVAL '1 hour', failures = 99 "
+                        "WHERE username_lc = :u", u=USER)
+            await _birl.note_login_failure_shared(s, USER)
+            n3 = await _scalar("SELECT failures FROM login_attempts "
+                               "WHERE username_lc = :u", u=USER)
+            check("bi: an expired window restarts at 1 — a budget spent an "
+                  "hour ago does not follow you into the next one",
+                  n3 == 1, f"failures={n3}")
+
+            passed = True
+            try:
+                await _birl.assert_login_allowed_shared(s, USER)
+            except Exception:
+                passed = False
+            check("bi: …and the account is allowed to sign in again",
+                  passed, "still throttled after the window rolled")
+
+        # Storage failure must NOT deny sign-in.
+        class _Boom:
+            async def execute(self, *a, **k):
+                raise RuntimeError("table is gone")
+
+            async def commit(self):
+                pass
+
+            async def rollback(self):
+                pass
+
+        survived = True
+        try:
+            await _birl.assert_login_allowed_shared(_Boom(), USER)
+            await _birl.note_login_failure_shared(_Boom(), USER)
+            await _birl.clear_login_failures_shared(_Boom(), USER)
+        except Exception:
+            survived = False
+        check("bi: if the throttle's OWN storage fails, sign-in still works — "
+              "a limiter that takes authentication down is worse than the "
+              "attack it prevents", survived, "a storage error propagated")
+    finally:
+        _birl.strict_limits_enabled = _strict
+        await _exec("DELETE FROM login_attempts WHERE username_lc LIKE 'svcbi%'")
+
+    # ── the widgets ──────────────────────────────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post("/auth/login", headers={"X-Real-IP": "203.0.113.97"},
+                          json={"username": "admin", "password": "admin2026"})
+        H = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        r = await ac.get("/dashboard/metrics", headers=H)
+        j = r.json()
+        check("bi: the dashboard publishes Top 5 Expiring and Highest Value "
+              "on the EXISTING metrics call — one round trip, not two new "
+              "endpoints",
+              r.status_code == 200 and "top_expiring" in j
+              and "highest_value" in j, f"{r.status_code} {sorted(j)}")
+        check("bi: Top 5 Expiring is capped at five and ordered soonest-first",
+              len(j["top_expiring"]) <= 5
+              and [x["expiry_date"] for x in j["top_expiring"]]
+              == sorted(x["expiry_date"] for x in j["top_expiring"]),
+              str(j["top_expiring"])[:200])
+        check("bi: Highest Value is capped at five and ordered by value",
+              len(j["highest_value"]) <= 5
+              and [x["value"] for x in j["highest_value"]]
+              == sorted((x["value"] for x in j["highest_value"]), reverse=True),
+              str(j["highest_value"])[:200])
+        cov = j.get("value_coverage") or {}
+        check("bi: …and it ships its own COVERAGE, because Unit_Cost defaults "
+              "to 0 — a value total stated without saying how much of the "
+              "catalogue is priced is a wrong number stated confidently, and "
+              "it gets quoted",
+              "priced" in cov and "total" in cov
+              and cov["priced"] <= cov["total"], str(cov))
+        check("bi: every priced row really is priced — a zero-cost item would "
+              "sit at the BOTTOM of a value ranking and look like data",
+              all(float(x["unit_cost"]) > 0 for x in j["highest_value"]),
+              str(j["highest_value"])[:200])
+
+    # ── the exec-summary email channel ───────────────────────────────────────
+    from .weekly_report import _email_one as _bi_email
+    sent = []
+
+    async def _fake_send(session, **kw):
+        sent.append(kw)
+        return {"status": "sent", "id": 1}
+
+    import backend.api.services.emailer as _bimail
+    _real = _bimail.send_email
+    _bimail.send_email = _fake_send
+    try:
+        async with SessionLocal() as s:
+            n = await _bi_email(s, "svcbi-hod", "hod@example.test", "CNCEC",
+                                "2026-08-01", "2026-08-07", "https://x/y/tok")
+        check("bi: the weekly Executive Summary now goes out by EMAIL too — "
+              "the schedule, the PDF and the secure link already existed; "
+              "email was the missing channel, not a missing cron",
+              n == 1 and sent and sent[0]["to"] == "hod@example.test",
+              f"n={n} {sent[:1]}")
+        check("bi: the email carries the same EXPIRING LINK, not the PDF "
+              "bytes — an attachment lives forever in whatever inbox it "
+              "reaches, including a forwarded one",
+              "https://x/y/tok" in sent[0]["body"] and "attachment" not in sent[0],
+              str(sent[0])[:200])
+        check("bi: …and it names the period and the site, so a reader knows "
+              "what they are opening before they click",
+              "CNCEC" in sent[0]["subject"] and "2026-08-01" in sent[0]["subject"],
+              sent[0]["subject"])
+
+        async def _boom(session, **kw):
+            raise RuntimeError("relay refused")
+
+        _bimail.send_email = _boom
+        async with SessionLocal() as s:
+            n = await _bi_email(s, "svcbi-hod", "hod@example.test", None,
+                                "2026-08-01", "2026-08-07", "https://x/y/tok")
+        check("bi: a refused relay returns 0 and does NOT break the run — the "
+              "bell row is already written, so nobody loses the report "
+              "because a mail server was down",
+              n == 0, f"n={n}")
+    finally:
+        _bimail.send_email = _real
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -10797,6 +11014,8 @@ async def main() -> int:
     await test_rack_locator()
     print("\n BH. Asset tracking — two hammers, one SAP; serials, movements, GPS")
     await test_asset_tracking()
+    print("\n BI. Shared login throttle + exec-summary email + dashboard widgets")
+    await test_shared_throttle_and_widgets()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

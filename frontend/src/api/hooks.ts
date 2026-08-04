@@ -368,6 +368,15 @@ export interface DashboardMetrics {
   stock_vs_min: { sap: string; name: string; current: number; minimum: number }[]
   top_consumed: { sap: string; name: string; consumed: number }[]
   burn_forecast: { sap: string; daily_avg: number; current: number; days_remaining: number | null }[]
+  // 2026-08-05 widgets. `days_left` goes NEGATIVE for a lot that has already
+  // expired — those are shown, not hidden: FEFO is allow-and-log by standing
+  // ruling, so this warns rather than blocks.
+  top_expiring: { lot: string; sap: string; name: string; expiry_date: string; days_left: number }[]
+  highest_value: { sap: string; name: string; qty: number; unit_cost: number; value: number }[]
+  /** Unit_Cost is optional on the inventory master, so `highest_value` is a
+   *  partial picture BY CONSTRUCTION. The coverage travels with the data so a
+   *  consumer cannot render the figures without the caveat. */
+  value_coverage: { priced: number; total: number }
 }
 export function useDashboardMetrics() {
   return useQuery<DashboardMetrics>({

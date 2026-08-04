@@ -1450,7 +1450,11 @@ def check_models_schema_parity() -> None:
                # the frozen legacy portal has no such editor.
                ("sme_equipment", "SQM_Override"),
                ("sme_equipment", "SQM_Override_By"),
-               ("sme_equipment", "SQM_Override_At")}
+               ("sme_equipment", "SQM_Override_At"),
+               # 2026-08-05 per-recipient address for the weekly Executive
+               # Summary (alembic a71e93b4c2f8). New-stack only — the frozen
+               # legacy portal sends every email to one configured inbox.
+               ("users", "email")}
     extra = model_only - allowed
     assert not extra, f"unexpected model-only columns (update models.py or DB): {extra}"
 
