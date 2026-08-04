@@ -522,6 +522,16 @@ async def main() -> int:
              f"({', '.join(erp_kinds)})" if erp_kinds else
              "SME tables only — the ERP warehouse is untouched")
     print(f"   scope  : {scope}")
+    # State the sheet scope out loud. CNCEC_Inventory.xlsx went from 5 to 14
+    # worksheets on 2026-08-04 and the sync reads exactly four of them; a run
+    # that silently ignores ten tabs should say so rather than leave the
+    # operator to infer it.
+    if "inventory" in data or "ledger" in data:
+        _wb = data.get("inventory") or data.get("ledger")
+        _ignored = bi.ignored_sheets(_wb)
+        print(f"   sheets : reading {', '.join(bi._CONSUMED_SHEETS)}")
+        if _ignored:
+            print(f"            ignoring {len(_ignored)}: {', '.join(_ignored)}")
 
     # Dry-run only: the ledger's soft-FK check cannot see inventory rows that
     # were never written, so hand it the SAPs the inventory plan would insert.
@@ -541,6 +551,12 @@ async def main() -> int:
 
         for kind in kinds:
             print(f"\n▶ {kind}  ({WORKBOOKS[kind]})")
+            # THE APP WINS: capture operator SQM overrides BEFORE a reseed
+            # deletes the rows carrying them, so they can be put back after the
+            # workbook has been re-applied.
+            sqm_snapshot = {}
+            if kind == "sme-equipment":
+                sqm_snapshot = await bi.snapshot_sqm_overrides(session, args.site)
             if args.sme_reseed and kind in RESEED_SQL:
                 await run_reseed(session, kind, args.site, args.commit)
 
@@ -560,6 +576,21 @@ async def main() -> int:
                 pending_saps |= {r["SAP_Code"] for r in plan["inserts"]}
 
             print(f"      {format_summary(bi._summary(plan))}")
+
+            # Surface-Shield routing rides on the ledger plan: the SME log is
+            # derived from the consumption rows that are ABOUT to be inserted,
+            # so `plan_ledger`'s reconcile makes it idempotent for free.
+            routing = None
+            if kind == "ledger":
+                routing = await bi.plan_sme_routing(session, args.site, plan)
+                if routing["log_inserts"] or routing["aliases"]:
+                    print(f"      surface-shield  "
+                          f"+{len(routing['log_inserts'])} SME log row(s)  "
+                          f"({routing['unassigned']} unassigned)  ·  "
+                          f"{len(routing['aliases'])} tank alias/es")
+                for w in routing["warnings"]:
+                    print(f"      ⚠ {w}")
+
             for w in plan.get("warnings", []):
                 print(f"      ⚠ {w}")
             for rej in plan.get("rejects", [])[:10]:
@@ -579,6 +610,9 @@ async def main() -> int:
             if args.commit:
                 if kind == "ledger":
                     totals[kind] = await apply_ledger(session, plan, args.user)
+                    if routing is not None:
+                        await bi.apply_sme_routing(session, routing, args.user)
+                        totals[kind]["sme_logged"] = len(routing["log_inserts"])
                 else:
                     totals[kind] = await apply_master(session, kind, plan,
                                                       args.user, site=args.site)
@@ -586,6 +620,20 @@ async def main() -> int:
                 # soft-FK check against `inventory` — must see these rows, but
                 # the whole sync stays a single rollback-able transaction.
                 await session.flush()
+                if kind == "sme-equipment":
+                    diverged = await bi.restore_sqm_overrides(
+                        session, args.site, sqm_snapshot)
+                    if diverged:
+                        print(f"      ⚠ {len(diverged)} equipment row(s) keep an "
+                              f"operator SQM override (workbook differs):")
+                        for d in diverged[:10]:
+                            print(f"          {d['tag']} / {d['code']}  "
+                                  f"workbook {d['workbook']:g} → "
+                                  f"override {d['override']:g}"
+                                  + (f"  ({d['by']})" if d["by"] else ""))
+                        if len(diverged) > 10:
+                            print(f"          … {len(diverged) - 10} more")
+                    await session.flush()
                 print(f"      ✅ staged {totals[kind]}")
 
         if args.commit:

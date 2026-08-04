@@ -68,6 +68,12 @@ class Consumption(Base):
     Source_Ref = Column(Text)
     Requested_By = Column(Text)
     Approved_By = Column("Approved By", Text)
+    # The workbook's `type` column (alembic b8d41f6a92c3) — which programme a
+    # consumption belongs to: "Surface Shield", "R/L Consumables", "Safety"…
+    # PERSISTED rather than re-derived from inventory.Category at read time,
+    # so recategorising a material later cannot retroactively rewrite what
+    # past consumption "was".
+    Item_Type = Column(Text)
     # Hot-path indexes (alembic e7c3b95a41d2). Stock maths filters this
     # ledger by (SAP_Code, Site_ID) and every report windows it by Date;
     # with primary keys alone both were sequential scans. NON-UNIQUE by
@@ -771,6 +777,33 @@ class WbsMaster(Base):
 # 2. SME sub-module (feature-frozen — strict isolation)
 # ==========================================================================
 
+class SmeTankAlias(Base):
+    """Workbook `Tank No.` → `sme_equipment.Equipment_Tag_No` (alembic
+    b8d41f6a92c3).
+
+    The Consumption Log's Tank No. cannot be matched automatically: `TNK-091`
+    (39 Surface-Shield rows, the largest bucket) suffix-matches BOTH
+    `522-8J10-TNK-091` (TRAIN J) and `522-8k10-TNK-091` (TRAIN K). The sync
+    auto-maps only aliases whose normalised form matches EXACTLY ONE tag and
+    parks the rest as `unresolved` for an operator — see the tank-alias screen.
+    """
+    __tablename__ = "sme_tank_alias"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    alias_raw = Column(Text, nullable=False)    # verbatim, as the workbook typed it
+    alias_norm = Column(Text, nullable=False)   # upper, spaces/hyphens/underscores gone
+    Equipment_Tag_No = Column(Text)
+    status = Column(Text, nullable=False, server_default=text("'unresolved'"))
+    match_count = Column(Integer, nullable=False, server_default=text('0'))
+    row_count = Column(Integer, nullable=False, server_default=text('0'))
+    resolved_by = Column(Text)
+    resolved_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "alias_norm", name="uq_sme_tank_alias_site_norm"),
+    )
+
+
 class SmeConsumptionLog(Base):
     __tablename__ = "sme_consumption_log"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -820,6 +853,13 @@ class SmeEquipment(Base):
     Lining_Type = Column(Text)
     Lining_System = Column(Text)
     Material_Spec = Column(Text)
+    # THE APP WINS (alembic c1a72e5b83d9). An operator SQM correction made in
+    # the UI survives both the ordinary workbook upsert and `--sme-reseed`;
+    # every sync re-applies it and REPORTS the divergence instead of silently
+    # reverting it. NULL = the workbook owns this row.
+    SQM_Override = Column(Float)
+    SQM_Override_By = Column(Text)
+    SQM_Override_At = Column(DateTime)
     Lining_Area_Location = Column(Text)
     __table_args__ = (
         UniqueConstraint("Site_ID", "Equipment_Tag_No", "Lining_System_Code"),

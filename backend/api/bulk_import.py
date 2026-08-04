@@ -38,10 +38,20 @@ full plan and a COMMIT mode that applies it in one transaction + audits:
 
 Roles: SME kinds are the Master-Data exact-lock {hod, admin}; `inventory` and
 `ledger` are admin-only. HOD site pinning follows sme_master._write_site.
+
+⚠️ SHEET SCOPE. `CNCEC_Inventory.xlsx` grew from 5 to 14 sheets on 2026-08-04
+(MASTER EQUIPMENTS, Safety Items, RL CONSUMABLES, RL TOOLS AND TACKLES, BR CC
+PU TOOLS AND TACKLES, ELECTRICAL ITEMS, INSTRUMENTS, CUMI MATERIAL RECEVIED,
+⚙ VBA Setup Guide). Worksheets are selected BY NAME, so those were already
+ignored — but `plan_inventory`'s single-sheet fallback read `worksheets[0]`,
+which is only `Inventory` by luck of tab order. `_CONSUMED_SHEETS` now makes
+the scope explicit and the fallback refuses to guess inside a multi-sheet
+workbook (see `_looks_like_cncec_workbook`).
 """
 from __future__ import annotations
 
 import io
+import re
 from collections import Counter
 from datetime import date, datetime
 from typing import Any, Optional
@@ -150,6 +160,60 @@ def _sheet_rows(data: bytes, want: str | None, header_probe: tuple[str, ...],
     raise HTTPException(422, f"header row not found (need columns {sorted(probe)})")
 
 
+# The ONLY four worksheets this module reads out of CNCEC_Inventory.xlsx.
+# Everything else in the workbook (10 sheets as of 2026-08-04) is reference
+# material the operator keeps beside the data — never a sync input.
+_CONSUMED_SHEETS = ("Inventory", "Receipt Log", "Consumption Log", "Return Log")
+
+
+def _sheet_names(data: bytes) -> list[str]:
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        raise HTTPException(422, "not a readable .xlsx workbook")
+    try:
+        return list(wb.sheetnames)
+    finally:
+        wb.close()
+
+
+def _looks_like_cncec_workbook(names: list[str]) -> bool:
+    """True when the file is the multi-sheet ledger workbook rather than a
+    single-sheet master export — i.e. it carries at least one of the log
+    sheets. Used to decide whether a missing `Inventory` tab is a DIFFERENT
+    kind of file (fall back) or a RENAMED tab in this one (refuse)."""
+    lower = {n.strip().lower() for n in names}
+    return any(s.lower() in lower for s in _CONSUMED_SHEETS[1:])
+
+
+def ignored_sheets(data: bytes) -> list[str]:
+    """Worksheets present in the workbook that the sync deliberately skips.
+    Reported once per run so the scope is visible rather than assumed."""
+    consumed = {s.lower() for s in _CONSUMED_SHEETS}
+    return [n for n in _sheet_names(data) if n.strip().lower() not in consumed]
+
+
+def _is_declined_inventory_col(header: str) -> bool:
+    """Inventory-sheet columns we have LOOKED AT and chosen not to import.
+
+    Distinguished from merely-unmapped columns so the warning text can say
+    which it is:
+
+      `Current Location`  BLANK in 452 of 452 rows on the 2026-08-04 workbook.
+                          The spreadsheet cannot seed locations, so the app
+                          owns them — racks in `storage_locations`, per-unit
+                          whereabouts in `asset_units`.
+      `Audit <date>`      a dated physical-count column the operator adds per
+                          stock take. Stock is ledger-derived; importing a
+                          count as master data would create a second truth
+                          (the workbook already disagrees with the DB on 131
+                          of 452 SAPs).
+    """
+    h = header.strip().lower()
+    return h == "current location" or h.startswith("audit ")
+
+
 def _col(headers: list[str], *names: str) -> Optional[int]:
     lower = [h.lower() for h in headers]
     for n in names:
@@ -163,7 +227,19 @@ async def plan_inventory(session: AsyncSession, data: bytes, site_id: str) -> di
     headers, rows = _sheet_rows(data, "Inventory",
                                 ("sap code", "category", "opening stock"),
                                 required=False)
-    if not headers:  # single-sheet master file fallback
+    if not headers:
+        # Single-sheet master-file fallback — but ONLY for a file that is not
+        # the CNCEC ledger workbook. Inside that workbook a missing `Inventory`
+        # tab means the tab was renamed or reordered, and `worksheets[0]` would
+        # then be `Request` or `Safety Items`; every write is
+        # `ON CONFLICT DO UPDATE`, so the master would be quietly rebuilt from
+        # the wrong sheet. Fail loudly with the sheet list instead.
+        names = _sheet_names(data)
+        if _looks_like_cncec_workbook(names):
+            raise HTTPException(
+                422, "worksheet 'Inventory' not found in what looks like the "
+                     f"CNCEC ledger workbook (has: {names}). Refusing to guess "
+                     "a sheet — rename the tab back to 'Inventory'.")
         headers, rows = _sheet_rows(data, None, ("sap code", "category"))
     colspec = {
         "sl": ("Sl. No.", "Sl_No", "Sl. #"), "sap": ("SAP CODE", "SAP_Code"),
@@ -181,7 +257,16 @@ async def plan_inventory(session: AsyncSession, data: bytes, site_id: str) -> di
     # — but LOUDLY, so a restructured sheet never loses data silently.
     _known = {n.lower() for names in colspec.values() for n in names}
     _known |= {"receipt", "consumption", "return", "current stock"}
-    extra_cols = [h for h in headers if h and h.lower() not in _known]
+    # Two classes of unmapped column, reported DIFFERENTLY on purpose. Both are
+    # still reported — a restructured sheet must never drop data silently — but
+    # a column we have analysed and rejected is not the same finding as one
+    # nobody has looked at, and collapsing them trains the operator to ignore
+    # the warning that matters.
+    extra_cols, declined_cols = [], []
+    for h in headers:
+        if not h or h.lower() in _known:
+            continue
+        (declined_cols if _is_declined_inventory_col(h) else extra_cols).append(h)
 
     existing = {r["SAP_Code"]: dict(r) for r in
                 (await session.execute(select(inventory_t))).mappings().all()}
@@ -195,6 +280,10 @@ async def plan_inventory(session: AsyncSession, data: bytes, site_id: str) -> di
     rejects, warnings = [], []
     if extra_cols:
         warnings.append("ignored unmapped column(s): " + ", ".join(extra_cols))
+    if declined_cols:
+        warnings.append("column(s) deliberately NOT imported: "
+                        + ", ".join(declined_cols)
+                        + " — see bulk_import._is_declined_inventory_col")
     normalised_cats = Counter()
     seen_saps = set()
     for n, row in enumerate(rows, start=1):
@@ -321,10 +410,25 @@ _LEDGER_SHEETS = {
                  "PR_Number": ("PR#",), "Work_Type": ("Work Type",),
                  "Tank_No": ("Tank No.",), "WBS": ("WBS#",),
                  "Approved By": ("Approved By",), "Issued_To": ("Received by",),
-                 "Issued_By": ("Prepared by",), "Remarks": ("Remarks",)},
+                 "Issued_By": ("Prepared by",), "Remarks": ("Remarks",),
+                 # 2026-08-04: the programme a consumption belongs to. All
+                 # 1,110 rows carry it, and it is what routes Surface Shields
+                 # into the SME portal — see `plan_sme_routing`.
+                 "Item_Type": ("type",)},
         # `consumption` has no Pallet_No / paper-number columns — 2026-07-14
         # workbook restructure adds both to the sheet; ignored by design.
-        "ref": "Tank_No", "ignore": ("cons. paper no.", "pallet no."),
+        #
+        # 2026-08-04 additions, both deliberately UNMAPPED:
+        #   `Location`      1 non-null value in 1,110 rows ("At site"). Mapping
+        #                   it would imply a data quality that does not exist;
+        #                   asset location lives in `asset_units` instead.
+        #   `Current Stock` a spreadsheet formula result. `Opening_Stock +
+        #                   Σledger` is already computed server-side, and
+        #                   importing this would create a second, divergent
+        #                   truth (the workbook already disagrees with the DB
+        #                   on 131 of 452 SAPs).
+        "ref": "Tank_No", "ignore": ("cons. paper no.", "pallet no.",
+                                     "location", "current stock"),
     },
     "returns": {
         "sheet": "Return Log", "table": returns_t,
@@ -444,6 +548,267 @@ async def plan_ledger(session: AsyncSession, data: bytes, site_id: str,
                 f"{spec['sheet']}: {section['db_only']} DB row(s) have no workbook "
                 f"counterpart — left untouched (this importer never deletes)")
     return out
+
+
+# ─── Surface-Shield routing → the SME portal (rule 1a safe) ───────────────────
+#
+# WHAT THIS DOES AND, MORE IMPORTANTLY, WHAT IT DOES NOT.
+#
+# Consumption rows tagged `type = 'Surface Shield'` are the SME programme's
+# actual physical draw. They are recorded in `sme_consumption_log` — a
+# REPORTING table read only by the variance comparison (sme.SQL_SME_COMPARISON)
+# and a Man-Hours rollup.
+#
+# ⚠️ **`sme_inventory_seed` IS NEVER WRITTEN HERE.** Rule 1a (SME ⇄ ERP strict
+# decoupling) says every SME quantity comes from that seed and nowhere else, so
+# a warehouse issue must not move a single estimator figure. Logging actual
+# consumption alongside the plan is not the same thing as netting it off the
+# plan, and this module does the first and never the second. The UI shows the
+# logged draw as a SIDE NOTE ("Actual Physical Balance") beside the estimator's
+# numbers — deliberately adjacent, never merged.
+#
+# Suite BA greps `SQL_SME_MATERIALS` + `_CALC_POOL_SQL` for ERP table names and
+# now also for `sme_consumption_log`, so a future join is caught at review.
+
+_SURFACE_SHIELD_TYPE = "surface shield"
+
+# Aliases an operator should never be asked to map to equipment — they are
+# places or activities, not vessels. Pre-marked `ignored` so the resolve screen
+# shows only the real questions.
+_NON_EQUIPMENT_ALIASES = {
+    "TOSITE", "HOUSEKEEPING", "INYARD", "SCAFFOLDING", "OTHERS", "OTHER",
+    "SAMPLEPLATE", "NA", "SITE",
+}
+
+
+def alias_norm(v) -> str:
+    """`Tank No.` → its matching form.
+
+    Upper-cases, drops every separator, then strips leading zeros inside each
+    run of digits. That last step is what collapses the four spellings of one
+    tank — `J091` / `J0091` / `J-0091` / `J 0091` all become `J91` — which is
+    58 of the 103 Surface-Shield rows. Without it they read as four vessels.
+    """
+    s = re.sub(r"[^A-Za-z0-9]", "", str(v or "")).upper()
+    return re.sub(r"0*(\d+)", lambda m: m.group(1), s)
+
+
+def match_alias(norm: str, tag_index: dict[str, set[str]]) -> list[str]:
+    """Equipment tags an alias could mean, best interpretation first.
+
+    EXACT normalised match wins outright. Only when there is none do we try a
+    suffix match, and a suffix match that hits more than one tag is reported as
+    ambiguous rather than resolved — `TNK-091` suffix-matches BOTH
+    `522-8J10-TNK-091` (TRAIN J) and `522-8k10-TNK-091` (TRAIN K), and those
+    are two different vessels on two different trains. Picking one would put 39
+    rows of real consumption against the wrong train and look entirely
+    plausible in every report afterwards.
+    """
+    if not norm or norm in _NON_EQUIPMENT_ALIASES:
+        return []
+    exact = tag_index.get(norm)
+    if exact:
+        return sorted(exact)
+    return sorted({t for k, tags in tag_index.items()
+                   if k.endswith(norm) and k != norm for t in tags})
+
+
+async def plan_sme_routing(session: AsyncSession, site_id: str,
+                           ledger_plan: dict) -> dict:
+    """Plan the Surface-Shield half of a ledger sync.
+
+    Derived from the consumption rows the ledger plan is ABOUT TO INSERT, which
+    is what makes it idempotent for free: `plan_ledger`'s three-tier reconcile
+    already skips rows that exist, so a re-run inserts nothing and therefore
+    logs nothing.
+    """
+    out = {"aliases": [], "log_inserts": [], "warnings": [],
+           "skipped_not_sme": 0, "unassigned": 0}
+    rows = [r for r in (ledger_plan.get("sections", {})
+                        .get("consumption", {}).get("inserts") or [])
+            if str(r.get("Item_Type") or "").strip().lower() == _SURFACE_SHIELD_TYPE]
+    if not rows:
+        return out
+
+    alias_t = _MD.tables["sme_tank_alias"]
+
+    tag_index: dict[str, set[str]] = {}
+    for (tag,) in (await session.execute(
+            select(equipment_t.c["Equipment_Tag_No"]).distinct()
+            .where(equipment_t.c["Site_ID"] == site_id))).all():
+        tag_index.setdefault(alias_norm(tag), set()).add(tag)
+
+    # SAP → Material_Code, then the seed's codes: only a material the estimator
+    # actually models can carry an Expected_Qty.
+    sap_to_mat = {r[0]: r[1] for r in (await session.execute(
+        select(inventory_t.c["SAP_Code"], inventory_t.c["Material_Code"]))).all()
+        if r[1]}
+    seed_codes = {r[0] for r in (await session.execute(
+        select(seed_t.c["Material_Code"]).distinct())).all()}
+
+    existing = {r["alias_norm"]: dict(r) for r in (await session.execute(
+        select(alias_t).where(alias_t.c["Site_ID"] == site_id))).mappings().all()}
+
+    # ── alias registry ──
+    counts = Counter(_s(r.get("Tank_No")) or "" for r in rows)
+    for raw, n in sorted(counts.items()):
+        norm = alias_norm(raw)
+        if not norm:
+            continue
+        cands = match_alias(norm, tag_index)
+        prior = existing.get(norm)
+        if prior and prior.get("status") in ("mapped", "ignored"):
+            continue          # an operator's decision is never overwritten
+        entry = {"Site_ID": site_id, "alias_raw": raw, "alias_norm": norm,
+                 "match_count": len(cands), "row_count": n}
+        if norm in _NON_EQUIPMENT_ALIASES:
+            entry |= {"status": "ignored", "Equipment_Tag_No": None}
+        elif len(cands) == 1:
+            entry |= {"status": "mapped", "Equipment_Tag_No": cands[0]}
+        else:
+            entry |= {"status": "unresolved", "Equipment_Tag_No": None}
+            out["warnings"].append(
+                f"tank alias {raw!r}: {n} row(s) held — "
+                + (f"matches {len(cands)} equipment tags ({', '.join(cands)})"
+                   if cands else "no equipment tag matches")
+                + " — resolve in SME → Tank Aliases")
+        out["aliases"].append(entry)
+
+    resolved = {a["alias_norm"]: a.get("Equipment_Tag_No")
+                for a in out["aliases"] if a["status"] == "mapped"}
+    for norm, prior in existing.items():
+        if prior.get("status") == "mapped" and prior.get("Equipment_Tag_No"):
+            resolved[norm] = prior["Equipment_Tag_No"]
+
+    # ── the log rows ──
+    batch = f"xlsx-{site_id}-{datetime.now():%Y%m%dT%H%M%S}"
+    for r in rows:
+        mat = sap_to_mat.get(r.get("SAP_Code"))
+        if not mat or mat not in seed_codes:
+            # A Surface-Shield consumable outside the estimator's recipe set —
+            # it belongs in the ERP ledger only. Counted, never silently lost.
+            out["skipped_not_sme"] += 1
+            continue
+        tag = resolved.get(alias_norm(r.get("Tank_No"))) or ""
+        if not tag:
+            out["unassigned"] += 1
+        out["log_inserts"].append({
+            "batch_id": batch, "Site_ID": site_id,
+            "entry_date": _day(r.get("Date")), "entered_by": "excel-sync",
+            # '' — not NULL: both columns are NOT NULL on this table, and ''
+            # is the codebase's existing "not scoped yet" sentinel. The
+            # `unassigned` status is what the UI filters on.
+            "Equipment_Tag_No": tag, "Lining_System_Code": "",
+            "Material_Code": mat,
+            # The workbook states a QUANTITY issued, never an area covered, so
+            # SQM_Completed stays 0 until an operator records it on the
+            # assignment screen. Expected_Qty needs a system code, so it stays
+            # 0 too — a variance against a guessed system is worse than none.
+            "SQM_Completed": 0.0, "Expected_Qty": 0.0,
+            "Actual_Qty": float(r.get("Quantity") or 0),
+            "status": "committed" if tag else "unassigned",
+            "notes": f"Tank No. {_s(r.get('Tank_No')) or '—'} · SAP "
+                     f"{r.get('SAP_Code')} · from {r.get('Date')}",
+        })
+    if out["skipped_not_sme"]:
+        out["warnings"].append(
+            f"{out['skipped_not_sme']} Surface-Shield row(s) are not estimator "
+            "materials (no sme_inventory_seed entry) — ERP ledger only")
+    if out["unassigned"]:
+        out["warnings"].append(
+            f"{out['unassigned']} Surface-Shield row(s) logged UNASSIGNED — "
+            "assign equipment + SQM in SME → Actual Consumption")
+    return out
+
+
+async def apply_sme_routing(session: AsyncSession, plan: dict,
+                            username: str) -> None:
+    """Write the alias registry and the SME consumption log.
+
+    Aliases upsert on (Site_ID, alias_norm) and never clobber a row an operator
+    has already decided — `plan_sme_routing` filters those out, and the
+    `DO UPDATE` here only refreshes the counts.
+    """
+    alias_t = _MD.tables["sme_tank_alias"]
+    log_t = _MD.tables["sme_consumption_log"]
+    for a in plan.get("aliases", []):
+        stmt = pg_insert(alias_t).values(**a)
+        await session.execute(stmt.on_conflict_do_update(
+            constraint="uq_sme_tank_alias_site_norm",
+            set_={"alias_raw": stmt.excluded.alias_raw,
+                  "match_count": stmt.excluded.match_count,
+                  "row_count": stmt.excluded.row_count,
+                  "status": stmt.excluded.status,
+                  "Equipment_Tag_No": stmt.excluded["Equipment_Tag_No"]}))
+    for row in plan.get("log_inserts", []):
+        await session.execute(insert(log_t).values(**row))
+    if plan.get("aliases") or plan.get("log_inserts"):
+        await write_audit(
+            session, username, "SME_ROUTING", "sme_consumption_log",
+            f"+{len(plan.get('log_inserts', []))} Surface-Shield log row(s), "
+            f"{len(plan.get('aliases', []))} tank alias/es "
+            f"({plan.get('unassigned', 0)} unassigned)")
+
+
+# ─── THE APP WINS: operator SQM overrides survive every sync ──────────────────
+#
+# `sme_equipment.Surface_Area_SQM` drives DEMAND, so a UI correction that a
+# workbook sync quietly reverted would show up a week later as a wrong buy list
+# with nothing to point at. Ruling 2026-08-04: an override beats the workbook,
+# and the divergence is REPORTED on every run rather than resolved in silence.
+_EQ_KEY = ("Site_ID", "Equipment_Tag_No", "Lining_System_Code")
+
+
+async def snapshot_sqm_overrides(session: AsyncSession, site_id: str) -> dict:
+    """(site, tag, code) → the override row, captured BEFORE a `--sme-reseed`
+    deletes it. `restore_sqm_overrides` puts it back afterwards."""
+    e = equipment_t.c
+    rows = (await session.execute(
+        select(e["Site_ID"], e["Equipment_Tag_No"], e["Lining_System_Code"],
+               e["SQM_Override"], e["SQM_Override_By"], e["SQM_Override_At"])
+        .where(e["Site_ID"] == site_id)
+        .where(e["SQM_Override"].isnot(None)))).mappings().all()
+    return {(r["Site_ID"], r["Equipment_Tag_No"], r["Lining_System_Code"]): dict(r)
+            for r in rows}
+
+
+async def restore_sqm_overrides(session: AsyncSession, site_id: str,
+                                snapshot: dict | None = None) -> list[dict]:
+    """Re-apply overrides on top of whatever the workbook just wrote.
+
+    Returns one entry per row where the workbook and the operator disagree, so
+    the caller can print it. An override that MATCHES the workbook is silently
+    satisfied — there is nothing to warn about.
+    """
+    e = equipment_t.c
+    for key, snap in (snapshot or {}).items():
+        await session.execute(
+            update(equipment_t)
+            .where(e["Site_ID"] == key[0])
+            .where(e["Equipment_Tag_No"] == key[1])
+            .where(e["Lining_System_Code"] == key[2])
+            .values(SQM_Override=snap["SQM_Override"],
+                    SQM_Override_By=snap["SQM_Override_By"],
+                    SQM_Override_At=snap["SQM_Override_At"]))
+
+    rows = (await session.execute(
+        select(e["id"], e["Equipment_Tag_No"], e["Lining_System_Code"],
+               e["Surface_Area_SQM"], e["SQM_Override"], e["SQM_Override_By"])
+        .where(e["Site_ID"] == site_id)
+        .where(e["SQM_Override"].isnot(None)))).mappings().all()
+    diverged = []
+    for r in rows:
+        if float(r["Surface_Area_SQM"] or 0) == float(r["SQM_Override"]):
+            continue
+        diverged.append({"tag": r["Equipment_Tag_No"],
+                         "code": r["Lining_System_Code"],
+                         "workbook": float(r["Surface_Area_SQM"] or 0),
+                         "override": float(r["SQM_Override"]),
+                         "by": r["SQM_Override_By"]})
+        await session.execute(update(equipment_t)
+                              .where(e["id"] == r["id"])
+                              .values(Surface_Area_SQM=r["SQM_Override"]))
+    return diverged
 
 
 async def apply_ledger(session: AsyncSession, plan: dict, username: str) -> None:

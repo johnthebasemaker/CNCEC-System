@@ -239,6 +239,67 @@ async def update_equipment(eq_id: int, body: EquipmentPatch,
     return {"updated": True}
 
 
+class SqmOverride(BaseModel):
+    # None CLEARS the override and hands the row back to the workbook.
+    Surface_Area_SQM: Optional[float] = Field(default=None, gt=0)
+
+
+@router.patch("/equipment/{eq_id}/sqm",
+              summary="Set (or clear) the operator SQM override — THE APP WINS")
+async def set_equipment_sqm(eq_id: int, body: SqmOverride,
+                            user: dict = Depends(require_roles("hod")),
+                            session: AsyncSession = Depends(get_session)):
+    """Correct a tank's surface area from the UI and have it STICK.
+
+    `Surface_Area_SQM` drives demand, so a plain edit that the next workbook
+    sync reverted would surface a week later as a wrong buy list with nothing
+    to point at. Writing `SQM_Override` alongside it is what survives both the
+    ordinary upsert and `--sme-reseed` (bulk_import.restore_sqm_overrides), and
+    what lets the sync REPORT the divergence instead of resolving it silently.
+
+    Passing `Surface_Area_SQM: null` clears the override; the row then follows
+    `Equipment.xlsx` again from the next sync.
+    """
+    row = (await session.execute(
+        select(equipment_t.c["Site_ID"], equipment_t.c["Equipment_Tag_No"],
+               equipment_t.c["Lining_System_Code"],
+               equipment_t.c["Surface_Area_SQM"])
+        .where(equipment_t.c["id"] == eq_id))).first()
+    scope = site_scope(user)
+    if row is None or (scope is not None and row[0] != scope):
+        raise HTTPException(404, "equipment row not found")
+    site, tag, code, was = row
+
+    if body.Surface_Area_SQM is None:
+        await session.execute(update(equipment_t)
+                              .where(equipment_t.c["id"] == eq_id)
+                              .values(SQM_Override=None, SQM_Override_By=None,
+                                      SQM_Override_At=None))
+        await write_audit(session, user["username"], "SME_CLEAR_SQM_OVERRIDE",
+                          "sme_equipment",
+                          f"{site}/{tag}/{code} id={eq_id} — workbook resumes ownership")
+        await session.commit()
+        return {"updated": True, "override": None,
+                "Surface_Area_SQM": float(was or 0)}
+
+    sqm = float(body.Surface_Area_SQM)
+    await session.execute(update(equipment_t)
+                          .where(equipment_t.c["id"] == eq_id)
+                          .values(Surface_Area_SQM=sqm, SQM_Override=sqm,
+                                  SQM_Override_By=user["username"],
+                                  SQM_Override_At=func.now()))
+    # Keep the progress row's Original_SQM in step — Done_SQM is preserved by
+    # `_upsert_progress`'s None-means-keep contract.
+    await _upsert_progress(session, site, tag, code,
+                           original_sqm=sqm, done_sqm=None)
+    await write_audit(session, user["username"], "SME_SET_SQM_OVERRIDE",
+                      "sme_equipment",
+                      f"{site}/{tag}/{code} id={eq_id} {float(was or 0):g} → {sqm:g}")
+    await session.commit()
+    return {"updated": True, "override": sqm, "Surface_Area_SQM": sqm,
+            "previous": float(was or 0)}
+
+
 @router.delete("/equipment/{eq_id}",
                summary="Delete an equipment row (cascades its SQM-progress entry)")
 async def delete_equipment(eq_id: int,

@@ -5653,12 +5653,19 @@ async def test_bulk_import():
         r = await ac.post("/import/inventory", headers=H(admin_t), files=up(inv_wb3),
                           params={"site_id": "CNCEC"})
         j = r.json() if r.status_code == 200 else {}
+        # `Current Location` / `Audit …` moved to the DECLINED class on
+        # 2026-08-04 (analysed and rejected — see
+        # bulk_import._is_declined_inventory_col) rather than the merely
+        # unmapped one. The property this check exists to protect is unchanged:
+        # a column the importer does not write is still named back to the
+        # operator, so a restructured sheet can never drop data silently.
+        _warn_text = " | ".join(j.get("warnings", []))
         check("aj: reordered inventory headers map by NAME (row unchanged) + "
-              "unknown columns warned",
+              "every unwritten column is reported back by name",
               r.status_code == 200 and j.get("summary", {}).get("unchanged") == 1
               and j.get("summary", {}).get("updates") == 0
-              and any("Current Location" in w and "Audit 13/06/26" in w
-                      for w in j.get("warnings", [])),
+              and "Current Location" in _warn_text
+              and "Audit 13/06/26" in _warn_text,
               f"{r.status_code} {j.get('summary')} warn={j.get('warnings')}")
         led_wb3 = _xlsx({
             "Receipt Log": [
@@ -9090,6 +9097,17 @@ async def test_sme_strict_decoupling():
         check("ba: neither SME quantity query so much as NAMES an ERP table "
               "(receipts / consumption / returns / inventory)",
               not _erp, f"found {sorted(set(_erp))} in:\n{_sql}")
+        # 2026-08-04: the Surface-Shield routing logs ACTUAL physical draw into
+        # `sme_consumption_log`. That table is a REPORTING surface and must
+        # never become an input to an SME quantity — netting observed
+        # consumption off `available_qty` is precisely the recoupling rule 1a
+        # forbids, and it would move every readiness figure on every SME tab.
+        # The word-boundary guard above cannot catch it (the name embeds
+        # `consumption` but `_` is a word character), so it gets its own check.
+        check("ba: neither SME quantity query reads sme_consumption_log — "
+              "observed draw sits BESIDE the plan, never inside it",
+              "sme_consumption_log" not in _sql,
+              f"sme_consumption_log appears in:\n{_sql}")
     finally:
         await _exec('DELETE FROM receipts WHERE "DN_No" = \'SVCBA-DN\'')
         await _exec('DELETE FROM consumption WHERE "SAP_Code" LIKE \'SVCBA%\'')
@@ -9896,6 +9914,319 @@ async def test_manual_retrieval_and_login_throttle():
           "a unique index reached a ledger table")
     _ = _bere
 
+async def test_surface_shield_routing():
+    """Suite BF — Surface-Shield routing, tank aliases, and the app-wins SQM.
+
+    The 2026-08-04 workbook adds a `type` column that says which programme a
+    consumption belongs to, and the operator asked for the Surface-Shield rows
+    to appear in the SME portal. Three properties have to hold at once, and two
+    of them are the kind that fail quietly:
+
+    1. **RULE 1a SURVIVES.** Logging actual physical draw is not the same thing
+       as netting it off the plan. `sme_inventory_seed` is the sole source of
+       every SME quantity, so the routing must write `sme_consumption_log` and
+       NOTHING else — the estimator's availability may not move by a single
+       unit. Proven here the same way suite BA proves it for receipts: read the
+       SME payload, run the routing, read it again, require byte-identity.
+
+    2. **AMBIGUITY IS NEVER RESOLVED BY GUESSING.** `TNK-091` suffix-matches
+       both `522-8J10-TNK-091` (TRAIN J) and `522-8k10-TNK-091` (TRAIN K) — 39
+       of the 103 Surface-Shield rows ride on that choice, and either answer
+       renders plausibly. The matcher must return BOTH and the sync must hold
+       the rows unassigned. Meanwhile the four spellings of one real tank
+       (`J091` / `J0091` / `J-0091` / `J 0091`) must collapse to one.
+
+    3. **THE APP WINS ON SQM.** An operator's surface-area correction drives
+       demand, so a workbook sync that silently reverted it would surface days
+       later as a wrong buy list. The override survives, and the divergence is
+       reported rather than resolved.
+    """
+    from sqlalchemy import text as _sqt
+
+    from . import bulk_import as _bf
+
+    async def _scalar(sql: str, **params):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), params)).scalar()
+
+    async def _exec(sql: str, **params):
+        async with SessionLocal() as s:
+            await s.execute(_sqt(sql), params)
+            await s.commit()
+
+    # ── 1. alias normalisation + matching (pure, no DB) ──────────────────────
+    check("bf: the four spellings of one tank collapse to a single alias — "
+          "J091 / J0091 / J-0091 / 'J 0091' are 58 of 103 rows and must not "
+          "read as four vessels",
+          len({_bf.alias_norm(v) for v in
+               ("J091", "J0091", "J-0091", "J 0091")}) == 1,
+          str({v: _bf.alias_norm(v) for v in ("J091", "J0091", "J-0091", "J 0091")}))
+    check("bf: leading-zero collapse does not merge genuinely different tanks",
+          _bf.alias_norm("J091") != _bf.alias_norm("J092"),
+          f"{_bf.alias_norm('J091')} vs {_bf.alias_norm('J092')}")
+
+    _idx = {}
+    for _t in ("522-8J10-TNK-091", "522-8k10-TNK-091", "J091", "J022"):
+        _idx.setdefault(_bf.alias_norm(_t), set()).add(_t)
+
+    _amb = _bf.match_alias(_bf.alias_norm("TNK-091"), _idx)
+    check("bf: TNK-091 is reported AMBIGUOUS (TRAIN J and TRAIN K), never "
+          "silently resolved to one of them",
+          len(_amb) == 2 and "522-8J10-TNK-091" in _amb and "522-8k10-TNK-091" in _amb,
+          str(_amb))
+    check("bf: an EXACT normalised match wins outright and never falls through "
+          "to the suffix rule",
+          _bf.match_alias(_bf.alias_norm("J-0091"), _idx) == ["J091"],
+          str(_bf.match_alias(_bf.alias_norm("J-0091"), _idx)))
+    check("bf: a place is not a vessel — 'To site' / 'House Keeping' match "
+          "nothing rather than fuzzing onto a tag",
+          _bf.match_alias(_bf.alias_norm("To site"), _idx) == []
+          and _bf.match_alias(_bf.alias_norm("House Keeping"), _idx) == [],
+          "non-equipment alias matched an equipment tag")
+
+    # ── 2. sheet scope ───────────────────────────────────────────────────────
+    check("bf: the sync declares exactly four consumed worksheets",
+          _bf._CONSUMED_SHEETS == ("Inventory", "Receipt Log",
+                                   "Consumption Log", "Return Log"),
+          str(_bf._CONSUMED_SHEETS))
+    _multi = _xlsx({"Inventory": [["SAP CODE", "Category"], ["BF-1", "Safety"]],
+                    "Receipt Log": [["SAP CODE", "Qty."], ["BF-1", 1]],
+                    "Safety Items": [["Sl."], [1]],
+                    "INSTRUMENTS": [["S.No."], [1]]})
+    check("bf: extra worksheets are reported as ignored, by name",
+          sorted(_bf.ignored_sheets(_multi)) == ["INSTRUMENTS", "Safety Items"],
+          str(_bf.ignored_sheets(_multi)))
+    _renamed = _xlsx({"Inventory 2026": [["SAP CODE", "Category"], ["BF-1", "Safety"]],
+                      "Consumption Log": [["SAP CODE", "Qty."], ["BF-1", 1]]})
+    try:
+        async with SessionLocal() as s:
+            await _bf.plan_inventory(s, _renamed, "CNCEC")
+        _guarded = False
+    except Exception as e:  # HTTPException(422)
+        _guarded = (getattr(e, "status_code", None) == 422
+                    and "Inventory" in str(getattr(e, "detail", e)))
+    check("bf: a RENAMED Inventory tab inside the ledger workbook is a 422, "
+          "not a silent fallback to worksheets[0] — every write is ON CONFLICT "
+          "DO UPDATE, so guessing the sheet would rebuild the master from the "
+          "wrong one",
+          _guarded, "plan_inventory accepted a workbook with no Inventory tab")
+
+    # ── 3. routing: rule 1a, end to end ──────────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        _ip = {"X-Real-IP": "203.0.113.91"}
+
+        async def token(u, p):
+            r = await ac.post("/auth/login", json={"username": u, "password": p},
+                              headers=_ip)
+            return r.json().get("access_token")
+
+        def H(t):
+            return {"Authorization": f"Bearer {t}"}
+
+        hod_t = await token("hod", "hod2026")
+        admin_t = await token("admin", "admin2026")
+
+        before = (await ac.get("/sme/materials", headers=H(hod_t),
+                               params={"site_id": "CNCEC"})).json()
+
+        # A Surface-Shield draw against a REAL estimator material, carrying an
+        # ambiguous tank so it lands unassigned.
+        _mat = await _scalar('SELECT "Material_Code" FROM sme_inventory_seed '
+                             'ORDER BY "Material_Code" LIMIT 1')
+        await _exec(
+            'INSERT INTO sme_consumption_log (batch_id, "Site_ID", entry_date,'
+            ' entered_by, "Equipment_Tag_No", "Lining_System_Code",'
+            ' "Material_Code", "SQM_Completed", "Expected_Qty", "Actual_Qty",'
+            ' status, notes) VALUES (:b, :s, :d, :u, :t, :c, :m, 0, 0, :q,'
+            " 'unassigned', :n)",
+            b="SVCBF", s="CNCEC", d="2026-08-04", u="svcbf", t="", c="",
+            m=_mat, q=999.0, n="Tank No. SVCBF-TNK · SAP SVCBF · from svcbf")
+
+        after = (await ac.get("/sme/materials", headers=H(hod_t),
+                              params={"site_id": "CNCEC"})).json()
+        check("bf: RULE 1a — logging actual Surface-Shield consumption moves "
+              "NO estimator number; the SME payload is byte-identical before "
+              "and after (availability is not netted down)",
+              before == after,
+              "the SME materials payload changed after a consumption log write")
+
+        # A source-level guard beside the behavioural one. The routing DOES
+        # read the seed — it has to know which materials the estimator models
+        # — so "never names it" would be false. The property that matters is
+        # that it never WRITES it, and that is what is asserted, so a future
+        # `update(seed_t)` slipped into this path fails at review.
+        import inspect as _bfi
+        _routing_src = (_bfi.getsource(_bf.plan_sme_routing)
+                        + _bfi.getsource(_bf.apply_sme_routing))
+        _writes = [w for w in ("insert(seed_t", "update(seed_t", "delete(seed_t",
+                               "pg_insert(seed_t")
+                   if w in _routing_src]
+        check("bf: the Surface-Shield routing READS the seed (to know which "
+              "materials the estimator models) but never WRITES it — a future "
+              "update there would net observed draw off the plan, which is "
+              "exactly what rule 1a forbids",
+              not _writes, f"found {_writes} in plan/apply_sme_routing")
+
+        # The side note reads the log and says so.
+        r = await ac.get("/sme/actuals/summary", headers=H(hod_t),
+                         params={"site_id": "CNCEC"})
+        _sum = r.json()
+        check("bf: /sme/actuals/summary reports the observed draw",
+              r.status_code == 200
+              and any(abs(float(i["Actual_Drawn_Qty"]) - 999.0) < 1e-9
+                      for i in _sum["items"]),
+              f"{r.status_code} {_sum}")
+        check("bf: the side note says out loud that it is NOT netted off the "
+              "plan — the label is the safeguard against someone later "
+              "'fixing' the estimator to subtract it",
+              "rule 1a" in _sum.get("note", "").lower(), _sum.get("note"))
+
+        # Unassigned rows are visible as a queue.
+        r = await ac.get("/sme/actuals/consumption", headers=H(hod_t),
+                         params={"site_id": "CNCEC", "status": "unassigned"})
+        check("bf: unassigned draw is queued for a human, not guessed at",
+              r.status_code == 200 and r.json()["unassigned"] >= 1,
+              f"{r.status_code} {r.json()}")
+
+        # ── 4. assignment computes the variance ─────────────────────────────
+        _eq = (await ac.get("/sme/master/equipment", headers=H(hod_t),
+                            params={"site_id": "CNCEC"})).json()["items"]
+        _target = next((e for e in _eq if e["Site_ID"] == "CNCEC"), None)
+        _log_id = await _scalar("SELECT id FROM sme_consumption_log "
+                                "WHERE batch_id='SVCBF'")
+        if _target:
+            r = await ac.patch(f"/sme/actuals/consumption/{_log_id}",
+                               headers=H(hod_t),
+                               json={"Equipment_Tag_No": _target["Equipment_Tag_No"],
+                                     "Lining_System_Code": _target["Lining_System_Code"],
+                                     "SQM_Completed": 10})
+            check("bf: assigning a draw to equipment + SQM commits it and "
+                  "computes Expected_Qty from the recipe (the first moment "
+                  "both halves are known)",
+                  r.status_code == 200 and r.json()["Actual_Qty"] == 999.0,
+                  f"{r.status_code} {r.text[:200]}")
+            _st = await _scalar("SELECT status FROM sme_consumption_log WHERE id=:i",
+                                i=_log_id)
+            check("bf: an assigned row leaves the unassigned queue",
+                  _st == "committed", f"status={_st}")
+
+            r = await ac.patch(f"/sme/actuals/consumption/{_log_id}",
+                               headers=H(hod_t),
+                               json={"Equipment_Tag_No": _target["Equipment_Tag_No"],
+                                     "Lining_System_Code": "SVCBF-NOPE",
+                                     "SQM_Completed": 1})
+            check("bf: assigning to a (tag, system code) pair that does not "
+                  "exist is a 422, not a row pointing at nothing",
+                  r.status_code == 422, f"got {r.status_code}")
+
+        after2 = (await ac.get("/sme/materials", headers=H(hod_t),
+                               params={"site_id": "CNCEC"})).json()
+        check("bf: RULE 1a holds through ASSIGNMENT too — attaching a draw to "
+              "equipment still moves no estimator number",
+              before == after2, "the SME payload changed after assignment")
+
+        # ── 5. tank alias resolve API ───────────────────────────────────────
+        await _exec(
+            'INSERT INTO sme_tank_alias ("Site_ID", alias_raw, alias_norm,'
+            ' status, match_count, row_count) VALUES (:s, :r, :n,'
+            " 'unresolved', 2, 39)"
+            ' ON CONFLICT ("Site_ID", alias_norm) DO NOTHING',
+            s="CNCEC", r="SVCBF-TNK", n=_bf.alias_norm("SVCBF-TNK"))
+        _aid = await _scalar('SELECT id FROM sme_tank_alias WHERE alias_raw=:r',
+                             r="SVCBF-TNK")
+        r = await ac.get("/sme/actuals/aliases", headers=H(hod_t),
+                         params={"site_id": "CNCEC"})
+        check("bf: the alias queue lists unresolved aliases first",
+              r.status_code == 200 and r.json()["unresolved"] >= 1
+              and r.json()["items"][0]["status"] == "unresolved",
+              f"{r.status_code} {r.json().get('unresolved')}")
+
+        r = await ac.get(f"/sme/actuals/aliases/{_aid}/candidates",
+                         headers=H(hod_t))
+        check("bf: the resolve screen shows the matcher's own candidates AND "
+              "the full tag list, so an operator decides with the same "
+              "evidence the sync had",
+              r.status_code == 200 and "candidates" in r.json()
+              and len(r.json()["all_tags"]) > 0, f"{r.status_code}")
+
+        r = await ac.patch(f"/sme/actuals/aliases/{_aid}", headers=H(hod_t),
+                           json={"Equipment_Tag_No": "SVCBF-NOT-A-TAG",
+                                 "status": "mapped"})
+        check("bf: an alias cannot be mapped to equipment that does not exist",
+              r.status_code == 422, f"got {r.status_code}")
+        r = await ac.patch(f"/sme/actuals/aliases/{_aid}", headers=H(hod_t),
+                           json={"status": "mapped"})
+        check("bf: mapping without a tag is refused (a 'mapped' alias that "
+              "points nowhere is worse than an unresolved one)",
+              r.status_code == 422, f"got {r.status_code}")
+        if _target:
+            r = await ac.patch(f"/sme/actuals/aliases/{_aid}", headers=H(hod_t),
+                               json={"Equipment_Tag_No": _target["Equipment_Tag_No"],
+                                     "status": "mapped"})
+            check("bf: resolving an alias records the decision",
+                  r.status_code == 200, f"{r.status_code} {r.text[:150]}")
+            _st = await _scalar("SELECT status FROM sme_tank_alias WHERE id=:i", i=_aid)
+            check("bf: a resolved alias leaves the queue", _st == "mapped", str(_st))
+
+        # ── 6. THE APP WINS on SQM ──────────────────────────────────────────
+        if _target:
+            _eid = _target["id"]
+            _was = float(_target["Surface_Area_SQM"] or 0)
+            _new = round(_was + 7.5, 3)
+            r = await ac.patch(f"/sme/master/equipment/{_eid}/sqm",
+                               headers=H(hod_t), json={"Surface_Area_SQM": _new})
+            check("bf: an operator SQM correction is accepted and recorded as "
+                  "an OVERRIDE, not just a value",
+                  r.status_code == 200 and r.json()["override"] == _new,
+                  f"{r.status_code} {r.text[:150]}")
+
+            # Simulate the workbook fighting back, then a sync.
+            await _exec('UPDATE sme_equipment SET "Surface_Area_SQM" = :v '
+                        "WHERE id = :i", v=_was, i=_eid)
+            async with SessionLocal() as s:
+                diverged = await _bf.restore_sqm_overrides(s, "CNCEC")
+                await s.commit()
+            _now = await _scalar('SELECT "Surface_Area_SQM" FROM sme_equipment '
+                                 "WHERE id = :i", i=_eid)
+            check("bf: THE APP WINS — a workbook sync that would revert an "
+                  "operator's SQM is overridden back, because SQM drives "
+                  "demand and a silent revert surfaces days later as a wrong "
+                  "buy list",
+                  abs(float(_now) - _new) < 1e-9, f"{_now} != {_new}")
+            check("bf: …and the divergence is REPORTED, never resolved in "
+                  "silence — 'preserve edits' without a report degenerates "
+                  "into 'never sync again'",
+                  any(d["tag"] == _target["Equipment_Tag_No"]
+                      and abs(d["override"] - _new) < 1e-9 for d in diverged),
+                  str(diverged[:3]))
+
+            r = await ac.patch(f"/sme/master/equipment/{_eid}/sqm",
+                               headers=H(hod_t), json={"Surface_Area_SQM": None})
+            _ov = await _scalar('SELECT "SQM_Override" FROM sme_equipment '
+                                "WHERE id = :i", i=_eid)
+            check("bf: clearing the override hands the row back to the "
+                  "workbook (an override you cannot undo is a trap)",
+                  r.status_code == 200 and _ov is None, f"{r.status_code} {_ov}")
+            await _exec('UPDATE sme_equipment SET "Surface_Area_SQM" = :v '
+                        "WHERE id = :i", v=_was, i=_eid)
+
+        # ── 7. role lock ────────────────────────────────────────────────────
+        sk_t = await token("worker", "floor2026")
+        for path in ("/sme/actuals/aliases", "/sme/actuals/consumption",
+                     "/sme/actuals/summary"):
+            r = await ac.get(path, headers=H(sk_t))
+            check(f"bf: store keeper → 403 on {path} (same exact-lock as "
+                  f"/sme/master)", r.status_code == 403, f"got {r.status_code}")
+        r = await ac.get("/sme/actuals/summary", headers=H(admin_t),
+                         params={"site_id": "CNCEC"})
+        check("bf: admin reaches the actuals API", r.status_code == 200,
+              f"got {r.status_code}")
+
+    await _exec("DELETE FROM sme_consumption_log WHERE batch_id = 'SVCBF'")
+    await _exec("DELETE FROM sme_tank_alias WHERE alias_raw LIKE 'SVCBF%'")
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -10018,6 +10349,8 @@ async def main() -> int:
     await test_auditor_read_only()
     print("\n BE. Manual retrieval + fence-aware parsing + per-account login throttle")
     await test_manual_retrieval_and_login_throttle()
+    print("\n BF. Surface-Shield routing + tank aliases + the app-wins SQM override")
+    await test_surface_shield_routing()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

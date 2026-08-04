@@ -1439,7 +1439,18 @@ def check_models_schema_parity() -> None:
                ("bug_reports", "title"), ("bug_reports", "severity"),
                ("bug_reports", "rollback_notes"),
                ("bug_reports", "safety_constraints"),
-               ("bug_reports", "triage_notes")}
+               ("bug_reports", "triage_notes"),
+               # 2026-08-04 Surface-Shield routing (alembic b8d41f6a92c3):
+               # the workbook's `type` column, persisted so a later
+               # recategorisation cannot retroactively rewrite what past
+               # consumption "was". New-stack only.
+               ("consumption", "Item_Type"),
+               # 2026-08-04 THE APP WINS (alembic c1a72e5b83d9): an operator
+               # SQM correction that survives the Excel sync. New-stack only —
+               # the frozen legacy portal has no such editor.
+               ("sme_equipment", "SQM_Override"),
+               ("sme_equipment", "SQM_Override_By"),
+               ("sme_equipment", "SQM_Override_At")}
     extra = model_only - allowed
     assert not extra, f"unexpected model-only columns (update models.py or DB): {extra}"
 
