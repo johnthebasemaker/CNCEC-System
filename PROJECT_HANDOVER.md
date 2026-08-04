@@ -1,10 +1,14 @@
-# PROJECT HANDOVER — read this first
+# PROJECT HANDOVER — the authority on what is locked
 
-> **Updated 2026-08-05.** This is the fresh-session entry point: what is locked,
-> where we are, and what happens next. Read this file, then
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the system brain), then
-> [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state + gotchas) and
-> [`REPO_MAP.md`](REPO_MAP.md) (the segregation contract).
+> **Updated 2026-08-04.** This file holds the LOCKED architecture rules, the
+> baselines, and the developer utilities. It is the authority; when anything
+> else disagrees with it, it wins.
+>
+> **Starting a fresh session? Read [`SESSION_HANDOVER.md`](SESSION_HANDOVER.md)
+> first** — it is the five-minute orientation, and it points back here for the
+> detail. Then [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the system
+> brain), [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state +
+> gotchas) and [`REPO_MAP.md`](REPO_MAP.md) (the segregation contract).
 >
 > **Next phase: Feature Fine-Tuning and UI Polish.**
 > **Hetzner production deployment is PAUSED by decision, not by blocker.**
@@ -15,6 +19,21 @@
 
 These are decisions that were each made *because the alternative was tried and
 broke something*. Do not revisit them without an explicit instruction.
+
+**The five that break things silently if you get them wrong.** Read these before
+touching SME maths, any export, or anything role-gated — each one was a live bug
+whose symptom appeared far from its cause:
+
+| # | Rule | The one line that matters |
+|---|---|---|
+| **1c** | **SME SUBSET RULE** | `Ordered_Qty` is the TOTAL procured; `Available_Qty` is the part that ARRIVED. **Tier 2 = `max(ordered − available, 0)`**, never `ordered`. Adding them double-counts stock already on the shelf — it understated the buy list by 22,951 units. |
+| **1b** | **SME TIER SEGREGATION** | Physical stock and pipeline stock are **never merged in the UI or in any KPI**. `Allocated_Qty` is a conservation field, NOT a coverage numerator. Six presentation layers got this wrong and overstated buildable area by 21.5 %. |
+| **1a** | **SME ⇄ ERP DECOUPLING** | Every SME number comes from `sme_inventory_seed` and nowhere else. A receipt, issue or return must not move a single SME figure. |
+| **1** | **COMPONENT IDENTITY** | The key is `(Material_Code, SAP_Code)`. Pooling by code alone summed four unlike drums and *inverted* the shortfall. |
+| **7** | **RBAC — AUDITOR** | View-only is enforced by **method-level ASGI middleware** (`backend/api/readonly.py`), never per-endpoint. Every `POST/PUT/PATCH/DELETE` is refused unless it is on the small documented allowlist — so a route added next year is closed by default instead of failing open. |
+
+Rules 2-6 and 8-11 below are equally binding; those five are simply the ones a
+newcomer is most likely to undo by accident.
 
 ### 1. SME allocation is keyed on `(Material_Code, SAP_Code)` — never pool by code alone
 
@@ -91,6 +110,36 @@ absent from the payload.
 Decoupled is not frozen — editing `sme_inventory_seed` (what the Excel sync writes)
 still moves every SME number at once. Suite BA pins that too.
 
+### 1b. STRICT TIER SEGREGATION — a purchase order is never readiness
+
+*Locked 2026-08-03.*
+
+**TIER 1** (`Alloc_Available` / `pool_init`) is the ONLY input to readiness:
+`Status`, `Completion_Pct`, `SQM_Achievable_Now`, `Coverage_Now_Pct`,
+`Fulfillment_Pct`, `SQM_Deficit`, and every "can we build it today" answer.
+
+**TIER 2** (`Alloc_Pending` / `pool_pending_init`) feeds ONLY the forward-looking
+twins — `Completion_With_Ordered_Pct`, `SQM_Achievable_With_Ordered`,
+`Coverage_With_Ordered_Pct`, `Fulfillment_With_Ordered_Pct` — and the NET buy
+list (`Shortfall_Qty`), so stock already ordered is not ordered twice.
+
+**`Allocated_Qty` (= tier 1 + tier 2) is a CONSERVATION field.** It exists so
+`Demand = Allocated + Shortfall_Qty` holds. It is NOT a readiness quantity, and
+`Allocated_Qty / Demand_Qty` is NOT a coverage percentage anything may colour
+green. Every tier-2 number a consumer could want is published as its own named
+field precisely so nobody re-derives one from it.
+
+**Why it is not negotiable:** the engine always had this right; six presentation
+layers above it did not. `PHENACIN ACP POWDER` (0 available, 56,350 on order)
+made **18 of 85** (tag, code) units render a green "100% Fully Ready" pill they
+had not earned, listed them under the *Fully Ready* filter, and overstated
+buildable area by **9,118 m² — 21.5 % of the remaining programme**. Suite BB
+(18 checks) and `tests/e2e/specs/sme-tiers.spec.ts` (4 tests) pin it end to end.
+Full account: [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md).
+
+Every SME tab shows the two tiers in separate columns, under a shared `TierNote`
+legend: **green = available now · amber = on order · red = still to buy**.
+
 ### 1c. THE SUBSET RULE — Available is part OF Ordered, not extra to it
 
 *Locked 2026-08-05 (operator correction on the shape of the source data).*
@@ -127,36 +176,6 @@ always meant — and the UI labels them **"When delivered"**. UI wording: second
 tier quantities read **"Pending Delivery"**, second-tier coverage reads **"When
 delivered"**.
 Full account: [`docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`](docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md).
-
-### 1b. STRICT TIER SEGREGATION — a purchase order is never readiness
-
-*Locked 2026-08-03.*
-
-**TIER 1** (`Alloc_Available` / `pool_init`) is the ONLY input to readiness:
-`Status`, `Completion_Pct`, `SQM_Achievable_Now`, `Coverage_Now_Pct`,
-`Fulfillment_Pct`, `SQM_Deficit`, and every "can we build it today" answer.
-
-**TIER 2** (`Alloc_Pending` / `pool_pending_init`) feeds ONLY the forward-looking
-twins — `Completion_With_Ordered_Pct`, `SQM_Achievable_With_Ordered`,
-`Coverage_With_Ordered_Pct`, `Fulfillment_With_Ordered_Pct` — and the NET buy
-list (`Shortfall_Qty`), so stock already ordered is not ordered twice.
-
-**`Allocated_Qty` (= tier 1 + tier 2) is a CONSERVATION field.** It exists so
-`Demand = Allocated + Shortfall_Qty` holds. It is NOT a readiness quantity, and
-`Allocated_Qty / Demand_Qty` is NOT a coverage percentage anything may colour
-green. Every tier-2 number a consumer could want is published as its own named
-field precisely so nobody re-derives one from it.
-
-**Why it is not negotiable:** the engine always had this right; six presentation
-layers above it did not. `PHENACIN ACP POWDER` (0 available, 56,350 on order)
-made **18 of 85** (tag, code) units render a green "100% Fully Ready" pill they
-had not earned, listed them under the *Fully Ready* filter, and overstated
-buildable area by **9,118 m² — 21.5 % of the remaining programme**. Suite BB
-(18 checks) and `tests/e2e/specs/sme-tiers.spec.ts` (4 tests) pin it end to end.
-Full account: [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md).
-
-Every SME tab shows the two tiers in separate columns, under a shared `TierNote`
-legend: **green = available now · amber = on order · red = still to buy**.
 
 ### 2. Two-tier allocation field contract
 
@@ -256,6 +275,33 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
 (truncation was eating the single character that distinguishes
 `CUMICRETE PU MF 300 (1MM) C` from its three siblings).
 
+### 6. Standing rules that predate this session (still binding)
+
+* **Both SME engines change together.** `backend/api/sme_engine.py` and
+  `frontend/src/sme/engine.ts` are line-for-line mirrors proven equal against
+  `sme_parity_fixture.json` → `sme_parity_golden.json`. Any numeric change =
+  change BOTH + regenerate the golden in ONE commit.
+* **Half-up rounding** `floor(x·10ⁿ + 0.5)` is shared verbatim across both
+  languages. Never "fix" it to half-even.
+* **STRICT BOTTLENECK** (2026-07-07): a unit's coverage is its least-available
+  material's rate, never the Σalloc/Σdemand average. **Extended 2026-08-04 to
+  every SCOPE-wide KPI**: a scope's coverage is `Σ buildable m² ÷ Σ remaining m²`
+  (`session.ts scopeBottleneckCoverage`), never a quantity average across unlike
+  materials. The Session and Location reports used the quantity average and read
+  **57.7 %** on the live model where the true figure is **7.8 %** — TRAIN K read
+  54.6 % against a real 0.4 %. Both now call one shared helper. Gated by
+  `npm run test:ui-math`.
+* **Unmodelled is never 100%** (ruling Q5): a system code with no recipe rows
+  scores 0 SQM achievable, never a silent full-ready.
+* **FEFO + over-issue stay allow-and-log** — never add a hard block.
+* **Never delete `system_audit_log` rows** — audit assertions are delta-counted.
+* **`gi_database.db` is untouchable** — never staged, never written by new-stack
+  tooling. Verify its sha256 is unchanged after any data work.
+* `sme_inventory_seed` never mingles with the ERP `inventory` table (SME Canon
+  Rule 2) — since 2026-08-02 this is the *narrow* case of rule 1a.
+
+---
+
 ### 7. Exports render through ONE engine each; Auditor is view-only
 
 *Added 2026-08-03 (`feat/exports-roles-and-sysadmin`).*
@@ -287,6 +333,8 @@ the variant SAP under the code, and names that **wrap rather than ellipse**
   only.
 
 ### 8. Local operations: `bin/power.sh` and `bin/backup_db.sh`
+
+*The findings; the commands are under **Developer utilities** below.*
 
 * `./bin/power.sh sleep|wake` stops/starts Postgres + the root cloudflared
   daemon for battery. Measured: those two cost **0.0 %** and **0.1 %** CPU idle.
@@ -348,66 +396,83 @@ planner uses (the pkey already scans backwards), the ledger `TRIM()` expression
 indexes lose to `(SAP_Code, Site_ID)`, and `inventory` is 442 rows. Mirror any
 new index in BOTH `models.py` and a migration. Ledger indexes are never UNIQUE.
 
-### 6. Standing rules that predate this session (still binding)
+## Developer utilities — the three scripts in `bin/`
 
-* **Both SME engines change together.** `backend/api/sme_engine.py` and
-  `frontend/src/sme/engine.ts` are line-for-line mirrors proven equal against
-  `sme_parity_fixture.json` → `sme_parity_golden.json`. Any numeric change =
-  change BOTH + regenerate the golden in ONE commit.
-* **Half-up rounding** `floor(x·10ⁿ + 0.5)` is shared verbatim across both
-  languages. Never "fix" it to half-even.
-* **STRICT BOTTLENECK** (2026-07-07): a unit's coverage is its least-available
-  material's rate, never the Σalloc/Σdemand average. **Extended 2026-08-04 to
-  every SCOPE-wide KPI**: a scope's coverage is `Σ buildable m² ÷ Σ remaining m²`
-  (`session.ts scopeBottleneckCoverage`), never a quantity average across unlike
-  materials. The Session and Location reports used the quantity average and read
-  **57.7 %** on the live model where the true figure is **7.8 %** — TRAIN K read
-  54.6 % against a real 0.4 %. Both now call one shared helper. Gated by
-  `npm run test:ui-math`.
-* **Unmodelled is never 100%** (ruling Q5): a system code with no recipe rows
-  scores 0 SQM achievable, never a silent full-ready.
-* **FEFO + over-issue stay allow-and-log** — never add a hard block.
-* **Never delete `system_audit_log` rows** — audit assertions are delta-counted.
-* **`gi_database.db` is untouchable** — never staged, never written by new-stack
-  tooling. Verify its sha256 is unchanged after any data work.
-* `sme_inventory_seed` never mingles with the ERP `inventory` table (SME Canon
-  Rule 2) — since 2026-08-02 this is the *narrow* case of rule 1a.
+Three separate jobs, deliberately not one script. `dev.sh` owns the DEV stack it
+starts; `power.sh` owns the SHARED always-on services it does not; `backup_db.sh`
+owns your data. Full detail:
+[`docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md`](docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md).
 
----
-
-## Running it locally — one command
-
-`bin/dev.sh` raises and levels the whole stack (Postgres + FastAPI + Vite +,
-where it applies, the Cloudflare connector). Three environments, one at a time —
-they all want `:5173`:
+### `./bin/dev.sh` — raise or level the dev stack
 
 | Command | Serves | Connector |
 |---|---|---|
 | `./bin/dev.sh localhost` | `http://localhost:5173` (HMR live) | none |
 | `./bin/dev.sh tunnel` | `https://local.giinventory.com` | starts `gi-hub` from `deploy/cloudflared/config.yml` |
 | `./bin/dev.sh gi` | `https://gi.giinventory.com` (legacy mirror) | none — the **root LaunchDaemon** already serves it |
+| `./bin/dev.sh stop` | kills API + Vite + **our** connector (`--db` also stops Postgres) | |
+| `./bin/dev.sh status` / `logs [api\|web\|tunnel]` | | |
 
-```bash
-./bin/dev.sh stop
-```
+Only ONE mode runs at a time — all three want `:5173`, and Vite's `strictPort`
+makes a second one fail loudly rather than drift to `:5174`.
 
-`stop` kills the API, Vite and *our* connector — process-group signals plus a
-repo-scoped sweep, so uvicorn's reloader child and Vite's node child go too —
-and then reports whether `:8000` and `:5173` are actually free. Also
-`./bin/dev.sh status` and `./bin/dev.sh logs [api|web|tunnel]`.
+`stop` signals the process GROUP (so uvicorn's reloader child and Vite's node
+child go too), then sweeps anything orphaned by a crashed shell, then reports
+whether `:8000` and `:5173` are actually free.
 
-Two things it will not do, on purpose: it leaves **Postgres** running (a shared
-brew service the legacy app and every suite use — `stop --db` if you really mean
-it), and every sweep is scoped to your uid so the **root cloudflared daemon**
-that serves `gi.giinventory.com` can never be caught in it. Starting a second
-connector is how Error 1033 came back before; `tunnel` mode refuses to start
-when one of yours is already up. Details: [`deploy/cloudflared/README.md`](deploy/cloudflared/README.md).
+Two things it will not do, on purpose:
+
+* it leaves **Postgres** running — a shared brew service the legacy app and
+  every suite use (`stop --db` if you really mean it);
+* every sweep is scoped to your uid, so the **root cloudflared daemon** that
+  serves `gi.giinventory.com` can never be caught in it. Starting a second
+  connector is how Error 1033 came back before, and `tunnel` mode refuses to
+  start when one of yours is already up.
+  Details: [`deploy/cloudflared/README.md`](deploy/cloudflared/README.md).
+
+### `./bin/power.sh` — battery: sleep and wake the always-on services
+
+| Command | What it does |
+|---|---|
+| `./bin/power.sh sleep` | Stops Postgres + unloads the root cloudflared LaunchDaemon (add `--force` to override a running dev stack) |
+| `./bin/power.sh wake` | Starts both, then probes the real hostname — a registered connector is not a routed one |
+| `./bin/power.sh status` | What is up, and what it costs |
+| `./bin/power.sh reap` | Unloads the **dead legacy LaunchAgents** (`restore` undoes it) |
+
+⚠️ While asleep, `https://gi.giinventory.com` is **offline** — that daemon is the
+only thing serving it.
+
+> **Measured, so nobody re-litigates it:** idle Postgres is **0.0 %** CPU and
+> idle cloudflared **0.1 %**. The real drain is `com.gi.whatsapp-worker` and two
+> siblings from the pre-cutover stack — their programs were deleted on
+> 2026-07-13 but `KeepAlive{Crashed:true}` respawns them **~2,880 times a day**.
+> **`./bin/power.sh reap` is still outstanding.**
+
+### `./bin/backup_db.sh` — local snapshots
+
+| Command | What it does |
+|---|---|
+| `./bin/backup_db.sh` | `pg_dump` of `gihub` (gzipped) + a read-only copy of `gi_database.db`, into gitignored `.backups/` |
+| `./bin/backup_db.sh --list` | What is there |
+| `./bin/backup_db.sh --install` | Daily at 02:00 as `com.gi.hub-backup` (**installed and verified**) |
+| `./bin/backup_db.sh --restore FILE` | **Prints** the restore command — restoring drops every table, so it is never run for you |
+
+The SQLite copy compares the source sha256 before and after, so the script can
+prove it did not write to the frozen DB. A dump is verified (end marker + at
+least one `CREATE TABLE`) before it is promoted from `.part`. Retention keeps 14
+of each kind.
+
+> Its predecessor `com.gi.backup` pointed at a script the cutover moved and had
+> failed silently for **25 consecutive nights** — there were no local backups at
+> all. `--install` retires it.
 
 ---
 
 ## PRESENT — current state and baselines
 
-All green locally at commit `fae0b3f` (main), verified 2026-07-30.
+All green locally on **`main`**, verified **2026-08-04** at commit `2877888`
+(PR #25 merged). These are the LOCKED baselines — a change that lowers any
+of them is a regression, not a new normal.
 
 | Gate | Result | Command |
 |---|---|---|
@@ -428,10 +493,12 @@ user-level instances that caused the recurring **Error 1033** are gone, and the
 dormant user LaunchAgent `com.gi.cloudflared` is unloaded. Diagnosis and the exact
 recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/README.md).
 
-### What shipped most recently (this session, merged to main)
+### What shipped most recently (merged to main)
 
 | PR | Commit | What |
 |---|---|---|
+| #25 | `2877888` | **Overnight polish** — the assistant was reading the WRONG MANUAL (fenced `# 1.` shell comments parsed as chapters 1-4 and overwrote Introduction/Roles/Login/Store-Keeper for every role); BM25 retrieval replaced prompt-stuffing (**admin 178 KB → 4 KB**); idle sign-out; per-ACCOUNT login throttle; 7 benchmarked indexes (alembic `e7c3b95a41d2`); ⌘K material search; manual §20 Auditor + §21 feature update. Suite **BE** (40) + 4 E2E |
+| #24 | `8284c37` | **Exports, roles and sysadmin** — overflow-proof PDFs (measured **4.1 mm** of column overlap and 28 destroyed characters); the premium branded xlsx layout applied to EVERY export (**header moved to row 6**); the view-only **Auditor** role (126 of 143 mutating routes blocked); `bin/power.sh` + `bin/backup_db.sh`. Suite **BD** (36) |
 | — | `fix/sme-ordered-subset-rule` | **The subset rule** (rule 1c) — `Ordered_Qty` is the TOTAL procured and `Available_Qty` a subset of it, so tier 2 is `max(ordered − available, 0)`; the additive reading understated the buy list by 22,951 units and hid a 9,685-unit shortage on GI-8005763. Suite **BC** (16) + `test:ui-math` §E (7) |
 | — | `fix/sme-final-math-alignment` | **Final math alignment** — scope-wide coverage → area-weighted bottleneck (57.7% → 7.8% on live data); Smart Calculator → `(Material_Code, SAP_Code)`; new `npm run test:ui-math` gate (20 checks) for the previously untested presentation layer |
 | — | `fix/sme-strict-tier-segregation` | **SME tier segregation** (rule 1b) — readiness is TIER 1 everywhere; `session.ts codeStats`, Total Overview, Location Report, Execution Plan, Dashboard, exec summary + PDF, Smart Calculator, location export all split; `insights.ts` Material_Key lookup bug fixed; suite **BB** (18) + 4 E2E |
