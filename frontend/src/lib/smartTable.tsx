@@ -246,10 +246,12 @@ function enhance<T>(col: AnyCol<T>, rows: readonly T[]): AnyCol<T> {
   if (path === undefined || path === null) return col
 
   const out: ColumnType<T> = { ...c }
+  let icons = 0
   if (c.sorter === undefined) {
     out.sorter = (a: T, b: T) => compareValues(pick(a, path), pick(b, path))
     out.sortDirections = c.sortDirections ?? ['ascend', 'descend']
     out.showSorterTooltip = c.showSorterTooltip ?? false
+    icons += SORT_ICON_PX
   }
   if (c.filters === undefined && c.filterDropdown === undefined) {
     const opts = cachedFilterOptions(rows, path, c.render)
@@ -261,9 +263,65 @@ function enhance<T>(col: AnyCol<T>, rows: readonly T[]): AnyCol<T> {
         const v = pick(record, path)
         return !isBlank(v) && asKey(v) === String(value)
       }
+      icons += FILTER_ICON_PX
     }
   }
+  if (icons) fitHeader(out, icons)
   return out
+}
+
+/* ── header fit ──────────────────────────────────────────────────────────────
+ *
+ * The affordances this module adds are drawn INSIDE the `<th>`, beside the
+ * title, and they are what was breaking SME headers. Measured on the Total
+ * Overview master table (18 columns) before this fix:
+ *
+ *   10 of 18 header cells wrapped onto 2 lines and one onto 3, forcing an
+ *   83px header row above 40px body rows. `Code` — four characters — wrapped
+ *   THREE ways at its declared 70px, because a sorter (22px) and a filter
+ *   (22px) left roughly 20px for the text.
+ *
+ * A four-letter word cannot wrap on its own, so this was never a column-width
+ * problem in the call sites; it was this file spending the caller's width
+ * without telling it. Two changes, both here rather than in 45 call sites:
+ *
+ *   1. the title is kept on ONE line (`white-space: nowrap`), so a narrow
+ *      column can never break a word mid-way;
+ *   2. a column that DECLARES a numeric width has it raised, if needed, to fit
+ *      that one line plus the icons we just added.
+ *
+ * Only ever raised, never lowered, and only for columns that already declare a
+ * numeric width — an auto-width column is the call site's own decision and is
+ * left alone. `SmartCalculator`'s hand-rolled `noWrapHeader` predates this and
+ * is now redundant, but harmless: it sets the same property.
+ *
+ * ⚠️ This governs the HEADER only. Rule 5 requires material NAMES in body
+ * cells to keep wrapping — truncation there ate the single character that
+ * distinguishes `CUMICRETE PU MF 300 (1MM) C` from its three siblings — and
+ * nothing here touches a body cell.
+ */
+const SORT_ICON_PX = 22
+const FILTER_ICON_PX = 22
+/** antd small-table header padding (8px each side) plus a 4px breathing gap. */
+const HEADER_PADDING_PX = 20
+/** Average advance of the 13px UI font. Deliberately a slight over-estimate:
+ *  a column a few px wider than needed is invisible, one a few px short wraps. */
+const CHAR_PX = 7
+
+function fitHeader<T>(col: ColumnType<T>, iconsPx: number): void {
+  const prev = col.onHeaderCell
+  col.onHeaderCell = (c, i) => {
+    const base = (prev?.(c, i) ?? {}) as Record<string, unknown>
+    return {
+      ...base,
+      style: { whiteSpace: 'nowrap', ...(base.style as object ?? {}) },
+    }
+  }
+  if (typeof col.width !== 'number') return
+  const title = typeof col.title === 'string' ? col.title : ''
+  if (!title) return
+  const needed = Math.ceil(title.length * CHAR_PX) + iconsPx + HEADER_PADDING_PX
+  if (needed > col.width) col.width = needed
 }
 
 /**

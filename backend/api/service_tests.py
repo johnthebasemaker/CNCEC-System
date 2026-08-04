@@ -6379,8 +6379,25 @@ async def test_sme_sk_upgrades():
               and l2.get("required_qty") == 16
               and l3.get("required_qty") == 4
               and sysb.get("totals", {}).get("shortfall_lines") == 1
-              and "2.5 KG/SQM × 40 SQM = 100 KG" in l1.get("explanation", ""),
+              and "100 KG for 40 SQM" in l1.get("explanation", ""),
               f"{r.status_code} l1={l1} l2={l2} l3={l3}")
+        # 2026-08-04 RULING: the per-m² recipe rate is an INPUT to the
+        # calculation, not a result, and it does not belong in an
+        # operator-facing document. The explanation used to open with
+        # "2.5 KG/SQM × 40 SQM = 100 KG" — the formula written out — and that
+        # string landed in every calculator export. It now states the outcome.
+        # The rate still DRIVES required_qty (100 = 2.5 × 40, asserted above)
+        # and still crosses the wire for the browser engine; it is simply not
+        # narrated back.
+        check("an-recipe: the 1-SQM rate is NOT spelled out in the explanation "
+              "— reports state what to draw, not the formula behind it",
+              all("/SQM" not in x.get("explanation", "") for x in lines),
+              f"explanations={[x.get('explanation') for x in lines]}")
+        check("an-recipe: …while the quantity the rate produced is still "
+              "stated in full, so nothing an operator needs was removed",
+              all(f"{x['required_qty']:g} {x['uom']}" in x.get("explanation", "")
+                  for x in lines),
+              f"explanations={[x.get('explanation') for x in lines]}")
         check("an-component: the two drums of SVCN-M2 keep their OWN stock — "
               "Comp-A has 0 on its shelf and is the full 16 short; it can no "
               "longer be covered out of Comp-B's 10",

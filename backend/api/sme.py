@@ -1440,7 +1440,14 @@ async def smart_calculator(code: Optional[str] = None,
                  if available is not None else None)
         net_short = (sme_engine.round_n(max(required - procured, 0.0), 4)
                      if procured is not None else None)
-        expl = f"{per:g} {uom or 'unit'}/SQM × {target:g} SQM = {required:g} {uom}".strip()
+        # 2026-08-04: the explanation used to LEAD with the recipe:
+        #   "0.35 KG/SQM × 1000 SQM = 350 KG"
+        # which is the per-square-metre rate written out in full, in a string
+        # that lands in every calculator export. The rate is an input to the
+        # calculation, not a result — reports state what to draw, not the
+        # formula behind it. It now states the outcome and the area it covers.
+        # (`per` is still what computes `required`; it is simply not narrated.)
+        expl = f"{required:g} {uom} for {target:g} SQM".strip()
         if packages:
             expl += f" → {packages} × {pkg:g} {uom} pack(s)"
         if available is not None:

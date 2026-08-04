@@ -9,6 +9,7 @@
 import { useMemo, useState } from 'react'
 import { Alert, App, Button, Card, Col, Collapse, Row, Select, Skeleton, Space } from 'antd'
 import { Table } from '../lib/smartTable'
+import MultiSelectAll from './MultiSelectAll'
 import { FileExcelOutlined, FilePdfOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { postDownloadDocument, useSmeSnapshot } from '../api/hooks'
@@ -214,18 +215,18 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
       <TierNote style={{ marginBottom: 12 }} />
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
         <Col xs={24} sm={12} lg={6}>
-          <Select mode="multiple" allowClear placeholder="All locations" style={{ width: '100%' }}
-            maxTagCount="responsive" value={locs} onChange={setLocs}
+          <MultiSelectAll placeholder="All locations" style={{ width: '100%' }}
+            value={locs} onChange={setLocs}
             options={locPool.map((l) => ({ value: l, label: l }))} />
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Select mode="multiple" allowClear placeholder="All types" style={{ width: '100%' }}
-            maxTagCount="responsive" value={types} onChange={setTypes}
+          <MultiSelectAll placeholder="All types" style={{ width: '100%' }}
+            value={types} onChange={setTypes}
             options={typePool.map((t) => ({ value: t, label: t }))} />
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Select mode="multiple" allowClear placeholder="All system codes" style={{ width: '100%' }}
-            maxTagCount="responsive" value={codes} onChange={setCodes}
+          <MultiSelectAll placeholder="All system codes" style={{ width: '100%' }}
+            value={codes} onChange={setCodes}
             options={codePool.map((c) => ({ value: c, label: `Code ${c}` }))} />
         </Col>
         <Col xs={24} sm={12} lg={6}>

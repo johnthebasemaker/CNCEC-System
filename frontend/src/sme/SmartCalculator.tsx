@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
-import { Alert, App, Button, Card, Collapse, Descriptions, InputNumber, Radio, Select, Space, Tag, Typography } from 'antd'
+import { Alert, App, Button, Card, Collapse, Descriptions, InputNumber, Radio, Space, Tag, Typography } from 'antd'
 import { Table } from '../lib/smartTable'
+import MultiSelectAll from './MultiSelectAll'
 import type { ColumnsType } from 'antd/es/table'
 import { CalculatorOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
@@ -181,8 +182,11 @@ export default function SmartCalculator({ siteId, stickyTop }:
       onHeaderCell: noWrapHeader, render: (v, r) => v || r.material_name || '—' },
     { title: 'Material', dataIndex: 'material_name', ellipsis: true,
       onHeaderCell: noWrapHeader },
-    { title: 'Per SQM', dataIndex: 'for_1_sqm', width: 100, align: 'right',
-      onHeaderCell: noWrapHeader, render: (v: number, r) => `${fmt(v)} ${r.uom}` },
+    // 2026-08-04: the `Per SQM` column (`for_1_sqm`) was REMOVED from this
+    // grid. The per-square-metre rate is an INPUT to the calculation, not a
+    // result — reports state what to draw, not the formula behind it. It is
+    // still delivered on the wire (the browser engine computes demand from
+    // it), and it still drives `required_qty` here; it is simply not shown.
     { title: 'Required', dataIndex: 'required_qty', width: 120, align: 'right',
       onHeaderCell: noWrapHeader,
       render: (v: number, r) => <b>{fmt(v)} {r.uom}</b> },
@@ -208,8 +212,8 @@ export default function SmartCalculator({ siteId, stickyTop }:
       </Typography.Paragraph>
       <Card size="small" style={{ marginBottom: 16, maxWidth: 760 }}>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Select mode="multiple" showSearch style={{ width: '100%' }}
-            placeholder="Lining system(s)" maxTagCount="responsive"
+          <MultiSelectAll showSearch style={{ width: '100%' }}
+            placeholder="Lining system(s)"
             loading={systems.isFetching} value={selCodes} onChange={setSelCodes}
             optionFilterProp="label"
             options={(systems.data?.systems ?? []).map((s) => ({

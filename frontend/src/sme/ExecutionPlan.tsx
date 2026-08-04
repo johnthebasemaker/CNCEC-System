@@ -13,6 +13,7 @@
 import { useMemo, useState } from 'react'
 import { Alert, App, Button, Card, Col, Collapse, Empty, Radio, Row, Select, Skeleton, Space } from 'antd'
 import { Table } from '../lib/smartTable'
+import MultiSelectAll from './MultiSelectAll'
 import { FileExcelOutlined, FilePdfOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { postDownloadDocument, useSmeProductionLog, useSmeSnapshot } from '../api/hooks'
@@ -529,14 +530,14 @@ function ConsumptionComparison({ model, siteId }: { model: SmeModel; siteId?: st
   return (
     <div>
       <Space wrap style={{ marginBottom: 10 }}>
-        <Select mode="multiple" allowClear placeholder="All locations" style={{ minWidth: 170 }}
-          value={locs} onChange={setLocs} maxTagCount="responsive"
+        <MultiSelectAll placeholder="All locations" style={{ minWidth: 170 }}
+          value={locs} onChange={setLocs}
           options={[...new Set(agg.map((r) => r.Location))].sort().map((l) => ({ value: l, label: l }))} />
-        <Select mode="multiple" allowClear placeholder="All equipment" style={{ minWidth: 190 }}
-          value={tags} onChange={setTags} maxTagCount="responsive"
+        <MultiSelectAll placeholder="All equipment" style={{ minWidth: 190 }}
+          value={tags} onChange={setTags}
           options={tagPool.map((t) => ({ value: t, label: t }))} />
-        <Select mode="multiple" allowClear placeholder="All codes" style={{ minWidth: 140 }}
-          value={codes} onChange={setCodes} maxTagCount="responsive"
+        <MultiSelectAll placeholder="All codes" style={{ minWidth: 140 }}
+          value={codes} onChange={setCodes}
           options={codePool.map((c) => ({ value: c, label: `Code ${c}` }))} />
         <Button size="small" icon={<FileExcelOutlined />}
           onClick={() => exportComparison('xlsx')}>Excel</Button>
