@@ -64,6 +64,7 @@ from .requests import router as requests_router  # noqa: E402
 from .sme import router as sme_router  # noqa: E402
 from .sme_master import router as sme_master_router  # noqa: E402
 from .sme_actuals import router as sme_actuals_router  # noqa: E402
+from .locations import router as locations_router  # noqa: E402
 from .bulk_import import router as bulk_import_router  # noqa: E402
 from .stock import router as stock_router  # noqa: E402
 from .warehouse import router as warehouse_router  # noqa: E402
@@ -245,6 +246,11 @@ app.include_router(sme_router)
 
 # SME Phase S6 (cutover day) — Master Data CRUD, exact-lock {hod, admin}.
 app.include_router(sme_master_router)
+
+# Warehouse rack locator — where a material physically lives. Reads are open
+# to every authenticated user (a store keeper is level 0 and is exactly who
+# needs this); writes are require_level(1) and self-guarded in the module.
+app.include_router(locations_router)
 
 # SME actual consumption + tank aliases (2026-08-04 Surface-Shield routing).
 # Same {hod, admin} exact-lock. Reads/writes sme_consumption_log only — it

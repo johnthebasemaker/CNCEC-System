@@ -63,6 +63,10 @@ export default function CommandPalette() {
   const [q, setQ] = useState('')
   const [active, setActive] = useState(0)
   const [materials, setMaterials] = useState<MaterialHit[]>([])
+  /** SAP → the rack to walk to. The locator's whole payoff is here: a store
+   *  keeper types a material and is told the shelf, without leaving the
+   *  palette or opening a second page. */
+  const [racks, setRacks] = useState<Record<string, string>>({})
   const [searching, setSearching] = useState(false)
   const inputRef = useRef<import('antd').InputRef>(null)
 
@@ -79,18 +83,41 @@ export default function CommandPalette() {
     const term = q.trim()
     if (!open || term.length < MIN_QUERY) {
       setMaterials([])
+      setRacks({})
       setSearching(false)
       return
     }
     const ctl = new AbortController()
     setSearching(true)
     const t = window.setTimeout(() => {
-      api
-        .get('/stock/by-site', {
-          params: { q: term, limit: MAX_MATERIALS },
-          signal: ctl.signal,
+      // Two requests, one debounce, one abort signal. `/stock/by-site` is the
+      // authority on WHICH materials this caller may see (it applies site
+      // scoping server-side); `/locations/lookup` only says where they sit, so
+      // it can never widen the result set — a rack with no matching stock row
+      // simply has nothing to attach to.
+      Promise.all([
+        api.get('/stock/by-site', {
+          params: { q: term, limit: MAX_MATERIALS }, signal: ctl.signal,
+        }),
+        api.get('/locations/lookup', {
+          params: { q: term, limit: MAX_MATERIALS }, signal: ctl.signal,
+        }).catch(() => null),   // the locator is a bonus, never a blocker
+      ])
+        .then(([stock, loc]) => {
+          setMaterials((stock.data?.items ?? []) as MaterialHit[])
+          const m: Record<string, string> = {}
+          for (const it of (loc?.data?.items ?? []) as {
+            SAP_Code: string; primary_label?: string | null
+            primary_location?: string | null
+          }[]) {
+            if (it.primary_location) {
+              m[String(it.SAP_Code)] = it.primary_label
+                ? `${it.primary_location} · ${it.primary_label}`
+                : it.primary_location
+            }
+          }
+          setRacks(m)
         })
-        .then((r) => setMaterials((r.data?.items ?? []) as MaterialHit[]))
         .catch(() => { /* aborted, offline, or a role with no site — show pages only */ })
         .finally(() => setSearching(false))
     }, DEBOUNCE_MS)
@@ -211,6 +238,15 @@ export default function CommandPalette() {
                     <b style={{ fontFamily: 'JetBrains Mono, monospace' }}>{m.SAP_Code}</b>
                     {m.Equipment_Description ? ` · ${m.Equipment_Description}` : ''}
                   </span>
+                  {/* The rack, when we know it. Shown BEFORE the quantity
+                      because "where do I go" is the question being asked —
+                      the store keeper already knows they want the material. */}
+                  {racks[m.SAP_Code] && (
+                    <Tag color="blue" style={{ marginInlineEnd: 0, flexShrink: 0,
+                      fontFamily: 'JetBrains Mono, monospace' }}>
+                      📍 {racks[m.SAP_Code]}
+                    </Tag>
+                  )}
                   <Tag style={{ marginInlineEnd: 0, flexShrink: 0 }}>
                     {Number(m.Current_Stock ?? 0).toLocaleString()} {m.UOM ?? ''}
                   </Tag>

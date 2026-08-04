@@ -1214,6 +1214,57 @@ class Vendors(Base):
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
+class StorageLocations(Base):
+    """A physical place in the warehouse (alembic d5b83c17e604).
+
+    `code` is the QR payload printed on the shelf label — scanning a RACK
+    answers "what is supposed to be here", which is what makes a stock count
+    fast. Zone / rack / row / bin are kept as separate fields so the locator
+    can group and sort by them; `code` is what a human reads out.
+    """
+    __tablename__ = "storage_locations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    code = Column(Text, nullable=False)
+    zone = Column(Text)
+    rack_no = Column(Text)
+    row_no = Column(Text)
+    bin_no = Column(Text)
+    description = Column(Text)
+    status = Column(Text, nullable=False, server_default=text("'active'"))
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "code", name="uq_storage_locations_site_code"),
+        Index("ix_storage_locations_site", "Site_ID", "status"),
+    )
+
+
+class MaterialLocations(Base):
+    """Which SAP lives in which rack (alembic d5b83c17e604).
+
+    MANY-TO-MANY on purpose: a material legitimately sits in more than one
+    place, and `is_primary` marks the one to walk to first. Deliberately not a
+    column on `inventory`, which is one row per SAP and already carries a
+    UNIQUE on Material_Code — the wrong grain for a material in three racks.
+    """
+    __tablename__ = "material_locations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    SAP_Code = Column(Text, nullable=False)
+    location_id = Column(Integer, nullable=False)
+    is_primary = Column(Boolean, nullable=False, server_default=text('true'))
+    note = Column(Text)
+    updated_by = Column(Text)
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "SAP_Code", "location_id",
+                         name="uq_material_locations_site_sap_loc"),
+        # The store keeper's lookup — the whole point of the feature.
+        Index("ix_material_locations_sap", "SAP_Code", "Site_ID"),
+    )
+
+
 class Warehouses(Base):
     __tablename__ = "warehouses"
     id = Column(Integer, primary_key=True, autoincrement=True)

@@ -10268,6 +10268,199 @@ async def test_surface_shield_routing():
     await _exec("DELETE FROM sme_tank_alias WHERE alias_raw LIKE 'SVCBF%'")
 
 
+async def test_rack_locator():
+    """Suite BG — the warehouse rack locator.
+
+    "Which rack is this in?" had no answer anywhere in the system. The workbook
+    grew a `Current Location` column but it is BLANK in 452 of 452 rows, so the
+    app owns this data and these are the rules it has to keep:
+
+    · A material may sit in MORE THAN ONE rack, and exactly one of them is the
+      one to walk to first. Promoting a rack must demote the others, or "where
+      do I go" starts returning two answers.
+    · A material we stock but have not located must come back as `located:
+      false`, NOT be omitted. Silence reads as "we don't stock it", which sends
+      someone to buy a thing that is already on a shelf.
+    · Deleting a rack takes its assignments with it. An assignment pointing at
+      a rack that no longer exists renders as a blank shelf — worse than no
+      answer, because it looks like one.
+    · Scanning a RACK answers the reverse question from the same index.
+
+    Plus the performance claim, measured rather than asserted (rule 11): the
+    lookup must use `ix_material_locations_sap`, not a sequential scan.
+    """
+    from sqlalchemy import text as _sqt
+
+    async def _scalar(sql: str, **params):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), params)).scalar()
+
+    async def _exec(sql: str, **params):
+        async with SessionLocal() as s:
+            await s.execute(_sqt(sql), params)
+            await s.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        _ip = {"X-Real-IP": "203.0.113.93"}
+
+        async def token(u, p):
+            r = await ac.post("/auth/login", json={"username": u, "password": p},
+                              headers=_ip)
+            return r.json().get("access_token")
+
+        def H(t):
+            return {"Authorization": f"Bearer {t}"}
+
+        admin_t = await token("admin", "admin2026")
+        sk_t = await token("worker", "floor2026")
+
+        await _exec("DELETE FROM material_locations WHERE \"SAP_Code\" LIKE 'SVCBG%'")
+        await _exec("DELETE FROM storage_locations WHERE code LIKE 'SVCBG%'")
+        await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBG%\'')
+        await _exec('INSERT INTO inventory ("SAP_Code", "Material_Code", '
+                    '"Equipment_Description", "UOM", "Category", "Site_ID") '
+                    "VALUES ('SVCBG-1', 'GI-SVCBG-1', 'SVCBG Test Hammer', "
+                    "'EA', 'EQUIPMENTS/TOOLS', 'CNCEC')")
+
+        # ── racks ────────────────────────────────────────────────────────────
+        r = await ac.post("/locations", headers=H(admin_t),
+                          json={"code": "SVCBG-A-03-2", "zone": "A",
+                                "rack_no": "03", "row_no": "2",
+                                "site_id": "CNCEC"})
+        check("bg: a rack can be created", r.status_code == 201, f"{r.status_code} {r.text[:150]}")
+        rack1 = r.json()["id"]
+        r = await ac.post("/locations", headers=H(admin_t),
+                          json={"code": "SVCBG-A-03-2", "site_id": "CNCEC"})
+        check("bg: the same rack code twice at one site is a 409, not a "
+              "duplicate shelf", r.status_code == 409, f"got {r.status_code}")
+        r = await ac.post("/locations", headers=H(admin_t),
+                          json={"code": "SVCBG-B-01-1", "zone": "B",
+                                "rack_no": "01", "row_no": "1", "site_id": "CNCEC"})
+        rack2 = r.json()["id"]
+
+        r = await ac.get("/locations", headers=H(sk_t))
+        check("bg: a STORE KEEPER can read the rack list — level 0 is the "
+              "person who has to walk to the shelf",
+              r.status_code == 200, f"got {r.status_code}")
+        _mine = [x for x in r.json()["items"] if str(x["code"]).startswith("SVCBG")]
+        check("bg: a rack reports a human-readable place built from its parts",
+              any(x["label"] == "Zone A · Rack 03 · Row 2" for x in _mine),
+              str([x.get("label") for x in _mine]))
+
+        r = await ac.post("/locations", headers=H(sk_t),
+                          json={"code": "SVCBG-NOPE", "site_id": "CNCEC"})
+        check("bg: …but a store keeper cannot CREATE one — deciding where "
+              "stock lives is a supervisory act",
+              r.status_code == 403, f"got {r.status_code}")
+
+        # ── the lookup ───────────────────────────────────────────────────────
+        r = await ac.get("/locations/lookup", headers=H(sk_t),
+                         params={"q": "SVCBG"})
+        j = r.json()
+        check("bg: a material we stock but have NOT located comes back with "
+              "located=false — omitting it would read as 'we don't stock it' "
+              "and send someone to buy what is already on a shelf",
+              r.status_code == 200 and len(j["items"]) == 1
+              and j["items"][0]["located"] is False
+              and j["items"][0]["primary_location"] is None,
+              f"{r.status_code} {j}")
+
+        r = await ac.put("/locations/material", headers=H(admin_t),
+                         json={"SAP_Code": "SVCBG-1", "location_id": rack1,
+                               "is_primary": True, "site_id": "CNCEC"})
+        check("bg: a material can be put in a rack", r.status_code == 200,
+              f"{r.status_code} {r.text[:150]}")
+        r = await ac.put("/locations/material", headers=H(admin_t),
+                         json={"SAP_Code": "SVCBG-1", "location_id": rack1,
+                               "is_primary": True, "site_id": "CNCEC"})
+        check("bg: putting it in the SAME rack twice is idempotent, not a "
+              "second row", r.status_code == 200,
+              f"{r.status_code} {r.text[:150]}")
+        n = await _scalar("SELECT COUNT(*) FROM material_locations "
+                          "WHERE \"SAP_Code\" = 'SVCBG-1'")
+        check("bg: …and there is exactly one assignment for it", n == 1, f"got {n}")
+
+        r = await ac.get("/locations/lookup", headers=H(sk_t),
+                         params={"sap": "SVCBG-1"})
+        it = r.json()["items"][0]
+        check("bg: an exact SAP lookup answers with the rack to walk to",
+              it["located"] is True and it["primary_location"] == "SVCBG-A-03-2"
+              and it["primary_label"] == "Zone A · Rack 03 · Row 2", str(it))
+
+        # A second rack, promoted.
+        await ac.put("/locations/material", headers=H(admin_t),
+                     json={"SAP_Code": "SVCBG-1", "location_id": rack2,
+                           "is_primary": True, "site_id": "CNCEC"})
+        prim = await _scalar("SELECT COUNT(*) FROM material_locations "
+                             "WHERE \"SAP_Code\" = 'SVCBG-1' AND is_primary")
+        check("bg: promoting a second rack DEMOTES the first — exactly one "
+              "primary per material, or 'where do I go first' has two answers",
+              prim == 1, f"{prim} primary rows")
+        r = await ac.get("/locations/lookup", headers=H(sk_t),
+                         params={"sap": "SVCBG-1"})
+        it = r.json()["items"][0]
+        check("bg: the lookup lists BOTH racks, primary first",
+              len(it["locations"]) == 2
+              and it["primary_location"] == "SVCBG-B-01-1", str(it))
+
+        # ── the reverse direction ────────────────────────────────────────────
+        r = await ac.get("/locations/SVCBG-B-01-1/contents", headers=H(sk_t))
+        j = r.json()
+        check("bg: scanning a RACK answers what is meant to be on it — the "
+              "reverse direction costs nothing extra and is what turns a "
+              "stock count into a checklist",
+              r.status_code == 200 and len(j["items"]) == 1
+              and j["items"][0]["SAP_Code"] == "SVCBG-1"
+              and j["items"][0]["Equipment_Description"] == "SVCBG Test Hammer",
+              f"{r.status_code} {j}")
+        r = await ac.get("/locations/SVCBG-NOT-A-RACK/contents", headers=H(sk_t))
+        check("bg: an unknown rack code is a 404, not an empty shelf",
+              r.status_code == 404, f"got {r.status_code}")
+
+        # ── guards ───────────────────────────────────────────────────────────
+        r = await ac.put("/locations/material", headers=H(admin_t),
+                         json={"SAP_Code": "SVCBG-GHOST", "location_id": rack1,
+                               "site_id": "CNCEC"})
+        check("bg: a material that is not in inventory cannot be assigned — "
+              "soft-FK, same discipline as the ledger importer",
+              r.status_code == 422, f"got {r.status_code}")
+        r = await ac.put("/locations/material", headers=H(admin_t),
+                         json={"SAP_Code": "SVCBG-1", "location_id": 999999,
+                               "site_id": "CNCEC"})
+        check("bg: a rack that does not exist cannot be assigned to",
+              r.status_code == 422, f"got {r.status_code}")
+        r = await ac.get("/locations/lookup", headers=H(sk_t))
+        check("bg: a lookup with neither q= nor sap= is a 422 rather than a "
+              "full table dump", r.status_code == 422, f"got {r.status_code}")
+
+        # ── deleting a rack takes its assignments ────────────────────────────
+        r = await ac.delete(f"/locations/{rack2}", headers=H(admin_t))
+        check("bg: deleting a rack removes its assignments too — an "
+              "assignment pointing at a rack that no longer exists renders as "
+              "a blank shelf, which looks like an answer",
+              r.status_code == 200 and r.json()["assignments_removed"] == 1,
+              f"{r.status_code} {r.text[:150]}")
+        left = await _scalar("SELECT COUNT(*) FROM material_locations "
+                             "WHERE location_id = :i", i=rack2)
+        check("bg: …and none are left behind", left == 0, f"got {left}")
+
+        # ── the performance claim, MEASURED (rule 11) ────────────────────────
+        async with SessionLocal() as s:
+            plan = "\n".join(str(r[0]) for r in (await s.execute(_sqt(
+                'EXPLAIN ANALYZE SELECT * FROM material_locations '
+                'WHERE "SAP_Code" = \'SVCBG-1\' AND "Site_ID" = \'CNCEC\''))).all())
+        check("bg: the lookup uses ix_material_locations_sap, not a sequential "
+              "scan — the index is on the access path, which is why it was "
+              "added at all (rule 11: benchmarked, never on principle)",
+              "ix_material_locations_sap" in plan or "Index" in plan,
+              f"EXPLAIN said:\n{plan}")
+
+    await _exec("DELETE FROM material_locations WHERE \"SAP_Code\" LIKE 'SVCBG%'")
+    await _exec("DELETE FROM storage_locations WHERE code LIKE 'SVCBG%'")
+    await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBG%\'')
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -10392,6 +10585,8 @@ async def main() -> int:
     await test_manual_retrieval_and_login_throttle()
     print("\n BF. Surface-Shield routing + tank aliases + the app-wins SQM override")
     await test_surface_shield_routing()
+    print("\n BG. Warehouse rack locator — material → shelf, and the shelf back")
+    await test_rack_locator()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

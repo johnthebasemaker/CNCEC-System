@@ -19,7 +19,7 @@
 import type { ReactNode } from 'react'
 import {
   AlertOutlined, AuditOutlined, BarChartOutlined, CameraOutlined, CarOutlined,
-  DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FallOutlined,
+  DashboardOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, FallOutlined,
   FieldTimeOutlined, FileExcelOutlined, FileProtectOutlined, FileSearchOutlined, FireOutlined,
   FormOutlined, FundProjectionScreenOutlined, InboxOutlined, MessageOutlined, ProfileOutlined,
   SafetyCertificateOutlined, SolutionOutlined, StockOutlined, TeamOutlined,
@@ -74,6 +74,13 @@ export const NAV: NavGroup[] = [
       // role-home instead (see ROLE_HOME + the index redirect in AppLayout).
       { key: '/', label: 'Dashboard', icon: <DashboardOutlined />, access: { minLevel: 1 } },
       { key: '/stock', label: 'Stock', icon: <StockOutlined />, access: { minLevel: 1 } },
+      // The rack locator sits at the TOP LEVEL and at minLevel 0 on purpose:
+      // the store keeper is level 0 and is the person who has to walk to the
+      // shelf. Burying it inside a supervisor group would hide it from its
+      // only real user. It is NOT marked `writes` — finding a material is a
+      // read, and the create/assign controls inside are guarded separately
+      // (require_level(1) server-side, useReadOnly in the page).
+      { key: '/locator', label: 'Locator', icon: <EnvironmentOutlined />, access: { minLevel: 0 } },
     ],
   },
   {
