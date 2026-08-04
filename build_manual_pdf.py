@@ -72,6 +72,24 @@ MARGIN_MM   = 18
 # is included in every site-level role so the printed booklet stands alone.
 # Admin = "ALL" → falls through to the master full PDF behaviour.
 ROLE_MANUAL_RECIPES = {
+    "auditor": {
+        "title":    "Auditor Manual",
+        "icon":     "\U0001F50D",
+        "audience": "Read-only review across every site: reports, records, KPIs.",
+        "chapters": [
+            "1. Introduction & System Overview",
+            "2. Roles, Permissions & Page Access",
+            "3. Login, Sidebar & Common Elements",
+            "8. Reports Module — Detailed Reference",
+            "9. Automated Notifications — WhatsApp & Email & In-app Bell",
+            "10. Data Model & Concept Reference",
+            "11. Status Codes, Reason Codes & Glossary",
+            "12. FAQ — Master Index by Role",
+            "16. Cross-Role Procurement Walk-through",
+            "20. Auditor (View-Only) Manual",
+            "21. 2026-08 Feature Update — What Changed",
+        ],
+    },
     "store_keeper": {
         "title":    "Store Keeper Manual",
         "icon":     "🗝️",
@@ -303,8 +321,22 @@ def slice_markdown_for_role(role_key: str, md_text: str) -> str:
 
     out_lines: list[str] = []
     include = False
+    fence: str | None = None
     for line in md_text.splitlines():
-        if line.startswith("# ") and not line.startswith("## "):
+        # Fence tracking: the Operations chapter documents shell scripts whose
+        # comments are literally "# 1. Pull the new code". Without this, such a
+        # line reads as a chapter heading and silently ends the chapter being
+        # collected. (Only latent today — no non-admin recipe includes that
+        # chapter — but it is the same defect that corrupted the assistant's
+        # context, so it is fixed at both sites.)
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            mark = stripped[:3]
+            fence = mark if fence is None else (None if fence == mark else fence)
+            if include:
+                out_lines.append(line)
+            continue
+        if fence is None and line.startswith("# ") and not line.startswith("## "):
             title = line[2:].strip()
             include = title in wanted
             if include:
@@ -1070,6 +1102,7 @@ def main(argv: list[str] | None = None) -> int:
                 "logistics":      "Logistics",
                 "warehouse_user": "Warehouse",
                 "admin":          "Admin",
+                "auditor":        "Auditor",
             }.get(rk, rk)
             out = Path(f"GI_{short}_Manual_{today}.pdf")
             pdf = build_role_manual_pdf(rk, md)

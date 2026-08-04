@@ -27,6 +27,8 @@
 17. [Operations & Hosting — the after-launch chapter](#17-operations--hosting--the-after-launch-chapter)
 18. [Material Estimator (SME) Manual](#18-material-estimator-sme-manual)
 19. [Man-Hours & Labor Tracking Manual (NEW)](#19-man-hours--labor-tracking-manual)
+20. [Auditor (View-Only) Manual (NEW)](#20-auditor-view-only-manual)
+21. [2026-08 Feature Update — What Changed](#21-2026-08-feature-update--what-changed)
 
 ---
 
@@ -96,25 +98,27 @@ Side-paths: vendor returns (any role can raise), reschedules (Warehouse/HOD → 
 ## 2.1 Role hierarchy
 
 ```
-store_keeper (0) < warehouse_user (1) ≈ supervisor (1) < hod (2) < logistics (3) < admin (4)
+store_keeper (0) < warehouse_user (1) ≈ supervisor (1) < hod (2) < logistics (3) ≈ auditor (3) < admin (4)
 ```
 
 The hierarchy is parallel, not strictly linear — `warehouse_user` and `supervisor` sit at the same numeric level but are scoped differently (one to a warehouse, the other to a site). Procurement-chain pages (Logistics Portal, Warehouse Portal) are EXACT-role-locked in addition to the hierarchy check, so a numerically higher role (e.g. Logistics) does NOT inherit access to a lower role's page (e.g. HOD Portal) just because the hierarchy says it could. The hierarchy lives in `config.py:ROLE_HIERARCHY`; the exact locks live in `main.py:_EXACT_ROLE_PAGES`.
 
 ## 2.2 Page access matrix
 
-| Page | Store Keeper | Warehouse User | Supervisor | HOD | Logistics | Admin |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|
-| 📦 Live Dashboard | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 📝 Entry Log | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| 📋 HOD Portal | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ (hidden — uses Admin Portal) |
-| 🚚 Logistics Portal (NEW) | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (admin shadow) |
-| 🏭 Warehouse Portal (NEW) | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ (admin shadow, picks WH in sidebar) |
-| 🛡️ Admin Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| 📊 Reports | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 🛡️ Supervisor Portal | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (admin shadow) |
-| 🧪 Material Estimator | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
-| 🕒 Man-Hours (NEW) | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| Page | Store Keeper | Warehouse User | Supervisor | HOD | Logistics | Auditor | Admin |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 📦 Live Dashboard | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 📝 Entry Log | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| 📋 HOD Portal | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ (hidden — uses Admin Portal) |
+| 🚚 Logistics Portal (NEW) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ (admin shadow) |
+| 🏭 Warehouse Portal (NEW) | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ (admin shadow, picks WH in sidebar) |
+| 🛡️ Admin Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| 📊 Reports | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ (read + download only) | ✅ |
+| 🗂️ Records (Inventory, ledgers, POs, PRs) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🛡️ Supervisor Portal | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ (admin shadow) |
+| 🧪 Material Estimator | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 🕒 Man-Hours (NEW) | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 🔍 Auditor view (NEW) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 
 > **Exact-role locks:** Entry Log, HOD Portal, Supervisor Portal, Logistics Portal, Warehouse Portal, Material Estimator, and Man-Hours are *exact-locked* in `main.py` (`_EXACT_ROLE_PAGES`) — higher-hierarchy roles do **not** inherit access. Admin reaches the locked portals via shadow access.
 
@@ -127,6 +131,7 @@ The hierarchy is parallel, not strictly linear — `warehouse_user` and `supervi
 | Supervisor | Their own site only — Reports, Live Dashboard, Burn Rate all site-locked. |
 | HOD | Their own site only — but they can REQUEST material from other sites (Cross-Site tab) and submit PRs to Logistics. |
 | Logistics (NEW) | All sites globally for PRs and POs they manage. No site lock — they sit above the site boundary. |
+| Auditor (NEW) | All sites globally, **read-only**. Sits at level 3 so it is not site-locked — an auditor pinned to one site could not audit. It can open the Dashboard, Stock, Records, Reports and Lining Coverage and change nothing anywhere. See §20. |
 | Admin | All sites + all warehouses globally — has the "All Sites" filter on every multi-site view; warehouse picker in sidebar when shadowing the Warehouse Portal. |
 
 ## 2.4 Default seeded accounts
@@ -3649,13 +3654,248 @@ It uses the same parse/import code path as the in-app upload, so behaviour is id
 
 ---
 
+# 20. Auditor (View-Only) Manual
+
+*Added 2026-08-03.*
+
+## 20.1 What the Auditor role is for
+
+The Auditor is for anyone who must **see the numbers without being able to move
+them** — an internal auditor, a client-side QA reviewer, a finance reviewer, a
+new manager still learning the system, or a consultant given temporary access.
+
+It is a real role like any other, with one difference that is absolute:
+
+> **An Auditor can read everything its level reaches and can change nothing,
+> anywhere, ever.**
+
+That is not a UI convention. It is enforced on the server for every request.
+
+## 20.2 What an Auditor can see
+
+| Area | What it shows |
+|---|---|
+| 📦 **Dashboard** | Every KPI, chart and category breakdown, across all sites |
+| 📈 **Stock** | Current stock by site, minimum levels, expiry |
+| 🗂️ **Records** | Inventory, Receipts, Consumption, Returns, Lots, Purchase Orders, Purchase Requests |
+| 📊 **Reports** | Every report, downloadable as Excel, PDF or CSV |
+| 🧪 **Lining Coverage** | The read-only coverage analysis |
+| 📁 **Documents** | The SOP and User Manual PDFs, QR/label sheets |
+| 👤 **Account** | Own security settings (password-manager 2FA, phone number) |
+
+An Auditor is **not** site-locked. Every other role below Logistics sees only
+its own site; an auditor sees all of them, because an auditor confined to one
+site cannot audit the business.
+
+## 20.3 What an Auditor cannot do
+
+Everything that changes data. The Data Entry forms, Master Data editors, Bulk
+Excel Import, HOD Approvals, the Logistics and Warehouse portals, the Supervisor
+portal and the Admin console **do not appear in the sidebar at all** — they are
+not hidden buttons on a visible page, the pages are simply not reachable.
+
+On pages an Auditor *can* open, actions that would change something are
+**disabled rather than hidden**, with a tooltip explaining why:
+
+> *Your account is view-only (Auditor) — this action changes data.*
+
+On the Reports page, for example, **Excel / PDF / CSV downloads work normally**
+(they only read), while **Archive**, **WhatsApp**, **New schedule**, **Run now**
+and **Delete** are greyed out.
+
+A **"View only"** tag sits permanently in the header beside the user name, so
+there is never any doubt about which kind of account is signed in.
+
+## 20.4 What an Auditor CAN still do
+
+Because they are read-only, not crippled:
+
+- Download **every report** in all three formats.
+- Use the **⌘K / Ctrl-K command palette** to jump to any page or material.
+- Ask the **Hub Assistant** questions (it answers from the Auditor's own manual
+  chapters — see §20.6).
+- Manage **their own account**: enable or disable two-factor authentication and
+  change their own phone number. These touch only their own user record.
+
+## 20.5 The security model (for Admins)
+
+Worth understanding before you hand the role out.
+
+The restriction is enforced **once, centrally, by HTTP method** — not endpoint
+by endpoint. Any request that could change state (`POST`, `PUT`, `PATCH`,
+`DELETE`) from a view-only account is refused with **403 Forbidden** before it
+ever reaches the endpoint:
+
+```
+403  your account is view-only (Auditor) — this action changes data
+     and is not permitted
+```
+
+Why that design matters to you: a per-endpoint permission check is only as
+reliable as the developer who remembers to add it, and the one that gets
+forgotten **fails open** — the write succeeds and nothing looks wrong. Keying
+on the method inverts that, so a feature added next year is closed to Auditors
+from the moment it is written. **126 of the system's 143 state-changing
+endpoints are blocked**; the 17 that are not are sign-in, sign-out, token
+refresh, the user's own 2FA and phone-change flows, and read-only calculation
+endpoints that use `POST` only because the request is too large for a URL.
+
+Two consequences to be aware of:
+
+- An Auditor probing a URL that does not exist gets **403, not 404**. The guard
+  runs before routing, so it cannot be used to map the system.
+- Blocking is by role, not by page. Even if an Auditor somehow reached a write
+  page, every button on it would still fail server-side.
+
+## 20.6 Creating an Auditor account
+
+**Admin Portal → 👥 Users → Add user**, and pick **Auditor (view-only)** in the
+Role dropdown. Leave the Site blank — Auditors are global by design, and the
+form does not ask for one.
+
+Users can also request the role themselves on the registration screen; it still
+needs Admin approval like any other request.
+
+## 20.7 The Hub Assistant for Auditors
+
+The assistant answers from chapters **1, 2, 3, 8, 9, 10, 11, 12, 16 and 20** —
+orientation, the reports module, notifications, the data model, the glossary,
+the FAQ and the cross-role procurement walk-through. That is deliberately the
+set matching the pages an Auditor can open.
+
+Ask it about a report, a status code or what a field means and it will answer.
+Ask it how to post a consumption entry and it will tell you that is outside the
+read-only Auditor view — because the operational chapters for roles that *can*
+post entries are never loaded into an Auditor's context in the first place.
+
+---
+
+# 21. 2026-08 Feature Update — What Changed
+
+Everything in this chapter is live. Grouped by what you would notice.
+
+## 21.1 Reports and exports look the same everywhere now
+
+**Every** Excel export — not just the Material Estimator's — now carries the
+branded layout: the GI logo, a "Report Generated / Generated By" band, a title
+bar and a framed, filterable table with the header frozen. Previously only three
+SME workbooks looked like that and everything else came out as a bare grid.
+
+> **If you have automation reading these files:** the header row is now **row 6**
+> and data begins on **row 7** (rows 1–4 are the logo and meta band, row 5 the
+> title bar). Anything that assumed a header on row 1 needs adjusting.
+
+**PDF reports no longer overlap or cut off text.** Columns are now measured
+against their actual content and share the page fairly, and long values *wrap*
+onto more lines instead of being truncated. Previously every column got an equal
+slice of the page regardless of need, so a long material description was drawn
+*on top of* the next column while `Date` and `UOM` wasted most of theirs — and
+anything past 24 characters was silently deleted.
+
+QR **badge and bin labels** were fixed the same way: a long employee name used
+to run past the edge of its sticker onto the one beside it.
+
+## 21.2 The Material Estimator understands your order data correctly
+
+**`Ordered_Qty` is the TOTAL quantity procured for the project, and
+`Available_Qty` is the part of it that has already arrived** — available is a
+*subset* of ordered, not a separate pile beside it.
+
+The estimator used to add the two together, which double-counted every unit
+already on the shelf. On real data that understated the buy list by **22,951
+units across 22 of 30 materials**, and on `GI-8005763` — where all 143,000
+ordered units had arrived — it read 286,000 and reported **nothing to buy**
+against a demand of 152,685, hiding a 9,685-unit shortage completely.
+
+What you will see in the UI:
+
+- Second-tier quantities now read **"Pending Delivery"** — the part of the order
+  still on its way — never just "Ordered".
+- Second-tier coverage reads **"When delivered"**.
+- Reports carry a **Total Procured** column beside them.
+
+Feasibility is unchanged and still judges **physical stock only**: a tank cannot
+be built with a purchase order.
+
+## 21.3 A view-only Auditor role
+
+See §20.
+
+## 21.4 You are signed out after 30 minutes of inactivity
+
+Leave the app untouched for 30 minutes and it signs you out and returns you to
+the login screen. A warning appears **two minutes before** with a button to stay
+signed in, and any real activity — a click, a keystroke, a scroll — resets the
+clock silently.
+
+This matters most on shared site terminals, where an unattended session was
+previously good until the browser was closed.
+
+## 21.5 Search anything with ⌘K
+
+Press **⌘K** (Mac) or **Ctrl-K** (Windows) anywhere in the app.
+
+The palette already jumped to pages; it now also searches your **inventory
+live**. Type a SAP code, part of a material name or a material code and the
+matching items appear under a **Materials** heading — pick one and you land on
+its Material Intelligence card. Results are scoped to what your role may see.
+
+## 21.6 The Hub Assistant is faster and more accurate
+
+The assistant used to be handed its entire allowed portion of this manual on
+every single question. For an Admin that was the whole ~180 KB document, which
+is slow to process; for everyone else it was the **first 800 characters of each
+chapter**, which is the wrong 800 whenever the answer is further down.
+
+It now finds the passages that actually match your question and reads only
+those — a **97.7 % smaller prompt for Admins**, and noticeably better answers
+for everyone, because the relevant paragraph is now present in full instead of
+being cut off.
+
+A parsing bug was fixed at the same time: shell comments inside the code blocks
+in the Operations chapter (`# 1. Pull the new code`) were being read as chapter
+headings, which silently replaced chapters 1–4 — Introduction, Roles &
+Permissions, Login, and the Store Keeper Manual — with fragments of a restore
+script. Ask "how do I log in?" today and you get §3.1, the login screen.
+
+The role filter is unchanged and still applied **before** retrieval: a Store
+Keeper's context physically cannot contain an Admin chapter.
+
+## 21.7 For administrators — new local tooling
+
+Two scripts in `bin/`, documented in `docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md`:
+
+| Command | What it does |
+|---|---|
+| `./bin/power.sh sleep` | Stops PostgreSQL and the Cloudflare connector so an idle laptop draws no power for them |
+| `./bin/power.sh wake` | Starts them again and verifies the public hostname responds |
+| `./bin/power.sh status` | What is running, and what it costs |
+| `./bin/backup_db.sh` | Timestamped snapshot of the database into `.backups/` |
+| `./bin/backup_db.sh --install` | Runs that backup automatically every night at 02:00 |
+| `./bin/backup_db.sh --restore F` | Prints the exact command to restore a snapshot |
+
+> The previous nightly backup job had been failing silently for 25 consecutive
+> nights — it pointed at a script that a repository restructure had moved. If
+> you were relying on it, **you had no local backups**. The replacement is
+> verified by restoring into a scratch database on every change.
+
+---
+
 ## Document end
 
 This manual covers every page, tab, button, table, and field built into the General Industries Hub v3.0 as of the latest commit, including the Logistics and Warehouse portals and the procurement chain (§14–16), the **Material Estimator (SME)** planning portal (§18), and the **Man-Hours & Labor Tracking** module (§19). For technical reference (function signatures, table schemas, full SQL), see `database.py`, `auth.py`, and `pages_internal/*.py` source files. For day-to-day operating procedure across all roles, see `SOP.md`.
 
-For PDF export: use any markdown-to-PDF converter (Typora, pandoc, marp, or VSCode's "Markdown PDF" extension). Suggested pandoc command:
+**To regenerate the PDFs**, use the repository's own builder — it is branded,
+has a generated table of contents, and needs no LaTeX, pandoc or WeasyPrint
+(fpdf2 is already a dependency):
+
 ```bash
-pandoc USER_MANUAL.md -o USER_MANUAL.pdf --pdf-engine=xelatex \
-  --toc --number-sections \
-  -V geometry:margin=2cm -V mainfont="Helvetica" -V monofont="Menlo"
+.venv/bin/python build_manual_pdf.py --role all
+```
+
+That writes the master `GI_Hub_User_Manual.pdf` plus one booklet per role,
+each containing only that role's chapters. For a single output:
+
+```bash
+.venv/bin/python build_manual_pdf.py --in USER_MANUAL.md --out GI_Hub_User_Manual.pdf
 ```

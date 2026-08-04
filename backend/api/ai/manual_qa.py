@@ -10,6 +10,19 @@ grew two sections the legacy allowlist predates: §18 SME Estimator and
 
 Ollama calls go through the module object (`aic.stream`) so tests can
 monkeypatch the client without a live server.
+
+2026-08-04 — two fixes, both delegated to `manual_index`:
+  * chapter parsing is now FENCE-AWARE. `# 1. Pull the new code` inside a
+    ```bash block in the Operations chapter parsed as chapter 1 and, on a
+    last-write-wins dict, replaced "Introduction & System Overview" with two
+    lines of launchctl. Chapters 1-4 were wrong for EVERY role.
+  * the prompt is now RETRIEVED, not stuffed. Admin used to receive the whole
+    ~180 KB manual on every question, and every other role the first 800
+    characters of each allowed chapter — the wrong 800 whenever the answer sat
+    further down. The question now selects a handful of sub-sections.
+The role filter still runs at the retrieval layer, BEFORE scoring, so the
+security property is unchanged: a role's context cannot physically contain a
+chapter it may not see.
 """
 from __future__ import annotations
 
@@ -20,19 +33,26 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from . import client as aic
+from . import manual_index as mx
 
 # Which top-level USER_MANUAL.md sections each role may see. Lower roles
 # cannot see higher roles' sections. §18 (SME) + §19 (Man-Hours) are
 # hod/admin-locked features, mirroring the portal locks.
 _ROLE_ALLOWED: dict[str, set[int]] = {
-    "store_keeper":   {1, 2, 3, 4, 10, 11, 12, 13},
-    "supervisor":     {1, 2, 3, 4, 5, 11, 12, 13},
-    "hod":            {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 16, 18, 19},
+    "store_keeper":   {1, 2, 3, 4, 10, 11, 12, 13, 21},
+    "supervisor":     {1, 2, 3, 4, 5, 11, 12, 13, 21},
+    "hod":            {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 16, 18, 19, 21},
     # Strict isolation: Logistics never sees Warehouse internals (and vice
     # versa); neither sees site-level chapters 4–6.
-    "logistics":      {1, 2, 3, 9, 11, 12, 13, 14, 16},
-    "warehouse_user": {1, 2, 3, 9, 11, 12, 13, 15, 16},
-    "admin":          set(range(1, 20)),
+    "logistics":      {1, 2, 3, 9, 11, 12, 13, 14, 16, 21},
+    "warehouse_user": {1, 2, 3, 9, 11, 12, 13, 15, 16, 21},
+    # The view-only Auditor (2026-08-03) reads across every site but can
+    # open only Dashboard / Stock / Records / Reports / Lining Coverage.
+    # Its chapters mirror exactly that: orientation, reporting, the data
+    # model and the glossary. No role operational how-tos it could not
+    # perform anyway, and not the hosting chapter.
+    "auditor":        {1, 2, 3, 8, 9, 10, 11, 12, 16, 20, 21},
+    "admin":          set(range(1, 22)),
 }
 
 _SECTION_TITLES = {
@@ -55,6 +75,8 @@ _SECTION_TITLES = {
     17: "Operations & Hosting",
     18: "Material Estimator (SME) Manual",
     19: "Man-Hours & Labor Tracking Manual",
+    20: "Auditor (View-Only) Manual",
+    21: "2026-08 Feature Update",
 }
 
 
@@ -63,22 +85,30 @@ def _manual_path() -> Path:
 
 
 @lru_cache(maxsize=1)
-def _load_sections() -> dict[int, str]:
-    """Parse USER_MANUAL.md once → {section_number: full_section_text}.
-    Boundaries are top-level '# N. ' headings (the unnumbered cover H1 is
-    skipped)."""
+def _manual_text() -> str:
     path = _manual_path()
-    if not path.exists():
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+@lru_cache(maxsize=1)
+def _load_sections() -> dict[int, str]:
+    """{section_number: full_section_text}, via the fence-aware parser.
+
+    This used to split on a bare lookahead regex, which cannot tell a heading
+    from a shell comment inside a fenced block — see manual_index.iter_chapters
+    for the failure it caused.
+    """
+    md = _manual_text()
+    if not md:
         return {}
-    md = path.read_text(encoding="utf-8")
-    parts = re.split(r"(?m)^(?=# \d+\.\s+)", md)
-    out: dict[int, str] = {}
-    for chunk in parts:
-        m = re.match(r"# (\d+)\.\s+(.*?)\n", chunk)
-        if not m:
-            continue
-        out[int(m.group(1))] = chunk.strip()
-    return out
+    return {num: f"# {num}. {title}\n{body}".strip()
+            for num, title, body in mx.iter_chapters(md)}
+
+
+@lru_cache(maxsize=1)
+def _index() -> mx.Index:
+    """Built once per process — ~390 chunks over the live manual, a few ms."""
+    return mx.Index(mx.build_chunks(_manual_text()))
 
 
 _PER_SECTION_CHAR_CAP = 800
@@ -140,6 +170,7 @@ _ROLE_LABEL = {
     "logistics": "Logistics Coordinator",
     "warehouse_user": "Warehouse Operator",
     "admin": "Administrator",
+    "auditor": "Auditor (view-only)",
 }
 
 # Role-aware refusal phrasing (never tell the Admin to "ask your Admin").
@@ -150,6 +181,7 @@ _ROLE_REFUSAL = {
     "logistics": "That's outside the Logistics Portal — please ask your Admin.",
     "warehouse_user": "That's outside the Warehouse Portal — please ask your Admin.",
     "admin": "I can't find that in the manual. Check the source markdown in USER_MANUAL.md.",
+    "auditor": "That's outside the read-only Auditor view — please ask your Admin.",
 }
 
 _SYSTEM_PROMPT_TMPL = """\
@@ -175,12 +207,42 @@ CONTEXT (manual sections {username} is allowed to see):
 """
 
 
-def build_system_prompt(role: str, username: str = "") -> str:
+def allowed_sections(role: str) -> set[int]:
+    """The chapters this role may see. Unknown roles fall back to the LOWEST
+    allowlist, never the highest — a typo in `users.role` must lose access,
+    not gain it."""
+    return _ROLE_ALLOWED.get(role, _ROLE_ALLOWED["store_keeper"])
+
+
+def retrieve_context(role: str, question: str) -> str:
+    """The passages worth showing for THIS question, from the chapters this
+    role may see. Returns '' when nothing scores — the caller then falls back
+    to the role's whole (truncated) context rather than answering blind."""
+    if not question:
+        return ""
+    try:
+        hits = _index().search(question, allowed=allowed_sections(role))
+    except Exception:  # noqa: BLE001 — retrieval must never break the chat
+        return ""
+    return mx.render_context(hits)
+
+
+def build_system_prompt(role: str, username: str = "",
+                        question: str = "") -> str:
+    """System prompt for one turn.
+
+    With a question, CONTEXT is the retrieved passages — a few KB instead of
+    the whole allowed manual, which is both much faster to evaluate and much
+    more likely to contain the answer than a fixed head-truncation. Without
+    one (or if nothing scores) it falls back to the role's full context, so
+    the assistant degrades to its previous behaviour rather than to nothing.
+    """
+    context = retrieve_context(role, question) or _context_for_role(role)
     return _SYSTEM_PROMPT_TMPL.format(
         username=(username or "").strip() or "the user",
         role_label=_ROLE_LABEL.get(role, role.title() if role else "user"),
         refusal=_ROLE_REFUSAL.get(role, _ROLE_REFUSAL["store_keeper"]),
-        context=_context_for_role(role) or "(manual not found on disk)",
+        context=context or "(manual not found on disk)",
     )
 
 
@@ -214,7 +276,7 @@ async def answer_manual_question(question: str, role: str,
     if canned is not None:
         yield canned
         return
-    system = build_system_prompt(role, username)
+    system = build_system_prompt(role, username, question)
     prompt = f"User question: {question}\n\nAnswer:"
     try:
         async for chunk in aic.stream(aic.MODEL_CHAT, prompt, system=system,

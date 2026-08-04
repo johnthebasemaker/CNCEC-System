@@ -1,12 +1,13 @@
 import { Suspense, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Alert, App, Badge, Button, ConfigProvider, Drawer, Grid, Layout, Menu, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd'
+import { Alert, App, Badge, Button, ConfigProvider, Drawer, Grid, Layout, Menu, Modal, Skeleton, Space, Switch, Tag, Tooltip, Typography } from 'antd'
 import type { MenuProps } from 'antd'
 import { AppstoreOutlined, EyeOutlined, LogoutOutlined, MenuOutlined, MoonOutlined, QrcodeOutlined, SearchOutlined, SunOutlined, UserOutlined } from '@ant-design/icons'
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useHealth, useOverdueActions, useWorkQueues } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
 import { READ_ONLY_REASON } from '../auth/useReadOnly'
+import { useIdleLogout } from '../auth/useIdleLogout'
 import type { User } from '../auth/AuthContext'
 import { NAV, ADMIN_DEFAULT_GROUPS, PRIMARY_GROUP, canAccess, canAccessPath, groupOfPath, roleHome } from '../config/nav'
 import type { NavGroup, NavNode } from '../config/nav'
@@ -156,6 +157,14 @@ export default function AppLayout() {
   const [navOpen, setNavOpen] = useState(false)
   useEffect(() => { setNavOpen(false) }, [location.pathname])
 
+  // Inactivity sign-out. The logout it calls is the ordinary one, so the
+  // refresh-token family is REVOKED server-side — the session is genuinely
+  // over, not just visually reset. See auth/useIdleLogout.ts.
+  const idle = useIdleLogout(!!user, () => {
+    logout()
+    message.warning('Signed out after 30 minutes of inactivity.', 6)
+  })
+
   // A view-only account tried to change something. The API client rejects the
   // request before it is sent (auth/readOnly.ts) and fires this; without a
   // toast the click would look like it simply did nothing.
@@ -294,6 +303,25 @@ export default function AppLayout() {
           setScanOpen(false)
           navigate(`/stock/material/${encodeURIComponent(parseScanPayload(text))}`)
         }} />
+      <Modal
+        open={idle.warning}
+        title="Still there?"
+        onOk={idle.staySignedIn}
+        onCancel={idle.staySignedIn}
+        okText="Stay signed in"
+        cancelButtonProps={{ style: { display: 'none' } }}
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+      >
+        <Typography.Paragraph style={{ marginBottom: 0 }}>
+          You have been inactive for a while. For security you will be signed out in{' '}
+          <b>{idle.secondsLeft}s</b>.
+        </Typography.Paragraph>
+        <Typography.Paragraph type="secondary" style={{ fontSize: '0.8rem', marginBottom: 0 }}>
+          Any unsaved form entries on this page will be lost.
+        </Typography.Paragraph>
+      </Modal>
     </Layout>
   )
 }
