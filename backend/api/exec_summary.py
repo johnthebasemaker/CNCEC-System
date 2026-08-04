@@ -11,7 +11,8 @@ multi-sheet Excel workbook (reports.to_xlsx_sheets) and as a server-rendered
 paginated PDF (exec_pdf.render_exec_pdf — measured tables, nothing cut at
 the page edges).
 
-Scope: require_roles("hod") — hod + admin, the same lock as Man-Hours/SME.
+Scope: hod + admin + auditor (2026-08-04) — see `_EXEC_READERS` below for why
+the view-only role was added to what is otherwise the Man-Hours/SME lock.
 HODs are pinned to their site; admins may pass ?site_id= or omit it for all
 sites. Date range [date_from, date_to] inclusive, default = today; trend
 compares against the preceding same-length window plus a 7-day daily average.
@@ -33,6 +34,22 @@ from . import sme_engine
 from .sme import _snapshot_rows
 
 router = APIRouter(prefix="/hod", tags=["executive summary"])
+
+# The Executive Summary's three endpoints are READS — JSON, xlsx and PDF of a
+# report, with no mutating counterpart anywhere in this module.
+#
+# 2026-08-04: `auditor` added. Unlike the rest of the HOD portal (which is
+# `require_level(2)` on hod.py's router and therefore already reachable by a
+# level-3 auditor), these three carried their own `require_roles("hod")`
+# exact-lock, so opening the nav entry alone would have produced a menu item
+# that 403s. Since the auditor role exists precisely to read everything its
+# level reaches and change nothing, and since these are GETs, widening the lock
+# here grants no new power: the method-keyed guard in readonly.py still refuses
+# every POST/PUT/PATCH/DELETE, and nothing was added to its allowlist.
+#
+# Suite BD pins both halves — the auditor must reach these, and must still be
+# refused /sme/master and /sme/actuals.
+_EXEC_READERS = require_roles("hod", "auditor")
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -381,7 +398,7 @@ def _resolve_site(user: dict, site_id: str | None) -> str | None:
 async def executive_summary(date_from: str | None = Query(None),
                             date_to: str | None = Query(None),
                             site_id: str | None = Query(None),
-                            user: dict = Depends(require_roles("hod")),
+                            user: dict = Depends(_EXEC_READERS),
                             session: AsyncSession = Depends(get_session)):
     dfrom, dto = _resolve_range(date_from, date_to)
     site = _resolve_site(user, site_id)
@@ -392,7 +409,7 @@ async def executive_summary(date_from: str | None = Query(None),
 async def executive_summary_xlsx(date_from: str | None = Query(None),
                                  date_to: str | None = Query(None),
                                  site_id: str | None = Query(None),
-                                 user: dict = Depends(require_roles("hod")),
+                                 user: dict = Depends(_EXEC_READERS),
                                  session: AsyncSession = Depends(get_session)):
     from .reports import to_xlsx_sheets
     dfrom, dto = _resolve_range(date_from, date_to)
@@ -464,7 +481,7 @@ async def executive_summary_xlsx(date_from: str | None = Query(None),
 async def executive_summary_pdf(date_from: str | None = Query(None),
                                 date_to: str | None = Query(None),
                                 site_id: str | None = Query(None),
-                                user: dict = Depends(require_roles("hod")),
+                                user: dict = Depends(_EXEC_READERS),
                                 session: AsyncSession = Depends(get_session)):
     from .exec_pdf import render_exec_pdf
     dfrom, dto = _resolve_range(date_from, date_to)

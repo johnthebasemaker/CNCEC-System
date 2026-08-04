@@ -264,15 +264,23 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           drillTitle="Session Materials" rows={combined.map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
             Demand: r.Demand_Qty, Available: r.Available_Qty,
-            'Pending Delivery': r.Pending_Delivery_Qty, 'Ready now %': r.Fulfillment_Pct,
-          }))} help="Material components demanded by the session — one row per physical drum (Material_Code + variant SAP)." /></Col>
+            'Pending Delivery': r.Pending_Delivery_Qty,
+            // THE SUBSET RULE (1c): Total Procured is the CEILING —
+            // max(available, ordered) — not a third bucket beside the other
+            // two. It is taken from the engine, never re-derived here as
+            // available + pending, because that is exactly the additive
+            // reading that understated the buy list by 22,951 units.
+            'Total Procured': r.Total_Procured_Qty,
+            'Ready now %': r.Fulfillment_Pct,
+          }))} help="Material components demanded by the session — one row per physical drum (Material_Code + variant SAP). Total Procured is the whole quantity bought for the project; Available is the part of it that has arrived." /></Col>
         <Col flex="1 1 160px"><KpiDrill title="Need to Order" value={String(shortOnly.length)}
           accent={shortOnly.length > 0 ? '#EF4444' : '#10B981'}
           drillTitle="Order List (net shortfall > 0)" rows={shortOnly.map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
             Available: r.Available_Qty, 'Pending Delivery': r.Pending_Delivery_Qty,
+            'Total Procured': r.Total_Procured_Qty,
             'To Order': r.Shortfall_Qty, 'Ready now %': r.Fulfillment_Pct,
-          }))} help="Components still to procure once the ENTIRE purchase order has landed." /></Col>
+          }))} help="Components still to procure once the ENTIRE purchase order has landed. To Order = demand − Total Procured, so nothing already bought is bought twice." /></Col>
         {/* Area-weighted bottleneck over the session's tags — drill down per
             EQUIPMENT, because that is the grain the number is computed at. */}
         <Col flex="1 1 160px"><KpiDrill title="Coverage now" value={`${cov.toFixed(1)}%`}
@@ -290,6 +298,7 @@ export default function SessionReport({ siteId }: { siteId?: string }) {
           rows={combined.filter((r) => r.Pending_Delivery_Qty > 0).map((r) => ({
             Material: r.Material_Code, SAP: r.SAP_Code, Name: r.Material_Name,
             Available: r.Available_Qty, 'Pending Delivery': r.Pending_Delivery_Qty,
+            'Total Procured': r.Total_Procured_Qty,
             'Ready now %': r.Fulfillment_Pct,
           }))} help="Coverage against the TOTAL procured quantity, i.e. once the whole order has landed. Forecast only — never a readiness figure." /></Col>
       </Row>

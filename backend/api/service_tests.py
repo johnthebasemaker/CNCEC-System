@@ -9594,6 +9594,30 @@ async def test_auditor_read_only():
                 check(f"bd: auditor READ {path} → not forbidden",
                       r.status_code != 403, f"{r.status_code} {r.text[:120]}")
 
+            # 2026-08-04: the HOD portal and the SME estimator were opened to
+            # the auditor in the NAV MANIFEST. Nothing changed on the server —
+            # both routers are `require_level(2)` and an auditor is level 3, so
+            # the API had always allowed these reads and only the SPA hid them.
+            # Pinned here so the two halves cannot drift: if a future edit
+            # tightens either router to `require_roles("hod")`, the nav entry
+            # becomes a link to a 403 and this fails.
+            for path in ("/hod/executive-summary", "/hod/low-stock",
+                         "/sme/materials", "/sme/equipment"):
+                r = await ac.get(path, headers=H, params={"site_id": "CNCEC"})
+                check(f"bd: auditor READ {path} → not forbidden (the nav now "
+                      f"offers this page, and the API must agree)",
+                      r.status_code != 403, f"{r.status_code} {r.text[:120]}")
+
+            # …and the two SME WRITE surfaces stay shut. These are
+            # `require_roles("hod")`, a genuine exact-lock, so an auditor is
+            # refused before the read-only middleware is even consulted — which
+            # is why they are deliberately absent from the nav.
+            for path in ("/sme/master/equipment", "/sme/actuals/consumption"):
+                r = await ac.get(path, headers=H, params={"site_id": "CNCEC"})
+                check(f"bd: auditor is still refused {path} — a write surface "
+                      f"is not made readable just because the group above it "
+                      f"is", r.status_code == 403, f"{r.status_code}")
+
             # WRITES are refused, with a message that names the reason.
             writes = [
                 ("post", "/entry/receipts", {"SAP_Code": "X", "Quantity": 1}),
