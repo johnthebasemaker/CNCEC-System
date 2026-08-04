@@ -10461,6 +10461,214 @@ async def test_rack_locator():
     await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBG%\'')
 
 
+async def test_asset_tracking():
+    """Suite BH — serialised assets, the two-hammers case, and GPS.
+
+    THE PROBLEM. Two hammers share one SAP code, so scanning either label
+    resolves to the same inventory row and the system cannot say which one is
+    in your hand or where the other went. The workbook cannot fix this: its
+    `Serial No.` column is a BATCH number (3441 appears on both components of
+    one primer) and its Location columns are blank, so the app owns identity.
+
+    The properties that matter, each of which fails quietly if it breaks:
+
+    · IDENTITY IS `(Site_ID, SAP_Code, serial_no)`. Two units of one SAP must
+      both exist and stay distinguishable — the same lesson as rule 1, where
+      pooling four unlike drums under one Material_Code inverted the shortfall.
+    · A SCAN THAT NAMES ONE THING ANSWERS; a scan that names several ASKS.
+      Silently picking the first unit is how the wrong hammer gets marked lost.
+    · A SERIAL BEATS A SAP. It is the more specific claim, so it is tried first.
+    · GPS NEVER BLOCKS THE MOVE. Permission declined, no fix indoors, no secure
+      context — the location update still lands, with coordinates absent. The
+      update carries the operational value; the coordinate is the bonus.
+    · THE HISTORY IS APPEND-ONLY and the cached `current_*` is written in the
+      same transaction, so the summary can never disagree with the log.
+    """
+    from sqlalchemy import text as _sqt
+
+    async def _scalar(sql: str, **params):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), params)).scalar()
+
+    async def _exec(sql: str, **params):
+        async with SessionLocal() as s:
+            await s.execute(_sqt(sql), params)
+            await s.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        _ip = {"X-Real-IP": "203.0.113.95"}
+
+        async def token(u, p):
+            r = await ac.post("/auth/login", json={"username": u, "password": p},
+                              headers=_ip)
+            return r.json().get("access_token")
+
+        def H(t):
+            return {"Authorization": f"Bearer {t}"}
+
+        admin_t = await token("admin", "admin2026")
+        sk_t = await token("worker", "floor2026")
+
+        await _exec("DELETE FROM asset_movements WHERE asset_unit_id IN "
+                    "(SELECT id FROM asset_units WHERE \"SAP_Code\" LIKE 'SVCBH%')")
+        await _exec("DELETE FROM asset_units WHERE \"SAP_Code\" LIKE 'SVCBH%'")
+        await _exec("DELETE FROM storage_locations WHERE code LIKE 'SVCBH%'")
+        await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBH%\'')
+        await _exec('INSERT INTO inventory ("SAP_Code", "Material_Code", '
+                    '"Equipment_Description", "UOM", "Category", "Site_ID") '
+                    "VALUES ('SVCBH-1', 'GI-SVCBH-1', 'SVCBH Claw Hammer', "
+                    "'EA', 'EQUIPMENTS/TOOLS', 'CNCEC')")
+        r = await ac.post("/locations", headers=H(admin_t),
+                          json={"code": "SVCBH-RACK-1", "zone": "H",
+                                "rack_no": "01", "site_id": "CNCEC"})
+        rack = r.json()["id"]
+
+        # ── two hammers, one SAP ─────────────────────────────────────────────
+        ids = []
+        for serial in ("SVCBH-HMR-A", "SVCBH-HMR-B"):
+            r = await ac.post("/assets", headers=H(admin_t),
+                              json={"SAP_Code": "SVCBH-1", "serial_no": serial,
+                                    "site_id": "CNCEC"})
+            check(f"bh: unit {serial} registers", r.status_code == 201,
+                  f"{r.status_code} {r.text[:150]}")
+            ids.append(r.json()["id"])
+        check("bh: TWO units of ONE SAP coexist — identity is "
+              "(Site_ID, SAP_Code, serial_no), so a second hammer is a second "
+              "row and not a conflict",
+              len(set(ids)) == 2, str(ids))
+
+        r = await ac.post("/assets", headers=H(admin_t),
+                          json={"SAP_Code": "SVCBH-1", "serial_no": "SVCBH-HMR-A",
+                                "site_id": "CNCEC"})
+        check("bh: the SAME serial twice is a 409 — one physical thing, one row",
+              r.status_code == 409, f"got {r.status_code}")
+        r = await ac.post("/assets", headers=H(admin_t),
+                          json={"SAP_Code": "SVCBH-GHOST", "serial_no": "X",
+                                "site_id": "CNCEC"})
+        check("bh: a unit cannot be registered against a SAP that is not in "
+              "inventory", r.status_code == 422, f"got {r.status_code}")
+
+        n = await _scalar("SELECT COUNT(*) FROM asset_movements WHERE "
+                          "asset_unit_id = :i", i=ids[0])
+        check("bh: registration IS the first movement — otherwise the history "
+              "starts with a gap and cannot answer for the first leg",
+              n == 1, f"got {n}")
+
+        # ── the scan ─────────────────────────────────────────────────────────
+        r = await ac.get("/assets/resolve", headers=H(sk_t),
+                         params={"scan": "SVCBH-HMR-B"})
+        j = r.json()
+        check("bh: a scan naming ONE thing answers immediately — a serial "
+              "resolves to that exact unit",
+              j["kind"] == "unit" and j["unit"]["serial_no"] == "SVCBH-HMR-B",
+              str(j)[:200])
+
+        r = await ac.get("/assets/resolve", headers=H(sk_t),
+                         params={"scan": "SVCBH-1"})
+        j = r.json()
+        check("bh: THE TWO-HAMMERS CASE — a scan naming only the SAP returns "
+              "a CHOICE of both units rather than silently picking one, which "
+              "is how the wrong hammer gets marked lost",
+              j["kind"] == "choice" and j["reason"] == "several_units"
+              and len(j["units"]) == 2, str(j)[:250])
+
+        r = await ac.get("/assets/resolve", headers=H(sk_t),
+                         params={"scan": "SVCBH-NOTHING"})
+        check("bh: a scan matching no unit falls through to `material` rather "
+              "than inventing an asset",
+              r.json()["kind"] == "material", str(r.json()))
+
+        # ── moving it, WITHOUT gps ───────────────────────────────────────────
+        r = await ac.patch(f"/assets/{ids[0]}/location", headers=H(admin_t),
+                           json={"location_id": rack, "status": "issued",
+                                 "holder": "Farook", "note": "to site"})
+        j = r.json()
+        check("bh: GPS NEVER BLOCKS THE MOVE — with no coordinates at all the "
+              "update still lands, and says so (gps_recorded false)",
+              r.status_code == 200 and j["gps_recorded"] is False
+              and j["unit"]["where"] == "SVCBH-RACK-1"
+              and j["unit"]["status"] == "issued", f"{r.status_code} {str(j)[:250]}")
+        check("bh: …and with no coordinates there is no maps link to follow",
+              j["unit"]["maps_url"] is None, str(j["unit"].get("maps_url")))
+
+        # ── moving it, WITH gps ──────────────────────────────────────────────
+        r = await ac.patch(f"/assets/{ids[0]}/location", headers=H(admin_t),
+                           json={"location_note": "Loaded on truck 4771",
+                                 "source": "qr_scan",
+                                 "gps": {"lat": 26.9, "lng": 49.6, "accuracy_m": 12}})
+        j = r.json()
+        check("bh: a move WITH a fix stores it and offers a maps link — the "
+              "display is a link, not a bundled map library",
+              j["gps_recorded"] is True
+              and abs(j["unit"]["current_lat"] - 26.9) < 1e-9
+              and "google.com/maps" in (j["unit"]["maps_url"] or ""),
+              str(j["unit"])[:250])
+
+        r = await ac.patch(f"/assets/{ids[0]}/location", headers=H(admin_t),
+                           json={"gps": {"lat": 999, "lng": 49.6}})
+        check("bh: coordinates that are not a point on Earth are refused at "
+              "the door, not stored and plotted later",
+              r.status_code == 422, f"got {r.status_code}")
+
+        # ── history ──────────────────────────────────────────────────────────
+        r = await ac.get(f"/assets/{ids[0]}", headers=H(sk_t))
+        j = r.json()
+        check("bh: the movement log is APPEND-ONLY — register + two moves are "
+              "all three still there, newest first",
+              len(j["movements"]) == 3
+              and j["movements"][0]["to_note"] == "Loaded on truck 4771",
+              f"{len(j['movements'])} movements")
+        check("bh: the cached current position agrees with the newest movement "
+              "— they are written in one transaction, so a summary that "
+              "disagrees with its own log is impossible",
+              j["unit"]["location_note"] == "Loaded on truck 4771"
+              and abs(j["unit"]["current_lat"] - 26.9) < 1e-9,
+              str(j["unit"])[:200])
+        check("bh: a movement that carried no fix reports none, rather than "
+              "inheriting the previous one",
+              any(m["lat"] is None for m in j["movements"]),
+              str([m["lat"] for m in j["movements"]]))
+
+        # ── the other hammer is untouched ────────────────────────────────────
+        r = await ac.get(f"/assets/{ids[1]}", headers=H(sk_t))
+        j = r.json()
+        check("bh: moving one hammer does NOT move the other — the whole "
+              "reason the serial is in the key",
+              j["unit"]["status"] == "in_stock" and j["unit"]["where"] is None
+              and j["unit"]["current_lat"] is None, str(j["unit"])[:200])
+
+        # ── guards ───────────────────────────────────────────────────────────
+        r = await ac.get("/assets", headers=H(sk_t), params={"sap": "SVCBH-1"})
+        check("bh: a store keeper can READ units — level 0 is who scans things",
+              r.status_code == 200 and len(r.json()["items"]) == 2,
+              f"{r.status_code}")
+        r = await ac.patch(f"/assets/{ids[1]}/location", headers=H(sk_t),
+                           json={"location_id": rack})
+        check("bh: …but cannot move one — recording where equipment went is a "
+              "supervisory act", r.status_code == 403, f"got {r.status_code}")
+        r = await ac.patch(f"/assets/{ids[0]}/location", headers=H(admin_t),
+                           json={"location_id": 999999})
+        check("bh: a rack that does not exist is refused",
+              r.status_code == 422, f"got {r.status_code}")
+
+        # ── delete takes the history ─────────────────────────────────────────
+        r = await ac.delete(f"/assets/{ids[0]}", headers=H(admin_t))
+        check("bh: deleting a unit removes its movements too — orphan history "
+              "rows point at nothing and would resurface under a recycled id",
+              r.status_code == 200 and r.json()["movements_removed"] == 3,
+              f"{r.status_code} {r.text[:150]}")
+        left = await _scalar("SELECT COUNT(*) FROM asset_movements "
+                             "WHERE asset_unit_id = :i", i=ids[0])
+        check("bh: …and none are left behind", left == 0, f"got {left}")
+
+    await _exec("DELETE FROM asset_movements WHERE asset_unit_id IN "
+                "(SELECT id FROM asset_units WHERE \"SAP_Code\" LIKE 'SVCBH%')")
+    await _exec("DELETE FROM asset_units WHERE \"SAP_Code\" LIKE 'SVCBH%'")
+    await _exec("DELETE FROM storage_locations WHERE code LIKE 'SVCBH%'")
+    await _exec('DELETE FROM inventory WHERE "SAP_Code" LIKE \'SVCBH%\'')
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -10587,6 +10795,8 @@ async def main() -> int:
     await test_surface_shield_routing()
     print("\n BG. Warehouse rack locator — material → shelf, and the shelf back")
     await test_rack_locator()
+    print("\n BH. Asset tracking — two hammers, one SAP; serials, movements, GPS")
+    await test_asset_tracking()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

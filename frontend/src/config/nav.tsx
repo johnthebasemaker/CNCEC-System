@@ -18,7 +18,7 @@
  */
 import type { ReactNode } from 'react'
 import {
-  AlertOutlined, AuditOutlined, BarChartOutlined, CameraOutlined, CarOutlined,
+  AimOutlined, AlertOutlined, AuditOutlined, BarChartOutlined, CameraOutlined, CarOutlined,
   DashboardOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, FallOutlined,
   FieldTimeOutlined, FileExcelOutlined, FileProtectOutlined, FileSearchOutlined, FireOutlined,
   FormOutlined, FundProjectionScreenOutlined, InboxOutlined, MessageOutlined, ProfileOutlined,
@@ -81,6 +81,9 @@ export const NAV: NavGroup[] = [
       // read, and the create/assign controls inside are guarded separately
       // (require_level(1) server-side, useReadOnly in the page).
       { key: '/locator', label: 'Locator', icon: <EnvironmentOutlined />, access: { minLevel: 0 } },
+      // Serialised assets. Same reasoning as the Locator: level 0, top level —
+      // the person scanning a hammer in a yard is a store keeper.
+      { key: '/assets', label: 'Assets', icon: <AimOutlined />, access: { minLevel: 0 } },
     ],
   },
   {

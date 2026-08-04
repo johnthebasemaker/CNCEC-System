@@ -1214,6 +1214,77 @@ class Vendors(Base):
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
+class AssetUnits(Base):
+    """One row per PHYSICAL THING (alembic e9f2a4c68b71).
+
+    Two hammers share one SAP code, so a scan cannot say which one you are
+    holding. Identity is `(Site_ID, SAP_Code, serial_no)` — deliberately
+    mirroring rule 1's lesson that what distinguishes two physical objects
+    belongs IN THE KEY.
+
+    ASSETS ONLY: a row exists only where an operator creates one, so
+    consumables simply have none. The workbook cannot seed this — its
+    `Serial No.` column is a BATCH number (3441 appears on both components of
+    one primer) and its Location columns are blank.
+
+    `current_*` caches the newest `AssetMovements` row, written in the same
+    transaction; the movement log is the history and is never deleted.
+    """
+    __tablename__ = "asset_units"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    SAP_Code = Column(Text, nullable=False)
+    serial_no = Column(Text, nullable=False)
+    asset_tag = Column(Text)
+    status = Column(Text, nullable=False, server_default=text("'in_stock'"))
+    current_location_id = Column(Integer)
+    current_lat = Column(Float)
+    current_lng = Column(Float)
+    gps_accuracy_m = Column(Float)
+    location_note = Column(Text)
+    holder = Column(Text)
+    last_seen_at = Column(DateTime)
+    last_seen_by = Column(Text)
+    notes = Column(Text)
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "SAP_Code", "serial_no",
+                         name="uq_asset_units_site_sap_serial"),
+        Index("ix_asset_units_sap_site", "SAP_Code", "Site_ID"),
+        Index("ix_asset_units_serial", "serial_no"),
+    )
+
+
+class AssetMovements(Base):
+    """Append-only "where has this been" (alembic e9f2a4c68b71).
+
+    Same discipline as `system_audit_log`: rows are never deleted, so the
+    history is a query rather than a guess.
+
+    ⚠️ `lat`/`lng` is where an EMPLOYEE was standing when they scanned. It is
+    best-effort — a denied browser permission still records the move with the
+    coordinates NULL, because location capture must never block a location
+    update — and it is the first genuinely personal data this system stores.
+    """
+    __tablename__ = "asset_movements"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    asset_unit_id = Column(Integer, nullable=False)
+    moved_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    moved_by = Column(Text)
+    from_location_id = Column(Integer)
+    to_location_id = Column(Integer)
+    from_note = Column(Text)
+    to_note = Column(Text)
+    lat = Column(Float)
+    lng = Column(Float)
+    accuracy_m = Column(Float)
+    source = Column(Text)
+    status = Column(Text)
+    note = Column(Text)
+    __table_args__ = (Index("ix_asset_movements_unit", "asset_unit_id", "moved_at"),)
+
+
 class StorageLocations(Base):
     """A physical place in the warehouse (alembic d5b83c17e604).
 
