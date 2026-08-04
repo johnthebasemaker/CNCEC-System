@@ -140,20 +140,19 @@ Regenerate the manual PDFs (master + one booklet per role):
 
 ## 6. Open items — none of them blocking
 
-1. **`./bin/power.sh reap` has still not been run.** Three dead LaunchAgents from
-   the pre-cutover stack are respawning **~2,880 times a day**. This is the
-   single largest idle battery cost on the machine and it is one command.
-2. **`deploy/cloudflared/config.yml` has a stray UUID appended** at the end of
-   the file. It predates the last three sessions; left uncommitted deliberately
-   because its intent is unknown. **Worth 30 seconds of the operator's time.**
-3. **The Auditor cannot see the HOD group or the SME Estimator** — those are
+> Verified 2026-08-04. The first two items on this list are **done**:
+> `launchctl print-disabled` shows all four stale agents `disabled`, so the
+> ~2,880 daily respawns have stopped, and `deploy/cloudflared/config.yml` ends
+> cleanly at the `http_status:404` rule with no stray UUID.
+
+1. **The Auditor cannot see the HOD group or the SME Estimator** — those are
    exact-locked to `{hod, admin}`, and an exact-lock is not a level. If auditors
    should read them, add `'auditor'` to those `anyRole` lists; the write guard
    keeps them read-only regardless.
-4. **The per-account login throttle is per-process.** With N uvicorn workers the
+2. **The per-account login throttle is per-process.** With N uvicorn workers the
    effective budget is N × 8. Same caveat the existing IP limiter carries; a
    shared store (Redis) is the fix when deploying behind more than one worker.
-5. **Hetzner deployment** — paused by decision. Runbook is ready.
+3. **Hetzner deployment** — paused by decision. Runbook is ready.
 
 ---
 

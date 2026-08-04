@@ -15,19 +15,31 @@
  *     would be a neat way to read another site's inventory, so the store
  *     keeper's results are checked to be non-leaky rather than merely present.
  */
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { storageStatePath } from '../harness/env'
 
 // One page load per role, several assertions against it — the palette is
 // cheap, but a fresh context per test is not.
 test.describe.configure({ mode: 'serial' })
 
+/**
+ * `page.goto` resolves on `load`, but the ⌘K handler is attached in a React
+ * effect — a keypress fired before the shell mounts is dropped, and the test
+ * then fails on a palette that never opened. The header button is rendered by
+ * AppLayout right beside <CommandPalette/>, so waiting for it is waiting for
+ * the listener. Every ⌘K in this file goes through here.
+ */
+async function pressPaletteKey(page: Page) {
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
+  await page.keyboard.press('ControlOrMeta+k')
+}
+
 test.describe('command-palette:admin', () => {
   test.use({ storageState: storageStatePath('admin') })
 
   test('⌘K opens, filters pages, and Enter navigates', async ({ page }) => {
     await page.goto('/')
-    await page.keyboard.press('ControlOrMeta+k')
+    await pressPaletteKey(page)
 
     const box = page.getByPlaceholder(/Jump to/)
     await expect(box).toBeVisible()
@@ -59,7 +71,7 @@ test.describe('command-palette:admin', () => {
     })
     expect(sap.length).toBeGreaterThan(0)
 
-    await page.keyboard.press('ControlOrMeta+k')
+    await pressPaletteKey(page)
     await page.getByPlaceholder(/Jump to/).fill(sap)
 
     const modal = page.locator('.ant-modal-body')
@@ -70,7 +82,7 @@ test.describe('command-palette:admin', () => {
 
   test('Esc closes it and nothing navigates', async ({ page }) => {
     await page.goto('/stock')
-    await page.keyboard.press('ControlOrMeta+k')
+    await pressPaletteKey(page)
     await expect(page.getByPlaceholder(/Jump to/)).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.getByPlaceholder(/Jump to/)).toBeHidden()
@@ -83,7 +95,7 @@ test.describe('command-palette:store_keeper', () => {
 
   test('material search stays inside the role’s own site scope', async ({ page }) => {
     await page.goto('/entry/issue')
-    await page.keyboard.press('ControlOrMeta+k')
+    await pressPaletteKey(page)
     const box = page.getByPlaceholder(/Jump to/)
     await expect(box).toBeVisible()
 
