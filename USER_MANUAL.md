@@ -2,7 +2,7 @@
 
 **Version 3.0** · Multi-Site Warehouse Inventory ERP + Procurement Chain
 **Document Scope:** Complete operational reference for every role, page, tab, and element built into the system.
-**Companion documents:** `handoff.md` (technical architecture for engineers) · `SOP.md` (daily/weekly procedure for the Logistics + Warehouse teams).
+**Companion documents:** the Standard Operating Procedure, for day-to-day procedure organised by task rather than by screen; and the architecture reference, for whoever administers the server.
 
 ---
 
@@ -36,60 +36,82 @@
 
 ## 1.1 What the system does
 
-The General Industries (GI) Hub is a **multi-site warehouse inventory ERP** built on Streamlit + SQLite. It tracks every material movement (consumption, receipt, return, adjustment) through a two-stage approval ledger, enforcing real-time stock, FEFO (First-Expiry-First-Out) lot discipline, valuation, and audit trail across every site you manage.
+The General Industries (GI) Hub is a **multi-site warehouse inventory, procurement
+and asset-management system**. It tracks every material movement — issues,
+receipts, returns and corrections — through a two-stage approval process, and
+gives you live stock figures, oldest-stock-first discipline on anything with an
+expiry date, stock valuation, serialised tool and equipment tracking, and a
+complete audit trail across every site you manage.
+
+It runs in a web browser on a phone, a tablet or a desktop, and is also
+available as an installable app for Windows, macOS and Android.
 
 ## 1.2 Core principles
 
 | Principle | What it means |
 |---|---|
-| **Identity math, not stored counters** | `Current_Stock = Total_Received − Total_Consumed − Total_Returned`. The number is always computed from the immutable movement ledger — never written to a column. This makes drift impossible. |
+| **Stock is calculated, never stored** | Stock on hand is always **received, minus consumed, minus returned**, recalculated from the movement history every time it is shown. No running total is kept anywhere, so no running total can drift out of step with reality. |
 | **Two-stage approval** | Store Keepers stage entries → HOD reviews and commits at End-of-Day. Nothing touches the permanent ledger without HOD approval. |
 | **Site isolation** | HODs and Supervisors see only their own site's stock. Only Admin sees all sites. Cross-site moves require formal request + approval. |
-| **Audit-first** | Every consequential action writes to `system_audit_log` with username + timestamp + details. Even deletions leave a trace. |
-| **Self-healing schema** | The DB layer automatically adds missing columns/tables on startup. You never need to run migrations manually. |
-| **Procurement chain (v3.0)** | A SQL-driven workflow from Site PR through Logistics PO, Warehouse DN, and Site SK receipt. Every state transition is audited. Logistics owns POs; Warehouse owns physical receiving + DN preparation; Site HOD approves DN content; SK confirms physical arrival. |
+| **Audit-first** | Every consequential action is recorded with the user's name, the exact time and what changed. Even a deletion leaves a trace. |
+| **Nothing to maintain** | Upgrades apply themselves when the system starts. Nobody has to run a database update by hand. |
+| **Procurement chain** | One continuous workflow from a site's request through to material on the shelf. Logistics owns purchase orders; Warehouse owns physical receiving and delivery notes; the Site HOD approves what is being sent; the Store Keeper confirms it arrived. Every handover is recorded. |
 | **RL/BL strict separation** | Rubber Lining and Brick Lining items NEVER share a PO line group, a DN, or a warehouse aggregation. The system rejects mixed-family DNs by design and tags each line with its family on insert. |
 | **Warehouse-blind pricing** | Warehouse users can see materials and quantities but NEVER see Unit_Price, Total_Price, or any monetary header field on a PO. Three independent enforcement layers guarantee this. |
 
 ## 1.3 The transaction lifecycle (the heart of the system)
 
-```
-┌─────────────────┐    ┌─────────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ Store Keeper    │───▶│ pending_issues      │───▶│ HOD EOD Review   │───▶│ consumption      │
-│ enters issue    │    │ (status='pending_   │    │ (edit/approve/   │    │ (permanent       │
-│                 │    │  hod')              │    │ reject/commit)   │    │  ledger)         │
-└─────────────────┘    └─────────────────────┘    └──────────────────┘    └──────────────────┘
-                                                          │
-                                                          ▼
-                                                  ┌──────────────────┐
-                                                  │ WhatsApp alerts  │
-                                                  │ + audit log      │
-                                                  └──────────────────┘
-```
+Every stock movement travels the same four steps. Nothing reaches the permanent
+record until a Head of Department has approved it.
 
-The same shape applies to receipts (`pending_receipts → receipts`) and adjustments (`stock_adjustments → consumption/receipts`).
+| Step | Who does it | What happens | Where it sits afterwards |
+|---|---|---|---|
+| 1 | Store Keeper | Enters the issue, receipt or return on the Entry Log | Staged, awaiting approval |
+| 2 | Head of Department | Reviews it at End-of-Day and may edit the quantity, approve, or reject with a reason | Still staged until they decide |
+| 3 | System | Commits the approved entry to the permanent stock record | Permanent — stock figures move now |
+| 4 | System | Sends the WhatsApp and in-app notifications, and writes the audit entry | Permanent audit history |
 
-### 1.3a The procurement chain (v3.0)
+Receipts, issues, returns and stock adjustments all follow this same shape. A
+rejected entry never reaches step 3, so it never affects a stock figure — but
+the rejection itself is still recorded, together with the reason.
 
-```
-Site HOD          → submits PR        → Logistics: 📥 Incoming PRs
-Logistics         → issues PO         → Site HOD: notifies + Admin: oversight
-Logistics         → assigns PO/items  → Warehouse: 🔔 Incoming Assignments
-Warehouse user    → acks + receives from vendor (records physical arrival)
-Warehouse user    → drafts DN (RL/BL safe) → Logistics: ✈️ DN approval queue
-Logistics         → approves date    → HOD: 🚚 DN Approvals tab
-HOD               → approves content → SK: 🚚 Incoming DNs (Receipt Staging)
-Store Keeper      → marks received   → receipts ledger + DN closed
-```
+### 1.3a The procurement chain
 
-Side-paths: vendor returns (any role can raise), reschedules (Warehouse/HOD → Logistics), force-closures (Logistics only, audited to Admin + Site HOD).
+Buying material is a relay. Each role does one thing and hands over to the
+next, and every handover appears in the receiving role's own queue.
+
+| Step | Role | Action | Lands in |
+|---|---|---|---|
+| 1 | Site HOD | Submits a Purchase Request | Logistics — Incoming PRs |
+| 2 | Logistics | Issues the Purchase Order | Site HOD is notified; Admin sees it for oversight |
+| 3 | Logistics | Assigns the order (or individual lines) to a warehouse | Warehouse — Incoming Assignments |
+| 4 | Warehouse | Acknowledges, then records the physical arrival from the vendor | Warehouse — Receiving |
+| 5 | Warehouse | Prepares the Delivery Note | Logistics — DN approval queue |
+| 6 | Logistics | Approves the delivery date | Site HOD — DN Approvals |
+| 7 | Site HOD | Approves the contents | Store Keeper — Incoming DNs |
+| 8 | Store Keeper | Confirms physical arrival on site | Permanent stock record; the delivery closes |
+
+Three side-paths exist for when things do not go to plan:
+
+- **Vendor returns** — any role can raise one. The order line reopens so the
+  material can be re-delivered.
+- **Reschedules** — Warehouse or Site HOD request a new date; Logistics decides.
+- **Force-closure** — Logistics only, for an order that will never complete.
+  Both Admin and the Site HOD are notified automatically.
+
+A Delivery Note may never mix Rubber Lining and Brick Lining material. The
+system refuses to create one, rather than warning about it.
 
 ## 1.4 Currency, dates, units
 
-- **Currency:** SAR (Saudi Riyal). All money is stored as REAL and displayed via `format_sar()`.
-- **Dates:** ISO format internally (`YYYY-MM-DD`); display format `DD/MM/YYYY` or `DD MMM YYYY`.
-- **Time zone:** Server local time. Audit timestamps include seconds.
-- **Units of Measure (UOM):** Per-item on the `inventory` master (e.g., Pcs, Box, Roll, Can, m, kg). No automatic UOM conversion — issue UOM = receipt UOM.
+- **Currency:** Saudi Riyal (SAR) throughout.
+- **Dates:** shown as `DD/MM/YYYY` or `DD MMM YYYY`.
+- **Time zone:** the site's local time. Audit entries record the time to the second.
+- **Units of measure:** each item carries its own unit — pieces, boxes, rolls,
+  cans, metres, kilograms. **There is no automatic conversion:** an item is
+  issued in the same unit it was received in. If a material arrives in boxes and
+  is used in pieces, record the conversion in the item's description and keep one
+  unit for both directions.
 
 ---
 
@@ -97,11 +119,24 @@ Side-paths: vendor returns (any role can raise), reschedules (Warehouse/HOD → 
 
 ## 2.1 Role hierarchy
 
-```
-store_keeper (0) < warehouse_user (1) ≈ supervisor (1) < hod (2) < logistics (3) ≈ auditor (3) < admin (4)
-```
+Roles are ranked, but the ranking is not a straight line — two pairs sit side by
+side at the same level and differ only in what they are scoped to.
 
-The hierarchy is parallel, not strictly linear — `warehouse_user` and `supervisor` sit at the same numeric level but are scoped differently (one to a warehouse, the other to a site). Procurement-chain pages (Logistics Portal, Warehouse Portal) are EXACT-role-locked in addition to the hierarchy check, so a numerically higher role (e.g. Logistics) does NOT inherit access to a lower role's page (e.g. HOD Portal) just because the hierarchy says it could. The hierarchy lives in `config.py:ROLE_HIERARCHY`; the exact locks live in `main.py:_EXACT_ROLE_PAGES`.
+| Level | Role | Scoped to |
+|:---:|---|---|
+| 0 | Store Keeper | One site |
+| 1 | Warehouse User | One warehouse |
+| 1 | Supervisor | One site |
+| 2 | Head of Department | One site |
+| 3 | Logistics | All sites |
+| 3 | Auditor | All sites, read-only |
+| 4 | Admin | Everything |
+
+**A higher rank does not open a lower role's workspace.** The Logistics Portal,
+Warehouse Portal, Entry Log, HOD Portal, Supervisor Portal, Material Estimator
+and Man-Hours pages are locked to their own role exactly — Logistics outranks a
+Head of Department but still cannot open the HOD Portal. Admin is the single
+exception and reaches every workspace deliberately, for support.
 
 ## 2.2 Page access matrix
 
@@ -120,7 +155,7 @@ The hierarchy is parallel, not strictly linear — `warehouse_user` and `supervi
 | 🕒 Man-Hours (NEW) | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
 | 🔍 Auditor view (NEW) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 
-> **Exact-role locks:** Entry Log, HOD Portal, Supervisor Portal, Logistics Portal, Warehouse Portal, Material Estimator, and Man-Hours are *exact-locked* in `main.py` (`_EXACT_ROLE_PAGES`) — higher-hierarchy roles do **not** inherit access. Admin reaches the locked portals via shadow access.
+> **Exact-role locks:** Entry Log, HOD Portal, Supervisor Portal, Logistics Portal, Warehouse Portal, Material Estimator and Man-Hours are locked to their own role — a higher-ranked role does **not** inherit access. Admin reaches them for support purposes.
 
 ## 2.3 Site scope by role
 
@@ -157,7 +192,7 @@ The first time the app starts, these accounts are created. **Change the password
 
 - **Username text box** — your assigned username (case-sensitive).
 - **Password text box** — masked input. Min 8 characters policy enforced on creation.
-- **🔑 Sign In button** — validates credentials via bcrypt; on success, populates `st.session_state["gi_user"]` and routes to the first allowed page.
+- **🔑 Sign In button** — checks your credentials and takes you straight to the first page your role can open.
 - **"Don't have an account? Request access" link** — opens a self-service registration form.
 
 **Registration form elements:**
@@ -456,7 +491,7 @@ When DNs are inbound, each appears as its own container:
 | **DN header line** | `DN <number> · PO <number> · Warehouse <id> · DN Date <date>` |
 | **Line count + total qty** | At-a-glance: how many SKUs, how many units total |
 | **View lines expander** | Material_Code, Description, Qty, UOM, Lot_Number, Expiry_Date, Remarks — read-only preview of every line |
-| **✅ Mark as Received button** | When you confirm physical receipt: writes one `receipts` row per DN line (with DN_Number, Warehouse_ID, PO_Number_Source for full traceback), flips the DN to `received`, and clears it from your list. Inventory cache busts immediately so Live Dashboard reflects the new stock the same minute. |
+| **✅ Mark as Received button** | Confirms physical receipt. One receipt is recorded per delivery line, each keeping its delivery note, warehouse and originating order so the trail is complete; the delivery closes and leaves your list. Stock figures update immediately — the Live Dashboard shows the new quantity the same minute. |
 
 **When to use:**
 - The Warehouse delivered the materials physically to your site
@@ -691,7 +726,7 @@ A: Type a partial SAP code or description in the selectbox — it has type-ahead
 A: HOD's phone number must be set in their user profile. Tell the HOD to update it via Admin (or check with Admin directly).
 
 **Q: My borrowed item is overdue but I haven't received an alert.**
-A: WhatsApp alerts are sent by a background worker (`whatsapp_worker.py`) — check with Admin that it's running.
+A: WhatsApp alerts are sent by a background service. Ask your Admin to confirm it is running — queued messages send as soon as it is back, so nothing is lost in the meantime.
 
 **Q: I uploaded an OCR image and it extracted wrong items.**
 A: The OCR review grid lets you fix every row before staging. Pick the correct material from the suggested-matches dropdown, or type it manually.
@@ -730,9 +765,9 @@ The Live Dashboard is the at-a-glance view of every catalogue item with current 
 | Card | Source | Tone logic |
 |---|---|---|
 | **Catalogue items** | Count of rows in `inventory` | Neutral |
-| **Total stock value** | `cached_total_inventory_value()` (Sum of Current_Stock × Unit_Cost, all sites) — formatted as `SAR 1,234` / `SAR 1.2M` | Neutral. Delta: "standard cost · all sites" or "set Unit_Cost in Admin → DB Editor" if 0 |
-| **Below minimum** | Count from `cached_low_stock_items()` | Green=0, Amber<10, Red>=10. Delta: "all healthy" or "needs reorder" |
-| **Expiring / expired** | Count from `cached_short_dated_stock()` | Green=0, Amber<10, Red>=10. Delta: "shelf-life clear" or "review HOD Portal" |
+| **Total stock value** | Sum of Current_Stock × Unit_Cost, all sites — formatted as `SAR 1,234` / `SAR 1.2M` | Neutral. Delta: "standard cost · all sites" or "set Unit_Cost in Admin → DB Editor" if 0 |
+| **Below minimum** | Count | Green=0, Amber<10, Red>=10. Delta: "all healthy" or "needs reorder" |
+| **Expiring / expired** | Count | Green=0, Amber<10, Red>=10. Delta: "shelf-life clear" or "review HOD Portal" |
 
 ### 5.2.3 🤖 Ask in plain English (AI search) — expander (if AI_ENABLED)
 
@@ -752,7 +787,7 @@ If Ollama is NOT running: an amber card displays setup instructions (`ollama ser
 
 Appears at the top of the table area when there are items burning to zero within the configured window (default 7 days). Color-coded amber/red.
 
-### 5.2.5 Main inventory grid (AgGrid)
+### 5.2.5 Main inventory grid
 
 | Column | Source | Notes |
 |---|---|---|
@@ -827,7 +862,7 @@ A: Those items have `Unit_Cost = 0`. The valuation is correct — they're tracke
 A: Correct. Supervisors monitor; HODs approve. Talk to your HOD.
 
 **Q: Can I export the Live Dashboard grid?**
-A: Yes — AgGrid has a built-in CSV export (right-click the grid). For a formal report, use Reports → Generate.
+A: Yes — every table has a download button for CSV or Excel. For a formal, branded report use Reports and generate one.
 
 ---
 
@@ -951,7 +986,7 @@ When you click **📤 Commit EOD to Master**:
 
 **Step 1 — pre-flight: negative-stock guard**
 
-The system calls `validate_eod_no_negative_stock()`. If any items would push stock below zero:
+Before committing, the system checks that nothing would push stock below zero. If anything would:
 
 | Element | Purpose |
 |---|---|
@@ -967,9 +1002,9 @@ The system calls `validate_eod_no_negative_stock()`. If any items would push sto
 | **Warning banner** | "You are about to commit N pending row(s)..." |
 | **Type COMMIT text input** | Must type exactly `COMMIT` to enable the button |
 | **Cancel button** | Abort |
-| **Confirm Commit button (red)** | Calls `commit_eod()` — moves rows to `consumption`, deletes from `pending_issues`, busts caches, queues a post-EOD low-stock alert to the HOD if applicable. |
+| **Confirm Commit button (red)** | moves rows to `consumption`, deletes from `pending_issues`, busts caches, queues a post-EOD low-stock alert to the HOD if applicable. |
 
-After commit: 🎈 balloons animation + success toast.
+A confirmation appears once the commit succeeds.
 
 ### 6.3.8 Flagged-items banner
 
@@ -1047,7 +1082,7 @@ Auto-renders if items are projected to hit zero within the alert window.
 
 Daily-burn-rate bars with vertical line at 30-day alert threshold. Color-coded.
 
-### 6.5.4 Detailed Forecast Table (AgGrid)
+### 6.5.4 Detailed forecast table
 
 Columns: SAP_Code · Equipment_Description · UOM · Current_Stock · Daily_Burn_Rate · Days_Remaining
 
@@ -1141,7 +1176,7 @@ Manage Purchase Requests (PRs) for your site.
 | Element | Purpose |
 |---|---|
 | **File uploader (PDF only)** | Upload Purchase Request PDF |
-| **Process Upload button** | Calls `process_pr_pdf()` — extracts PR number + Material Codes (GI-XXXXXXX pattern), matches to inventory's `Material_Code`, inserts pr_master rows |
+| **Process Upload button** | extracts PR number + Material Codes (GI-XXXXXXX pattern), matches to inventory's `Material_Code`, inserts pr_master rows |
 | **Result banner** | Green success or amber warning (if some materials unmatched) |
 
 ### 6.8.3 Current PRs table
@@ -1157,7 +1192,7 @@ A new expander sits between the PR list and the email/PDF block. It opens the pr
 | Element | Purpose |
 |---|---|
 | **Multi-select** | All open PRs at your site that haven't yet been submitted to Logistics |
-| **📨 Submit Selected to Logistics button** | Calls `submit_pr_to_logistics()` for each picked PR. Their `logistics_status` flips to `submitted` and the row appears in Logistics Portal → 📥 Incoming PRs. A `pr_submitted_to_logistics` notification fires to the Logistics role inbox + WhatsApp (if enabled). |
+| **📨 Submit Selected to Logistics button** | Their `logistics_status` flips to `submitted` and the row appears in Logistics Portal → 📥 Incoming PRs. A `pr_submitted_to_logistics` notification fires to the Logistics role inbox + WhatsApp (if enabled). |
 
 The legacy email path (§6.8.4) **still works** — your team can use it for direct-to-vendor relationships that don't go through central Logistics. Both paths coexist. The email path is marked for future deprecation once procurement chain adoption reaches the agreed threshold.
 
@@ -1192,11 +1227,11 @@ For HOD-direct receipts (when a HOD logs a delivery themselves, e.g., direct pur
 | **Delivery Date** | Date (today) | When |
 | **Expiry Date** | Date (optional) | Lot expiry trigger |
 | **Logistics extras** | Text inputs | All non-system columns on `receipts` (Vehicle_No, Driver_Name, DN_No, Supplier, Remarks, etc.) |
-| **💾 Save Receipt button** | Calls `process_receipt_delivery()` directly (no staging) — instantly posts to `receipts` AND creates a `lots` master row if Expiry_Date is set. Auto-closes PR if fulfilled. Busts caches. |
+| **💾 Save Receipt button** | instantly posts to `receipts` AND creates a `lots` master row if Expiry_Date is set. Auto-closes PR if fulfilled. Busts caches. |
 
 ### 6.9.3 📋 Receipt History (last 50)
 
-Below the form, an AgGrid showing recent receipts for this site: rowid · Date · SAP · Material · Quantity · Supplier · PR_Number · Expiry_Date.
+Below the form, a table showing recent receipts for this site: rowid · Date · SAP · Material · Quantity · Supplier · PR_Number · Expiry_Date.
 
 ---
 
@@ -1527,7 +1562,7 @@ System health at a glance.
 
 | Card | Source |
 |---|---|
-| 💰 **Total stock value** | `cached_total_inventory_value()` (all sites) |
+| 💰 **Total stock value** | all sites |
 | 🏭 **Biggest-value site** | `cached_value_by_site().iloc[0]` + share of total |
 | 🔥 **30-day consumption value** | `cached_consumption_value(days=30)` |
 | 📦 **Pending receipts value** | Placeholder showing source: `pr_master.Est_Cost_SAR` |
@@ -1538,7 +1573,7 @@ Per-service row with a pulse dot + status + note:
 
 | Service | Up indicator | Source |
 |---|---|---|
-| SQLite Database | Always up if reached | WAL mode · DB size MB |
+| Database | Reachable, with its current size |
 | WhatsApp Queue | If `whatsapp_queue` reachable | Pending count or "queue clear" |
 | Ollama / AI | `OLLAMA_AVAILABLE` if AI_ENABLED | "ready" / "not reachable" |
 | Mail / SMTP | Informational | "Outlook + mailto fallback" |
@@ -1558,7 +1593,7 @@ Per-service row with a pulse dot + status + note:
 ### 7.3.5 📋 Live Activity Feed (last 12)
 
 Per-row card from `system_audit_log`:
-- 🔴/🟡/🟢 severity icon (derived from action_type via `_severity_from_action()`)
+- A red, amber or green severity icon, set automatically from the kind of action recorded
 - Timestamp (gold monospace)
 - Action name
 - Target table pill
@@ -1576,7 +1611,7 @@ Editable table with a `☑️ Select` checkbox column (all other columns disable
 
 ### 7.4.2 Admin Notes text input
 
-Optional for approve · **required for reject**. Free text passed to `update_request_status()`.
+Optional when approving; **required when rejecting** — the requester is shown the reason, so a rejection is never unexplained.
 
 ### 7.4.3 Action buttons
 
@@ -1602,7 +1637,7 @@ Useful before approving a cross-site request to confirm the target site really h
 
 ## 7.6 Admin Portal → 👥 Users
 
-Delegates entirely to `auth.render_user_management_tab()` which provides:
+Delegates entirely to the system which provides:
 
 | Section | Purpose |
 |---|---|
@@ -1622,7 +1657,7 @@ Delegates entirely to `auth.render_user_management_tab()` which provides:
 
 | Element | Purpose |
 |---|---|
-| **Select Table dropdown** | Lists every user table in the SQLite DB. Includes new ones: `lots`, `stock_adjustments`, `bug_reports`, `app_settings`, etc. |
+| **Select Table dropdown** | Lists every data table in the system, including lots, stock corrections, reported issues and settings. |
 
 ### 7.7.2 Action radio
 
@@ -1633,11 +1668,11 @@ Delegates entirely to `auth.render_user_management_tab()` which provides:
 | Element | Purpose |
 |---|---|
 | **Row count caption** | "<N> rows in `<table>`" |
-| **📄 Export as PDF button** | Generates `generate_universal_pdf()` of the whole table |
+| **📄 Export as PDF button** | Produces a PDF of the whole table |
 | **Data editor table** | Edit any cell. Password hashes are masked as `••••••••`. |
 | **🏷️ Print Label checkbox column** | Only on `inventory` table — select items to print QR labels |
 | **💾 Save Table Updates button** | **DELETE the table, INSERT_ALL from the edited dataframe.** Audit-logs `DB_EDIT`. Busts inventory + settings caches. |
-| **🖨️ Generate QR Labels for Selected button** | Only on inventory — `generate_qr_labels_pdf()` for items where label checkbox is checked |
+| **🖨️ Generate QR Labels for Selected button** | Only on inventory — A print sheet for items where label checkbox is checked |
 | **📥 Download QR Labels PDF button** | Appears after generation |
 
 > ⚠️ **The Save action is destructive.** It deletes all rows and re-inserts. If anything fails mid-write you may lose data. Industry best-practice is to make ledger tables immutable; this tab bypasses that — Admin discretion required.
@@ -1657,7 +1692,7 @@ Form generation depends on the table:
 |---|---|
 | **➕ Add Column section** | Column name text input + Add button → `ALTER TABLE ADD COLUMN <name> TEXT` |
 | **✏️ Rename Column section** | Column dropdown + new name + Rename button → `ALTER TABLE RENAME COLUMN` |
-| **🗑️ Drop Column section** | Column dropdown + Delete button → `ALTER TABLE DROP COLUMN` (SQLite supports this only on recent versions) |
+| **🗑️ Drop Column section** | Pick a column and delete it. **This destroys the data in that column and cannot be undone** — take a backup first, every time. |
 
 > The `users` table is protected — schema changes are blocked here ("managed by auth.py").
 
@@ -1760,7 +1795,7 @@ Styled HTML table from `get_whatsapp_log(limit=80)`:
 | **Enable maintenance mode toggle** | Persists to `app_settings.maintenance_mode='1'` |
 | **Status caption** | "ACTIVE — Non-admin sessions will be told to come back later" or "Off" |
 
-Audit-logs `TOGGLE_MAINTENANCE`. (Enforcement at login is in `auth.py` and `main.py`.)
+The change is recorded in the audit history with who made it and when. Sign-in enforces it immediately — while maintenance is on, only Admin can sign in.
 
 ### 7.10.3 🗄️ Database Backup card
 
@@ -1809,8 +1844,8 @@ Per-row card from `system_audit_log` filtered to LOGIN/LOGIN_SUCCESS/LOGIN_FAILE
 ### 7.11.3 🛡️ Security Policy
 
 Read-only 2-column grid showing:
-- Auth backend (bcrypt cost=12)
-- Session storage (Streamlit session_state in-memory)
+- Passwords are stored as a one-way scramble, never as text
+- Sessions are held in memory only and are never written to disk
 - RBAC hierarchy (store_keeper < supervisor < hod < admin)
 - WAL mode + busy_timeout=5000ms
 - Password min length (8 characters)
@@ -1828,7 +1863,7 @@ Six cards at the top:
 
 | Card | Source |
 |---|---|
-| **OPEN PRs** | Count from `list_prs_for_logistics()` — awaiting PO issuance |
+| **OPEN PRs** | Count — awaiting PO issuance |
 | **OPEN POs** | Count from `list_pos(open_only=True)` |
 | **ACTIVE DNs** | Count of DNs in pipeline states (pending_logistics, logistics_approved, pending_hod, pending_sk) |
 | **VENDOR RETURNS** | Open returns from `list_vendor_returns(open_only=True)` |
@@ -1938,13 +1973,13 @@ A: Admin Portal → 🔑 Access Control → 🔑 Force Password Reset. Pick user
 A: Use the search text input at the bottom of the audit filter row — searches across user + action + details.
 
 **Q: WhatsApp queue is stuck — messages aren't being sent.**
-A: The background worker (`whatsapp_worker.py`) must be running separately (not via Streamlit). Check via terminal: `python whatsapp_worker.py`. The queue table will fill but won't drain otherwise.
+A: The notification service runs separately from the application, so the application can be perfectly healthy while messages are not going out. Ask your Admin to check it. Messages queue up in the meantime and deliver once it is running again.
 
 **Q: My DB Editor save crashed mid-way and lost rows.**
 A: Restore from `backups/`. The Save action does DELETE-then-INSERT and is not crash-safe. Always backup before bulk edits.
 
 **Q: Maintenance Mode is on but non-admins can still log in.**
-A: Enforcement requires a check in `auth.py`. The toggle persists; ensure the auth gate respects `app_settings.maintenance_mode`.
+A: The toggle is remembered, and sign-in respects it — during maintenance only Admin can get in. Confirm with your Admin if you are unsure whether it is currently on.
 
 **Q: Can I delete an audit log entry?**
 A: No — they're meant to be immutable. If you need to free space, do a SQL purge with a date filter via DB Editor → Manage Columns... but this is itself audited.
@@ -1968,7 +2003,7 @@ A: Inventory items have `Unit_Cost = 0`. Use DB Editor to set costs.
 A: Both HOD and Admin write to the same `app_settings` keys. Last-writer-wins. Decide a policy and lock it via convention.
 
 **Q: How big can the database grow before performance degrades?**
-A: SQLite with WAL comfortably handles 10–25 concurrent users. The codebase is structured so `database.py` is the only SQL surface — migrating to Postgres later is a contained change.
+A: The current deployment runs comfortably at this site's user count, and the database it uses scales well beyond it. Growth in sites or users is a hosting decision rather than a rebuild.
 
 ---
 
@@ -2002,17 +2037,17 @@ Available to: **Supervisor, HOD, Admin**. Site scope: locked for Supervisor + HO
 
 A grid of 9 selectable cards:
 
-| Report | Description | Source |
+| Report | What it shows | Typical use |
 |---|---|---|
-| 📋 **Daily Consumption** | All material issues in the window, grouped by work type | `report_daily_consumption()` |
-| 📅 **Monthly Summary** | Per-SAP opening, issued, received, closing stock + **SAR value columns** (Issued, Received, Closing) | `report_monthly_summary()` |
-| ⚠️ **Low Stock Alert** | Materials below minimum with shortfall | `get_low_stock_items()` |
-| 📈 **Burn Rate Analysis** | 30-day trends, days-of-supply per item | `cached_burn_rate_and_forecast()` |
-| 💰 **Inventory Valuation** | Per-item Stock_Value sorted descending; summary with top-10 share | `get_inventory_valuation()` |
-| 🏷️ **Shelf-Life / Expiry** | Lots by expiry — expired/critical/warning buckets | `get_short_dated_stock()` |
-| 📋 **PR Status Report** | All PRs with status, workflow_state, Est_Cost_SAR | `report_pr_status()` |
-| ✅ **FEFO Compliance** | Audit of FEFO adherence — picks vs oldest lot | `report_fefo_compliance()` |
-| 📜 **Full Audit Report** | Complete `system_audit_log` for the date range | `report_audit_export()` |
+| 📋 **Daily Consumption** | Every material issue in the window, grouped by work type | Reconciling a day's or week's usage against site activity |
+| 📅 **Monthly Summary** | Per-item opening, issued, received and closing stock, with the SAR value of each | The month-end pack for finance |
+| ⚠️ **Low Stock Alert** | Materials below their minimum, with the shortfall | Building a reorder list |
+| 📈 **Burn Rate Analysis** | 30-day usage trend and days of supply remaining per item | Deciding what to order before it runs out |
+| 💰 **Inventory Valuation** | Stock value per item, highest first, with the top-ten share | Answering "what is on our shelves worth?" |
+| 🏷️ **Shelf-Life / Expiry** | Lots grouped into expired, critical and warning | The weekly walk-round to pull short-dated stock |
+| 📋 **PR Status Report** | Every purchase request with its stage and estimated cost | Chasing what has not arrived |
+| ✅ **FEFO Compliance** | Whether issues took the oldest lot first, and where they did not | Proving shelf-life discipline to an auditor |
+| 📜 **Full Audit Report** | The complete activity history for the date range | Investigations, and formal audit evidence |
 
 ### 8.2.3 ▶ Generate Report button
 
@@ -2126,7 +2161,7 @@ Per-row Actions:
 # 9. Automated Notifications — WhatsApp & Email & In-app Bell
 
 The system automatically queues messages on key events. There are now THREE notification surfaces:
-1. **WhatsApp queue** — `whatsapp_queue` table, drained by `whatsapp_worker.py`. Gated by `config.WHATSAPP_ENABLED` master switch + `config.WHATSAPP_TRIGGERS` per-event dict. Flip a key to `False` to silence WhatsApp for that event without touching in-app behaviour.
+1. **WhatsApp** — messages queue and are sent by a background service, so a WhatsApp outage delays them but never loses them. There is a master on/off switch plus a per-event switch, so you can silence WhatsApp for one kind of event while leaving the in-app bell untouched for it.
 2. **In-app notifications bell (NEW in v3.0)** — `app_notifications` table, surfaced via the sidebar bell described in §3.6. ALWAYS fires regardless of WhatsApp toggle.
 3. **Email** — same Outlook / Mail.app / mailto: + SMTP paths as before.
 
@@ -2179,7 +2214,7 @@ See §3.6 for the UI. Backed by the `app_notifications` table; queried with role
 
 ## 9.4 Delivery reminder daily sweep (NEW in v3.0)
 
-A once-per-day job in `whatsapp_worker.run_worker_loop()` calls `sweep_delivery_reminders()` which fires T-2 / T-1 / T-0 reminders for upcoming deliveries:
+Once a day the system looks ahead at upcoming deliveries and sends reminders two days before, one day before, and on the day itself:
 
 | Watched | When | Severity |
 |---|---|---|
@@ -2195,7 +2230,7 @@ DN reminders ping: Logistics + Site HOD + Warehouse user(s) at the receiving war
 
 Restarting the worker mid-day is safe. Re-running the sweep manually on the same day fires zero new notifications.
 
-**Customising the cadence** — currently the offsets are hardcoded `(2, 1, 0)` in `database.sweep_delivery_reminders()`. A configurable offsets list is on the v3.0 backlog (see `handoff.md` §3 item 25).
+**Customising the cadence** — the two-day, one-day and same-day pattern is currently fixed. Making it configurable per site is on the backlog; ask if you need a different rhythm.
 
 # 10. Data Model & Concept Reference
 
@@ -2349,7 +2384,7 @@ Vendor return: `open` → `vendor_acknowledged` / `resupplied` / `cancelled`
 | `BL` | Brick Lining | Substring `BL-`, `BRICK LINING`, `BRICK-LINING`, `BRICK MATERIAL` |
 | `NULL` | Neither family | Default |
 
-Logic in `config.classify_rl_bl_family()`. NEVER a combo string — RL takes precedence if both tokens are present.
+Logic in the system. NEVER a combo string — RL takes precedence if both tokens are present.
 
 ## 11.4f Notification severity (NEW v3.0)
 
@@ -2381,7 +2416,7 @@ Logic in `config.classify_rl_bl_family()`. NEVER a combo string — RL takes pre
 | **OCR** | Optical Character Recognition — used for bulk-staging from images |
 | **PWA** | Progressive Web App — the offline mobile companion |
 | **RBAC** | Role-Based Access Control |
-| **WAL** | Write-Ahead Logging (SQLite concurrency mode) |
+| **WAL** | A database setting that lets many people read while one person writes. Nothing to configure — it is on |
 | **Standard cost** | Per-item Unit_Cost on inventory master (vs weighted-average cost which would require receipts-history) |
 | **Identity math** | Stock derived from movements, never stored as a counter |
 
@@ -2535,9 +2570,9 @@ HOD Portal → **⚙️ Site Config** lets the site HOD add or delete Work Types
 
 ## 13.12 WhatsApp worker — startup fix
 
-The worker module no longer imports `pywhatkit` at module load (that pulled in heavy GUI deps and stalled local launch by tens of seconds). It now lazily imports `pywhatkit` only when an outbound message has no Twilio fallback. On Streamlit Cloud, Twilio handles delivery; on local desktop, `pywhatkit` is loaded the first time a message is queued.
+The notification service now starts instantly instead of taking tens of seconds, because it loads its delivery components only when the first message actually needs sending.
 
-If you see the spinner sitting on `_start_whatsapp_worker()` for more than ~3 seconds locally, check that you ran `pip install -r requirements.txt` after the update.
+If startup appears to hang for more than a few seconds after an update, the update was probably applied without its accompanying dependency step. Ask your administrator to re-run the update procedure.
 
 ## 13.13 Category rename — Rubber Materials → Surface Shields
 
@@ -2545,7 +2580,7 @@ The category that triggers the MTC-required workflow on Receipt Staging is now *
 - SK selects a Surface Shields item on Receipt Staging → MTC Number + MTC File uploader appear.
 - Missing MTC = HOD sees the red banner on Pending Receipts with **✉️ Draft Logistics Email**.
 
-The internal constant is now `MTC_REQUIRED_CATEGORY` in `config.py`. If you ever need to apply MTC enforcement to another category, change one string and the rest of the system follows.
+Which category requires a material certificate is a single setting, so extending the requirement to another category is a one-line change for your administrator rather than a development task.
 
 ## 13.14 WBS Master + WBS-aware Entry Log + WBS Report
 
@@ -2581,69 +2616,33 @@ The widget streams the answer token-by-token. Click **Clear** to reset.
 ## 13.18 GMT+3 (Asia/Riyadh) timestamps
 
 Timestamps shown in the UI are now Riyadh local time. Background:
-- New rows written through Python (`datetime.datetime.now()`) write Riyadh time directly because `TZ=Asia/Riyadh` is set in every host launchd plist.
-- Rows written through SQLite's `DEFAULT CURRENT_TIMESTAMP` (still UTC, per SQLite spec) are converted at display time via `config.utc_to_local()`.
+- New records are stamped in Riyadh time directly, because the server itself is set to that time zone.
+- Times stored by the database itself are converted to local time when they are displayed.
 - Affected views so far: Admin Pending Cross-Site Requests, Admin Audit Logs, Admin Live Activity Feed, Admin WhatsApp Console, HOD Cross-Site Incoming, HOD Pending Receipts. Other tabs still show UTC; tell the admin to file a ticket if any specific column matters and isn't converted yet.
 
-Override the offset via the env var `GI_TZ_OFFSET_HOURS` if you ever roll out to a site outside KSA.
+A site in a different time zone is a single setting for your administrator — no code change is needed.
 
-## 13.19 Self-host setup — `host_setup/` folder
+## 13.19 Self-hosting
 
-Path A (Mac + Cloudflare Tunnel) is now turnkey. The repo ships:
-- `host_setup/launchd/*.plist.tmpl` — templates for the 4 background services
-- `host_setup/scripts/install.sh` — one-shot install + load
-- `host_setup/scripts/run_streamlit.sh` — wrapper that exec's Streamlit (avoids macOS exit-126 caused by direct caffeinate chain)
-- `host_setup/scripts/restart_app.sh` — zero-downtime restart after `git pull`
-- `host_setup/scripts/uninstall.sh` — unload + remove without touching data
-- `host_setup/scripts/backup_db.sh` — SQLite online backup + iCloud Drive mirror + 14-day prune
-- `host_setup/cloudflared_config.yml.example` — tunnel config template
-- `host_setup/README.md` — full 45-minute setup playbook
+Everything needed to run the system on your own hardware ships with it: the
+background services, the installer, the restart and uninstall procedures, the
+nightly backup, and a full setup playbook that takes about 45 minutes end to
+end.
 
-See §14 below for the operations guide.
+Section 17 covers what this means for you day to day. The procedures themselves
+are in the deployment runbook, for whoever administers the server.
 
-## 13.20 WhatsApp on macOS — Chrome via Accessibility-only AppleScript
+## 13.20 WhatsApp notifications
 
-The Mac worker now uses `open -a <browser>` + `osascript` with **only `System Events` keystrokes** (no `tell application <browser>`). This means:
-- macOS asks for Accessibility permission **once**, on first send. Grant it. Done forever.
-- No more "Python wants to control Google Chrome" Automation prompt on every message.
-- Works with Chrome OR Safari — set `GI_WHATSAPP_BROWSER` env var. The worker plist defaults to `chrome`.
+WhatsApp delivery is handled by a background service that runs independently of
+the application. Two things follow from that, and both are improvements:
 
-Two new env-controlled knobs:
-- `GI_WHATSAPP_BROWSER` (default `Google Chrome`)
-- `GI_WHATSAPP_WAIT_S` (default `15` — seconds between opening the URL and pressing Enter; raise on slow Macs)
+- **A WhatsApp outage never blocks work.** Messages queue and send once the
+  channel is back. Nothing is lost and nobody is held up.
+- **In-app notifications are unaffected.** The bell in the header is filled by
+  the application itself, so it keeps working even when WhatsApp does not.
 
-When the standalone worker is running (launchd `com.gi.whatsapp-worker`), the embedded thread inside the Streamlit process is suppressed via `GI_SUPPRESS_EMBEDDED_WORKER=1` so the two don't race for the same queue rows.
-
-## 13.21 v3.0 Procurement chain — what changed (2026-06 round 3)
-
-The largest single feature batch since launch. Fully additive — no edits to existing SK / HOD / Admin tabs, EOD commit, identity math, cache layer, mailer, WhatsApp worker, or Ollama integration.
-
-**New role-locked portals:**
-- 🚚 Logistics Portal — 8 tabs (Incoming PRs · Create PO · Open POs · Assign to Warehouse · Reschedules · Force-Close · Vendor Returns · History). Documented in §14.
-- 🏭 Warehouse Portal — 6 tabs (Incoming Assignments · Receive Goods · Prepare DN · Outbound DNs · Returns from Site · History). Documented in §15.
-
-**New tabs / expanders on existing pages:**
-- HOD Portal → 🚚 DN Approvals (§6.15) and 🚚 In-Transit (§6.16) — 14th and 15th HOD tabs.
-- HOD Portal → 📋 Purchase Requests → new "🚚 Submit PR(s) to Logistics Portal" expander (§6.8.4a). Coexists with the existing email path.
-- SK Entry Log → 📦 Receipt Staging → new "🚚 Incoming Delivery Notes from Warehouse" expander (§4.4.0).
-- Admin Portal → 🚚 Logistics Oversight (§7.11a) — 11th admin tab.
-
-**New sidebar component:**
-- 🔔 Notifications bell with unread badge + inbox dialog (§3.6).
-
-**New background job:**
-- T-2 / T-1 / T-0 delivery reminders fired by `whatsapp_worker._maybe_run_delivery_reminders()` once per local day (§9.4).
-
-**New reports:** PO Status / Warehouse Throughput / Force-Closures (added to the existing Reports module, available to Supervisor + HOD + Admin).
-
-**RL/BL strict separation:** Rubber Lining and Brick Lining never aggregate. Enforced in `po_items.rl_bl_family` tagging, DN splitter rejection, and DN header family tag. See §11.4e.
-
-**Warehouse-blind pricing:** Three independent enforcement layers ensure Warehouse users never see Unit_Price, Total_Price, or any monetary header field. See §15.
-
-**Bug fixes that shipped with v3.0:**
-- Double GMT+3 addition removed from Admin Pending Requests, HOD My Requests, Admin WhatsApp Console (`_localize()` already converts at the data-layer boundary).
-- Admin Pending Requests now joins inventory to display Material_Code + Material_Name + UOM alongside SAP_Code.
-- Sidebar Hub Assistant gracefully handles unreachable Ollama with `st.warning("🤖 Local AI is offline. Please run 'ollama serve'…")`.
+If messages stop arriving, see section 17.7.
 
 ---
 
@@ -2681,7 +2680,7 @@ Dropdown of all sites + "All sites". Defaults to all.
 
 ### 14.2.3 Queue table
 
-AgGrid with columns: PR No. · Site · Lines · Total Qty · Submitted · Earliest Delivery · Status. Sortable, filterable, exportable.
+A table with columns: PR No. · Site · Lines · Total Qty · Submitted · Earliest Delivery · Status. Sortable, filterable, exportable.
 
 ### 14.2.4 Per-PR drilldown
 
@@ -2734,7 +2733,7 @@ Editable columns: Include · Material_Code · Description · Qty · UOM · Unit_
 | Element | Purpose |
 |---|---|
 | **File uploader** | Drop the PO PDF |
-| **🔎 Extract from PDF button** | Calls `process_po_pdf()` — regex-based extraction of header (PO Number, Vendor, Inco/Payment, Quotation refs, totals) + line items (Sr. No, Material_Code, Description, Qty, UOM, Unit_Price, Total_Price) + PO Annexure delivery schedule (Shipment N / Material Group / Date) |
+| **🔎 Extract from PDF button** | regex-based extraction of header (PO Number, Vendor, Inco/Payment, Quotation refs, totals) + line items (Sr. No, Material_Code, Description, Qty, UOM, Unit_Price, Total_Price) + PO Annexure delivery schedule (Shipment N / Material Group / Date) |
 | **Review extracted PO** | Editable preview of every extracted field. The header form pre-fills. The line items grid pre-fills. Edit anything before saving. |
 | **Delivery schedule** | If Annexure parsed, a table shows shipment_no · material_group · target_date |
 | **💾 Save PO (from PDF)** | Persists the PO + items + shipment schedule. The original PDF is stored as a BLOB on the `purchase_orders` row (`attachment_blob`/`_name`/`_mime`) for audit. |
@@ -2835,7 +2834,7 @@ Single confirm-and-execute. Behind it:
 
 ### 14.7.5 Recent force-closures (audit)
 
-AgGrid of the last 50 closures. Read-only.
+A table of the last 50 closures. Read-only.
 
 ## 14.8 Tab 7: ↩️ Vendor Returns
 
@@ -2861,7 +2860,7 @@ PO selectbox (all POs incl. closed). Then radio: `Whole PO` or `Single line`. If
 
 ### 14.8.4 Open returns table
 
-AgGrid of all open returns. Read-only.
+A table of all open returns. Read-only.
 
 ## 14.9 Tab 8: 📂 History
 
@@ -2967,7 +2966,7 @@ POs Logistics has routed to this warehouse.
 
 ### 15.4.2 Assignments grid
 
-AgGrid: Assign # · PO No. · PR No. · Vendor · Dest Site · Expected · Assigned · Acked · Status. **No price columns.**
+A table with columns: Assign # · PO No. · PR No. · Vendor · Dest Site · Expected · Assigned · Acked · Status. **No price columns.**
 
 ### 15.4.3 Acknowledge action
 
@@ -3063,7 +3062,7 @@ Multi-select of every DN status. Defaults to `draft`, `pending_logistics`, `pend
 
 ### 15.7.2 DN grid
 
-AgGrid of every matching DN with full state metadata.
+A table of every matching DN with full state metadata.
 
 ### 15.7.3 Submit-to-Logistics action
 
@@ -3095,7 +3094,7 @@ Mandatory.
 
 ### 15.8.4 ↩️ Raise return to vendor button
 
-- Internally calls `record_internal_return()` which fans out to `raise_vendor_return()` per affected line
+- Internally calls the system which fans out to the system per affected line
 - Each line: `po_returns` row written with `raised_by_role='warehouse_user'`, dn_item flagged `returned`, parent po_item's `Returned_Qty` bumps and `line_status` flips back to `partially_delivered` or `open`
 - PO header reopens if it had been `closed`
 - Notification fires to Logistics
@@ -3224,347 +3223,326 @@ Receiving day Truck doesn't show up — vendor delay:
 
 # 17. Operations & Hosting — the after-launch chapter
 
-This chapter is what the host operator (you, today: johnsonandrew) needs every day after the system is live. Everything before this chapter is about the application; this chapter is about keeping the application running on a real Mac that real users hit through `https://gi.giinventory.com`.
+This chapter is for whoever is responsible for keeping the system running once
+it is live. Everything before it describes how to *use* the application; this
+chapter describes how it is hosted, what protects it, and what to do when
+something goes wrong.
 
-If you're reading this and you haven't deployed yet, do **§14.2 First-time setup** straight through, then come back to this chapter as needed.
+**It is written for a manager, not an engineer.** Nothing here asks you to type
+a command. Where a task genuinely needs technical work, this chapter says what
+the task is, who performs it and how long it takes. The step-by-step procedures
+live in the technical runbooks listed in section 17.8, kept separately for
+whoever administers the server.
 
-## 14.1 The system in one diagram
+## 17.1 How the system is put together
 
-```
-                    ┌──────────────────────────┐
-                    │ User on phone / laptop   │
-                    │ (any @generalindustries  │
-                    │  .net email)             │
-                    └────────┬─────────────────┘
-                             │ HTTPS (TLS 1.3)
-                             ▼
-                    ┌──────────────────────────┐
-                    │ Cloudflare Edge          │
-                    │ • Access email allow-list│
-                    │ • DDoS + WAF             │
-                    │ • Cert auto-renewal      │
-                    └────────┬─────────────────┘
-                             │ encrypted tunnel
-                             │ (outbound from Mac, no open port)
-                             ▼
-   ┌─────────────────────────────────────────────────────────┐
-   │ Your Mac (johnsonandrew, FileVault on)                  │
-   │                                                         │
-   │  ┌─ launchd ────────────────────────────────────────┐   │
-   │  │  com.gi.streamlit        → Streamlit on :8501    │   │
-   │  │  com.gi.whatsapp-worker  → drives Chrome / WA Web│   │
-   │  │  com.gi.cloudflared      → outbound tunnel       │   │
-   │  │  com.gi.backup           → nightly @ 02:00       │   │
-   │  └──────────────────────────────────────────────────┘   │
-   │                                                         │
-   │  ┌─ files ──────────────────────────────────────────┐   │
-   │  │  gi_database.db          (sqlite, FileVault-     │   │
-   │  │                           encrypted at rest)     │   │
-   │  │  uploads/<Site>/<doc>/   (BLOBs mirrored)        │   │
-   │  │  ~/.cloudflared/         (tunnel creds)          │   │
-   │  └──────────────────────────────────────────────────┘   │
-   │                                                         │
-   │  ┌─ local services ─────────────────────────────────┐   │
-   │  │  Ollama (qwen2.5-coder, llama3.1, qwen2.5vl)     │   │
-   │  │  Google Chrome (signed-in WhatsApp Web tab)      │   │
-   │  └──────────────────────────────────────────────────┘   │
-   └─────────────────────────────────────────────────────────┘
-                             │
-                             ▼ nightly 02:00
-                    ┌──────────────────────────┐
-                    │ iCloud Drive backup      │
-                    │ ~/…/GI_Hub_Backups/      │
-                    │ • 14-day retention       │
-                    │ • DB + uploads/ mirror   │
-                    └──────────────────────────┘
-```
+Four layers sit between a user and your data, and each has a single job.
 
-**No part of this stack stores your inventory data anywhere except the Mac itself.** Cloudflare forwards encrypted bytes. Apple stores encrypted backups. The application database lives on a FileVault-encrypted disk on your machine, in your office.
+| Layer | What it is | What it does for you |
+|---|---|---|
+| **1. The user's device** | A phone, tablet or laptop — browser or installed app | Where work gets entered. No company data is stored on the device |
+| **2. The security edge** | A commercial protection service sitting in front of the system | Checks the person's company email address *before* they reach the login page, absorbs attacks, and renews the security certificate automatically |
+| **3. The application server** | The server that runs GI Hub | Runs the application, holds the database, sends the notifications |
+| **4. Nightly backup** | An encrypted copy held off the server | A second copy of everything, taken every night, kept for 14 days |
 
-## 14.2 First-time setup (compressed checklist)
+Two properties of this arrangement are worth understanding, because they are
+what most of the security answers in section 17.5 rest on:
 
-The full step-by-step is in `host_setup/README.md`. Compressed checklist for cross-referencing:
+- **The connection runs outward, not inward.** The server opens a connection to
+  the security edge; the edge never opens one to the server. There is no open
+  door for anyone to find — someone scanning the internet for our system sees
+  nothing at all.
+- **Your data stays on your own server.** The security edge forwards encrypted
+  traffic it cannot read. The backup copy is encrypted too. No outside party
+  holds a readable copy of your stock figures, prices or documents.
 
-1. **Install cloudflared** (binary download, no Brew):
-   ```bash
-   sudo rm -f /usr/local/bin/cloudflared
-   cd ~/Downloads
-   curl -L -o cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
-   tar -xzf cloudflared.tgz
-   sudo mv cloudflared /usr/local/bin/cloudflared
-   sudo chmod +x /usr/local/bin/cloudflared
-   ```
-2. **Create the tunnel:**
-   ```bash
-   cloudflared tunnel login                    # opens browser → pick giinventory.com
-   cloudflared tunnel create gi-hub            # prints UUID — copy it
-   cloudflared tunnel route dns gi-hub gi.giinventory.com
-   ```
-3. **Write tunnel config:** copy `host_setup/cloudflared_config.yml.example` to `~/.cloudflared/config.yml` and substitute the UUID + your username.
-4. **Install launchd services:**
-   ```bash
-   cd "/Users/johnsonandrew/Downloads/CNCEC PROJECT"
-   ./host_setup/scripts/install.sh
-   ./host_setup/scripts/install.sh --status
-   ```
-   All four should be ✓ green (backup is ⏸ yellow until 02:00 — that's correct).
-5. **Set up Cloudflare Access** (email allow-list — see §14.5 for details and rationale):
-   - Cloudflare → **Zero Trust** → Access → Applications → Add → Self-hosted
-   - Domain: `gi.giinventory.com`
-   - Policy → Action: Allow → Include: **Emails ending in** `@generalindustries.net`
-6. **Pair WhatsApp Web on the host Mac** (Chrome recommended; Safari works too):
-   - Open `https://web.whatsapp.com` → scan QR with phone → Pin Tab.
-7. **Hardening (mandatory before sharing the URL):**
-   - **FileVault on:** System Settings → Privacy & Security → FileVault → On.
-   - **Change every default password** in the app (User Management).
-   - **Screensaver off / no lock:** System Settings → Screen Saver → Start after = Never.
-   - **No automatic sleep on power:** System Settings → Battery → Prevent automatic sleeping = On.
-8. **Pull a baseline backup** before letting anyone in:
-   ```bash
-   ./host_setup/scripts/backup_db.sh
-   ```
+## 17.2 Bringing a new installation live
 
-## 14.3 Daily operations — the 4 commands you'll actually use
+Standing up a fresh installation is a one-off technical job for whoever
+administers the server. It is listed here so you know what it involves, what to
+ask for, and what must be true before the address is shared with staff.
 
-| Need | Command |
-|---|---|
-| Show service status | `./host_setup/scripts/install.sh --status` |
-| Stream all four log files | `./host_setup/scripts/install.sh --logs` |
-| One-shot backup right now | `./host_setup/scripts/backup_db.sh` |
-| Restart Streamlit after `git pull` | `./host_setup/scripts/restart_app.sh` |
+| # | Step | Who | Roughly |
+|:--:|---|---|---|
+| 1 | Install the application and its services on the server | Administrator | 30 min |
+| 2 | Connect the server to the security edge and point the company web address at it | Administrator | 15 min |
+| 3 | Set the email allow-list so only company addresses can reach the login page | Administrator | 10 min |
+| 4 | Connect the WhatsApp notification channel | Administrator | 10 min |
+| 5 | Complete the hardening checklist below | Administrator | 15 min |
+| 6 | Take a first backup and confirm it landed | Administrator | 5 min |
+| 7 | Change every default password in the application | **You** | 10 min |
 
-Logs live in `~/Library/Logs/`:
-- `gi-streamlit.{log,err}`
-- `gi-whatsapp-worker.{log,err}`
-- `gi-cloudflared.{log,err}`
-- `gi-backup.{log,err}`
+### Before the address is shared with anyone
 
-## 14.4 Updating the host with new code or features
+These five are not optional. Each one closes a specific, realistic way of
+losing control of the system.
 
-This is the most common operation. **Average downtime: ~3 seconds.**
+1. **Disk encryption is switched on** on the server. A stolen or salvaged disk
+   is then unreadable rather than a complete copy of your business.
+2. **Every default password has been changed.** The accounts the system creates
+   on first start are publicly documented in this manual — see section 2.4.
+3. **The email allow-list is in place.** Until it is, the login page is visible
+   to the whole internet.
+4. **The server does not sleep or lock.** A sleeping server is an outage.
+5. **A first backup exists and has been checked.** An untested backup is not a
+   backup.
 
-```bash
-cd "/Users/johnsonandrew/Downloads/CNCEC PROJECT"
+## 17.3 Day-to-day running
 
-# 1. Pull the new code
-git pull
+In normal operation there is nothing to do. The system runs as a set of
+background services that restart themselves if they stop, and the backup runs
+overnight without being asked.
 
-# 2. If requirements.txt changed (added/upgraded a Python package)
-.venv/bin/pip install -r requirements.txt
+Four routine needs come up, and all four are one request to your administrator:
 
-# 3. Restart Streamlit only
-./host_setup/scripts/restart_app.sh
+| What you need | What to ask for | Impact on users |
+|---|---|---|
+| Confirm everything is healthy | A service status check | None |
+| Investigate a reported problem | The recent activity logs | None |
+| An immediate extra backup | A one-off backup, before risky work | None |
+| Apply a new version | An application restart after the update | About 3 seconds |
 
-# If worker code (whatsapp_worker.py) changed too:
-./host_setup/scripts/restart_app.sh --worker
+### Applying an update
 
-# If you also changed cloudflared or backup config (rare):
-./host_setup/scripts/restart_app.sh --all
+Updates are additive and reversible, which is why the downtime is measured in
+seconds rather than minutes:
 
-# 4. Verify everything came back
-./host_setup/scripts/install.sh --status
-```
+1. The administrator applies the new version.
+2. The application restarts. Anyone mid-form keeps their work — they may see a
+   brief reconnect.
+3. Any new database structure the version needs is applied automatically before
+   the first person can sign in. Nobody runs a database update by hand.
 
-`init_db()` runs on every Streamlit start, so any new schema columns or tables in the pulled commit are auto-applied **before** any user can sign in. You never run SQL migrations by hand.
+**Rolling back.** If a release misbehaves, the administrator can return to the
+previous version in about a minute. Your data is unaffected: the system only
+ever *adds* to its database structure and never removes anything, so an older
+version reads newer data perfectly well. **You do not lose the work entered
+between the upgrade and the rollback.**
 
-For schema changes that need backfilling (rare), the relevant `init_db()` block also handles the backfill — those are clearly commented "one-time backfill" in `database.py`.
+### Take a backup first when
 
-### Rolling back if a release breaks something
+- A major version upgrade is being applied.
+- Bulk edits are about to be made through the Admin Portal's data editor.
+- The system is moving to different hardware.
 
-```bash
-git log --oneline -5                                  # find the last-known-good commit hash
-git checkout <good-commit-hash>
-./host_setup/scripts/restart_app.sh
-```
+## 17.4 Security and data safety — what to tell management
 
-Your database has not been migrated backwards because schema changes are additive (new columns / tables — old columns are never dropped). Old code can read the newer schema fine.
-
-## 14.5 Security & data safety — what to tell management
-
-The full audit-quality version is in `handoff.md`. The customer-friendly version follows.
+These are the questions that come up in a management or client review, with
+answers you can give directly.
 
 ### Where does our data physically live?
 
-- **On the Mac in our office.** The database file (`gi_database.db`) and every uploaded attachment (delivery notes, MTC certificates, photos) sit on the Mac's own disk. Nothing is uploaded to a third-party database service.
-- **FileVault encryption** scrambles the entire disk. A stolen Mac is a brick — the database is unreadable without the disk password.
-- **Encrypted backups to iCloud Drive** add a second copy at Apple, also encrypted, also under your control.
+- **On our own server.** The database and every uploaded attachment — delivery
+  notes, material certificates, photographs — sit on storage we control. No
+  third-party service holds a copy of your inventory.
+- **The disk is encrypted.** A stolen or salvaged disk is unreadable without the
+  key, rather than a complete copy of the business.
+- **The nightly backup is encrypted too**, and is held somewhere the server
+  itself cannot reach — so a problem on the server cannot corrupt the backup.
 
 ### Who can reach the application?
 
-- **Only the email addresses we explicitly whitelist.** Cloudflare Access checks the user's email at the edge — anyone NOT on the list never reaches the Mac, never sees the login page, never causes a single log line on our server. The list is one-click manageable in the Cloudflare dashboard.
-- **And inside the app:** users still sign in with the role-based bcrypt login. Two locks on the door, not one.
+There are two locks on the door, not one:
+
+1. **The security edge checks the email address first.** Anyone not on the
+   allow-list never reaches our server, never sees the login page, and leaves no
+   trace on our system at all.
+2. **The application then requires a username and password.** Passwords are
+   stored using a one-way scramble, so even someone holding the database file
+   cannot read them back.
+
+Sensitive accounts can add a second factor, and a session that sits idle signs
+itself out rather than waiting to be found.
 
 ### How is the connection secured?
 
-- Every byte travels over HTTPS (TLS 1.3 — the same encryption layer used by banks).
-- Cloudflare forwards encrypted bytes; they cannot read the contents. (They terminate TLS at their edge, then re-encrypt to our Mac via the Tunnel's own mTLS channel. The application body is opaque to them.)
-- Cloudflare certifications relevant to this: SOC 2 Type II, ISO 27001, PCI DSS. Public reference: https://www.cloudflare.com/trust-hub/
+- Every byte travels encrypted, using the same standard as online banking.
+- The security edge forwards encrypted traffic and re-encrypts it on the way to
+  our server. The contents of your records are not readable by it.
+- The provider holds the recognised independent certifications for this class of
+  service — SOC 2 Type II, ISO 27001 and PCI DSS.
 
-### What's the attack surface?
+### What is the attack surface?
 
-- **Zero public ports.** Our Mac never accepts an inbound TCP connection. The Tunnel is an outbound connection from us to Cloudflare. A hacker port-scanning the internet sees nothing.
-- The application gates every consequential action behind a role check (HOD/Admin/etc.). Even an authenticated user can't escalate privileges from the UI.
-- Every action writes a permanent audit log row (`system_audit_log`) with username + timestamp + details. Admin can review or export at any time.
+- **No open ports.** Our server never accepts an incoming connection from the
+  internet; it makes an outgoing one instead. Someone scanning for our system
+  finds nothing to attempt.
+- **Every action is permission-checked on the server**, not just hidden in the
+  interface. A user cannot reach another role's function by guessing an address,
+  and a read-only account is refused every change centrally rather than screen by
+  screen.
+- **Every consequential action is recorded** with the user's name, the time and
+  what changed. Admin can review or export that history at any point.
 
-### What happens if X fails?
+### What happens if something fails?
 
 | Failure | Impact | Recovery |
 |---|---|---|
-| Power outage | App offline for the duration | UPS battery (recommended, ~$50) keeps it up; otherwise it restarts on power-on |
-| Internet outage | External users blocked; office network still reaches `http://localhost:8501` | None needed — auto-resumes when ISP returns |
-| Cloudflare incident | External access blocked | Switch to Tailscale Funnel in ~5 minutes (documented in handoff.md) |
-| Host Mac dies | App down until replacement | Restore last backup to a new Mac, ~30 min, lose ≤24h of data |
-| Disk corruption | DB unusable | Restore from a backup (14 days kept), ~5 min |
-| Accidental delete | Single record gone | Restore from a backup, ~5 min |
-| Internal user steals data | Limited scope (own role) | Audit log shows username + exact action + timestamp for investigation |
+| Power loss at the server | System offline while it lasts | A battery unit covers short cuts; otherwise it restarts by itself when power returns |
+| Internet outage | Remote users cannot reach it; staff on the local network still can | None needed — it resumes on its own |
+| Security-edge provider incident | Remote access blocked | An alternative route can be switched on in about 5 minutes |
+| Server hardware failure | Offline until replaced | Restore the last backup onto replacement hardware: about 30 minutes, losing at most one day |
+| Disk corruption | Database unusable | Restore from any of the last 14 nightly copies: about 5 minutes |
+| A record deleted by mistake | One record lost | Restore a copy alongside the live system and re-enter it |
+| A member of staff misuses their access | Limited to what their role can reach | The audit trail names the user, the action and the exact time |
 
-### What's the actual cost?
+The two rows worth acting on before you need them: **a battery unit for the
+server** removes the most common cause of an outage, and **a second backup
+destination** (section 17.5) removes the only single point of failure left in
+the recovery plan.
 
-- Domain (`giinventory.com`): ~$8 / year on Cloudflare Registrar (at-cost).
-- Cloudflare Tunnel: free, unlimited bandwidth.
-- Cloudflare Access ≤50 users: free.
-- iCloud storage (5 GB free, enough for this app): free.
-- WhatsApp notifications via WhatsApp Web on the host Mac: free.
-- Local Ollama AI models: free, computed on the Mac.
-- Mac electricity: ~$50–80 / year.
+### What does it cost to run?
 
-**Total: $58–88 / year, all-in.**
+Running costs are dominated by the server itself; everything around it is either
+free at this scale or a few dollars a year.
 
-### Non-negotiables for the operator
+| Item | Cost |
+|---|---|
+| Web address | About $8 a year |
+| Secure connection to the server | Free, unlimited traffic |
+| Email allow-list, up to 50 users | Free |
+| Backup storage at this data volume | Free |
+| WhatsApp and email notifications | Included |
+| AI assistant | Free — it runs on our own server, so no per-question charge and no data leaves the building |
+| Server and electricity | The main line item, and it depends on the hosting choice |
 
-These are not optional. Skipping any of them defeats the security model.
+### Non-negotiables
 
-1. **FileVault must be on.**
-2. **The host Mac stays in a physically secured location** (locked IT room or office).
-3. **Default passwords (`admin/admin2026` etc.) must be changed** on day one.
-4. **The Cloudflare Access policy must be set BEFORE the URL is shared** with any user.
-5. **The Mac must not be used for personal browsing.** Keep it as a single-purpose appliance.
-6. **Apple Software Updates** for macOS get installed within 7 days of release.
+Skipping any one of these defeats the security model rather than weakening it.
 
-## 14.6 Backup & restore
+1. **Disk encryption stays on.**
+2. **The server stays in a physically secured location.**
+3. **Default passwords are changed on day one** — they are published in this
+   manual, in section 2.4.
+4. **The email allow-list is in place before the address is shared.**
+5. **The server is not used for anything else.** Keep it single-purpose.
+6. **Operating-system security updates are applied within a week of release.**
 
-### Automatic nightly
+## 17.5 Backup and restore
 
-`com.gi.backup` fires at **02:00** every day via `StartCalendarInterval` in the launchd plist. The script (`host_setup/scripts/backup_db.sh`) does:
+### What runs automatically
 
-1. **SQLite online backup** to `~/Library/Mobile Documents/com~apple~CloudDocs/GI_Hub_Backups/db/gi_database_YYYYMMDD_HHMMSS.db`. The online backup API takes a consistent snapshot even while Streamlit is reading + writing, with no downtime.
-2. **rsync mirror** of `uploads/` to `~/…/GI_Hub_Backups/uploads_latest/` (incremental — only changed files transfer).
-3. **Prune** snapshots older than 14 days.
-4. **Optional second destination** if you've set the env var `GI_BACKUP_EXTRA` (e.g. an external SSD path or rclone-mounted Google Drive).
+Every night at **02:00** the system takes a complete copy of itself, without
+going offline and without anyone starting it:
 
-Verify the most recent backup any time:
-```bash
-ls -lht ~/Library/Mobile\ Documents/com~apple~CloudDocs/GI_Hub_Backups/db/ | head -5
-```
+1. A consistent snapshot of the database — taken safely even while people are
+   using the system, so there is no maintenance window.
+2. A copy of every uploaded attachment: delivery notes, material certificates,
+   photographs.
+3. Snapshots older than **14 days** are removed, so the backup area does not
+   grow without limit.
+4. Optionally a second copy to another destination, if one has been configured.
 
-### Manual snapshot before risky work
+### Restoring
 
-Always run a snapshot before:
-- Major version upgrade (`git pull` that touches `database.py`)
-- Bulk edits via Admin → Master DB Editor
-- Switching the host Mac to a new machine
-- Migrating to a different hosting path
+Restoring is a technical procedure your administrator performs. What matters to
+you is the shape of it:
 
-```bash
-./host_setup/scripts/backup_db.sh
-```
+| Question | Answer |
+|---|---|
+| How far back can we go? | Any night in the last 14 days |
+| How long does a restore take? | About 5 minutes for the database; a little longer if attachments are also being restored |
+| Is the system usable during a restore? | No — it is stopped for those few minutes, because the database must not be open while it is replaced |
+| How much work would we lose? | Everything entered since the snapshot being restored. Restoring last night's copy loses today |
+| Can a single deleted record be restored on its own? | Not directly. The practical route is to restore a copy alongside the live system, read the record out of it, and re-enter it |
 
-### Restore
+### Where the copies live
 
-```bash
-# 1. Stop the app first (the live DB must not be open during a restore)
-launchctl unload ~/Library/LaunchAgents/com.gi.streamlit.plist
+One nightly copy goes to encrypted cloud storage. **That is one copy in one
+company's hands**, which is better than none but is not two independent
+failure domains.
 
-# 2. Copy the chosen snapshot into place
-cp "~/Library/Mobile Documents/com~apple~CloudDocs/GI_Hub_Backups/db/gi_database_20260613_020000.db" \
-   "/Users/johnsonandrew/Downloads/CNCEC PROJECT/gi_database.db"
+If the data matters enough to survive a bad week — and inventory, procurement
+and valuation records normally do — ask your administrator to add a second
+destination in a different place. Any of these work, and all of them are cheap:
 
-# 3. Start the app again
-launchctl load -w ~/Library/LaunchAgents/com.gi.streamlit.plist
-./host_setup/scripts/install.sh --status
-```
-
-For `uploads/` files, restore from the latest mirror:
-```bash
-rsync -a "~/Library/Mobile Documents/com~apple~CloudDocs/GI_Hub_Backups/uploads_latest/" \
-         "/Users/johnsonandrew/Downloads/CNCEC PROJECT/uploads/"
-```
-
-### Off-site copy (optional but recommended)
-
-iCloud Drive is one copy on Apple's servers. For a truly off-Apple second copy:
-
-| Option | Free quota | One-time setup |
+| Option | Cost | Set-up |
 |---|---|---|
-| **Backblaze B2** | 10 GB free, 1 GB/day egress | 15 min — `brew install rclone`, configure B2 backend, point `GI_BACKUP_EXTRA` at a mounted rclone mount or add a second `rclone sync` step in `backup_db.sh` |
-| **Cloudflare R2** | 10 GB free, no egress fees | 20 min — same as B2, point rclone at the R2 endpoint |
-| **External SSD** | depends on disk | 0 min — `export GI_BACKUP_EXTRA="/Volumes/Backup_SSD/GI_Hub"` |
-| **Private GitHub repo** | unlimited <100 MB files | 5 min — add a `git add gi_database.db && git commit && git push` step in `backup_db.sh` |
+| A second cloud storage provider | Free at this data volume | About 15 minutes, one-off |
+| An external drive kept on site | Cost of the drive | Minutes, one-off |
+| A drive held off site, rotated | Cost of two drives | Minutes, plus the discipline to rotate them |
 
-Recommended pair: **iCloud (always on, encrypted) + Backblaze B2 (off-Apple, off-Mac, off-Cloudflare)**. Three independent failure domains.
+The recommended arrangement is **the nightly cloud copy plus one other
+provider**: three independent things would then have to fail on the same night
+before data is genuinely gone.
 
-## 14.7 Cloudflare cheatsheet
+## 17.6 Controlling who can reach the system
 
-You don't need to be a Cloudflare expert. The four things you'll actually touch:
+Access is controlled in two independent places, and it is worth being clear
+about which does what:
 
-### Add or remove an allowed email
-
-1. Cloudflare dashboard → **Zero Trust** (left sidebar, near bottom)
-2. Access → Applications → click **GI Hub Warehouse**
-3. Policies → click **GI Staff only** (or whatever you named it)
-4. Edit the **Include** rule:
-   - To allow specific addresses: switch selector to **Emails** and add the address comma-separated.
-   - To allow a whole domain: keep **Emails ending in** and edit the value (e.g. `@generalindustries.net`).
-5. Save.
-
-Changes take effect within 60 seconds globally. No need to restart anything on the Mac.
-
-### Change the tunnel hostname
-
-```bash
-cloudflared tunnel route dns gi-hub anotherhost.giinventory.com
-./host_setup/scripts/restart_app.sh --all
-```
-
-Cloudflare automatically updates DNS. The old hostname keeps working until you delete its CNAME.
-
-### Check tunnel health from the Cloudflare side
-
-Cloudflare dashboard → Zero Trust → Networks → Tunnels → `gi-hub`.
-
-You'll see one or more "Connectors" (one per running `cloudflared` instance). Each shows latency, packet loss, and uptime. If a Connector is missing or grey, your `com.gi.cloudflared` service isn't healthy — check `~/Library/Logs/gi-cloudflared.err`.
-
-### Add custom block / allow rules
-
-Cloudflare → giinventory.com → Security → WAF. You can:
-- Block known bad IPs / countries (not usually necessary — Access does the heavy lifting).
-- Rate-limit specific paths (e.g. limit `/login` to 10 attempts/minute per IP — recommended).
-
-## 14.8 Troubleshooting cheat sheet
-
-| Symptom | Most likely cause | First thing to try |
+| Control | What it decides | Who changes it |
 |---|---|---|
-| `https://gi.giinventory.com` shows Cloudflare 502 | Streamlit isn't running | `./host_setup/scripts/install.sh --status` — if Streamlit is ⏸ red, check `gi-streamlit.err` |
-| `https://gi.giinventory.com` shows Cloudflare 530 | Tunnel isn't connected | `tail ~/Library/Logs/gi-cloudflared.err` — usually a typo in `~/.cloudflared/config.yml` |
-| Cloudflare Access login page rejects a valid email | Email not on the policy | Zero Trust → Access → Applications → GI Hub → policy → confirm address is in the Include list |
-| App loads but WhatsApp messages don't deliver | WhatsApp Web tab closed or signed out | `open -a "Google Chrome" "https://web.whatsapp.com"` — re-pair, leave the tab pinned |
-| WhatsApp delivers, but Cmd+W AppleScript fails first time | Accessibility permission not granted | macOS prompt should appear; click Allow once. Verify under System Settings → Privacy & Security → Accessibility |
-| Backup directory empty | iCloud Drive disabled | System Settings → Apple Account → iCloud → iCloud Drive → On. Re-run `backup_db.sh` |
-| AI features dead | Ollama not running | `ollama serve` (or it's already running — check `ollama ps`). Confirm via Admin → Settings → 🤖 AI Connection |
-| Timestamps wrong | TZ env var not picked up | `launchctl unload ~/Library/LaunchAgents/com.gi.streamlit.plist && launchctl load -w ~/Library/LaunchAgents/com.gi.streamlit.plist` |
-| Streamlit `exit 126` | Permissions on the venv binary | `chmod +x .venv/bin/streamlit` then `./host_setup/scripts/restart_app.sh` |
-| Need to free disk fast | Old backups | `find ~/Library/Mobile\ Documents/com~apple~CloudDocs/GI_Hub_Backups/db -name 'gi_database_*.db' -mtime +7 -delete` |
-| Want a "full uninstall, keep data" | — | `./host_setup/scripts/uninstall.sh` — services removed, DB + uploads + backups untouched |
+| **The email allow-list**, at the security edge | Whether a person reaches the login page at all | Administrator, in the security dashboard |
+| **The user account**, inside the application | What that person can see and do once signed in | You, in Admin Portal → Users |
 
-If you hit something that's not in this table, capture three things and send to the developer:
+Both must be right. An allow-listed email with no user account cannot sign in;
+a user account whose email is not allow-listed never sees the login page.
 
-```bash
-./host_setup/scripts/install.sh --status > /tmp/status.txt
-tail -200 ~/Library/Logs/gi-streamlit.err > /tmp/streamlit-err.txt
-tail -200 ~/Library/Logs/gi-whatsapp-worker.err > /tmp/worker-err.txt
-```
+### Adding or removing someone
 
----
+**When a new person joins**, two things must happen: their company email is
+added to the allow-list, and you create their account with the correct role
+and site. Neither works without the other.
+
+**When someone leaves, do both, in this order:**
+
+1. **Deactivate their account** in Admin Portal → Users. This takes effect
+   immediately and is the one that matters — it ends any session they have open.
+2. **Ask for their email to be removed** from the allow-list. This takes effect
+   globally within about a minute.
+
+Changing the allow-list needs no restart and interrupts nobody.
+
+### A note on rate limiting
+
+Repeated failed sign-in attempts are already slowed down by the application
+itself. Ask your administrator to add a limit at the security edge as well —
+it stops that traffic before it ever reaches your server, which is both faster
+and cheaper than handling it inside the application.
+
+## 17.7 When something is not working
+
+Find the symptom, try the first column, and escalate if it persists. None of
+these need you to type anything.
+
+| What you are seeing | Most likely cause | What to do |
+|---|---|---|
+| The web address shows an error page instead of the login screen | The application or its connection to the security edge has stopped | Ask your administrator for a service status check. This is almost always a restart |
+| A valid company email is refused at the login page | That address is not on the allow-list | Ask for it to be added — takes about a minute to take effect |
+| Someone signs in but sees "your account has no site" | The account was created without a site or warehouse assigned | Admin Portal → Users → set their site (or warehouse, for warehouse staff) |
+| The application works but WhatsApp messages are not arriving | The notification channel has become disconnected | Ask your administrator to re-connect it. **Nothing is lost** — messages queue and send once it is back |
+| Notifications arrive late in a batch rather than immediately | The recipient has the evening-summary preference switched on | That is intentional. Change it in their profile if they want them immediately |
+| The AI assistant says it is offline | The assistant service is not running | Ask your administrator to start it. Every other part of the system is unaffected |
+| Times on records look wrong by a fixed number of hours | The server's time zone is not set correctly | Ask your administrator to correct it and restart |
+| Backups have stopped appearing | The backup destination is full or disconnected | Ask for the backup log to be checked. **Treat this as urgent** — you are running without a safety net |
+
+### Escalating to the developer
+
+Three things make a report actionable, and without them the first reply will
+only ask for them:
+
+1. **What you expected to happen, and what happened instead.**
+2. **The exact time**, and which site and user account it happened on.
+3. **A screenshot**, including any error text in full.
+
+Your administrator can attach the relevant service logs. Please do not delete or
+re-enter the affected record before it has been looked at — the audit trail is
+usually what identifies the cause.
+
+## 17.8 Technical runbooks
+
+The procedures behind this chapter are documented for whoever administers the
+server. They are deliberately kept out of this manual, which is written for
+people who use the system rather than run it.
+
+| Runbook | Covers |
+|---|---|
+| Deployment guide | Server setup, the security edge, going live |
+| Debugging guide | Diagnosing faults, reading the logs |
+| Native apps guide | Building and distributing the Windows, macOS and Android apps |
+| Architecture reference | How the system is built, and why |
+| Standard operating procedure | Day-to-day operating rules for every role |
 
 # 18. Material Estimator (SME) Manual
 
@@ -3572,9 +3550,20 @@ tail -200 ~/Library/Logs/gi-whatsapp-worker.err > /tmp/worker-err.txt
 
 ## 18.1 What it is
 
-The **Smart Material Estimator (SME)** is a planning portal for Rubber-Lining / Brick-Lining work. It answers: *"For the equipment and lining systems at this site, how much material do we need, what's already available, and what must we still procure?"* It is a **read-only projection** over the live ERP ledger — it never writes consumption, receipts, or stock. `Available_Qty` is **computed** (SME seed baseline + Logistics receipts − tagged consumption), never stored.
+The **Smart Material Estimator (SME)** is a planning portal for Rubber-Lining / Brick-Lining work. It answers: *"For the equipment and lining systems at this site, how much material do we need, what's already available, and what must we still procure?"* It is **read-only** — planning here never writes a consumption, a receipt or a stock figure.
 
-It reads three SME-owned master tables seeded by Admin: **Equipment** (per site — tag, location, surface area, lining system), **Recipe** (global — material per 1 SQM for each lining system), and the **Materials seed** (the SME inventory baseline). Locations and Equipment Types are managed in `system_settings`.
+> **The estimator is a separate pool from the warehouse, deliberately.**
+> Every quantity the estimator uses comes from its own material baseline and from nowhere else. A warehouse issue does **not** reduce what the estimator says is available, and it is not supposed to: the plan answers "what does this project need and what has been bought for it", while the warehouse answers "what is on the shelf today". Netting one off the other would silently move every readiness figure on every tab. Where physical draw matters, it is shown *beside* the plan as an Actual Physical Balance — adjacent, never merged. See section 21.
+
+It works from three sets of master data, all maintained on the Master Data tab:
+
+| Master data | Scope | What it holds |
+|---|---|---|
+| **Equipment** | Per site | Each tag, its location, its surface area and which lining system applies |
+| **Recipe** | Shared | How much of each material one square metre of each lining system needs |
+| **Materials** | Shared | The estimator's own quantity baseline — what has arrived and what is still on order |
+
+Locations and equipment types come from the system settings, so the drop-downs stay consistent across every tab.
 
 ## 18.2 Tabs (8)
 
@@ -3635,15 +3624,24 @@ The variance dashboard. KPI strip (scopes tracked / over-consuming / total actua
 ### 19.2.5 🧑‍🔧 Employee-wise
 The "where did each person work, date by date" view. Pick an employee (or *All*) and a date range; get a clean, date-ordered list of every tag/system they worked with hours and allocated SQM — the un-cluttered per-person timeline.
 
-## 19.3 Bulk seed (Admin / CLI)
+## 19.3 Loading an attendance file in bulk
 
-To pre-load an attendance file outside the UI:
-```bash
-python3 scripts/manhour_bootstrap.py --file "/path/to/attendance.xlsx" --site-id CNCEC
-#   --dry-run    parse + report, write nothing
-#   --no-replace append instead of replace-by-date
-```
-It uses the same parse/import code path as the in-app upload, so behaviour is identical.
+Attendance is normally uploaded through the Man-Hours page itself, which is the
+recommended route: it shows you what it parsed before anything is saved.
+
+For a very large historical backfill, your administrator can load the same file
+directly on the server. It uses the identical parsing and import logic as the
+page, so the result is the same either way, and it offers two options worth
+knowing about:
+
+| Option | What it does | When to ask for it |
+|---|---|---|
+| **Preview only** | Parses the file and reports what it found, saving nothing | Always, the first time a new file format appears |
+| **Replace by date** | Existing lines for the dates in the file are replaced | Re-loading a corrected file for a period |
+| **Add without replacing** | Lines are added alongside what is already there | Loading a period that was never loaded before |
+
+**Replace by date is the default**, because loading a corrected file twice is a
+far more common mistake than deliberately wanting two copies of the same day.
 
 ## 19.4 Key rules (for support)
 
@@ -3721,15 +3719,10 @@ Because they are read-only, not crippled:
 
 Worth understanding before you hand the role out.
 
-The restriction is enforced **once, centrally, by HTTP method** — not endpoint
-by endpoint. Any request that could change state (`POST`, `PUT`, `PATCH`,
-`DELETE`) from a view-only account is refused with **403 Forbidden** before it
-ever reaches the endpoint:
-
-```
-403  your account is view-only (Auditor) — this action changes data
-     and is not permitted
-```
+The restriction is enforced **once, centrally**, rather than screen by screen.
+Any request that would change data from a view-only account is refused before it
+reaches the feature at all, and the user is told plainly that their account is
+view-only and the action is not permitted.
 
 Why that design matters to you: a per-endpoint permission check is only as
 reliable as the developer who remembers to add it, and the one that gets
@@ -3861,41 +3854,108 @@ script. Ask "how do I log in?" today and you get §3.1, the login screen.
 The role filter is unchanged and still applied **before** retrieval: a Store
 Keeper's context physically cannot contain an Admin chapter.
 
-## 21.7 For administrators — new local tooling
+## 21.7 Serialised tool and equipment tracking
 
-Two scripts in `bin/`, documented in `docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md`:
+Two hammers share one item code, so scanning either label used to resolve to the
+same inventory line — the system could not tell you which one was in your hand
+or where the other had gone. **Assets** solves that.
 
-| Command | What it does |
+**Each physical item gets its own record**, identified by its serial number. A
+scan now resolves three ways, and the order is deliberate:
+
+| What the label carries | What you get |
 |---|---|
-| `./bin/power.sh sleep` | Stops PostgreSQL and the Cloudflare connector so an idle laptop draws no power for them |
-| `./bin/power.sh wake` | Starts them again and verifies the public hostname responds |
-| `./bin/power.sh status` | What is running, and what it costs |
-| `./bin/backup_db.sh` | Timestamped snapshot of the database into `.backups/` |
-| `./bin/backup_db.sh --install` | Runs that backup automatically every night at 02:00 |
-| `./bin/backup_db.sh --restore F` | Prints the exact command to restore a snapshot |
+| A serial number or asset tag | That exact item, immediately — there is nothing to choose |
+| Only the item code, and several units exist | A "which one is in your hand?" list to pick from |
+| Only the item code, and no units are registered | The ordinary material view — the system does not invent an asset |
 
-> The previous nightly backup job had been failing silently for 25 consecutive
-> nights — it pointed at a script that a repository restructure had moved. If
-> you were relying on it, **you had no local backups**. The replacement is
-> verified by restoring into a scratch database on every change.
+**Recording where something is.** Open the item, tap **Move**, and either pick a
+rack or describe the place in words — not everything lives on a shelf, and "loaded
+on truck 4771" is a real answer. If the device can supply coordinates, they are
+captured **alongside** the update, never in front of it: a declined permission or
+a yard with no signal still records the move, with the coordinates simply absent.
+A recorded position becomes a map link on the item.
+
+**Status** covers both what condition a tool is in — *working*, *not in use*,
+*under repair* — and where it sits in the stores workflow. The full history of
+every move is kept and is never overwritten, so "where has this been" is a
+question with an answer.
+
+> **Coordinate capture needs a secure connection.** Over plain HTTP the browser
+> refuses to supply a position — the move still saves, without coordinates. If
+> your team is on the installed app or the company web address, this is already
+> the case.
+
+> **Your spreadsheet seeds this; the app owns it.** A location typed in the
+> Consumption Log creates the asset on the next sync. From then on, what somebody
+> recorded in the app wins: a re-sync will not move a tool, revert its status, or
+> erase a captured position.
+
+## 21.8 The warehouse rack locator
+
+"Which rack is this in?" now has an answer. Search by material name, by code, or
+by scanning a label, and the system tells you the shelf to walk to — ordered so
+that the first result is where to go first, even when a material is stocked in
+three places.
+
+- A material you stock but nobody has located comes back marked **not located**,
+  rather than being left out. Silence would read as "we do not stock it", which
+  sends somebody out to buy what is already on a shelf.
+- **Scanning the rack itself** answers the reverse question — everything that is
+  meant to be on that shelf. That turns a stock count from a hunt into a
+  checklist.
+- The locator is built into the ⌘K search, so it is two keystrokes from anywhere
+  in the application.
+
+## 21.9 The Material Estimator handles messy tank references
+
+The Consumption Log records a tank reference typed by hand, and the same vessel
+appears written four different ways. The system now recognises those as one
+vessel automatically — that alone accounted for 58 of 103 rows.
+
+**Where a reference is genuinely ambiguous, it refuses to guess.** `TNK-091`
+exists on both TRAIN J and TRAIN K; either answer would look completely plausible
+in every report afterwards, so those rows wait in a queue for someone who knows.
+Resolve the reference once on the **Actual Consumption** tab and every row waiting
+on it is tagged.
+
+## 21.10 For administrators — local tooling
+
+Two maintenance scripts ship with the system, documented in the administrator
+runbook: one puts the database and the public connection to sleep and wakes them
+again for a laptop that is not always on, and one takes and restores database
+snapshots, with an option to run nightly at 02:00.
+
+> The previous nightly backup had been failing **silently for 25 consecutive
+> nights** — it pointed at a script that a repository reorganisation had moved.
+> Anyone relying on it had no local backups at all. The replacement is verified
+> by actually restoring into a scratch database on every change, which is the
+> only check that means anything.
 
 ---
 
 ## Document end
 
-This manual covers every page, tab, button, table, and field built into the General Industries Hub v3.0 as of the latest commit, including the Logistics and Warehouse portals and the procurement chain (§14–16), the **Material Estimator (SME)** planning portal (§18), and the **Man-Hours & Labor Tracking** module (§19). For technical reference (function signatures, table schemas, full SQL), see `database.py`, `auth.py`, and `pages_internal/*.py` source files. For day-to-day operating procedure across all roles, see `SOP.md`.
+This manual covers every page, tab, button, table and field in the General
+Industries Hub: the site workspaces (sections 4 to 7), the Reports module
+(section 8), the Logistics and Warehouse portals and the procurement chain
+(sections 14 to 16), hosting and operations (section 17), the Material Estimator
+(section 18), Man-Hours and Labor Tracking (section 19), the Auditor role
+(section 20), and the asset-tracking and warehouse-locator features added in
+2026-08 (section 21).
 
-**To regenerate the PDFs**, use the repository's own builder — it is branded,
-has a generated table of contents, and needs no LaTeX, pandoc or WeasyPrint
-(fpdf2 is already a dependency):
+**For day-to-day operating procedure across all roles**, see the Standard
+Operating Procedure document, which is shorter and organised by task rather than
+by screen.
 
-```bash
-.venv/bin/python build_manual_pdf.py --role all
-```
+### Printed and PDF copies
 
-That writes the master `GI_Hub_User_Manual.pdf` plus one booklet per role,
-each containing only that role's chapters. For a single output:
+Every role has its own booklet containing only the chapters that apply to them —
+a Store Keeper's booklet does not include the Logistics portal, and is a fraction
+of the length. Admin Portal → Settings offers each of them as a download, and the
+full manual alongside.
 
-```bash
-.venv/bin/python build_manual_pdf.py --in USER_MANUAL.md --out GI_Hub_User_Manual.pdf
-```
+If you are handing the system over to a new team, print the role booklets rather
+than this complete document. People read twenty relevant pages and skip two
+hundred.
+

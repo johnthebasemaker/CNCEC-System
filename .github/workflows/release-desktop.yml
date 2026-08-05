@@ -51,6 +51,30 @@ jobs:
         with:
           workspaces: frontend/src-tauri
 
+      # Tauri names every installer from tauri.conf.json's `version`, NOT from
+      # the tag — which is how tag v1.2.0 shipped assets called
+      # "GI Hub_0.1.0_x64-setup.exe" and left nobody able to tell which build
+      # an installer came from. Three files carry the number and all three had
+      # drifted apart (0.1.0 / 0.1.0 / 0.0.0). Fail the build here rather than
+      # publish a mislabelled installer: a wrong version on a released binary
+      # cannot be corrected after someone has installed it.
+      - name: Check the version matches the tag
+        working-directory: frontend
+        shell: bash
+        run: |
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          PKG=$(node -p "require('./package.json').version")
+          CARGO=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "tauri.conf.json=$CONF  package.json=$PKG  Cargo.toml=$CARGO"
+          if [ "$CONF" != "$PKG" ] || [ "$CONF" != "$CARGO" ]; then
+            echo "::error title=version drift::tauri.conf.json ($CONF), package.json ($PKG) and Cargo.toml ($CARGO) must all match"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$CONF" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error title=version drift::tag ${GITHUB_REF_NAME} does not match version $CONF — bump the three files before tagging"
+            exit 1
+          fi
+
       - name: Install npm dependencies
         working-directory: frontend
         run: npm ci --no-audit --no-fund

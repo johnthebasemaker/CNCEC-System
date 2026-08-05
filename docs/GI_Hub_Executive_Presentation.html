@@ -118,43 +118,49 @@
       <div class="mark"><span>⚙️</span></div>
       <div style="text-align:left">
         <div class="kicker" style="margin:0">General Industries</div>
-        <div style="font-family:var(--mono);color:var(--t3);font-size:.8rem;letter-spacing:.1em">INVENTORY · PROCUREMENT · MATERIAL PLANNING</div>
+        <div style="font-family:var(--mono);color:var(--t3);font-size:.8rem;letter-spacing:.1em">INVENTORY · PROCUREMENT · ASSETS · PLANNING</div>
       </div>
     </div>
-    <h1>GI&nbsp;Hub&nbsp;ERP<br><span style="color:var(--gold)">+ Smart Material Estimator</span></h1>
+    <h1>GI&nbsp;Hub<br><span style="color:var(--gold)">Enterprise Asset Management ERP</span></h1>
     <p class="sub" style="text-align:center;margin-left:auto;margin-right:auto">
-      A single, role-based platform that runs the full material lifecycle —
-      from purchase request to consumption — with integrated engineering
-      estimators for both <span class="em">material</span> and <span class="em">labor</span>
-      on Rubber&nbsp;&amp;&nbsp;Brick lining projects.
+      A single, role-based platform running the full material lifecycle —
+      purchase request to consumption — plus <span class="em">serialised asset
+      and tool tracking</span>, a <span class="em">warehouse rack locator</span>,
+      and integrated engineering estimators for both
+      <span class="em">material</span> and <span class="em">labor</span> on
+      Rubber&nbsp;&amp;&nbsp;Brick lining projects.
     </p>
     <div class="badges" style="justify-content:center">
-      <span class="pill">Streamlit · SQLite (WAL)</span>
-      <span class="pill">6 Roles · Multi-Site</span>
-      <span class="pill">554 automated tests</span>
-      <span class="pill">Material &amp; Labor planning</span>
-      <span class="pill">Docker · Hetzner-ready</span>
+      <span class="pill">v1.2.0 · Web · Windows · macOS · Android</span>
+      <span class="pill">React · FastAPI · PostgreSQL</span>
+      <span class="pill">7 Roles · Multi-Site</span>
+      <span class="pill">1,917 automated checks</span>
+      <span class="pill">Private on-premise AI</span>
     </div>
   </section>
 
   <!-- 2 · EXECUTIVE SUMMARY -->
   <section class="slide" data-title="Executive Summary">
     <div class="kicker">At a glance</div>
-    <h2>One platform, <span class="acc">the whole material lifecycle</span></h2>
+    <h2>One platform, <span class="acc">every asset accounted for</span></h2>
     <p class="lead">GI Hub replaced scattered spreadsheets and email threads with a governed, auditable
-      system. Every issue, receipt, purchase order and engineering estimate flows through one database
-      with role-based controls and a full audit trail.</p>
+      system. Every issue, receipt, purchase order, tool movement and engineering estimate flows through
+      one database with role-based controls and a full audit trail.</p>
     <div class="grid g4">
-      <div class="card"><div class="stat">6</div><div class="stat-l">Role-based portals</div></div>
-      <div class="card"><div class="stat">2+</div><div class="stat-l">Sites (HQ · CNCEC)</div></div>
-      <div class="card"><div class="stat">554</div><div class="stat-l">Regression tests green</div></div>
+      <div class="card"><div class="stat">7</div><div class="stat-l">Role-based portals</div></div>
+      <div class="card"><div class="stat">1,917</div><div class="stat-l">Automated checks green</div></div>
+      <div class="card"><div class="stat">4</div><div class="stat-l">Platforms shipped</div></div>
       <div class="card"><div class="stat">100%</div><div class="stat-l">Audited write paths</div></div>
     </div>
-    <div class="grid g4" style="margin-top:1.1rem">
-      <div class="card accent"><h3><span class="ico">📦</span>Inventory & Stock</h3><p>Live stock computed from the ledger — receipts, consumption, returns, transfers — never a hand-edited number. FEFO lot discipline.</p></div>
-      <div class="card accent"><h3><span class="ico">🧾</span>Procurement Chain</h3><p>Purchase Request → PO → Delivery Note → Receive, with HOD approval gates and cross-site stock requests.</p></div>
-      <div class="card accent"><h3><span class="ico">🧪</span>Material Estimator</h3><p>Engineering planning for lining projects — demand vs. availability, coverage %, and procurement suggestions.</p></div>
-      <div class="card accent"><h3><span class="ico">🕒</span>Man-Hours & Labor</h3><p>Track planned vs. actual man-hours per scope — timesheets, overtime, and variance analysis. <b>(New)</b></p></div>
+    <div class="grid g3" style="margin-top:1.1rem">
+      <div class="card accent"><h3><span class="ico">📦</span>Inventory &amp; Stock</h3><p>Live stock computed from the ledger — receipts, consumption, returns, transfers — never a hand-edited number. FEFO lot discipline.</p></div>
+      <div class="card accent"><h3><span class="ico">🧾</span>Procurement Chain</h3><p>Purchase Request → PO → Delivery Note → Receive, with approval gates at every handover and cross-site stock requests.</p></div>
+      <div class="card accent"><h3><span class="ico">🔨</span>Asset &amp; Tool Tracking</h3><p>Every physical tool tracked by its own serial, with GPS position capture and an append-only movement history. <b>(New)</b></p></div>
+    </div>
+    <div class="grid g3" style="margin-top:1.1rem">
+      <div class="card accent"><h3><span class="ico">📍</span>Rack Locator</h3><p>Material name, code or a QR scan answers "which shelf?" instantly — and scanning a shelf lists what belongs on it. <b>(New)</b></p></div>
+      <div class="card accent"><h3><span class="ico">🧪</span>Material Estimator</h3><p>Engineering planning for lining projects — demand, coverage, shortfall and a defensible buy list.</p></div>
+      <div class="card accent"><h3><span class="ico">🕒</span>Man-Hours &amp; Labor</h3><p>Planned vs. actual man-hours per scope — timesheets, overtime and variance analysis.</p></div>
     </div>
   </section>
 
@@ -183,38 +189,43 @@
   <section class="slide" data-title="Architecture">
     <div class="kicker">How it's built</div>
     <h2>System <span class="acc">architecture</span></h2>
-    <p class="lead">A lean, dependency-light stack chosen for reliability and low operating cost — no heavyweight servers to babysit.</p>
+    <p class="lead">A modern three-tier stack chosen for reliability and low operating cost, shipping to the
+      browser and as native applications from one codebase.</p>
     <div class="grid g4">
-      <div class="card"><h3><span class="ico">🖥️</span>Presentation</h3><p>Streamlit web app. Custom RBAC sidebar routes each user to exactly the portals their role allows.</p></div>
-      <div class="card"><h3><span class="ico">🧠</span>Logic</h3><p>All business rules + SQL centralized in <span class="pill">database.py</span> — the single write authority and audit gate.</p></div>
-      <div class="card"><h3><span class="ico">🗄️</span>Data</h3><p>SQLite in WAL mode. Live stock & estimator quantities are <em>derived</em> via SQL views, never stored.</p></div>
-      <div class="card"><h3><span class="ico">🔌</span>Services</h3><p>FastAPI AI sidecar, WhatsApp Business worker, e-mail/PDF generation, automated backups — each isolated, each replaceable.</p></div>
+      <div class="card"><h3><span class="ico">🖥️</span>Presentation</h3><p>A React single-page application, installable as a Windows, macOS or Android app. Offline-capable; role-aware navigation shows each user only their own workspaces.</p></div>
+      <div class="card"><h3><span class="ico">🧠</span>Logic</h3><p>A FastAPI service holding every business rule. Permission checks live on the <em>server</em>, so no rule can be bypassed by reaching an address directly.</p></div>
+      <div class="card"><h3><span class="ico">🗄️</span>Data</h3><p>PostgreSQL. Stock and estimator figures are <em>derived</em> from the movement history at read time, never stored — so they cannot drift.</p></div>
+      <div class="card"><h3><span class="ico">🔌</span>Services</h3><p>On-premise AI assistant, WhatsApp Business, e-mail, PDF and Excel generation, nightly backups — each isolated and independently replaceable.</p></div>
     </div>
     <div class="note">
-      <b>Quality gate:</b> a <b>554-check</b> automated harness (<span class="pill">bug_check.py</span>) guards every release —
-      schema, workflows, RBAC, and the SME integration. No change ships unless the suite stays green.
+      <b>Quality gate:</b> <b>1,917 automated checks</b> guard every release — 1,228 service-level tests,
+      599 data-integrity checks, 57 end-to-end browser journeys and 33 estimator-arithmetic assertions,
+      plus 1,313 cross-engine parity comparisons. <b>No change ships unless every suite is green.</b>
     </div>
     <div class="legend">
-      <span><span class="dot" style="background:var(--gold)"></span>Single write authority</span>
+      <span><span class="dot" style="background:var(--gold)"></span>Server-enforced permissions</span>
       <span><span class="dot" style="background:var(--green)"></span>Derived, not stored</span>
-      <span><span class="dot" style="background:var(--sky)"></span>Self-hosted via Cloudflare Tunnel</span>
+      <span><span class="dot" style="background:var(--sky)"></span>Self-hosted · no data leaves the server</span>
     </div>
   </section>
 
   <!-- 5 · ROLES -->
   <section class="slide" data-title="Roles & Access">
     <div class="kicker">Governance</div>
-    <h2>Six roles, <span class="acc">least-privilege by design</span></h2>
-    <p class="lead">Each person sees only what their role permits. Procurement roles are parallel ladders — seniority never silently unlocks another team's portal.</p>
-    <div class="grid g3">
-      <div class="card"><h3><span class="ico">🗝️</span>Store Keeper</h3><p>Records daily issues & consumption; runs Smart Scan; submits batches for approval.</p></div>
+    <h2>Seven roles, <span class="acc">least-privilege by design</span></h2>
+    <p class="lead">Each person sees only what their role permits. The ladders are parallel, not linear — seniority never silently unlocks another team's workspace.</p>
+    <div class="grid g4">
+      <div class="card"><h3><span class="ico">🗝️</span>Store Keeper</h3><p>Records daily issues and consumption, scans barcodes, submits batches for approval.</p></div>
       <div class="card"><h3><span class="ico">🛡️</span>Supervisor</h3><p>Raises material requests; monitors the live dashboard for their site.</p></div>
-      <div class="card"><h3><span class="ico">🏭</span>Warehouse</h3><p>Receives stock, prepares Delivery Notes, manages lots & FEFO.</p></div>
-      <div class="card"><h3><span class="ico">🚚</span>Logistics</h3><p>Drives the PR → PO procurement chain and cross-site fulfilment.</p></div>
-      <div class="card accent"><h3><span class="ico">🏛️</span>Head of Dept (HOD)</h3><p>Approves issues, commits End-of-Day, owns the Material Estimator &amp; Man-Hours planning.</p></div>
-      <div class="card accent"><h3><span class="ico">👑</span>Admin</h3><p>Full oversight, master-data editor, user management, system settings.</p></div>
+      <div class="card"><h3><span class="ico">🏭</span>Warehouse</h3><p>Receives stock, prepares Delivery Notes, manages lots and shelf-life discipline.</p></div>
+      <div class="card"><h3><span class="ico">🚚</span>Logistics</h3><p>Drives the request-to-order procurement chain and cross-site fulfilment.</p></div>
     </div>
-    <div class="note"><b>Multi-site aware:</b> every record is scoped by <span class="pill">Site_ID</span> so HQ and CNCEC operate independently while admins get a consolidated view.</div>
+    <div class="grid g3" style="margin-top:1.1rem">
+      <div class="card accent"><h3><span class="ico">🏛️</span>Head of Dept</h3><p>Approves issues, commits End-of-Day, owns the Material Estimator and Man-Hours planning.</p></div>
+      <div class="card accent"><h3><span class="ico">🔍</span>Auditor</h3><p>Reads every site, changes nothing anywhere — enforced centrally rather than screen by screen. <b>(New)</b></p></div>
+      <div class="card accent"><h3><span class="ico">👑</span>Admin</h3><p>Full oversight, master-data editing, user management, system settings.</p></div>
+    </div>
+    <div class="note"><b>Multi-site aware:</b> every record is scoped to its site, so each operates independently while Admin and Auditor get a consolidated view. A user with no site assigned is refused rather than shown everything — the fail-safe direction.</div>
   </section>
 
   <!-- 6 · CORE WORKFLOW (procurement + inventory) -->
@@ -273,8 +284,8 @@
   <section class="slide" data-title="Smart Material Estimator">
     <div class="kicker">The headline integration</div>
     <h2>Smart Material Estimator, <span class="acc">merged in</span></h2>
-    <p class="lead">A standalone engineering tool for Rubber &amp; Brick lining projects is now a first-class portal inside the ERP —
-      locked to HOD &amp; Admin. It answers: <em>"For this scope of work, what materials do we need, what do we have, and what must we buy?"</em></p>
+    <p class="lead">A standalone engineering tool for Rubber &amp; Brick lining projects is now a first-class portal inside the platform —
+      locked to Head of Department &amp; Admin. It answers: <em>"For this scope of work, what materials do we need, what do we have, and what must we buy?"</em></p>
     <div class="grid g4">
       <div class="card"><h3>🏗️ Equipment</h3><p>Tanks, vessels &amp; their lining systems with surface areas (SQM) per site.</p></div>
       <div class="card"><h3>🧮 Recipes</h3><p>Material consumption per 1 SQM for every lining system code.</p></div>
@@ -282,37 +293,58 @@
       <div class="card"><h3>🛒 Procurement</h3><p>Smart suggestions and a "days of continuation" runway from current stock.</p></div>
     </div>
     <div class="note">
-      <b>Apple-to-apple parity:</b> the estimator runs the original tool's own code as a <b>literal drop-in</b> — every chart, report and
-      layout preserved — bridged to the ERP database through compatibility views. Same experience, one source of truth.
+      <b>Rebuilt, not bolted on:</b> the estimator was reimplemented natively — eight report tabs, a Smart
+      Calculator, editable master data and branded Excel and PDF exports — while every number it produces is
+      checked against the original tool's arithmetic. <b>The reports are new; the answers are the proven ones.</b>
     </div>
   </section>
 
   <!-- 9 · SME ISOLATION MODEL -->
-  <section class="slide" data-title="SME Data Model">
-    <div class="kicker">The clever part</div>
-    <h2>Strict isolation, <span class="acc">live numbers</span></h2>
-    <p class="lead">The estimator's inventory is kept <em>separate</em> from the ERP stock ledger to prevent clutter and corruption —
-      yet its quantities stay current by rolling up real ERP movements at read time.</p>
+  <section class="slide" data-title="The Subset Rule">
+    <div class="kicker">The rule that pays for itself</div>
+    <h2>The subset rule, and <span class="acc">strict decoupling</span></h2>
+    <p class="lead">Two disciplines govern every estimator figure. Both were adopted after the alternative
+      produced a confidently wrong buy list — the most expensive kind of error a planning tool can make.</p>
     <div class="two-col">
       <div>
-        <div class="eq"><span class="gold">Available</span> = Initial &nbsp;+&nbsp; Received &nbsp;−&nbsp; Consumed</div>
+        <div class="eq"><span class="gold">Arrived</span> is <em>part of</em> <span class="gold">Ordered</span> &nbsp;—&nbsp; never added to it</div>
         <ul class="clean" style="margin-top:1rem">
-          <li><span class="em">Initial</span> — the SME-owned baseline, loaded once from the engineering Excel files.</li>
-          <li><span class="em">Received / Consumed</span> — pulled live from the ERP ledger, never re-keyed.</li>
-          <li>Computed on the fly by a SQL view — nothing is stored, so it can never drift.</li>
-          <li>SME write operations <span class="em">never</span> touch the ERP inventory table, and vice-versa.</li>
+          <li><span class="em">The subset rule.</span> The quantity procured is the ceiling; the arrived quantity is the part of it already on site. Adding the two double-counted every unit on the shelf.</li>
+          <li><span class="em">What that error cost.</span> On real data it understated the buy list by <b>22,951 units across 22 of 30 materials</b> — and on one material where the entire order had arrived, it reported <b>nothing to buy</b> against a real shortage of 9,685.</li>
+          <li><span class="em">Tier segregation.</span> Material on the shelf and material still in transit are never merged into one figure. Readiness counts only what has physically arrived.</li>
+          <li><span class="em">Strict decoupling.</span> Every estimator quantity comes from its own baseline. A warehouse issue does not silently move a planning number.</li>
         </ul>
       </div>
       <div class="card accent center">
-        <h3 style="justify-content:center">Two stores, one truth</h3>
+        <h3 style="justify-content:center">Adjacent, never merged</h3>
         <div class="flow" style="flex-direction:column;gap:.55rem;margin-top:.6rem">
-          <div class="node"><div class="t">📘 SME baseline</div><div class="d">engineering Excel → seed table</div></div>
-          <div class="arrow" style="justify-content:center;font-size:1rem">＋ live ERP receipts − consumption</div>
-          <div class="node accent" style="border-color:rgba(212,175,55,.5)"><div class="t" style="color:var(--gold-l)">📊 Estimator view</div><div class="d">always-current availability</div></div>
+          <div class="node"><div class="t">📘 The plan</div><div class="d">what this project needs, and what has been bought for it</div></div>
+          <div class="arrow" style="justify-content:center;font-size:1rem">shown side by side</div>
+          <div class="node"><div class="t">📦 The warehouse</div><div class="d">what is physically on the shelf today</div></div>
         </div>
-        <p style="margin-top:.8rem">Future-proof: rolls up consumption from both projects without a refactor.</p>
+        <p style="margin-top:.8rem">Netting one off the other would move every readiness figure on every tab
+          at once, with nothing on screen to explain why.</p>
       </div>
     </div>
+    <div class="note"><b>Verified both ways:</b> the estimator's arithmetic is implemented twice — once on the
+      server, once in the browser — and <b>1,313 parity comparisons</b> prove the two agree on every case. A
+      change to one that does not match the other fails the build.</div>
+  </section>
+
+  <!-- 9a · TANK ALIASES -->
+  <section class="slide" data-title="Handling Imperfect Data">
+    <div class="kicker">Real spreadsheets, not clean ones</div>
+    <h2>Reading data <span class="acc">people actually typed</span></h2>
+    <p class="lead">The consumption workbook records a tank reference by hand, and the same vessel appears
+      written four different ways. The system reconciles what it safely can — and refuses to guess the rest.</p>
+    <div class="grid g3">
+      <div class="card"><h3><span class="ico">✅</span>Reconciled automatically</h3><p>Four spellings of one tank resolve to a single vessel. On live data that alone accounted for <b>58 of 103 rows</b> that would otherwise have read as separate equipment.</p></div>
+      <div class="card accent"><h3><span class="ico">⚠️</span>Held, not guessed</h3><p>One reference matched vessels on <em>two different trains</em>. Either answer would have looked entirely plausible in every report afterwards, so <b>39 rows wait for a human</b> instead.</p></div>
+      <div class="card"><h3><span class="ico">👤</span>Resolved once</h3><p>Someone who knows the site answers once, and every row waiting on that reference is tagged. The decision is remembered and never overwritten by a later import.</p></div>
+    </div>
+    <div class="note"><b>Why this matters commercially:</b> a planning system that silently assigns consumption to
+      the wrong equipment produces reports that are wrong <em>and</em> confident. Refusing to guess is the
+      more expensive engineering choice and the only defensible one.</div>
   </section>
 
   <!-- 9b · MAN-HOURS & LABOR TRACKING -->
@@ -335,32 +367,84 @@
     <div class="note"><b>Same DNA as the material estimator:</b> it reads the equipment &amp; system catalogue but writes only its own isolated tables — never the stock ledger or End-of-Day path. Proven on real data: <b>22 employees · 209 timesheets</b> imported and verified in one pass.</div>
   </section>
 
+  <!-- 9c · ENTERPRISE ASSET & TOOL TRACKING -->
+  <section class="slide" data-title="Asset & Tool Tracking">
+    <div class="kicker">The step into asset management</div>
+    <h2>Enterprise asset &amp; <span class="acc">tool tracking</span></h2>
+    <p class="lead">Two hammers share one item code, so scanning either label used to resolve to the same
+      inventory line — the system could not say which one was in your hand or where the other had gone.
+      Every physical tool now has its own identity, its own position, and a history that cannot be rewritten.</p>
+    <div class="grid g4">
+      <div class="card accent"><h3><span class="ico">🔨</span>Serialised identity</h3><p>One record per physical thing, keyed by its serial number — not per item code. Ten identical hammers are ten tracked assets.</p></div>
+      <div class="card accent"><h3><span class="ico">📍</span>GPS on scan</h3><p>Scan a tool and its coordinates are captured <em>alongside</em> the update, becoming a map link on the record.</p></div>
+      <div class="card accent"><h3><span class="ico">🕘</span>Append-only history</h3><p>Every move is kept and never overwritten, so "where has this been, and who had it" is a question with an answer.</p></div>
+      <div class="card accent"><h3><span class="ico">🛠</span>Condition &amp; custody</h3><p>Working, not in use, under repair — plus who is holding it. One field, recorded by whoever is standing in front of it.</p></div>
+    </div>
+    <div class="grid g2" style="margin-top:1.1rem">
+      <div class="card"><h3><span class="ico">🤝</span>The scan resolves three ways</h3><p>A serial gives you <em>that exact tool</em>. An item code with several units asks <em>"which one is in your hand?"</em>. An item code with none falls back to the ordinary material view — the system never invents an asset that does not exist.</p></div>
+      <div class="card"><h3><span class="ico">🛡️</span>Capture never blocks the update</h3><p>A declined permission, a yard with no signal, a phone without a fix — the move still records, with the coordinates simply absent. <b>The location update is the operational value; the coordinate is the bonus.</b></p></div>
+    </div>
+    <div class="note"><b>"App wins" conflict resolution:</b> a spreadsheet location seeds an asset on first import,
+      but from then on what somebody recorded <em>in the app</em> is authoritative. A re-import cannot move a
+      tool, revert its condition, or erase a captured position — because a person who walked to the thing and
+      scanned it is a better source than a cell somebody typed last month.</div>
+  </section>
+
+  <!-- 9d · WAREHOUSE RACK LOCATOR -->
+  <section class="slide" data-title="Warehouse Rack Locator">
+    <div class="kicker">Minutes back, every day</div>
+    <h2>The warehouse <span class="acc">rack locator</span></h2>
+    <p class="lead">"Which rack is this in?" had no answer anywhere in the system. Now it takes two keystrokes
+      from any screen — and the answer works in both directions.</p>
+    <div class="flow">
+      <div class="node"><div class="t">Search</div><div class="d">Material name, item code, or scan a label</div><span class="role">ANY ROLE</span></div>
+      <div class="arrow">→</div>
+      <div class="node"><div class="t">⌘K palette</div><div class="d">Global search, from anywhere in the app</div><span class="role">TWO KEYSTROKES</span></div>
+      <div class="arrow">→</div>
+      <div class="node accent" style="border-color:rgba(212,175,55,.5)"><div class="t" style="color:var(--gold-l)">Zone · Rack · Row · Bin</div><div class="d">The precise shelf to walk to</div><span class="role">STORE KEEPER</span></div>
+    </div>
+    <div class="grid g3" style="margin-top:1.3rem">
+      <div class="card"><h3><span class="ico">🔁</span>Both directions</h3><p>Scanning the <em>shelf's own</em> label lists everything that belongs on it — turning a stock count from a hunt into a checklist.</p></div>
+      <div class="card"><h3><span class="ico">🗺️</span>Multiple locations</h3><p>A material legitimately sits in three places. Results are ordered so the first row is where to go <em>first</em>.</p></div>
+      <div class="card accent"><h3><span class="ico">❗</span>Honest about gaps</h3><p>A material stocked but not yet located returns <b>"not located"</b> rather than nothing. Silence would read as "we don't stock it" — and send somebody out to buy what is already on a shelf.</p></div>
+    </div>
+    <div class="note"><b>Fast because it is simple.</b> No search engine, no cache, no duplicated data — the
+      lookup rides an index measured against the real access path. Four earlier index candidates were
+      <em>benchmarked and rejected</em> because the query planner never used them. Speed here is evidence,
+      not assertion.</div>
+  </section>
+
   <!-- 10 · DATA INTEGRITY -->
   <section class="slide" data-title="Integrity & Quality">
     <div class="kicker">Trust the numbers</div>
     <h2>Built for <span class="acc">integrity</span></h2>
     <div class="grid g2">
-      <div class="card"><h3><span class="ico">🧪</span>Automated regression harness</h3><p>554 checks cover schema, every workflow state machine, RBAC locks and the SME integration. Runs before every release; the build is gated on green.</p></div>
-      <div class="card"><h3><span class="ico">🧾</span>Immutable audit trail</h3><p>Posted ledger rows are never edited in place. Corrections happen via reversal documents; rejected items are archived, not deleted.</p></div>
-      <div class="card"><h3><span class="ico">📐</span>Derived, not declared</h3><p>Live stock and estimator availability are computed from movements — eliminating the "someone typed the wrong number" class of error.</p></div>
-      <div class="card"><h3><span class="ico">🔒</span>Least-privilege RBAC</h3><p>Page access is exact-locked per role; multi-site scoping prevents cross-contamination of data between HQ and CNCEC.</p></div>
+      <div class="card"><h3><span class="ico">🧪</span>1,917 automated checks</h3><p>Schema, every workflow, permission lock, estimator calculation and end-to-end browser journey. Runs before every release; the build is gated on green.</p></div>
+      <div class="card"><h3><span class="ico">🧾</span>Immutable audit trail</h3><p>Posted records are never edited in place. Corrections happen through reversals; rejected items are archived, not deleted. Asset movements are append-only.</p></div>
+      <div class="card"><h3><span class="ico">📐</span>Derived, not declared</h3><p>Stock and estimator figures are computed from movements — eliminating the "someone typed the wrong number" class of error entirely.</p></div>
+      <div class="card"><h3><span class="ico">🔒</span>Fail-closed permissions</h3><p>Checked centrally by request type rather than screen by screen — so a feature written next year is closed to a read-only account from the moment it exists.</p></div>
     </div>
-    <div class="note"><b>Self-healing schema:</b> the database migrates itself forward on startup — new columns, views and seed data apply idempotently with zero manual DB surgery.</div>
+    <div class="note"><b>Why "fail-closed" is the load-bearing word:</b> a permission check added screen by screen is
+      only as reliable as the developer who remembers it, and <b>the one that gets forgotten fails open</b> — the
+      write succeeds and nothing looks wrong. Checking centrally inverts that. <b>126 of the 143 state-changing
+      operations</b> are blocked for a read-only account; the 17 that are not are sign-in, sign-out and a user's
+      own security settings.</div>
   </section>
 
   <!-- 11 · AUTOMATION & AI -->
   <section class="slide" data-title="Automation & AI">
     <div class="kicker">Force multipliers</div>
-    <h2>Automation &amp; <span class="acc">intelligence</span></h2>
+    <h2>Automation, AI &amp; <span class="acc">security</span></h2>
     <div class="grid g3">
-      <div class="card"><h3><span class="ico">📷</span>Smart Scan AI</h3><p>Vision OCR reads material slips from a phone photo; an optional AI fallback locates items when the primary model is unsure. Opt-in, gated OFF until a site enables it.</p></div>
-      <div class="card"><h3><span class="ico">💬</span>WhatsApp Business</h3><p>Direct Meta Cloud API pushes notifications and chases overdue returnables — two-way messaging, no third-party reseller.</p></div>
-      <div class="card"><h3><span class="ico">📄</span>Reports & PDFs</h3><p>Role-based PDF reports, Excel exports and e-mail drafts generated on demand for procurement and management.</p></div>
+      <div class="card accent"><h3><span class="ico">💬</span>The Hub Assistant</h3><p>Ask a question in plain language and get the answer from <em>this</em> manual, with the section quoted. Retrieval is <b>97% faster</b> than the previous approach and materially more accurate — it ranks by how distinctive a term is, so a rare word like a system code outweighs a common one.</p></div>
+      <div class="card accent"><h3><span class="ico">🔒</span>Answers respect your role</h3><p>The assistant retrieves only what the person asking is already permitted to see. <b>It cannot become a way around a permission</b> — the most important property an internal chatbot can have, and the easiest to get wrong.</p></div>
+      <div class="card accent"><h3><span class="ico">⏱</span>Idle sign-out</h3><p>A session left unattended signs itself out rather than waiting to be found — a warehouse terminal is a shared device, and a forgotten session is an open door.</p></div>
     </div>
-    <div class="grid g3" style="margin-top:1.1rem">
-      <div class="card"><h3><span class="ico">🔔</span>In-app Notifications</h3><p>An unread bell surfaces every action item — approvals, receipts, requests — to the right role.</p></div>
-      <div class="card"><h3><span class="ico">💾</span>Automated Backups</h3><p>Scheduled snapshots with a documented restore procedure protect against data loss.</p></div>
-      <div class="card"><h3><span class="ico">🌐</span>Private & Self-Hosted</h3><p>Runs on a dedicated company server — the local AI models stay internal and never leave the box. (See deployment, next.)</p></div>
+    <div class="grid g4" style="margin-top:1.1rem">
+      <div class="card"><h3><span class="ico">📷</span>Smart Scan</h3><p>Reads material slips and handwritten quantities from a phone photo. Opt-in per site.</p></div>
+      <div class="card"><h3><span class="ico">💬</span>WhatsApp Business</h3><p>Notifications and overdue-returnable chasing, two-way, direct — no reseller in the middle.</p></div>
+      <div class="card"><h3><span class="ico">📄</span>Reports &amp; exports</h3><p>Branded PDF and Excel output on demand, with a role-specific manual booklet for every user.</p></div>
+      <div class="card"><h3><span class="ico">🌐</span>Private by design</h3><p>The AI runs on your own server. <b>No question, document or stock figure is sent to an outside provider</b> — and there is no per-question charge.</p></div>
     </div>
   </section>
 
@@ -390,37 +474,42 @@
     <h2>Status &amp; <span class="acc">roadmap</span></h2>
     <table class="matrix">
       <tr><th>Area</th><th>Status</th><th>Notes</th></tr>
-      <tr><td><b>Core ERP</b> — inventory, procurement, EOD</td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live</span></td><td>In daily production use across sites.</td></tr>
-      <tr><td><b>SME Integration</b></td><td><span class="pill" style="border-color:var(--gold);color:var(--gold)">● Complete &amp; Locked</span></td><td>Feature-complete; frozen. Touched only for proven regressions.</td></tr>
-      <tr><td><b>Man-Hours &amp; Labor</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live · New</span></td><td>Shipped &amp; tested; loaded with real CNCEC attendance data.</td></tr>
-      <tr><td><b>Smart Scan AI</b></td><td><span class="pill" style="border-color:var(--sky);color:var(--sky)">● Ready · opt-in</span></td><td>Shipped; gated OFF until a pilot site enables it.</td></tr>
-      <tr><td><b>Docker / Deployment</b></td><td><span class="pill" style="border-color:var(--low);color:var(--low)">▶ In progress</span></td><td>Container stack, Nginx + TLS, CI/CD &amp; Meta WhatsApp built; server provisioning next.</td></tr>
-      <tr><td><b>ERP feature roadmap</b></td><td><span class="pill" style="border-color:var(--indigo);color:var(--indigo)">▷ Planned</span></td><td>Stock reservations, hard FEFO, UoM conversion, auto-PR drafting.</td></tr>
+      <tr><td><b>Core ERP</b> — inventory, procurement, End-of-Day</td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live</span></td><td>In daily production use across sites.</td></tr>
+      <tr><td><b>Material Estimator</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live</span></td><td>Subset rule, tier segregation and tank-alias resolution all shipped and verified on live data.</td></tr>
+      <tr><td><b>Man-Hours &amp; Labor</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live</span></td><td>Loaded and verified with real site attendance data.</td></tr>
+      <tr><td><b>Asset &amp; Tool Tracking</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live · New</span></td><td>Serials, GPS capture and movement history shipped. Awaiting the first tools to be registered.</td></tr>
+      <tr><td><b>Warehouse Rack Locator</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live · New</span></td><td>Search and ⌘K integration shipped. Awaiting shelf labels to be assigned.</td></tr>
+      <tr><td><b>Native applications</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Shipped</span></td><td>v1.2.0 for Windows, macOS and Android, built automatically from a release tag.</td></tr>
+      <tr><td><b>Auditor role &amp; AI assistant</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live</span></td><td>Read-only auditing and the on-premise assistant both in production.</td></tr>
+      <tr><td><b>Server deployment</b></td><td><span class="pill" style="border-color:var(--low);color:var(--low)">▶ Remaining</span></td><td>The full stack, reverse proxy, TLS and continuous deployment are built and tested; provisioning the server is the last step.</td></tr>
+      <tr><td><b>Next capabilities</b></td><td><span class="pill" style="border-color:var(--indigo);color:var(--indigo)">▷ Planned</span></td><td>Stock reservations, unit-of-measure conversion, automatic purchase-request drafting.</td></tr>
     </table>
-    <div class="note"><b>Direction:</b> with the SME merge complete and labor tracking live, development is finishing <b>production deployment</b> and deepening the <b>ERP's own</b> capabilities — tighter inventory discipline and procurement automation.</div>
+    <div class="note"><b>Direction:</b> the platform is <b>feature-complete for its current scope</b> — inventory,
+      procurement, material and labor planning, and now asset management. <b>One task remains before full
+      production: provisioning the server.</b></div>
   </section>
 
   <!-- 13 · CLOSE -->
   <section class="slide center" data-title="Summary">
     <div class="kicker">In one line</div>
-    <h1 style="max-width:18ch">One governed platform.<br><span style="color:var(--gold)">Every material, accounted for.</span></h1>
+    <h1 style="max-width:20ch">One governed platform.<br><span style="color:var(--gold)">Every material and every asset, accounted for.</span></h1>
     <div class="grid g4" style="margin-top:2rem;width:min(900px,90%)">
       <div class="card center"><div class="stat">1</div><div class="stat-l">Source of truth</div></div>
-      <div class="card center"><div class="stat">6</div><div class="stat-l">Governed roles</div></div>
-      <div class="card center"><div class="stat">554</div><div class="stat-l">Tests green</div></div>
+      <div class="card center"><div class="stat">7</div><div class="stat-l">Governed roles</div></div>
+      <div class="card center"><div class="stat">1,917</div><div class="stat-l">Checks green</div></div>
       <div class="card center"><div class="stat">0</div><div class="stat-l">Hand-edited stock</div></div>
     </div>
     <p class="sub" style="text-align:center;margin-left:auto;margin-right:auto">
-      GI Hub ERP — from purchase request to consumption, with material <em>and</em> labor
-      planning built in, and production deployment underway.
+      GI Hub — from purchase request to consumption, from the shelf to the serial number,
+      with material <em>and</em> labor planning built in. Feature-complete; one step from full production.
     </p>
   </section>
 
 </div>
 
 <div class="footer" id="footer">
-  <span class="brand"><b>GI&nbsp;Hub&nbsp;ERP</b> &nbsp;·&nbsp; Material &amp; Labor Planning</span>
-  <span id="pagecount">01 / 15</span>
+  <span class="brand"><b>GI&nbsp;Hub</b> &nbsp;·&nbsp; Enterprise Asset Management ERP &nbsp;·&nbsp; v1.2.0</span>
+  <span id="pagecount">01 / 18</span>
 </div>
 <div id="hint">Navigate with <kbd>←</kbd> <kbd>→</kbd> &nbsp;·&nbsp; <kbd>F</kbd> fullscreen &nbsp;·&nbsp; <kbd>Home</kbd> reset</div>
 
