@@ -110,7 +110,13 @@ async def generate_and_dispatch(session: AsyncSession) -> dict:
         (reports_t.c["kind"] == KIND)
         & (reports_t.c["expires_at"] < text("CURRENT_TIMESTAMP"))))
 
-    links, notified = {}, 0
+    # 2026-08-05: EMAIL is now a third channel beside the bell and WhatsApp.
+    # Addresses are read once for the whole run rather than per recipient.
+    emails = {r.username: (r.email or "").strip() for r in (await session.execute(
+        select(users_t.c["username"], users_t.c["email"])
+        .where(users_t.c["role"].in_(("admin", "hod"))))).all()}
+
+    links, notified, mailed = {}, 0, 0
     for scope, usernames in scopes.items():
         blob, fname = await _render_site(session, scope, dfrom, dto)
         token = await _store(session, site=scope, dfrom=dfrom, dto=dto,
@@ -127,11 +133,59 @@ async def generate_and_dispatch(session: AsyncSession) -> dict:
                 related_table="generated_reports", related_ref=f"{KIND}:{scope or 'ALL'}",
                 created_by="scheduler", delivery="urgent")
             notified += 1
+            mailed += await _email_one(session, username, emails.get(username),
+                                       scope, dfrom, dto, url)
     await session.commit()
-    log.info("weekly exec report: %d PDF(s), %d recipient(s), period %s→%s",
-             len(links), notified, dfrom, dto)
-    return {"reports": len(links), "recipients": notified,
+    log.info("weekly exec report: %d PDF(s), %d recipient(s), %d email(s), "
+             "period %s→%s", len(links), notified, mailed, dfrom, dto)
+    return {"reports": len(links), "recipients": notified, "emails": mailed,
             "date_from": dfrom, "date_to": dto, "links": links}
+
+
+async def _email_one(session: AsyncSession, username: str, address: str | None,
+                     scope: str | None, dfrom: str, dto: str, url: str) -> int:
+    """Send one recipient their copy by email. Returns 1 if queued, else 0.
+
+    WHY EMAIL AT ALL, WHEN WHATSAPP ALREADY WORKS. The WhatsApp path carries a
+    LINK rather than the PDF because Meta only delivers document attachments
+    inside a 24-hour customer-service window, and a Friday broadcast usually is
+    not in one. SMTP has no such window — but the same secure expiring link is
+    sent, deliberately, rather than the PDF bytes: the link is access-
+    controlled and dies after LINK_TTL_HOURS, while an attachment lives forever
+    in whatever inbox it lands in, including a forwarded one.
+
+    NEVER FATAL. A missing address, a refused relay or an SMTP timeout returns
+    0 and the run continues — the bell row has already been written, so nobody
+    loses the report because a mail server was down. Same reasoning as the
+    WhatsApp path, which has always been allowed to fail.
+    """
+    try:
+        from .services.emailer import logistics_to, send_email
+    except Exception:  # noqa: BLE001
+        return 0
+    # Until per-user addresses are filled in, fall back to the configured
+    # inbox: the feature has to deliver on day one with no data entry, and it
+    # gets more precise as `users.email` is populated.
+    address = (address or "").strip() or logistics_to()
+    if not address:
+        return 0
+    try:
+        res = await send_email(
+            session, to=address,
+            subject=f"Weekly Executive Summary — {scope or 'all sites'} "
+                    f"({dfrom} → {dto})",
+            body=(f"The weekly Executive Summary for {scope or 'all sites'} "
+                  f"is ready.\n\nPeriod: {dfrom} → {dto}\n\n"
+                  f"Download the PDF (link valid {LINK_TTL_HOURS} hours):\n{url}\n\n"
+                  "This link is single-purpose and expires; it is not a "
+                  "permanent copy.\n\n— GI Hub"),
+            event_key="weekly_exec_report",
+            related_table="generated_reports",
+            related_ref=f"{KIND}:{scope or 'ALL'}", created_by="scheduler")
+        return 1 if res.get("status") == "sent" else 0
+    except Exception:  # noqa: BLE001 — a mail failure must not break the run
+        log.exception("weekly exec report: email to %s failed", username)
+        return 0
 
 
 async def weekly_report_loop() -> None:

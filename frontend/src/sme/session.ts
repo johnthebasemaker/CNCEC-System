@@ -239,6 +239,25 @@ export interface WeightedProcurementRow {
   Available_Qty: number
   /** TIER 2 — the PENDING (unreceived) part of the order. */
   Pending_Delivery_Qty: number
+  /**
+   * The whole quantity procured for this component, at the ALLOCATED grain.
+   *
+   * Added 2026-08-04 so the Session Report download can state it. Mirrors
+   * `sme._material_demand_rows`, which computes it the same way, so the
+   * exported document and the on-screen table cannot drift.
+   *
+   * ⚠️ THE SUBSET RULE (1c). Summing the two tiers looks like the additive
+   * error that rule overturned, and it is not: `Alloc_Pending` is already
+   * `max(ordered − available, 0)` — the pending DELIVERY, not the whole order
+   * — so tier1 + tier2 is the CEILING `max(available, ordered)`, never
+   * available + ordered. The mistake would be re-deriving this from the raw
+   * seed figures; taking it from the split tiers is what makes it correct.
+   *
+   * ⚠️ TIER SEGREGATION (1b). This is a quantity, not readiness. It is
+   * numerically equal to `Allocated_Qty`, which is a CONSERVATION field —
+   * nothing may use either as a coverage numerator or colour it green.
+   */
+  Total_Procured_Qty: number
   Allocated_Qty: number
   Shortfall_Qty: number
   Fulfillment_Pct: number
@@ -261,6 +280,7 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
         Material_Key: ln.Material_Key,
         Material_Name: ln.Material_Name, UOM: ln.UOM,
         Demand_Qty: 0, Available_Qty: 0, Pending_Delivery_Qty: 0,
+        Total_Procured_Qty: 0,
         Allocated_Qty: 0, Shortfall_Qty: 0, Fulfillment_Pct: 100,
         SQM_Total: 0, SQM_Done: 0, SQM_Deficit: 0,
       }
@@ -269,6 +289,10 @@ export function weightedProcurement(lines: AllocationLine[]): WeightedProcuremen
     r.Demand_Qty += ln.Demand_Qty
     r.Available_Qty += ln.Alloc_Available
     r.Pending_Delivery_Qty += ln.Alloc_Pending
+    // Accumulated from the SPLIT tiers, exactly as sme._material_demand_rows
+    // does — see the field's doc comment for why that is the ceiling and not
+    // the additive double-count.
+    r.Total_Procured_Qty += ln.Alloc_Available + ln.Alloc_Pending
     r.Allocated_Qty += ln.Allocated_Qty
     r.Shortfall_Qty += ln.Shortfall_Qty
     r.SQM_Total += ln.Total_SQM

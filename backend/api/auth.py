@@ -35,8 +35,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import is_production, jwt_secret
 from .db import get_session
-from .ratelimit import (assert_login_allowed, check_bucket, clear_login_failures,
-                        client_ip, note_login_failure, rate_limit,
+from .ratelimit import (assert_login_allowed, assert_login_allowed_shared,
+                        check_bucket, clear_login_failures,
+                        clear_login_failures_shared, client_ip,
+                        note_login_failure, note_login_failure_shared, rate_limit,
                         strict_limits_enabled)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -457,19 +459,26 @@ async def login(body: LoginIn, response: Response,
     # endpoint's rate_limit() is per-IP and therefore blind to credential
     # stuffing spread across many hosts. See ratelimit.assert_login_allowed.
     assert_login_allowed(body.username)
+    # …and the SHARED budget, which is the one that is true across workers.
+    # The in-process check above stays because it costs nothing and trips first
+    # inside a hot worker; this row is what stops N workers meaning N × 8.
+    await assert_login_allowed_shared(session, body.username)
     row = await _fetch_user(session, body.username)
     if row is None:
         _verify_password(body.password, _DUMMY_HASH)  # constant-time-ish
         note_login_failure(body.username)
         await _audit(session, body.username.strip(), "LOGIN_FAILED", "unknown user")
+        await note_login_failure_shared(session, body.username)
         raise HTTPException(401, "invalid username or password")
     if not _verify_password(body.password, row.password_hash):
         note_login_failure(body.username)
         await _audit(session, row.username, "LOGIN_FAILED", "bad password")
+        await note_login_failure_shared(session, body.username)
         raise HTTPException(401, "invalid username or password")
     # Correct password → the account's failure budget is released immediately,
     # so a burst of wrong guesses never leaves the real owner locked out.
     clear_login_failures(body.username)
+    await clear_login_failures_shared(session, body.username)
 
     if row.role != "admin" and await maintenance_on(session):
         raise HTTPException(503, "GI Hub is in maintenance mode — please try again later")
@@ -501,11 +510,14 @@ async def login_2fa(body: TwoFAIn, response: Response,
     # A wrong TOTP is a failed sign-in: without this the second factor would
     # be the one unthrottled step, brute-forceable at 10/min/IP over 1e6 codes.
     assert_login_allowed(row.username)
+    await assert_login_allowed_shared(session, row.username)
     if not _verify_totp(row.totp_secret, body.code):
         note_login_failure(row.username)
         await _audit(session, row.username, "2FA_FAILED", "invalid code")
+        await note_login_failure_shared(session, row.username)
         raise HTTPException(401, "invalid 2FA code")
     clear_login_failures(row.username)
+    await clear_login_failures_shared(session, row.username)
     if row.role != "admin" and await maintenance_on(session):
         raise HTTPException(503, "GI Hub is in maintenance mode — please try again later")
     client_type = p.get("client") if p.get("client") in REFRESH_TTLS else "web"

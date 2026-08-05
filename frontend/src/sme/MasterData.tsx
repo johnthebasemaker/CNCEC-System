@@ -8,14 +8,15 @@
  * Materials edit the SME-owned seed only — derived availability columns are
  * read-only by design (Canon Rule 2).
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, App, Button, Card, Col, Form, Input, InputNumber, List, Modal, Popconfirm,
-  Row as GridRow, Space, Tabs, Typography,
+  Row as GridRow, Space, Tabs, Tooltip, Typography,
 } from 'antd'
 import { Table } from '../lib/smartTable'
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import { api } from '../api/client'
 import type { Row } from '../api/client'
 import {
   useSmeMasterCreate, useSmeMasterDelete, useSmeMasterList, useSmeMasterPatch,
@@ -119,6 +120,84 @@ function FieldInputs({ fields, lockNames }: { fields: FieldDef[]; lockNames?: st
   )
 }
 
+/**
+ * Correct a tank's surface area — and have it STICK.
+ *
+ * `Surface_Area_SQM` drives demand for every report, so a plain edit that the
+ * next `Equipment.xlsx` sync silently reverted would resurface days later as a
+ * wrong buy list with nothing to point at. Saving here records an OVERRIDE
+ * alongside the value; the sync re-applies it and reports the divergence
+ * rather than resolving it quietly. Clearing hands the row back to the
+ * workbook — an override you cannot undo is a trap.
+ */
+function SqmOverrideModal({ row, onClose, onSaved }: {
+  row: Row | null
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const { message } = App.useApp()
+  const [value, setValue] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+  const current = Number(row?.Surface_Area_SQM ?? 0)
+  const override = row?.SQM_Override == null ? null : Number(row.SQM_Override)
+
+  useEffect(() => { setValue(row ? current : null) }, [row?.id])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const save = async (clear = false) => {
+    if (!row) return
+    setBusy(true)
+    try {
+      await api.patch(`/sme/master/equipment/${row.id}/sqm`,
+                      { Surface_Area_SQM: clear ? null : value })
+      message.success(clear ? 'Override cleared — the workbook owns this row again'
+                            : 'Saved — this value now survives the Excel sync')
+      onSaved()
+      onClose()
+    } catch (e) {
+      message.error(errMsg(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal open={!!row} onCancel={onClose} destroyOnHidden footer={null}
+      title={row ? `Surface area — ${row.Equipment_Tag_No} / ${row.Lining_System_Code}` : ''}>
+      {row && (
+        <>
+          <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+            message="This changes project demand"
+            description="Surface area feeds every SQM, coverage and buy-list figure
+              for this equipment. Saving records it as an operator override, so
+              the next Excel sync will keep it and report the difference instead
+              of overwriting it." />
+          <Form layout="vertical">
+            <Form.Item label="Surface area (m²)"
+              extra={override != null
+                ? `Currently overridden to ${override} by ${String(row.SQM_Override_By ?? 'an operator')}.`
+                : 'Currently follows Equipment.xlsx.'}>
+              <InputNumber min={0.001} step={0.1} value={value} onChange={setValue}
+                style={{ width: '100%' }} />
+            </Form.Item>
+            <Space>
+              <Button type="primary" loading={busy}
+                disabled={value == null || value <= 0} onClick={() => save(false)}>
+                Save override
+              </Button>
+              {override != null && (
+                <Popconfirm title="Hand this row back to Equipment.xlsx?"
+                  onConfirm={() => save(true)}>
+                  <Button danger loading={busy}>Clear override</Button>
+                </Popconfirm>)}
+              <Button onClick={onClose}>Cancel</Button>
+            </Space>
+          </Form>
+        </>)}
+    </Modal>
+  )
+}
+
+
 interface CrudTabProps {
   kind: 'equipment' | 'recipes' | 'materials'
   fields: FieldDef[]
@@ -142,6 +221,7 @@ function CrudTab({ kind, fields, idKey, siteId, needsSite, siteMissing,
   const del = useSmeMasterDelete(kind)
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<Row | null>(null)
+  const [sqmRow, setSqmRow] = useState<Row | null>(null)
   const [form] = Form.useForm()
 
   const rows = list.data ?? []
@@ -193,10 +273,20 @@ function CrudTab({ kind, fields, idKey, siteId, needsSite, siteMissing,
   const columns: ColumnsType<Row> = useMemo(() => [
     ...buildColumns(rows),
     {
-      title: 'Actions', key: '__actions', fixed: 'right', width: 150,
+      title: 'Actions', key: '__actions', fixed: 'right',
+      width: kind === 'equipment' ? 230 : 150,
       render: (_: unknown, r: Row) => (
         <Space>
           <Button size="small" onClick={() => openEdit(r)}>Edit</Button>
+          {kind === 'equipment' && (
+            <Tooltip title={r.SQM_Override != null
+              ? `Operator override ${Number(r.SQM_Override)} — survives the Excel sync`
+              : 'Correct the surface area; the correction wins over the workbook'}>
+              <Button size="small" type={r.SQM_Override != null ? 'primary' : 'default'}
+                ghost={r.SQM_Override != null} onClick={() => setSqmRow(r)}>
+                SQM
+              </Button>
+            </Tooltip>)}
           <Popconfirm title={deleteWarning ?? 'Delete this row?'} onConfirm={() => remove(r)}>
             <Button size="small" danger>Delete</Button>
           </Popconfirm>
@@ -204,7 +294,7 @@ function CrudTab({ kind, fields, idKey, siteId, needsSite, siteMissing,
       ),
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [rows, deleteWarning])
+  ], [rows, deleteWarning, kind])
 
   return (
     <div>
@@ -238,6 +328,8 @@ function CrudTab({ kind, fields, idKey, siteId, needsSite, siteMissing,
           <FieldInputs fields={fields} lockNames={editing ? lockOnEdit : undefined} />
         </Form>
       </Modal>
+      <SqmOverrideModal row={sqmRow} onClose={() => setSqmRow(null)}
+        onSaved={() => list.refetch()} />
     </div>
   )
 }

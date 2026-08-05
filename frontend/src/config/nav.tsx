@@ -18,8 +18,8 @@
  */
 import type { ReactNode } from 'react'
 import {
-  AlertOutlined, AuditOutlined, BarChartOutlined, CameraOutlined, CarOutlined,
-  DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FallOutlined,
+  AimOutlined, AlertOutlined, AuditOutlined, BarChartOutlined, CameraOutlined, CarOutlined,
+  DashboardOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, FallOutlined,
   FieldTimeOutlined, FileExcelOutlined, FileProtectOutlined, FileSearchOutlined, FireOutlined,
   FormOutlined, FundProjectionScreenOutlined, InboxOutlined, MessageOutlined, ProfileOutlined,
   SafetyCertificateOutlined, SolutionOutlined, StockOutlined, TeamOutlined,
@@ -74,6 +74,16 @@ export const NAV: NavGroup[] = [
       // role-home instead (see ROLE_HOME + the index redirect in AppLayout).
       { key: '/', label: 'Dashboard', icon: <DashboardOutlined />, access: { minLevel: 1 } },
       { key: '/stock', label: 'Stock', icon: <StockOutlined />, access: { minLevel: 1 } },
+      // The rack locator sits at the TOP LEVEL and at minLevel 0 on purpose:
+      // the store keeper is level 0 and is the person who has to walk to the
+      // shelf. Burying it inside a supervisor group would hide it from its
+      // only real user. It is NOT marked `writes` — finding a material is a
+      // read, and the create/assign controls inside are guarded separately
+      // (require_level(1) server-side, useReadOnly in the page).
+      { key: '/locator', label: 'Locator', icon: <EnvironmentOutlined />, access: { minLevel: 0 } },
+      // Serialised assets. Same reasoning as the Locator: level 0, top level —
+      // the person scanning a hammer in a yard is a store keeper.
+      { key: '/assets', label: 'Assets', icon: <AimOutlined />, access: { minLevel: 0 } },
     ],
   },
   {
@@ -105,29 +115,48 @@ export const NAV: NavGroup[] = [
     })),
   },
   {
+    // 2026-08-04: `auditor` reads the HOD portal.
+    //
+    // The API was never the thing keeping it out — /hod/* is
+    // `Depends(require_level(2))` and an auditor is level 3, so the backend
+    // has always allowed these reads. Only this manifest hid them, which made
+    // "the Auditor cannot see HOD" a UI accident rather than a policy.
+    //
+    // Added to the READ children only. Anything wrapped in `w()` stays
+    // {hod, admin}: a `writes: true` page is unreachable for a view-only role
+    // by design, and that is the mechanism that strips the Approve / Import
+    // controls without touching a single page component. The write guard in
+    // readonly.py is untouched and nothing is added to its allowlist — an
+    // auditor that reached one of these pages still cannot POST from it.
     id: 'hod',
     label: 'HOD',
-    access: { anyRole: ['hod'] },   // HOD Portal exact-locked {hod, admin}
+    access: { anyRole: ['hod', 'auditor'] },
     children: [
-      { key: '/hod/executive-summary', label: 'Executive Summary', icon: <FundProjectionScreenOutlined />, access: { anyRole: ['hod'] } },
+      { key: '/hod/executive-summary', label: 'Executive Summary', icon: <FundProjectionScreenOutlined />, access: { anyRole: ['hod', 'auditor'] } },
       { key: '/hod/approvals', label: 'Approvals', icon: <AuditOutlined />, access: w({ anyRole: ['hod'] }), badge: 'approvals' },
-      { key: '/hod/burn-rate', label: 'Burn Rate', icon: <FireOutlined />, access: { anyRole: ['hod'] } },
-      { key: '/hod/lining-coverage', label: 'Lining Coverage', icon: <ExperimentOutlined />, access: { anyRole: ['hod', 'logistics'] } },
-      { key: '/hod/documents', label: 'Document Library', icon: <FileSearchOutlined />, access: { anyRole: ['hod'] } },
-      { key: '/hod/low-stock', label: 'Low Stock', icon: <FallOutlined />, access: { anyRole: ['hod'] } },
-      { key: '/hod/prs', label: 'Purchase Requests', icon: <ProfileOutlined />, access: { anyRole: ['hod'] } },
-      { key: '/hod/requests', label: 'Cross-Site Requests', icon: <SolutionOutlined />, access: { anyRole: ['hod'] } },
+      { key: '/hod/burn-rate', label: 'Burn Rate', icon: <FireOutlined />, access: { anyRole: ['hod', 'auditor'] } },
+      { key: '/hod/lining-coverage', label: 'Lining Coverage', icon: <ExperimentOutlined />, access: { anyRole: ['hod', 'logistics', 'auditor'] } },
+      { key: '/hod/documents', label: 'Document Library', icon: <FileSearchOutlined />, access: { anyRole: ['hod', 'auditor'] } },
+      { key: '/hod/low-stock', label: 'Low Stock', icon: <FallOutlined />, access: { anyRole: ['hod', 'auditor'] } },
+      { key: '/hod/prs', label: 'Purchase Requests', icon: <ProfileOutlined />, access: { anyRole: ['hod', 'auditor'] } },
+      { key: '/hod/requests', label: 'Cross-Site Requests', icon: <SolutionOutlined />, access: { anyRole: ['hod', 'auditor'] } },
       // Bulk Excel import — SME kinds for HOD; inventory/ledger cards appear
-      // for admin only (server enforces both).
+      // for admin only (server enforces both). NOT opened to the auditor: it
+      // is a write surface end to end.
       { key: '/bulk-import', label: 'Bulk Excel Import', icon: <FileExcelOutlined />, access: w({ anyRole: ['hod'] }) },
     ],
   },
   {
+    // The Estimator is a read-only analysis view and /sme/* is likewise
+    // `require_level(2)`, so the auditor already reached the data. Its two
+    // WRITE surfaces — Master Data and Actual Consumption — are
+    // `require_roles("hod")` inside SmePage and on the server, so they simply
+    // do not render for an auditor.
     id: 'sme',
     label: 'SME Estimator',
-    access: { anyRole: ['hod'] },   // Material Estimator exact-locked {hod, admin}
+    access: { anyRole: ['hod', 'auditor'] },
     children: [
-      { key: '/sme', label: 'Estimator', icon: <ExperimentOutlined />, access: { anyRole: ['hod'] } },
+      { key: '/sme', label: 'Estimator', icon: <ExperimentOutlined />, access: { anyRole: ['hod', 'auditor'] } },
     ],
   },
   {

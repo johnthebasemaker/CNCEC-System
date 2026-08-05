@@ -22,7 +22,7 @@
  * Run:  npm run test:ui-math   (from frontend/)
  */
 import { buildModel, matKey, runPlan } from '../src/sme/engine.ts'
-import { codeStats, scopeBottleneckCoverage, tagStats } from '../src/sme/session.ts'
+import { codeStats, scopeBottleneckCoverage, tagStats, weightedProcurement } from '../src/sme/session.ts'
 import { materialBalance, pairCoverage, scopeCoverage, allUnits } from '../src/sme/insights.ts'
 
 let passed = 0
@@ -249,6 +249,55 @@ console.log('\n E. THE SUBSET RULE — available is part OF ordered, not extra t
   `pending=${over.Pending_Delivery_Qty} procured=${over.Total_Procured_Qty}`)
 
   void units; void m
+}
+
+// ─── F. the Session Report's exported quantities ──────────────────────────────
+// `Total Procured` was added to the Session Report drill-down exports on
+// 2026-08-04. It is the one column an export layer is most likely to get wrong,
+// because the intuitive way to produce it — available + pending — is exactly
+// the additive reading the subset rule overturned. Pinned here so a future
+// refactor of the export block fails the gate instead of shipping a buy list
+// that is short by everything already on the shelf.
+console.log('\n F. Session Report exports — Total Procured is the CEILING')
+{
+  // 100 m² of demand at 1 KG/m². 40 KG have ARRIVED out of 100 PROCURED, so
+  // the pending delivery is 60 — never another 100.
+  const m = buildModel(
+    [{ Equipment_Tag_No: 'T1', Lining_System_Code: 'C1', Surface_Area_SQM: 100 }],
+    [{ Lining_System_Code: 'C1', Lining_System_Name: 'SYS', Material_Code: 'M1',
+      SAP_Code: 'S1', Material_Name: 'Partly delivered', UOM: 'KG',
+      For_1_SQM: RATE }],
+    [{ material_code: 'M1', sap_code: 'S1', material_name: 'Partly delivered',
+      uom: 'KG', available_qty: 40, ordered_qty: 100 }],
+    [])
+  const r = weightedProcurement(runPlan(m, ['T1']).lines)[0]
+
+  check('the export row carries Total_Procured_Qty at all — the column the '
+    + 'Session Report download renders (it was undefined before, which is '
+    + 'a blank cell, not an error)',
+  r && r.Total_Procured_Qty !== undefined, JSON.stringify(r))
+  check('the three exported quantities stay DISTINCT — 40 arrived, 60 still '
+    + 'in the pipeline, 100 procured in total',
+  r.Available_Qty === 40 && r.Pending_Delivery_Qty === 60
+    && r.Total_Procured_Qty === 100,
+  `${r.Available_Qty}/${r.Pending_Delivery_Qty}/${r.Total_Procured_Qty}`)
+  check('Total Procured is the CEILING max(available, ordered) = 100, NOT the '
+    + '140 that available + ordered would give — the subset rule holds in the '
+    + 'export layer, not only in the engine',
+  r.Total_Procured_Qty === 100 && 40 + 100 === 140,
+  `procured=${r.Total_Procured_Qty}`)
+  check('it is accumulated from the SPLIT tiers, so it conserves against '
+    + 'Allocated_Qty (rule 2) instead of being a fourth independent figure '
+    + 'that can drift',
+  near(r.Total_Procured_Qty, r.Allocated_Qty),
+  `procured=${r.Total_Procured_Qty} allocated=${r.Allocated_Qty}`)
+  check('the buy list still nets against the ceiling: demand 100, procured '
+    + '100 → nothing left to buy, while 60 KG remain physically short',
+  r.Shortfall_Qty === 0 && near(r.Demand_Qty - r.Available_Qty, 60),
+  `to buy=${r.Shortfall_Qty} physical gap=${r.Demand_Qty - r.Available_Qty}`)
+  check('readiness is untouched by any of this — coverage is TIER 1 only, '
+    + '40 of 100 = 40%, never 100% because the order is complete',
+  near(r.Fulfillment_Pct, 40), `fulfillment=${r.Fulfillment_Pct}`)
 }
 
 console.log(`\n== SME UI MATH: ${failures.length ? '❌ FAIL' : '✅ PASS'} `

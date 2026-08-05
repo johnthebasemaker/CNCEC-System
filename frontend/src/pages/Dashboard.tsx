@@ -1,4 +1,4 @@
-import { Card, Col, Empty, Row, Typography } from 'antd'
+import { Card, Col, Empty, Row, Tag, Tooltip, Typography } from 'antd'
 import { Table } from '../lib/smartTable'
 import { DollarOutlined, EnvironmentOutlined, InboxOutlined, WarningOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
@@ -138,6 +138,57 @@ export default function Dashboard() {
                 </BarChart>
               </ResponsiveContainer>
             ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No consumption in 30 days" />}
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }} className="gi-cascade">
+        <Col xs={24} lg={12}>
+          {/* A WARNING widget, never a block: FEFO stays allow-and-log by
+              standing ruling, so already-expired lots are shown (negative
+              days) rather than hidden — those are the ones needing a decision
+              today. */}
+          <Card title="Top 5 expiring lots" size="small">
+            {metrics?.top_expiring?.length ? (
+              <Table size="small" pagination={false} rowKey={(r) => String(r.lot)}
+                dataSource={metrics.top_expiring}
+                columns={[
+                  { title: 'Lot', dataIndex: 'lot', width: 120 },
+                  { title: 'SAP', dataIndex: 'sap', width: 90 },
+                  { title: 'Material', dataIndex: 'name', ellipsis: true },
+                  { title: 'Expires', dataIndex: 'expiry_date', width: 110 },
+                  { title: 'Days', dataIndex: 'days_left', width: 90, align: 'right',
+                    render: (v: number) => (
+                      <Tag color={v < 0 ? 'red' : v <= 30 ? 'orange' : 'default'}>
+                        {v < 0 ? `${Math.abs(v)} overdue` : v}
+                      </Tag>) },
+                ]} />
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No dated lots" />}
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card size="small" title="Highest value on hand"
+            extra={metrics?.value_coverage && (
+              <Tooltip title="Unit cost is optional on the inventory master, so
+                this ranking only covers the items that have one. A total stated
+                without that caveat is a wrong number stated confidently.">
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {metrics.value_coverage.priced} of {metrics.value_coverage.total} priced
+                </Typography.Text>
+              </Tooltip>)}>
+            {metrics?.highest_value?.length ? (
+              <Table size="small" pagination={false} rowKey={(r) => String(r.sap)}
+                dataSource={metrics.highest_value}
+                columns={[
+                  { title: 'SAP', dataIndex: 'sap', width: 90 },
+                  { title: 'Material', dataIndex: 'name', ellipsis: true },
+                  { title: 'Qty', dataIndex: 'qty', width: 90, align: 'right',
+                    render: (v: number) => nf(Number(v)) },
+                  { title: 'Value', dataIndex: 'value', width: 120, align: 'right',
+                    render: (v: number) => <b>{nf(Number(v))}</b> },
+                ]} />
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="No item carries a unit cost yet" />}
           </Card>
         </Col>
       </Row>

@@ -607,6 +607,34 @@ _MATERIAL_DEMAND_COLS = ["S_No", "Material_Code", "SAP_Code", "Material_Name",
                          "Pending_Delivery_Qty", "Total_Procured_Qty",
                          "Allocated_Qty", "Net_Demand", "Fulfillment_Pct"]
 
+# The session report's per-equipment breakdown. Named EXPLICITLY, for two
+# reasons that were both live defects when this list was derived from dict key
+# order instead (2026-08-04):
+#
+#  1. THE RECIPE LEAKED. `For_1_SQM` — the per-square-metre consumption rate —
+#     rode into every operator-facing session document. It is an INPUT to the
+#     calculation, not a result, and the ruling is that it stays backend-side:
+#     reports state what to draw, not the formula that produced it. (It remains
+#     in `/sme/snapshot`, because the TypeScript engine computes demand in the
+#     browser and cannot work without it.)
+#  2. ENGINE INTERNALS LEAKED. `Material_Key`, `Pool_Before`, `Pool_After`,
+#     `Pending_Pool_Before`, `Pending_Pool_After` are cascade bookkeeping — the
+#     running pool as the allocator walks the priority order. In a spreadsheet
+#     they read like quantities somebody might sum, and summing them is
+#     meaningless.
+#
+# TIER DISCIPLINE (rule 1b) is preserved exactly: `Alloc_Available` (tier 1)
+# and `Alloc_Pending` (tier 2) stay separate columns, `Allocated_Qty` is their
+# conserved sum and is NOT a coverage numerator, and the two Fulfillment
+# figures keep their own names.
+_SESSION_LINE_COLS = ["Equipment_Tag_No", "Lining_System_Code",
+                      "Lining_System_Short_Name", "Total_SQM",
+                      "Material_Code", "SAP_Code", "Material_Name", "UOM",
+                      "Demand_Qty", "Alloc_Available", "Alloc_Pending",
+                      "Allocated_Qty", "Shortfall_Available_Qty",
+                      "Shortfall_Qty", "Fulfillment_Pct",
+                      "Fulfillment_With_Ordered_Pct"]
+
 # Material-Wise Segregated Report (2026-07-28), grouped by system code.
 _SEGREGATED_CODE_COLS = ["Lining_System_Code", "System_Name", "Equipment_Count",
                          "Total_SQM", "Done_SQM", "Remaining_SQM",
@@ -824,7 +852,8 @@ async def plan_export(body: PlanExportBody,
         sections = [
             (lead, _MATERIAL_DEMAND_COLS,
              [[r.get(c) for c in _MATERIAL_DEMAND_COLS] for r in summary]),
-            ("Equipment Breakdown", *_tabular(items)),
+            ("Equipment Breakdown", _SESSION_LINE_COLS,
+             [[r.get(c) for c in _SESSION_LINE_COLS] for r in items]),
         ]
         data = (to_xlsx_sheets(sections, uname) if fmt == "xlsx" else
                 to_pdf_sheets(title, sections, uname, page_break_between=True))
@@ -832,7 +861,14 @@ async def plan_export(body: PlanExportBody,
                                  headers={"Content-Disposition":
                                           f'attachment; filename="{fname}"'})
 
-    columns = list(items[0].keys()) if items else []
+    # Cascade-line documents (session-full CSV, location report, execution
+    # plan) go through the same explicit column list, so the recipe rate and
+    # the allocator's running pools cannot leak into them either — see
+    # `_SESSION_LINE_COLS`.
+    if part in ("lines", "_execution", "_location") and items:
+        columns = [c for c in _SESSION_LINE_COLS if c in items[0]]
+    else:
+        columns = list(items[0].keys()) if items else []
     rows = [[r.get(c) for c in columns] for r in items]
     render, media = _FORMATS[fmt]
     data = render(title, columns, rows, user["username"])
@@ -1404,7 +1440,14 @@ async def smart_calculator(code: Optional[str] = None,
                  if available is not None else None)
         net_short = (sme_engine.round_n(max(required - procured, 0.0), 4)
                      if procured is not None else None)
-        expl = f"{per:g} {uom or 'unit'}/SQM × {target:g} SQM = {required:g} {uom}".strip()
+        # 2026-08-04: the explanation used to LEAD with the recipe:
+        #   "0.35 KG/SQM × 1000 SQM = 350 KG"
+        # which is the per-square-metre rate written out in full, in a string
+        # that lands in every calculator export. The rate is an input to the
+        # calculation, not a result — reports state what to draw, not the
+        # formula behind it. It now states the outcome and the area it covers.
+        # (`per` is still what computes `required`; it is simply not narrated.)
+        expl = f"{required:g} {uom} for {target:g} SQM".strip()
         if packages:
             expl += f" → {packages} × {pkg:g} {uom} pack(s)"
         if available is not None:

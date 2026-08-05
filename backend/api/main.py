@@ -63,6 +63,9 @@ from .receiving import router as receiving_router  # noqa: E402
 from .requests import router as requests_router  # noqa: E402
 from .sme import router as sme_router  # noqa: E402
 from .sme_master import router as sme_master_router  # noqa: E402
+from .sme_actuals import router as sme_actuals_router  # noqa: E402
+from .locations import router as locations_router  # noqa: E402
+from .assets import router as assets_router  # noqa: E402
 from .bulk_import import router as bulk_import_router  # noqa: E402
 from .stock import router as stock_router  # noqa: E402
 from .warehouse import router as warehouse_router  # noqa: E402
@@ -244,6 +247,21 @@ app.include_router(sme_router)
 
 # SME Phase S6 (cutover day) — Master Data CRUD, exact-lock {hod, admin}.
 app.include_router(sme_master_router)
+
+# Serialised asset tracking — one row per physical thing, with an append-only
+# movement log and optional GPS. Reads open to every authenticated user;
+# register/move/retire are require_level(1), self-guarded in the module.
+app.include_router(assets_router)
+
+# Warehouse rack locator — where a material physically lives. Reads are open
+# to every authenticated user (a store keeper is level 0 and is exactly who
+# needs this); writes are require_level(1) and self-guarded in the module.
+app.include_router(locations_router)
+
+# SME actual consumption + tank aliases (2026-08-04 Surface-Shield routing).
+# Same {hod, admin} exact-lock. Reads/writes sme_consumption_log only — it
+# never touches sme_inventory_seed, so no estimator figure can move (rule 1a).
+app.include_router(sme_actuals_router)
 
 # Bulk Excel import — dry-run/commit upserts for inventory + SME masters
 # (self-guarded: SME kinds {hod, admin}; inventory/ledger admin-only).

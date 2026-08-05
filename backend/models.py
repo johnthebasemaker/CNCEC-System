@@ -68,6 +68,12 @@ class Consumption(Base):
     Source_Ref = Column(Text)
     Requested_By = Column(Text)
     Approved_By = Column("Approved By", Text)
+    # The workbook's `type` column (alembic b8d41f6a92c3) — which programme a
+    # consumption belongs to: "Surface Shield", "R/L Consumables", "Safety"…
+    # PERSISTED rather than re-derived from inventory.Category at read time,
+    # so recategorising a material later cannot retroactively rewrite what
+    # past consumption "was".
+    Item_Type = Column(Text)
     # Hot-path indexes (alembic e7c3b95a41d2). Stock maths filters this
     # ledger by (SAP_Code, Site_ID) and every report windows it by Date;
     # with primary keys alone both were sequential scans. NON-UNIQUE by
@@ -582,6 +588,12 @@ class Users(Base):
     Site_ID = Column(Text, server_default=text("'HQ'"))
     Warehouse_ID = Column(Text)
     Phone_Number = Column(Text)
+    # Per-recipient address (alembic a71e93b4c2f8), for the weekly Executive
+    # Summary. Nullable and deliberately NOT unique — a shift account or a
+    # departmental mailbox is legitimately shared, and a UNIQUE would reject
+    # the second user for no benefit. Until it is filled in, weekly_report
+    # falls back to the configured inbox.
+    email = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     totp_secret = Column(Text)
     totp_enabled = Column(Integer, server_default=text('0'))
@@ -771,6 +783,33 @@ class WbsMaster(Base):
 # 2. SME sub-module (feature-frozen — strict isolation)
 # ==========================================================================
 
+class SmeTankAlias(Base):
+    """Workbook `Tank No.` → `sme_equipment.Equipment_Tag_No` (alembic
+    b8d41f6a92c3).
+
+    The Consumption Log's Tank No. cannot be matched automatically: `TNK-091`
+    (39 Surface-Shield rows, the largest bucket) suffix-matches BOTH
+    `522-8J10-TNK-091` (TRAIN J) and `522-8k10-TNK-091` (TRAIN K). The sync
+    auto-maps only aliases whose normalised form matches EXACTLY ONE tag and
+    parks the rest as `unresolved` for an operator — see the tank-alias screen.
+    """
+    __tablename__ = "sme_tank_alias"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    alias_raw = Column(Text, nullable=False)    # verbatim, as the workbook typed it
+    alias_norm = Column(Text, nullable=False)   # upper, spaces/hyphens/underscores gone
+    Equipment_Tag_No = Column(Text)
+    status = Column(Text, nullable=False, server_default=text("'unresolved'"))
+    match_count = Column(Integer, nullable=False, server_default=text('0'))
+    row_count = Column(Integer, nullable=False, server_default=text('0'))
+    resolved_by = Column(Text)
+    resolved_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "alias_norm", name="uq_sme_tank_alias_site_norm"),
+    )
+
+
 class SmeConsumptionLog(Base):
     __tablename__ = "sme_consumption_log"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -820,6 +859,13 @@ class SmeEquipment(Base):
     Lining_Type = Column(Text)
     Lining_System = Column(Text)
     Material_Spec = Column(Text)
+    # THE APP WINS (alembic c1a72e5b83d9). An operator SQM correction made in
+    # the UI survives both the ordinary workbook upsert and `--sme-reseed`;
+    # every sync re-applies it and REPORTS the divergence instead of silently
+    # reverting it. NULL = the workbook owns this row.
+    SQM_Override = Column(Float)
+    SQM_Override_By = Column(Text)
+    SQM_Override_At = Column(DateTime)
     Lining_Area_Location = Column(Text)
     __table_args__ = (
         UniqueConstraint("Site_ID", "Equipment_Tag_No", "Lining_System_Code"),
@@ -1173,6 +1219,149 @@ class Vendors(Base):
     status = Column(Text, server_default=text("'active'"))
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+class LoginAttempts(Base):
+    """The per-account failure budget, SHARED across workers (alembic
+    f3c81d5a97e2).
+
+    The in-process budget (ratelimit.LOGIN_FAIL_MAX) multiplies by the worker
+    count; this row is the cross-worker authority. Postgres rather than Redis:
+    the counter ticks a few times a minute and Postgres is already deployed,
+    backed up and holding the users table this protects.
+
+    ⚠️ Still THROTTLES, never LOCKS (rule 10). `window_start` rolls forward on
+    its own and a correct password deletes the row — recovery is the passage of
+    time, never an administrator, because a per-account limit someone else can
+    trip on your behalf must not need a support ticket to undo.
+    """
+    __tablename__ = "login_attempts"
+    username_lc = Column(Text, primary_key=True)
+    window_start = Column(DateTime, nullable=False,
+                          server_default=text('CURRENT_TIMESTAMP'))
+    failures = Column(Integer, nullable=False, server_default=text('0'))
+
+
+class AssetUnits(Base):
+    """One row per PHYSICAL THING (alembic e9f2a4c68b71).
+
+    Two hammers share one SAP code, so a scan cannot say which one you are
+    holding. Identity is `(Site_ID, SAP_Code, serial_no)` — deliberately
+    mirroring rule 1's lesson that what distinguishes two physical objects
+    belongs IN THE KEY.
+
+    ASSETS ONLY: a row exists only where an operator creates one, so
+    consumables simply have none. The workbook cannot seed this — its
+    `Serial No.` column is a BATCH number (3441 appears on both components of
+    one primer) and its Location columns are blank.
+
+    `current_*` caches the newest `AssetMovements` row, written in the same
+    transaction; the movement log is the history and is never deleted.
+    """
+    __tablename__ = "asset_units"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    SAP_Code = Column(Text, nullable=False)
+    serial_no = Column(Text, nullable=False)
+    asset_tag = Column(Text)
+    status = Column(Text, nullable=False, server_default=text("'in_stock'"))
+    current_location_id = Column(Integer)
+    current_lat = Column(Float)
+    current_lng = Column(Float)
+    gps_accuracy_m = Column(Float)
+    location_note = Column(Text)
+    holder = Column(Text)
+    last_seen_at = Column(DateTime)
+    last_seen_by = Column(Text)
+    notes = Column(Text)
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "SAP_Code", "serial_no",
+                         name="uq_asset_units_site_sap_serial"),
+        Index("ix_asset_units_sap_site", "SAP_Code", "Site_ID"),
+        Index("ix_asset_units_serial", "serial_no"),
+    )
+
+
+class AssetMovements(Base):
+    """Append-only "where has this been" (alembic e9f2a4c68b71).
+
+    Same discipline as `system_audit_log`: rows are never deleted, so the
+    history is a query rather than a guess.
+
+    ⚠️ `lat`/`lng` is where an EMPLOYEE was standing when they scanned. It is
+    best-effort — a denied browser permission still records the move with the
+    coordinates NULL, because location capture must never block a location
+    update — and it is the first genuinely personal data this system stores.
+    """
+    __tablename__ = "asset_movements"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    asset_unit_id = Column(Integer, nullable=False)
+    moved_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    moved_by = Column(Text)
+    from_location_id = Column(Integer)
+    to_location_id = Column(Integer)
+    from_note = Column(Text)
+    to_note = Column(Text)
+    lat = Column(Float)
+    lng = Column(Float)
+    accuracy_m = Column(Float)
+    source = Column(Text)
+    status = Column(Text)
+    note = Column(Text)
+    __table_args__ = (Index("ix_asset_movements_unit", "asset_unit_id", "moved_at"),)
+
+
+class StorageLocations(Base):
+    """A physical place in the warehouse (alembic d5b83c17e604).
+
+    `code` is the QR payload printed on the shelf label — scanning a RACK
+    answers "what is supposed to be here", which is what makes a stock count
+    fast. Zone / rack / row / bin are kept as separate fields so the locator
+    can group and sort by them; `code` is what a human reads out.
+    """
+    __tablename__ = "storage_locations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    code = Column(Text, nullable=False)
+    zone = Column(Text)
+    rack_no = Column(Text)
+    row_no = Column(Text)
+    bin_no = Column(Text)
+    description = Column(Text)
+    status = Column(Text, nullable=False, server_default=text("'active'"))
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "code", name="uq_storage_locations_site_code"),
+        Index("ix_storage_locations_site", "Site_ID", "status"),
+    )
+
+
+class MaterialLocations(Base):
+    """Which SAP lives in which rack (alembic d5b83c17e604).
+
+    MANY-TO-MANY on purpose: a material legitimately sits in more than one
+    place, and `is_primary` marks the one to walk to first. Deliberately not a
+    column on `inventory`, which is one row per SAP and already carries a
+    UNIQUE on Material_Code — the wrong grain for a material in three racks.
+    """
+    __tablename__ = "material_locations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    SAP_Code = Column(Text, nullable=False)
+    location_id = Column(Integer, nullable=False)
+    is_primary = Column(Boolean, nullable=False, server_default=text('true'))
+    note = Column(Text)
+    updated_by = Column(Text)
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "SAP_Code", "location_id",
+                         name="uq_material_locations_site_sap_loc"),
+        # The store keeper's lookup — the whole point of the feature.
+        Index("ix_material_locations_sap", "SAP_Code", "Site_ID"),
+    )
+
 
 class Warehouses(Base):
     __tablename__ = "warehouses"

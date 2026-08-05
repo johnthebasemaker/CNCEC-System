@@ -12,6 +12,7 @@ import ExecutionPlan from '../sme/ExecutionPlan'
 import LocationReport from '../sme/LocationReport'
 import { EquipmentMatrixReport, ScopedExport, SystemCodeReport } from '../sme/MatrixReports'
 import TotalOverview from '../sme/TotalOverview'
+import ActualConsumption from '../sme/ActualConsumption'
 import MasterData from '../sme/MasterData'
 import { ScenarioProvider } from '../sme/ScenarioContext'
 import SessionBuilder from '../sme/SessionBuilder'
@@ -225,7 +226,13 @@ function SmePageBody({ siteId, setSiteId, sites }: {
           { key: 'demand', label: 'Demand Matrix', children: <DemandMatrix siteId={siteId} /> },
           { key: 'calculator', label: '🧮 Smart Calculator',
             children: <SmartCalculator siteId={siteId} stickyTop={smeOffset} /> },
+          // Actual draw + tank aliases. Same {hod, admin} lock as Master Data
+          // — assigning consumption to equipment is master-data-grade work,
+          // and the API refuses anything less anyway.
           ...(canEditMasters ? [{
+            key: 'actuals', label: '🧾 Actual Consumption',
+            children: <ActualConsumption siteId={siteId} />,
+          }, {
             key: 'master', label: '🗄️ Master Data',
             children: <MasterData siteId={siteId} />,
           }] : []),
