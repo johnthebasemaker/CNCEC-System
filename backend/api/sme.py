@@ -631,9 +631,62 @@ _SESSION_LINE_COLS = ["Equipment_Tag_No", "Lining_System_Code",
                       "Lining_System_Short_Name", "Total_SQM",
                       "Material_Code", "SAP_Code", "Material_Name", "UOM",
                       "Demand_Qty", "Alloc_Available", "Alloc_Pending",
-                      "Allocated_Qty", "Shortfall_Available_Qty",
+                      "Allocated_Qty",
+                      # 2026-08-05 — the PROJECT-level order, beside the
+                      # per-line allocation. See `_with_material_totals`.
+                      "Pending_Delivery_Qty", "Total_Procured_Qty",
+                      "Shortfall_Available_Qty",
                       "Shortfall_Qty", "Fulfillment_Pct",
                       "Fulfillment_With_Ordered_Pct"]
+
+# Columns whose value is a property of the MATERIAL, not of the line they sit
+# on, and which therefore REPEAT down the sheet. Named here so the test suite
+# can assert exactly that, and so nobody later "fixes" the repetition by
+# apportioning them per line.
+_MATERIAL_LEVEL_LINE_COLS = ("Pending_Delivery_Qty", "Total_Procured_Qty")
+
+
+def _with_material_totals(model: dict, lines: list[dict]) -> list[dict]:
+    """Attach the PROJECT-level order position to each cascade line.
+
+    WHY. `Alloc_Available` / `Alloc_Pending` / `Allocated_Qty` say what THIS
+    equipment×material line was given by the cascade. They do not say what is
+    on the way for the project as a whole, and that is the question procurement
+    actually asks of the session report. On a material short enough to be
+    rationed, a line can show `Alloc_Pending = 230` while 409 are genuinely in
+    transit — the rest having been allocated to other equipment.
+
+    ⚠️ THE SUBSET RULE (1c) — HOW THE CEILING IS BUILT.
+    `pool_pending_init` is ALREADY `max(ordered − available, 0)`: the UNRECEIVED
+    subset, not the whole order. So
+
+        Total_Procured_Qty = pool_init + pool_pending_init
+                           = available + (ordered − available)
+                           = max(available, ordered)          ← the ceiling
+
+    That is emphatically NOT "ordered + available", which is the additive
+    reading rule 1c overturned and which understated the buy list by 22,951
+    units. Both figures are taken from the engine's own pools; nothing here
+    re-derives a quantity from the raw seed.
+
+    ⚠️ THESE TWO COLUMNS DO NOT SUM DOWN THE SHEET. A material appearing on
+    twelve equipment lines carries the same 409 on all twelve, because it is
+    one purchase order and not twelve. The per-line quantities beside them
+    (`Alloc_Pending`, `Allocated_Qty`) are the additive ones. Suite AX asserts
+    the repetition explicitly so that a future refactor cannot quietly turn
+    these into an apportioned share that looks summable and is wrong either way.
+    """
+    pool = model.get("pool_init") or {}
+    pending = model.get("pool_pending_init") or {}
+    out = []
+    for ln in lines:
+        key = ln.get("Material_Key")
+        avail = float(pool.get(key, 0.0) or 0.0)
+        pend = float(pending.get(key, 0.0) or 0.0)
+        out.append({**ln,
+                    "Pending_Delivery_Qty": sme_engine.round_n(pend, 3),
+                    "Total_Procured_Qty": sme_engine.round_n(avail + pend, 3)})
+    return out
 
 # Material-Wise Segregated Report (2026-07-28), grouped by system code.
 _SEGREGATED_CODE_COLS = ["Lining_System_Code", "System_Name", "Equipment_Count",
@@ -799,8 +852,9 @@ async def plan_export(body: PlanExportBody,
         tag = (body.equipment_tag or "").strip()
         if not tag:
             raise HTTPException(400, "execution-plan export needs equipment_tag")
-        items = [ln for ln in plan["lines"]
-                 if ln["Equipment_Tag_No"] == tag and ln["Shortfall_Qty"] > 0]
+        items = _with_material_totals(model, [
+            ln for ln in plan["lines"]
+            if ln["Equipment_Tag_No"] == tag and ln["Shortfall_Qty"] > 0])
         title = f"SME Execution Plan — {tag} (order list)"
         fname = legacy_filename(f"execution_plan_{_fname_part(tag)}", uname, fmt)
     elif part == "_location":
@@ -808,9 +862,10 @@ async def plan_export(body: PlanExportBody,
         if loc:
             loc_tags = {t for t, m in model["tag_meta"].items()
                         if (m.get("Location") or "") == loc}
-            items = [ln for ln in plan["lines"] if ln["Equipment_Tag_No"] in loc_tags]
+            items = _with_material_totals(model, [
+                ln for ln in plan["lines"] if ln["Equipment_Tag_No"] in loc_tags])
         else:
-            items = plan["lines"]
+            items = _with_material_totals(model, plan["lines"])
         scope = loc or "All Equipment"
         title = f"SME Location Report — {scope}"
         fname = legacy_filename(
@@ -836,6 +891,10 @@ async def plan_export(body: PlanExportBody,
                                               f'attachment; filename="{fname}"'})
     else:
         items = plan[part]
+        # Cascade lines carry the per-line allocation; the session report also
+        # states the PROJECT-level order beside it (2026-08-05).
+        if part == "lines":
+            items = _with_material_totals(model, items)
     if body.title and body.title.strip():
         title = body.title.strip()
 
