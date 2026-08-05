@@ -577,12 +577,47 @@ async def main() -> int:
 
             print(f"      {format_summary(bi._summary(plan))}")
 
+            # ── where things live ──
+            # Racks ride on the inventory sheet, assets on the Consumption Log.
+            # Both READ THE SHEET rather than the plan, because a place is
+            # STATE: it must seed from a workbook whose rows are already loaded,
+            # and a re-run must converge. Both are create-if-absent, so the app
+            # keeps every status, rack and GPS fix a human has set.
+            racks = assets = None
+            if kind == "inventory":
+                racks = await bi.plan_rack_locations(
+                    session, data[kind], args.site,
+                    extra_saps={r["SAP_Code"] for r in plan["inserts"]})
+                if racks["racks"] or racks["links"]:
+                    print(f"      racks           "
+                          f"+{len(racks['racks'])} location(s)  "
+                          f"+{len(racks['links'])} material link(s)  "
+                          f"({racks['kept']} kept by the app)")
+                elif racks["column"]:
+                    print(f"      racks           column "
+                          f"{racks['column']!r} present, {racks['blank']} row(s) "
+                          f"blank — nothing to seed")
+                for w in racks["warnings"]:
+                    print(f"      ⚠ {w}")
+
             # Surface-Shield routing rides on the ledger plan: the SME log is
             # derived from the consumption rows that are ABOUT to be inserted,
             # so `plan_ledger`'s reconcile makes it idempotent for free.
             routing = None
             if kind == "ledger":
                 routing = await bi.plan_sme_routing(session, args.site, plan)
+                assets = await bi.plan_asset_units(session, data[kind], args.site,
+                                                   extra_saps=pending_saps)
+                if assets["inserts"] or assets["existing"]:
+                    print(f"      assets          "
+                          f"+{len(assets['inserts'])} unit(s)  "
+                          f"({assets['existing']} already tracked)  ·  "
+                          f"{assets['consumable_rows']} consumable row(s)")
+                for w in assets["warnings"]:
+                    print(f"      ⚠ {w}")
+                for rej in assets["rejects"][:5]:
+                    print(f"      ✗ asset row {rej['row']} SAP {rej['sap']}: "
+                          f"{rej['reason']}")
                 if routing["log_inserts"] or routing["aliases"]:
                     print(f"      surface-shield  "
                           f"+{len(routing['log_inserts'])} SME log row(s)  "
@@ -613,9 +648,22 @@ async def main() -> int:
                     if routing is not None:
                         await bi.apply_sme_routing(session, routing, args.user)
                         totals[kind]["sme_logged"] = len(routing["log_inserts"])
+                    if assets is not None:
+                        totals[kind] |= await bi.apply_asset_units(
+                            session, assets, args.user)
+                        refreshed = await bi.refresh_asset_location_notes(
+                            session, assets, args.site)
+                        if refreshed:
+                            print(f"      ↻ {refreshed} untouched asset(s) took "
+                                  f"the workbook's new Location text")
                 else:
                     totals[kind] = await apply_master(session, kind, plan,
                                                       args.user, site=args.site)
+                    if racks is not None:
+                        # After the master upserts, inside the same transaction.
+                        await session.flush()
+                        totals[kind] |= await bi.apply_rack_locations(
+                            session, racks, args.user)
                 # Flush (do NOT commit): later kinds — notably the ledger's
                 # soft-FK check against `inventory` — must see these rows, but
                 # the whole sync stays a single rollback-able transaction.

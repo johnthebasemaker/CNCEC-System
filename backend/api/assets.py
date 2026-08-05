@@ -59,6 +59,19 @@ inventory_t = _MD.tables["inventory"]
 _LAT = (-90.0, 90.0)
 _LNG = (-180.0, 180.0)
 
+# 2026-08-05 — the vocabulary widened on the operator's own words. The original
+# five are CUSTODY (where the thing is in the stores workflow); `working`,
+# `not_in_use` and `repair` are CONDITION (what state the thing is in), which is
+# what someone standing in front of a hammer actually knows.
+#
+# ONE field, not two, deliberately: the operator asked for a single status and
+# in practice records whichever fact they have. Splitting it would put a column
+# on the screen that is empty on every row somebody did not think to fill, and
+# `asset_movements.status` already gives the history of how it changed.
+_STATUS_VALUES = ("in_stock", "issued", "returned", "lost", "scrapped",
+                  "working", "not_in_use", "repair")
+_STATUS_RE = "^(" + "|".join(_STATUS_VALUES) + ")$"
+
 
 def _rows(res) -> list[dict]:
     return [dict(r) for r in res.mappings().all()]
@@ -128,7 +141,7 @@ async def _enrich(session: AsyncSession, units: list[dict]) -> list[dict]:
 async def list_assets(site_id: Optional[str] = None,
                       q: Optional[str] = Query(None, max_length=80),
                       sap: Optional[str] = Query(None, max_length=60),
-                      status: Optional[str] = None,
+                      status: Optional[str] = Query(None, pattern=_STATUS_RE),
                       limit: int = Query(100, ge=1, le=500),
                       user: dict = Depends(get_current_user),
                       session: AsyncSession = Depends(get_session)):
@@ -155,6 +168,9 @@ class UnitCreate(BaseModel):
     SAP_Code: str = Field(min_length=1, max_length=60)
     serial_no: str = Field(min_length=1, max_length=80)
     asset_tag: Optional[str] = Field(default=None, max_length=80)
+    # The condition, asked for at registration: the workbook has no Status
+    # column, so the app is where it gets said. Absent → the table default.
+    status: Optional[str] = Field(default=None, pattern=_STATUS_RE)
     current_location_id: Optional[int] = None
     location_note: Optional[str] = Field(default=None, max_length=200)
     holder: Optional[str] = Field(default=None, max_length=120)
@@ -188,7 +204,7 @@ async def create_asset(body: UnitCreate,
     await session.execute(insert(move_t).values(
         asset_unit_id=new_id, moved_by=user["username"],
         to_location_id=body.current_location_id, to_note=body.location_note,
-        source="register", status="in_stock", note="registered"))
+        source="register", status=body.status or "in_stock", note="registered"))
     await write_audit(session, user["username"], "ASSET_REGISTER", "asset_units",
                       f"{site}/{sap}/{body.serial_no} id={new_id}")
     await session.commit()
@@ -267,8 +283,7 @@ class MoveBody(BaseModel):
     location_id: Optional[int] = None
     location_note: Optional[str] = Field(default=None, max_length=200)
     holder: Optional[str] = Field(default=None, max_length=120)
-    status: Optional[str] = Field(
-        default=None, pattern="^(in_stock|issued|returned|lost|scrapped)$")
+    status: Optional[str] = Field(default=None, pattern=_STATUS_RE)
     note: Optional[str] = Field(default=None, max_length=400)
     gps: Optional[GpsFix] = None
     source: str = Field(default="manual", max_length=20)
@@ -330,8 +345,7 @@ class UnitPatch(BaseModel):
     asset_tag: Optional[str] = None
     holder: Optional[str] = None
     notes: Optional[str] = None
-    status: Optional[str] = Field(
-        default=None, pattern="^(in_stock|issued|returned|lost|scrapped)$")
+    status: Optional[str] = Field(default=None, pattern=_STATUS_RE)
 
 
 @router.patch("/{unit_id}", summary="Edit a unit's details")

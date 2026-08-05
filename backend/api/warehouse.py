@@ -19,7 +19,7 @@ from .auth import require_roles, resolve_warehouse_param, warehouse_scope
 from .db import get_session
 from .services import procurement
 from .services import warehouse as wh
-from .services.ledger import _MD, write_audit
+from .services.ledger import _MD, attach_material_names, write_audit
 from .services.notifications import dispatch, notify
 
 router = APIRouter(prefix="/warehouse", tags=["warehouse"],
@@ -218,7 +218,9 @@ async def list_returns(status: Optional[str] = None,
             select(_po_assignments_t.c["PO_Number"])
             .where(_po_assignments_t.c["Warehouse_ID"] == scope)))
     stmt = stmt.order_by(t.c["id"].desc()).limit(500)
-    return {"items": [dict(m) for m in (await session.execute(stmt)).mappings().all()]}
+    items = [dict(m) for m in (await session.execute(stmt)).mappings().all()]
+    return {"items": await attach_material_names(session, items,
+                                                 code_key="Material_Code")}
 
 
 @router.post("/returns", status_code=201, summary="Record a return received from a site")

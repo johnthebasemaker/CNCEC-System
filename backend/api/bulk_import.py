@@ -36,6 +36,18 @@ full plan and a COMMIT mode that applies it in one transaction + audits:
                  legacy SQLite seed has no SAP_Code column) are retired once
                  the workbook supplies real SAPs for that code.
 
+Two further planners ride on the same workbook and are driven by
+`tools/pg_excel_sync.py` rather than by an HTTP endpoint, exactly as the
+Surface-Shield routing is:
+
+  plan_rack_locations  Inventory `Rack/Current Location` → storage_locations +
+                       material_locations (the store keeper's shelf lookup)
+  plan_asset_units     Consumption Log `Location` → asset_units. A Location is
+                       what MAKES the row a reusable asset; without one it is
+                       ordinary consumption and no unit exists.
+
+Both are create-if-absent — see "THE WORKBOOK SEEDS, THE APP OWNS" below.
+
 Roles: SME kinds are the Master-Data exact-lock {hod, admin}; `inventory` and
 `ledger` are admin-only. HOD site pinning follows sme_master._write_site.
 
@@ -75,6 +87,13 @@ returns_t = _MD.tables["returns"]
 equipment_t = _MD.tables["sme_equipment"]
 recipe_t = _MD.tables["sme_recipe"]
 seed_t = _MD.tables["sme_inventory_seed"]
+# 2026-08-05 — the workbook seeds where things live (see `plan_rack_locations`
+# and `plan_asset_units`). Both are CREATE-IF-ABSENT: the app owns a place once
+# a human has touched it.
+storage_loc_t = _MD.tables["storage_locations"]
+material_loc_t = _MD.tables["material_locations"]
+asset_unit_t = _MD.tables["asset_units"]
+asset_move_t = _MD.tables["asset_movements"]
 
 MAX_XLSX_BYTES = 8 * 1024 * 1024
 
@@ -257,6 +276,10 @@ async def plan_inventory(session: AsyncSession, data: bytes, site_id: str) -> di
     # — but LOUDLY, so a restructured sheet never loses data silently.
     _known = {n.lower() for names in colspec.values() for n in names}
     _known |= {"receipt", "consumption", "return", "current stock"}
+    # Consumed by `plan_rack_locations`, which writes storage_locations rather
+    # than a column on `inventory` — a material legitimately sits in more than
+    # one rack, which is the wrong grain for this one-row-per-SAP table.
+    _known |= {n.lower() for n in _RACK_COL_NAMES}
     # Two classes of unmapped column, reported DIFFERENTLY on purpose. Both are
     # still reported — a restructured sheet must never drop data silently — but
     # a column we have analysed and rejected is not the same finding as one
@@ -418,10 +441,12 @@ _LEDGER_SHEETS = {
         # `consumption` has no Pallet_No / paper-number columns — 2026-07-14
         # workbook restructure adds both to the sheet; ignored by design.
         #
-        # 2026-08-04 additions, both deliberately UNMAPPED:
-        #   `Location`      1 non-null value in 1,110 rows ("At site"). Mapping
-        #                   it would imply a data quality that does not exist;
-        #                   asset location lives in `asset_units` instead.
+        # 2026-08-04 additions, both deliberately unmapped ONTO `consumption`:
+        #   `Location`      2026-08-05 ruling: a Location makes the row a
+        #                   REUSABLE ASSET, so it is read by
+        #                   `plan_asset_units` and written to `asset_units` —
+        #                   never onto the ledger row, which records an event
+        #                   and not a whereabouts.
         #   `Current Stock` a spreadsheet formula result. `Opening_Stock +
         #                   Σledger` is already computed server-side, and
         #                   importing this would create a second, divergent
@@ -748,6 +773,378 @@ async def apply_sme_routing(session: AsyncSession, plan: dict,
             f"+{len(plan.get('log_inserts', []))} Surface-Shield log row(s), "
             f"{len(plan.get('aliases', []))} tank alias/es "
             f"({plan.get('unassigned', 0)} unassigned)")
+
+
+# ─── where things live: racks (Inventory) and assets (Consumption Log) ────────
+#
+# Two planners, one ruling: **THE WORKBOOK SEEDS, THE APP OWNS.**
+#
+# A spreadsheet cell is a starting point typed by whoever last edited the file.
+# A row in `asset_units` or `material_locations` is where a store keeper says a
+# thing actually is — often after walking to it and scanning its label, with a
+# GPS fix attached. Those are not the same claim, and the second one wins. So
+# both planners CREATE what is missing and never overwrite what is there:
+#
+#   storage_locations   ON CONFLICT (Site_ID, code) DO NOTHING — an operator's
+#                       zone/rack/row breakdown survives every re-sync.
+#   material_locations  a SAP that already has ANY assignment is left alone.
+#   asset_units         an existing unit keeps its status, its rack and above
+#                       all its `current_lat`/`current_lng`. The workbook's
+#                       Location text refreshes `location_note` only while the
+#                       app has never touched the unit (`last_seen_by` is still
+#                       the sync itself and no fix has been recorded).
+#
+# ⚠️ STATE OF THE WORKBOOK, 2026-08-05. Both columns exist and both are
+# effectively empty: `Rack/Current Location` is blank in 453 of 453 Inventory
+# rows, and `Location` is filled on 1 of 1,166 Consumption Log rows ("At site",
+# on a row with no Serial No., so it cannot be keyed and is reported back). A
+# run today therefore seeds nothing — that is the correct outcome, not a
+# failure, and both planners are written to be no-ops on a blank column and on
+# a missing one alike.
+
+# The workbook writes a condition in prose. `asset_units.status` is a free-text
+# column, so these map onto the vocabulary the app's own picker offers rather
+# than onto the custody values — an operator saying "not in use" means the
+# hammer is idle, not that it was returned to stores.
+_ASSET_STATUS_CANON = {
+    "working": "working", "in use": "working", "in-use": "working",
+    "ok": "working", "good": "working", "active": "working",
+    "not in use": "not_in_use", "not-in-use": "not_in_use",
+    "notinuse": "not_in_use", "idle": "not_in_use", "unused": "not_in_use",
+    "spare": "not_in_use",
+    "repair": "repair", "under repair": "repair", "maintenance": "repair",
+    "service": "repair", "damaged": "repair",
+    "lost": "lost", "missing": "lost",
+    "scrapped": "scrapped", "scrap": "scrapped", "condemned": "scrapped",
+    "in_stock": "in_stock", "in stock": "in_stock", "stock": "in_stock",
+    "issued": "issued", "returned": "returned",
+}
+
+_RACK_COL_NAMES = ("Rack/Current Location", "Rack / Current Location",
+                   "Rack/Location", "Rack No", "Rack_No", "Rack")
+
+
+async def plan_rack_locations(session: AsyncSession, data: bytes, site_id: str,
+                              extra_saps: set[str] | None = None) -> dict:
+    """Inventory sheet → `storage_locations` + `material_locations`.
+
+    The workbook states one free-text place per SAP. That text becomes the
+    rack's `code` (the QR payload printed on the shelf) AND its `description`,
+    and the zone / rack / row / bin breakdown is left EMPTY on purpose: one
+    column cannot be split into four without guessing, and `_label()` already
+    falls back to the description, so an unparsed rack still reads correctly on
+    the locator. An operator who wants the breakdown fills it in the app, and
+    `DO NOTHING` means the next sync will not undo that.
+
+    Returns a plan even when the column is absent — a workbook without it is a
+    valid workbook, not an error.
+    """
+    out = {"racks": [], "links": [], "warnings": [], "kept": 0, "blank": 0,
+           "rejects": [], "column": None}
+    headers, rows = _sheet_rows(data, "Inventory",
+                                ("sap code", "category"), required=False)
+    if not headers:
+        out["warnings"].append("Inventory sheet missing — no racks seeded")
+        return out
+    rack_i = _col(headers, *_RACK_COL_NAMES)
+    if rack_i is None:
+        out["warnings"].append(
+            f"no rack column (looked for {' / '.join(_RACK_COL_NAMES)}) "
+            f"— no racks seeded")
+        return out
+    out["column"] = headers[rack_i]
+    sap_i = _col(headers, "SAP CODE", "SAP_Code")
+    if sap_i is None:
+        raise HTTPException(422, "SAP CODE column missing")
+
+    # `extra_saps` are the SAPs the inventory plan is about to insert. Without
+    # them a brand-new material would have its rack rejected on the very run
+    # that introduces it, and only pick one up on the NEXT sync.
+    known_saps = {r[0].strip() for r in (await session.execute(
+        select(inventory_t.c["SAP_Code"]))).all() if r[0]}
+    known_saps |= extra_saps or set()
+    existing_codes = {r[0] for r in (await session.execute(
+        select(storage_loc_t.c["code"])
+        .where(storage_loc_t.c["Site_ID"] == site_id))).all()}
+    assigned = {r[0] for r in (await session.execute(
+        select(material_loc_t.c["SAP_Code"]).distinct()
+        .where(material_loc_t.c["Site_ID"] == site_id))).all()}
+
+    seen_codes: set[str] = set()
+    seen_saps: set[str] = set()
+    for n, row in enumerate(rows, start=1):
+        sap = _s(row[sap_i]) if sap_i < len(row) else None
+        place = _s(row[rack_i]) if rack_i < len(row) else None
+        if not sap:
+            continue
+        if not place:
+            out["blank"] += 1
+            continue
+        code = re.sub(r"\s+", " ", place).strip()
+        if sap not in known_saps:
+            out["rejects"].append({"row": n, "sap": sap,
+                                   "reason": "SAP not in inventory master"})
+            continue
+        if code not in existing_codes and code not in seen_codes:
+            seen_codes.add(code)
+            out["racks"].append({"Site_ID": site_id, "code": code,
+                                 "description": code, "created_by": "excel-sync"})
+        if sap in assigned:
+            # Somebody has already said where this lives, in the app. The
+            # workbook does not get to move it.
+            out["kept"] += 1
+            continue
+        if sap in seen_saps:
+            continue
+        seen_saps.add(sap)
+        out["links"].append({"Site_ID": site_id, "SAP_Code": sap, "code": code,
+                             "is_primary": True, "note": "seeded from workbook",
+                             "updated_by": "excel-sync"})
+    if out["kept"]:
+        out["warnings"].append(
+            f"{out['kept']} SAP(s) already have a rack assigned in the app — "
+            f"the workbook's value was NOT applied (the app owns a place once "
+            f"a human has set it)")
+    return out
+
+
+async def apply_rack_locations(session: AsyncSession, plan: dict,
+                               username: str) -> dict:
+    """Create the missing racks, then link the materials to them.
+
+    Racks first and flushed, because the links resolve `code` → `id` against
+    rows this same call has just inserted.
+    """
+    counts = {"racks": 0, "links": 0}
+    for rack in plan.get("racks", []):
+        stmt = pg_insert(storage_loc_t).values(**rack)
+        await session.execute(stmt.on_conflict_do_nothing(
+            constraint="uq_storage_locations_site_code"))
+        counts["racks"] += 1
+    if plan.get("racks"):
+        await session.flush()
+
+    if plan.get("links"):
+        ids = {r[0]: r[1] for r in (await session.execute(
+            select(storage_loc_t.c["code"], storage_loc_t.c["id"])
+            .where(storage_loc_t.c["Site_ID"] == plan["links"][0]["Site_ID"]))).all()}
+        for link in plan["links"]:
+            loc_id = ids.get(link["code"])
+            if loc_id is None:          # the rack row vanished under us
+                continue
+            vals = {k: v for k, v in link.items() if k != "code"}
+            stmt = pg_insert(material_loc_t).values(location_id=loc_id, **vals)
+            await session.execute(stmt.on_conflict_do_nothing(
+                constraint="uq_material_locations_site_sap_loc"))
+            counts["links"] += 1
+    if counts["racks"] or counts["links"]:
+        await write_audit(session, username, "BULK_IMPORT_RACKS",
+                          "material_locations",
+                          f"pg_excel_sync: +{counts['racks']} rack(s), "
+                          f"+{counts['links']} material link(s)")
+    return counts
+
+
+async def plan_asset_units(session: AsyncSession, data: bytes, site_id: str,
+                           extra_saps: set[str] | None = None) -> dict:
+    """Consumption Log → `asset_units`, one row per physical thing.
+
+    ═══════════════════════════════════════════════════════════════════════════
+    THE GOLDEN RULE: a `Location` makes the row an ASSET. No Location, and it
+    is ordinary consumption — no unit is created, and the ledger keeps it.
+    ═══════════════════════════════════════════════════════════════════════════
+
+    That single test is what separates a hammer from a drum of primer without
+    needing a second column to say which is which, and it is the operator's own
+    convention rather than one this code invented.
+
+    KEYED ON `(Site_ID, SAP_Code, Serial No.)` — the constraint that already
+    exists on the table. Two hammers share a SAP and are told apart by serial;
+    that is the whole reason the table is not just a column on `inventory`.
+
+    ⚠️ A row with a Location but NO serial cannot be keyed and is NOT invented
+    a serial for: two such rows would silently become one asset, or one asset
+    would be created twice on the next run. They are counted and named back to
+    the operator instead, which is a fixable spreadsheet problem rather than a
+    permanent data one. (The 2026-08-05 workbook has exactly one such row.)
+
+    This planner reads the SHEET, not the ledger plan — unlike
+    `plan_sme_routing`, which derives from the rows about to be inserted. An
+    asset is STATE, not an event: it must be seedable from a workbook whose
+    consumption rows are already loaded, and re-running must converge. The
+    create-if-absent write is what makes that idempotent.
+    """
+    out = {"inserts": [], "seen_notes": [], "warnings": [], "rejects": [],
+           "no_serial": [], "consumable_rows": 0, "existing": 0,
+           "duplicate_rows": 0, "columns": {}}
+    headers, rows = _sheet_rows(data, "Consumption Log", ("sap code", "qty."),
+                                required=False)
+    if not headers:
+        out["warnings"].append("Consumption Log sheet missing — no assets seeded")
+        return out
+    loc_i = _col(headers, "Location", "Current Location")
+    if loc_i is None:
+        out["warnings"].append(
+            "Consumption Log has no Location column — nothing marks a row as a "
+            "reusable asset, so none were seeded")
+        return out
+    sap_i = _col(headers, "SAP CODE", "SAP_Code")
+    ser_i = _col(headers, "Serial No.", "Serial_No", "Serial No")
+    st_i = _col(headers, "Status", "Condition")
+    date_i = _col(headers, "Date")
+    out["columns"] = {"location": headers[loc_i],
+                      "serial": headers[ser_i] if ser_i is not None else None,
+                      "status": headers[st_i] if st_i is not None else None}
+    if ser_i is None:
+        out["warnings"].append(
+            "Consumption Log has no Serial No. column — an asset cannot be told "
+            "apart from another of the same SAP, so none were seeded")
+        return out
+    if st_i is None:
+        # Expected today: the operator sets condition in the app instead.
+        out["warnings"].append(
+            "no Status column — seeded units start 'in_stock'; set the real "
+            "condition (working / not in use / repair) on the Assets screen")
+
+    known_saps = {r[0].strip() for r in (await session.execute(
+        select(inventory_t.c["SAP_Code"]))).all() if r[0]}
+    known_saps |= extra_saps or set()   # dry-run: inventory was never written
+    have = {(r[0], r[1]) for r in (await session.execute(
+        select(asset_unit_t.c["SAP_Code"], asset_unit_t.c["serial_no"])
+        .where(asset_unit_t.c["Site_ID"] == site_id))).all()}
+
+    unknown_status = Counter()
+    seen: set[tuple[str, str]] = set()
+    for n, row in enumerate(rows, start=1):
+        sap = _s(row[sap_i]) if sap_i is not None and sap_i < len(row) else None
+        place = _s(row[loc_i]) if loc_i < len(row) else None
+        if not sap:
+            continue
+        if not place:
+            out["consumable_rows"] += 1     # THE GOLDEN RULE, negative half
+            continue
+        serial = _s(row[ser_i]) if ser_i < len(row) else None
+        if not serial:
+            out["no_serial"].append(
+                {"row": n, "sap": sap, "location": place,
+                 "date": _s(row[date_i]) if date_i is not None
+                         and date_i < len(row) else None})
+            continue
+        if sap not in known_saps:
+            out["rejects"].append({"row": n, "sap": sap,
+                                   "reason": "SAP not in inventory master"})
+            continue
+        key = (sap, serial)
+        if key in have:
+            # APP WINS — no status, rack or fix is proposed. The Location TEXT
+            # is offered separately, and `refresh_asset_location_notes` applies
+            # it only while the app has never touched the unit.
+            out["existing"] += 1
+            out["seen_notes"].append({"SAP_Code": sap, "serial_no": serial,
+                                      "location_note": place[:200]})
+            continue
+        if key in seen:
+            out["duplicate_rows"] += 1
+            continue
+        seen.add(key)
+
+        status = "in_stock"
+        if st_i is not None and st_i < len(row):
+            raw = _s(row[st_i])
+            if raw:
+                canon = _ASSET_STATUS_CANON.get(raw.strip().lower())
+                if canon:
+                    status = canon
+                else:
+                    unknown_status[raw] += 1
+        out["inserts"].append({
+            "Site_ID": site_id, "SAP_Code": sap, "serial_no": serial,
+            "status": status,
+            # Free text, not a rack id: the workbook says "At site", which is a
+            # place a person recognises and not a shelf in `storage_locations`.
+            "location_note": place[:200],
+            "created_by": "excel-sync", "last_seen_by": "excel-sync",
+        })
+
+    if out["no_serial"]:
+        sample = ", ".join(f"row {r['row']} (SAP {r['sap']}, {r['location']!r})"
+                           for r in out["no_serial"][:5])
+        out["warnings"].append(
+            f"{len(out['no_serial'])} row(s) have a Location but no Serial No. "
+            f"— cannot be keyed, so no asset was created: {sample}"
+            + (" …" if len(out["no_serial"]) > 5 else ""))
+    if unknown_status:
+        out["warnings"].append(
+            "unrecognised Status value(s), left as 'in_stock': "
+            + ", ".join(f"{k!r} ×{v}" for k, v in unknown_status.items()))
+    if out["existing"]:
+        out["warnings"].append(
+            f"{out['existing']} asset row(s) already exist — left untouched "
+            f"(the app owns an asset's status, rack and GPS fix)")
+    return out
+
+
+async def apply_asset_units(session: AsyncSession, plan: dict,
+                            username: str) -> dict:
+    """Create the new units, each with its opening movement row.
+
+    The registration IS the first movement — the same contract
+    `assets.create_asset` keeps — so "where has this been" has no gap at the
+    start of the history.
+
+    THE APP WINS is enforced twice over: `plan_asset_units` never proposes a
+    unit that already exists, and `DO NOTHING` here means that even a racing
+    second run cannot overwrite a status or a GPS fix.
+    """
+    inserted = 0
+    for unit in plan.get("inserts", []):
+        new_id = (await session.execute(
+            pg_insert(asset_unit_t).values(**unit, last_seen_at=func.now())
+            .on_conflict_do_nothing(constraint="uq_asset_units_site_sap_serial")
+            .returning(asset_unit_t.c["id"]))).scalar()
+        if new_id is None:
+            continue                # already there — see the docstring
+        await session.execute(insert(asset_move_t).values(
+            asset_unit_id=new_id, moved_by=username,
+            to_note=unit["location_note"], source="excel-sync",
+            status=unit["status"], note="seeded from CNCEC_Inventory.xlsx"))
+        inserted += 1
+    if inserted:
+        await write_audit(session, username, "BULK_IMPORT_ASSETS", "asset_units",
+                          f"pg_excel_sync: +{inserted} asset unit(s) from the "
+                          f"Consumption Log (Location ⇒ reusable asset)")
+    return {"units": inserted}
+
+
+async def refresh_asset_location_notes(session: AsyncSession, plan: dict,
+                                       site_id: str) -> int:
+    """Re-seed the Location TEXT on units the app has never touched.
+
+    The narrow case the ruling leaves open: a unit this sync created on an
+    earlier run, that nobody has since moved, whose spreadsheet cell has been
+    corrected. Updating it is right — nothing in the app is being overwritten.
+
+    The guard is `last_seen_by = 'excel-sync'` AND no coordinates: every app
+    path (`create_asset`, `move_asset`) stamps `last_seen_by` with the real
+    username, so this predicate is false the moment a human is involved. GPS is
+    checked as well because a fix is the strongest possible statement that
+    somebody stood next to this thing.
+    """
+    touched = 0
+    for unit in plan.get("seen_notes", []):
+        res = await session.execute(
+            update(asset_unit_t)
+            .where(asset_unit_t.c["Site_ID"] == site_id,
+                   asset_unit_t.c["SAP_Code"] == unit["SAP_Code"],
+                   asset_unit_t.c["serial_no"] == unit["serial_no"],
+                   asset_unit_t.c["last_seen_by"] == "excel-sync",
+                   asset_unit_t.c["current_lat"].is_(None),
+                   asset_unit_t.c["current_lng"].is_(None),
+                   asset_unit_t.c["location_note"].isnot(None),
+                   asset_unit_t.c["location_note"] != unit["location_note"])
+            .values(location_note=unit["location_note"]))
+        touched += res.rowcount or 0
+    return touched
 
 
 # ─── THE APP WINS: operator SQM overrides survive every sync ──────────────────

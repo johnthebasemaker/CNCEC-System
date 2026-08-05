@@ -17,7 +17,7 @@ import datetime as _dt
 from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .ledger import _MD, write_audit  # reuse metadata + audit writer
+from .ledger import _MD, attach_material_names, write_audit  # metadata + audit writer
 from .notifications import dispatch, notify
 
 pr_master_t = _MD.tables["pr_master"]
@@ -448,7 +448,10 @@ async def list_vendor_returns(session: AsyncSession, status: str | None):
     stmt = select(po_returns_t).order_by(po_returns_t.c["id"].desc()).limit(500)
     if status:
         stmt = stmt.where(po_returns_t.c["status"] == status)
-    return _rows(await session.execute(stmt))
+    # `po_returns` records only the Material_Code, and the row is a decision
+    # about physical goods going back to a vendor — name what they are.
+    return await attach_material_names(
+        session, _rows(await session.execute(stmt)), code_key="Material_Code")
 
 
 async def close_vendor_return(session: AsyncSession, *, username: str, return_id: int,

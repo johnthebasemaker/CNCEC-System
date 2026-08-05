@@ -6,9 +6,13 @@ import { useBurnRate, useSites } from '../api/hooks'
 import type { Row } from '../api/client'
 
 const columns: ColumnsType<Row> = [
-  { title: 'SAP_Code', dataIndex: 'SAP_Code', key: 'SAP_Code' },
-  { title: 'Consumed', dataIndex: 'Consumed', key: 'Consumed', align: 'right' },
-  { title: 'Daily avg', dataIndex: 'Daily_Avg', key: 'Daily_Avg', align: 'right' },
+  { title: 'SAP', dataIndex: 'SAP_Code', key: 'SAP_Code', width: 110 },
+  { title: 'Material', dataIndex: 'Material_Code', key: 'Material_Code', width: 130,
+    render: (v) => v ?? '—' },
+  { title: 'Description', dataIndex: 'Equipment_Description', key: 'd', ellipsis: true },
+  { title: 'UOM', dataIndex: 'UOM', key: 'u', width: 70 },
+  { title: 'Consumed', dataIndex: 'Consumed', key: 'Consumed', align: 'right', width: 110 },
+  { title: 'Daily avg', dataIndex: 'Daily_Avg', key: 'Daily_Avg', align: 'right', width: 110 },
 ]
 
 export default function BurnRatePage() {

@@ -10561,15 +10561,32 @@ async def test_rack_locator():
         check("bg: …and none are left behind", left == 0, f"got {left}")
 
         # ── the performance claim, MEASURED (rule 11) ────────────────────────
+        # NOT "the planner picks the index": on a table this small a Seq Scan
+        # IS the cheaper plan and choosing it is correct, so asserting the
+        # choice would fail whenever the fixture happens to be the only data.
+        # The claim worth testing is that the index COVERS THE PREDICATE — i.e.
+        # its leading column is the one the lookup filters on — which is what
+        # turning the seq scan off asks the planner.
+        _PRED = ('SELECT * FROM material_locations '
+                 'WHERE "SAP_Code" = \'SVCBG-1\' AND "Site_ID" = \'CNCEC\'')
         async with SessionLocal() as s:
-            plan = "\n".join(str(r[0]) for r in (await s.execute(_sqt(
-                'EXPLAIN ANALYZE SELECT * FROM material_locations '
-                'WHERE "SAP_Code" = \'SVCBG-1\' AND "Site_ID" = \'CNCEC\''))).all())
-        check("bg: the lookup uses ix_material_locations_sap, not a sequential "
-              "scan — the index is on the access path, which is why it was "
-              "added at all (rule 11: benchmarked, never on principle)",
-              "ix_material_locations_sap" in plan or "Index" in plan,
-              f"EXPLAIN said:\n{plan}")
+            await s.execute(_sqt("SET LOCAL enable_seqscan = off"))
+            forced = "\n".join(str(r[0]) for r in
+                               (await s.execute(_sqt(f"EXPLAIN {_PRED}"))).all())
+            await s.rollback()
+        check("bg: ix_material_locations_sap covers the store keeper's lookup — "
+              "with the sequential path closed the planner reaches for THAT "
+              "index, which is the design claim. Rule 11: an index earns its "
+              "place on the access path, and four candidates were rejected "
+              "because the planner never used them",
+              "ix_material_locations_sap" in forced, f"EXPLAIN said:\n{forced}")
+        async with SessionLocal() as s:
+            live = "\n".join(str(r[0]) for r in (await s.execute(
+                _sqt(f"EXPLAIN ANALYZE {_PRED}"))).all())
+        check("bg: …and the lookup is fast either way — sub-millisecond on the "
+              "real table, whichever plan Postgres picks",
+              float(live.rsplit("Execution Time:", 1)[-1].split("ms")[0]) < 50,
+              f"EXPLAIN said:\n{live}")
 
     await _exec("DELETE FROM material_locations WHERE \"SAP_Code\" LIKE 'SVCBG%'")
     await _exec("DELETE FROM storage_locations WHERE code LIKE 'SVCBG%'")
@@ -11001,6 +11018,379 @@ async def test_shared_throttle_and_widgets():
         _bimail.send_email = _real
 
 
+async def test_workbook_places_and_names():
+    """Suite BJ — the workbook seeds WHERE things are, and the app owns it.
+
+    Two new sync paths and one UI rule, and every check here exists because the
+    obvious implementation of each gets one of them wrong.
+
+    ── THE GOLDEN RULE ────────────────────────────────────────────────────────
+    A `Location` on a Consumption Log row is what MAKES it a reusable asset.
+    Blank means consumable, and a consumable must not grow an `asset_units`
+    row — 1,165 of the 1,166 real rows are blank, so a planner that keys off
+    anything else (a category, a SAP prefix, "has a serial") would manufacture
+    a thousand phantom hammers on the first run.
+
+    ── THE WORKBOOK SEEDS, THE APP OWNS ───────────────────────────────────────
+    A spreadsheet cell is a starting point. A row a store keeper wrote after
+    walking to the thing and scanning it — with a GPS fix attached — is the
+    truth. So a re-sync must not be able to move a rack, revert a status, or
+    erase a coordinate. This is asserted the only way that means anything:
+    write through the API first, re-run the sync, and read back.
+
+    ── THE ONE THAT CANNOT BE KEYED ───────────────────────────────────────────
+    A Location with no Serial No. is unkeyable — `(Site_ID, SAP_Code,
+    serial_no)` is the constraint, and inventing a serial would either merge
+    two assets into one or create the same asset twice on the next run. The
+    real 2026-08-05 workbook has exactly one such row, so this is a live case
+    and not a hypothetical: it must be REPORTED, never guessed at.
+
+    Hermetic: SVCBJ- keys throughout, deltas rather than absolute totals, and
+    every row removed at the end.
+    """
+    from sqlalchemy import text as _sqt
+
+    import backend.api.bulk_import as _bi
+
+    async def _scalar(sql: str, **params):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), params)).scalar()
+
+    async def _exec(sql: str, **params):
+        async with SessionLocal() as s:
+            await s.execute(_sqt(sql), params)
+            await s.commit()
+
+    SITE = "CNCEC"
+    _TITLE = ["CNCEC PROJECT Equipement and Materials Details"]
+    _INV_HDR = ["Sl. No.", "SAP CODE", "Material Code", "Equipment Description",
+                "UOM", "Category", "Opening Stock", "Receipt", "Consumption",
+                "Return", "Current Stock", "Minimum Qty",
+                "Rack/Current Location"]
+    _CON_HDR = ["Date", "SAP CODE", "Material Code", "Equipment Description",
+                "UOM", "Qty.", "Serial No.", "PR#", "Work Type", "Tank No.",
+                "WBS#", "Approved By", "Cons. Paper No.", "Pallet No.",
+                "Received by", "Prepared by", "Location", "Remarks",
+                "Current Stock", "type"]
+
+    def inv_row(sap, rack=None):
+        return ["1", sap, f"GI-{sap}", f"{sap} widget", "EA", "EQUIPMENTS/TOOLS",
+                0, 0, 0, 0, 0, 0, rack]
+
+    def con_row(sap, serial=None, location=None, status=None):
+        r = ["2026-08-05", sap, f"GI-{sap}", f"{sap} widget", "EA", 1, serial,
+             None, None, None, None, None, None, None, None, None, location,
+             None, None, "R/L Consumables"]
+        return r + [status] if status is not None else r
+
+    def book(inv_rows, con_rows, *, rack_col=True, status_col=False):
+        inv_hdr = _INV_HDR if rack_col else _INV_HDR[:-1]
+        con_hdr = _CON_HDR + (["Status"] if status_col else [])
+        return _xlsx({
+            "Inventory": [_TITLE, inv_hdr]
+                         + [r if rack_col else r[:-1] for r in inv_rows],
+            "Consumption Log": [_TITLE, con_hdr] + con_rows,
+        })
+
+    async def clean():
+        await _exec("DELETE FROM asset_movements WHERE asset_unit_id IN "
+                    "(SELECT id FROM asset_units WHERE \"SAP_Code\" LIKE 'SVCBJ%')")
+        await _exec("DELETE FROM asset_units WHERE \"SAP_Code\" LIKE 'SVCBJ%'")
+        await _exec("DELETE FROM material_locations WHERE \"SAP_Code\" LIKE 'SVCBJ%'")
+        await _exec("DELETE FROM storage_locations WHERE code LIKE 'SVCBJ%'")
+        await _exec("DELETE FROM consumption WHERE \"SAP_Code\" LIKE 'SVCBJ%'")
+        await _exec("DELETE FROM inventory WHERE \"SAP_Code\" LIKE 'SVCBJ%'")
+
+    await clean()
+    for sap in ("SVCBJ-1", "SVCBJ-2", "SVCBJ-3"):
+        await _exec('INSERT INTO inventory ("SAP_Code", "Material_Code", '
+                    '"Equipment_Description", "UOM", "Category", "Site_ID") '
+                    "VALUES (:s, :m, :d, 'EA', 'EQUIPMENTS/TOOLS', :site)",
+                    s=sap, m=f"GI-{sap}", d=f"{sap} Test Hammer", site=SITE)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        _ip = {"X-Real-IP": "203.0.113.96"}
+
+        async def token(u, p):
+            r = await ac.post("/auth/login", json={"username": u, "password": p},
+                              headers=_ip)
+            return r.json().get("access_token")
+
+        def H(t):
+            return {"Authorization": f"Bearer {t}"}
+
+        admin_t = await token("admin", "admin2026")
+        hod_t = await token("hod", "hod2026")
+
+        # ══ racks: the column may be absent, blank, or real ══════════════════
+        async with SessionLocal() as s:
+            gone = await _bi.plan_rack_locations(
+                s, book([inv_row("SVCBJ-1")], [], rack_col=False), SITE)
+        check("bj: a workbook with NO rack column plans nothing and does not "
+              "raise — the column is new, and last month's file is still a "
+              "valid file",
+              gone["racks"] == [] and gone["links"] == [] and gone["column"] is None
+              and any("no rack column" in w for w in gone["warnings"]),
+              str(gone)[:200])
+
+        async with SessionLocal() as s:
+            blank = await _bi.plan_rack_locations(
+                s, book([inv_row("SVCBJ-1"), inv_row("SVCBJ-2", "  ")], []), SITE)
+        check("bj: the column present and BLANK is a no-op, counted not warned "
+              "— it is blank in 453 of 453 real rows today, so this is the "
+              "normal case and must stay quiet",
+              blank["racks"] == [] and blank["links"] == [] and blank["blank"] == 2
+              and blank["column"] == "Rack/Current Location",
+              str(blank)[:200])
+
+        wb_rack = book([inv_row("SVCBJ-1", "SVCBJ-A-01-2"),
+                        inv_row("SVCBJ-2", "SVCBJ-A-01-2"),
+                        inv_row("SVCBJ-3", " SVCBJ-B-04  ")], [])
+        async with SessionLocal() as s:
+            p = await _bi.plan_rack_locations(s, wb_rack, SITE)
+            await _bi.apply_rack_locations(s, p, "svcbj")
+            await s.commit()
+        racks = await _scalar("SELECT COUNT(*) FROM storage_locations "
+                              "WHERE code LIKE 'SVCBJ%'")
+        links = await _scalar("SELECT COUNT(*) FROM material_locations "
+                              "WHERE \"SAP_Code\" LIKE 'SVCBJ%'")
+        check("bj: two SAPs on one shelf create ONE rack and TWO links — a rack "
+              "is a place, not a property of a material, which is why this is "
+              "material_locations and not a column on inventory",
+              racks == 2 and links == 3, f"racks={racks} links={links}")
+        check("bj: surrounding whitespace is collapsed into one rack, not two "
+              "— ' SVCBJ-B-04  ' and 'SVCBJ-B-04' are the same shelf",
+              await _scalar("SELECT COUNT(*) FROM storage_locations "
+                            "WHERE code = 'SVCBJ-B-04'") == 1)
+
+        r = await ac.get("/locations/lookup", headers=H(admin_t),
+                         params={"sap": "SVCBJ-1", "site_id": SITE})
+        it = (r.json().get("items") or [{}])[0]
+        check("bj: …and the store keeper's lookup answers with that shelf — the "
+              "seed is only worth anything if the hot path finds it",
+              r.status_code == 200 and it.get("located") is True
+              and it.get("primary_location") == "SVCBJ-A-01-2",
+              f"{r.status_code} {str(it)[:160]}")
+
+        async with SessionLocal() as s:
+            p2 = await _bi.plan_rack_locations(s, wb_rack, SITE)
+        check("bj: re-running plans NOTHING new — idempotent by construction, "
+              "not by a second dedupe pass",
+              p2["racks"] == [] and p2["links"] == [] and p2["kept"] == 3,
+              str(p2)[:200])
+
+        # THE APP WINS — an operator's edit survives the workbook.
+        await _exec("UPDATE storage_locations SET zone='Z9', rack_no='01', "
+                    "row_no='2' WHERE code='SVCBJ-A-01-2'")
+        rid = await _scalar("SELECT id FROM storage_locations "
+                            "WHERE code='SVCBJ-B-04'")
+        r = await ac.put("/locations/material", headers=H(admin_t),
+                         json={"SAP_Code": "SVCBJ-1", "location_id": int(rid),
+                               "is_primary": True, "site_id": SITE})
+        check("bj: an operator can move SVCBJ-1 to another shelf via the API",
+              r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+        async with SessionLocal() as s:
+            p3 = await _bi.plan_rack_locations(s, wb_rack, SITE)
+            await _bi.apply_rack_locations(s, p3, "svcbj")
+            await s.commit()
+        zone = await _scalar("SELECT zone FROM storage_locations "
+                             "WHERE code='SVCBJ-A-01-2'")
+        prim = await _scalar('SELECT l.code FROM material_locations m '
+                             'JOIN storage_locations l ON l.id = m.location_id '
+                             'WHERE m."SAP_Code"=\'SVCBJ-1\' AND m.is_primary')
+        check("bj: THE APP WINS on racks — the sync re-ran and the operator's "
+              "zone breakdown AND their re-assignment both survived. A "
+              "DO UPDATE here would silently walk somebody back to the wrong "
+              "shelf a week later",
+              zone == "Z9" and prim == "SVCBJ-B-04", f"zone={zone} primary={prim}")
+
+        async with SessionLocal() as s:
+            bad = await _bi.plan_rack_locations(
+                s, book([inv_row("SVCBJ-NOPE", "SVCBJ-C-01")], []), SITE)
+        check("bj: a rack for a SAP the master does not carry is REJECTED, not "
+              "linked — a dangling assignment renders as a blank shelf, which "
+              "looks like an answer",
+              bad["links"] == [] and len(bad["rejects"]) == 1
+              and bad["rejects"][0]["sap"] == "SVCBJ-NOPE", str(bad)[:200])
+
+        # ══ assets: THE GOLDEN RULE ══════════════════════════════════════════
+        wb_asset = book([], [
+            con_row("SVCBJ-1", "SN-AAA", "Yard bay 4"),      # asset
+            con_row("SVCBJ-1", "SN-BBB", "Truck 4771"),      # 2nd of same SAP
+            con_row("SVCBJ-2", "SN-CCC", None),              # consumable
+            con_row("SVCBJ-2", None, None),                  # consumable
+            con_row("SVCBJ-3", None, "At site"),             # unkeyable
+        ])
+        async with SessionLocal() as s:
+            a = await _bi.plan_asset_units(s, wb_asset, SITE)
+            await _bi.apply_asset_units(s, a, "svcbj")
+            await s.commit()
+        check("bj: THE GOLDEN RULE — a row WITH a Location becomes an asset "
+              "unit; a row without one stays ordinary consumption and creates "
+              "nothing. 1,165 of 1,166 real rows are blank, so a planner that "
+              "keyed off anything else would invent a thousand hammers",
+              len(a["inserts"]) == 2 and a["consumable_rows"] == 2,
+              f"inserts={len(a['inserts'])} consumable={a['consumable_rows']}")
+        n_units = await _scalar("SELECT COUNT(*) FROM asset_units "
+                                "WHERE \"SAP_Code\" = 'SVCBJ-1'")
+        check("bj: two hammers on ONE SAP are two rows, told apart by serial — "
+              "the whole reason asset_units is not a column on inventory",
+              n_units == 2, f"units={n_units}")
+        note = await _scalar("SELECT location_note FROM asset_units "
+                             "WHERE serial_no='SN-AAA'")
+        check("bj: the Excel Location lands in `location_note` as TEXT, not as "
+              "a rack id — 'Yard bay 4' is a place a person recognises and not "
+              "a shelf in storage_locations",
+              note == "Yard bay 4", f"note={note!r}")
+        moves = await _scalar("SELECT COUNT(*) FROM asset_movements m JOIN "
+                              "asset_units u ON u.id = m.asset_unit_id "
+                              "WHERE u.serial_no='SN-AAA' AND m.source='excel-sync'")
+        check("bj: the seed IS the first movement — otherwise 'where has this "
+              "been' opens with a gap it can never fill",
+              moves == 1, f"movements={moves}")
+        check("bj: a Location with NO Serial No. is reported back by row, never "
+              "given an invented serial — the real workbook has exactly one "
+              "(row 9, SAP 1169, 'At site'), and a guessed key would either "
+              "merge two assets or duplicate one on the next run",
+              len(a["no_serial"]) == 1 and a["no_serial"][0]["sap"] == "SVCBJ-3"
+              and any("no Serial No." in w for w in a["warnings"]),
+              str(a["no_serial"])[:200])
+        check("bj: …and no unit was created for it",
+              await _scalar("SELECT COUNT(*) FROM asset_units "
+                            "WHERE \"SAP_Code\"='SVCBJ-3'") == 0)
+
+        async with SessionLocal() as s:
+            again = await _bi.plan_asset_units(s, wb_asset, SITE)
+        check("bj: a second sync proposes NOTHING — assets are state, so the "
+              "planner reads the sheet and converges rather than depending on "
+              "which ledger rows happen to be new",
+              again["inserts"] == [] and again["existing"] == 2, str(again)[:200])
+
+        # ── status vocabulary ──
+        wb_status = book([], [
+            con_row("SVCBJ-2", "SN-W", "Bay 1", status="Working"),
+            con_row("SVCBJ-2", "SN-N", "Bay 1", status="not in use"),
+            con_row("SVCBJ-2", "SN-R", "Bay 1", status="Under Repair"),
+            con_row("SVCBJ-2", "SN-X", "Bay 1", status="banana"),
+        ], status_col=True)
+        async with SessionLocal() as s:
+            st = await _bi.plan_asset_units(s, wb_status, SITE)
+            await _bi.apply_asset_units(s, st, "svcbj")
+            await s.commit()
+        got = {r[0]: r[1] for r in (await _rows_sql(
+            "SELECT serial_no, status FROM asset_units "
+            "WHERE \"SAP_Code\"='SVCBJ-2'"))}
+        check("bj: the operator's own words map onto the status vocabulary — "
+              "'Working' / 'not in use' / 'Under Repair' are what somebody "
+              "standing in front of a hammer actually says",
+              got.get("SN-W") == "working" and got.get("SN-N") == "not_in_use"
+              and got.get("SN-R") == "repair", str(got))
+        check("bj: an unrecognised status is NOT invented — the unit is created "
+              "with the safe default and the value is named back",
+              got.get("SN-X") == "in_stock"
+              and any("banana" in w for w in st["warnings"]), str(st["warnings"]))
+        r = await ac.patch("/assets/1/location", headers=H(admin_t),
+                           json={"status": "definitely_not_a_status"})
+        check("bj: …and the API refuses the same garbage with a 422 rather than "
+              "storing a status nothing renders",
+              r.status_code == 422, f"got {r.status_code}")
+
+        # ── THE APP WINS: GPS and status are never re-seeded ──
+        uid = await _scalar("SELECT id FROM asset_units WHERE serial_no='SN-AAA'")
+        r = await ac.patch(f"/assets/{int(uid)}/location", headers=H(admin_t),
+                           json={"location_note": "Moved by a human",
+                                 "status": "working",
+                                 "gps": {"lat": 26.4207, "lng": 50.0888,
+                                         "accuracy_m": 8}})
+        check("bj: an operator records the hammer's real position, with a fix",
+              r.status_code == 200 and r.json().get("gps_recorded") is True,
+              f"{r.status_code} {r.text[:140]}")
+        async with SessionLocal() as s:
+            p = await _bi.plan_asset_units(s, wb_asset, SITE)
+            await _bi.apply_asset_units(s, p, "svcbj")
+            n = await _bi.refresh_asset_location_notes(s, p, SITE)
+            await s.commit()
+        after = dict(zip(
+            ("note", "lat", "status"),
+            (await _rows_sql("SELECT location_note, current_lat, status "
+                             "FROM asset_units WHERE serial_no='SN-AAA'"))[0]))
+        check("bj: THE APP WINS — the sync re-ran over the same workbook and "
+              "the GPS pinpoint, the app-set status AND the app's location "
+              "text all survived. The Excel Location is the initial seed, and "
+              "a coordinate is the strongest possible statement that somebody "
+              "stood next to this thing",
+              after["note"] == "Moved by a human" and after["status"] == "working"
+              and after["lat"] is not None and n == 0, f"{after} refreshed={n}")
+
+        # …but a unit the app has NEVER touched does take a corrected cell.
+        wb_fixed = book([], [con_row("SVCBJ-1", "SN-BBB", "Truck 9999")])
+        async with SessionLocal() as s:
+            p = await _bi.plan_asset_units(s, wb_fixed, SITE)
+            n = await _bi.refresh_asset_location_notes(s, p, SITE)
+            await s.commit()
+        untouched = await _scalar("SELECT location_note FROM asset_units "
+                                  "WHERE serial_no='SN-BBB'")
+        check("bj: the narrow case the ruling leaves open — a unit nobody has "
+              "touched (last_seen_by is still the sync, no fix recorded) DOES "
+              "take a corrected Location. Nothing in the app is being "
+              "overwritten, so refusing would just strand a typo",
+              n == 1 and untouched == "Truck 9999", f"n={n} note={untouched!r}")
+
+        # ══ Phase 1: a code is not a name ════════════════════════════════════
+        r = await ac.get("/sme/actuals/consumption", headers=H(hod_t),
+                         params={"site_id": SITE})
+        rows = r.json().get("items") or []
+        check("bj: the Actual-draw queue carries Material_Name beside the code "
+              "— an operator assigning a drum to a tank should not have to "
+              "know 400 GI-600001x codes by heart",
+              r.status_code == 200 and all("Material_Name" in i for i in rows)
+              and (not rows or any(i.get("Material_Name") for i in rows)),
+              f"{r.status_code} {str(rows[:1])[:200]}")
+        # Grep the CODE, not the prose: the module's rule-1a banner names the
+        # seed table on purpose, to say what it is refusing to touch.
+        src = "\n".join(ln for ln in _read_src("backend/api/sme_actuals.py")
+                        .splitlines() if not ln.lstrip().startswith("#"))
+        check("bj: …and that name comes from sme_recipe, NOT from "
+              "sme_inventory_seed — rule 1a makes the seed the sole source of "
+              "every SME QUANTITY. Adding a LABEL lookup is exactly how a "
+              "quantity read sneaks in later, so the table object stays absent",
+              '_MD.tables["sme_inventory_seed"]' not in src
+              and "seed_t" not in src
+              and "FROM sme_inventory_seed" not in src,
+              "sme_actuals.py now reaches for the seed table")
+
+        r = await ac.get("/hod/burn-rate", headers=H(hod_t),
+                         params={"site_id": SITE, "days": 3650})
+        items = r.json().get("items") or []
+        check("bj: burn rate names the material it is burning — the page was "
+              "a column of bare SAP codes and a number",
+              r.status_code == 200 and all("Equipment_Description" in i
+                                           for i in items),
+              f"{r.status_code} {str(items[:1])[:200]}")
+        r = await ac.get("/admin/lots", headers=H(admin_t))
+        lots = r.json().get("items") or []
+        check("bj: admin lots name the material too — quarantining stock by "
+              "SAP code alone asks somebody to take goods out of circulation "
+              "without being told what they are",
+              r.status_code == 200 and all("Equipment_Description" in i
+                                           for i in lots),
+              f"{r.status_code} {str(lots[:1])[:200]}")
+
+    await clean()
+
+
+async def _rows_sql(sql: str, **params):
+    from sqlalchemy import text as _sqt
+    async with SessionLocal() as s:
+        return (await s.execute(_sqt(sql), params)).all()
+
+
+def _read_src(rel: str) -> str:
+    import pathlib
+    return (pathlib.Path(__file__).resolve().parents[2] / rel).read_text()
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -11131,6 +11521,8 @@ async def main() -> int:
     await test_asset_tracking()
     print("\n BI. Shared login throttle + exec-summary email + dashboard widgets")
     await test_shared_throttle_and_widgets()
+    print("\n BJ. Workbook seeds racks + assets; the app owns them; names beside codes")
+    await test_workbook_places_and_names()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

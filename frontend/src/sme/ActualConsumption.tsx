@@ -130,8 +130,19 @@ export default function ActualConsumption({ siteId }: Props) {
 
   const drawCols = [
     { title: 'Date', dataIndex: 'entry_date', width: 110 },
-    { title: 'Material', dataIndex: 'Material_Code', width: 140,
-      render: (v: string) => <span style={mono}>{v}</span> },
+    // Code AND name. An operator working down this queue is deciding which
+    // tank a drum went on; a column of bare GI-600001x asks them to know 400
+    // codes by heart. The name wraps rather than ellipses (rule 5).
+    { title: 'Material', dataIndex: 'Material_Code', width: 230,
+      render: (v: string, r: Row) => (
+        <div style={{ lineHeight: 1.25 }}>
+          <span style={mono}>{v}</span>
+          {r.Material_Name ? (
+            <div style={{ fontSize: 11, opacity: 0.7, whiteSpace: 'normal',
+                          wordBreak: 'break-word' }}>
+              {String(r.Material_Name)}
+            </div>) : null}
+        </div>) },
     { title: 'Drawn', dataIndex: 'Actual_Qty', width: 100, align: 'right' as const,
       render: (v: number) => <b style={mono}>{nf(v)}</b> },
     { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 200,
@@ -262,8 +273,9 @@ export default function ActualConsumption({ siteId }: Props) {
               { onSuccess: () => setRowEdit(null) })}>
             <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
               <b style={mono}>{nf(rowEdit.Actual_Qty)}</b> of{' '}
-              <b style={mono}>{String(rowEdit.Material_Code)}</b> drawn on{' '}
-              {String(rowEdit.entry_date)}.<br />
+              <b style={mono}>{String(rowEdit.Material_Code)}</b>
+              {rowEdit.Material_Name ? ` — ${String(rowEdit.Material_Name)}` : ''}
+              {' '}drawn on {String(rowEdit.entry_date)}.<br />
               <span style={{ fontSize: 12 }}>{String(rowEdit.notes ?? '')}</span>
             </Typography.Paragraph>
             <Form.Item name="Equipment_Tag_No" label="Equipment"

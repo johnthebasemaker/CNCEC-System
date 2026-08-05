@@ -449,14 +449,25 @@ async def burn_rate(site_id: Optional[str] = None, days: int = 30,
     if site_id:
         where += ' AND COALESCE("Site_ID", \'HQ\') = :site'
         params["site"] = site_id
+    # LEFT JOIN, never INNER: a consumption row whose SAP has since left the
+    # master must still appear in the burn rate. It is the row most worth
+    # seeing, and an inner join would silently drop it.
     sql = text(f'''
-        SELECT TRIM("SAP_Code") AS "SAP_Code",
-               ROUND(CAST(SUM("Quantity") AS NUMERIC), 3) AS "Consumed",
-               ROUND(CAST(SUM("Quantity") / :days AS NUMERIC), 3) AS "Daily_Avg"
-        FROM consumption
-        WHERE {where}
-        GROUP BY TRIM("SAP_Code")
-        ORDER BY "Consumed" DESC
+        SELECT c."SAP_Code",
+               i."Material_Code",
+               i."Equipment_Description",
+               i."UOM",
+               c."Consumed", c."Daily_Avg"
+        FROM (
+            SELECT TRIM("SAP_Code") AS "SAP_Code",
+                   ROUND(CAST(SUM("Quantity") AS NUMERIC), 3) AS "Consumed",
+                   ROUND(CAST(SUM("Quantity") / :days AS NUMERIC), 3) AS "Daily_Avg"
+            FROM consumption
+            WHERE {where}
+            GROUP BY TRIM("SAP_Code")
+        ) c
+        LEFT JOIN inventory i ON TRIM(i."SAP_Code") = c."SAP_Code"
+        ORDER BY c."Consumed" DESC
         LIMIT 200
     ''')
     return {"days": days, "since": cutoff,

@@ -67,6 +67,32 @@ equipment_t = _MD.tables["sme_equipment"]
 recipe_t = _MD.tables["sme_recipe"]
 
 
+async def _material_names(session: AsyncSession,
+                          codes: set[str]) -> dict[str, str]:
+    """Material_Code → its human name, for the tables that only had the code.
+
+    ⚠️ The name is read from `sme_recipe`, NOT from `sme_inventory_seed`. Both
+    carry a `Material_Name`, but rule 1a makes the seed the sole source of every
+    SME QUANTITY and this module deliberately never touches it (see the banner
+    above) — reaching into it for a label would put the one table this file must
+    not import one edit away from a quantity read. The recipe already defines
+    which materials the estimator models, so it is both the safer source and the
+    right grain.
+
+    A material with no recipe line simply has no name here and the caller falls
+    back to the code. That is honest: a missing label is not worth a second
+    lookup path into the table rule 1a fences off.
+    """
+    if not codes:
+        return {}
+    rows = (await session.execute(
+        select(recipe_t.c["Material_Code"],
+               func.min(recipe_t.c["Material_Name"]).label("name"))
+        .where(recipe_t.c["Material_Code"].in_(codes))
+        .group_by(recipe_t.c["Material_Code"]))).all()
+    return {r[0]: r[1] for r in rows if r[1]}
+
+
 def _write_site(user: dict, site_id: Optional[str]) -> str:
     """Same contract as sme_master._write_site — scoped users are pinned to
     their own site, unscoped users must name one."""
@@ -202,6 +228,12 @@ async def list_consumption(site_id: Optional[str] = None,
         stmt = stmt.where(log_t.c["status"] == status)
     items = _rows(await session.execute(
         stmt.order_by(log_t.c["entry_date"].desc(), log_t.c["id"].desc())))
+    # `sme_consumption_log` stores the code only. An operator assigning a draw
+    # to equipment is reading down a column of GI-6000012s, so the name goes
+    # beside it rather than in a tooltip.
+    names = await _material_names(session, {i["Material_Code"] for i in items})
+    for i in items:
+        i["Material_Name"] = names.get(i["Material_Code"])
     return {"items": items,
             "unassigned": sum(1 for i in items if i["status"] == "unassigned")}
 
@@ -311,6 +343,9 @@ async def actuals_summary(site_id: Optional[str] = None,
     if site is not None:
         stmt = stmt.where(log_t.c["Site_ID"] == site)
     items = _rows(await session.execute(stmt))
+    names = await _material_names(session, {i["Material_Code"] for i in items})
+    for i in items:
+        i["Material_Name"] = names.get(i["Material_Code"])
     return {"items": items,
             "note": "Observed physical draw. The SME estimator's availability "
                     "is deliberately NOT reduced by these figures (rule 1a) — "

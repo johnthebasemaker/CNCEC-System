@@ -288,12 +288,27 @@ function ExecMain({ model, siteId }: { model: SmeModel; siteId?: string }) {
   )
 }
 
+/** Material_Code → its name and UOM, from the recipe the model already holds.
+ *
+ * `sme_consumption_log` rows carry the code alone, so every table that renders
+ * them needs this to say what the material IS. Built from the client model
+ * rather than fetched: the recipes are already in memory, and this is a label
+ * lookup, not a quantity — nothing here is netted against anything. */
+function materialMeta(model: SmeModel): Map<string, { name: string; uom: string }> {
+  const m = new Map<string, { name: string; uom: string }>()
+  for (const rows of model.recipesByCode.values()) {
+    for (const r of rows) if (!m.has(r.Material_Code)) m.set(r.Material_Code, { name: r.Material_Name, uom: r.UOM })
+  }
+  return m
+}
+
 // ─── 📋 Sub-view 2: progress list + production details ───────────────────────
 // PROGRESS-driven like the legacy portal (`FROM sqm_progress LEFT JOIN
 // equipment`): scopes entered directly in the SQM editor with no
 // equipment-master row (e.g. work areas) must still appear here.
 function ProgressList({ model, snap, siteId }: { model: SmeModel; snap: SmeSnapshot; siteId?: string }) {
   const { data: log } = useSmeProductionLog(siteId)
+  const matName = useMemo(() => materialMeta(model), [model])
   const [loc, setLoc] = useState<string | undefined>()
   const [status, setStatus] = useState('All')
 
@@ -396,7 +411,15 @@ function ProgressList({ model, snap, siteId }: { model: SmeModel; snap: SmeSnaps
                   <Table sticky={{ offsetHeader: 64 }} size="small" rowKey="Material_Code" pagination={false}
                     scroll={{ x: 'max-content' }}
                     columns={[
-                      { title: 'Material', dataIndex: 'Material_Code', key: 'm' },
+                      { title: 'Material', dataIndex: 'Material_Code', key: 'm',
+                        render: (v: string) => (
+                          <div style={{ lineHeight: 1.25 }}>
+                            <span style={mono}>{v}</span>
+                            {matName.get(v)?.name ? (
+                              <div style={{ fontSize: 11, opacity: 0.7 }}>
+                                {matName.get(v)!.name}
+                              </div>) : null}
+                          </div>) },
                       { title: 'Expected', dataIndex: 'Expected_Qty', key: 'e', align: 'right', render: (v: number) => nf(Number(v ?? 0)) },
                       { title: 'Actual', dataIndex: 'Actual_Qty', key: 'a', align: 'right', render: (v: number) => nf(Number(v ?? 0)) },
                     ]}
@@ -419,13 +442,7 @@ function ConsumptionComparison({ model, siteId }: { model: SmeModel; siteId?: st
   const [tags, setTags] = useState<string[]>([])
   const [codes, setCodes] = useState<string[]>([])
 
-  const matName = useMemo(() => {
-    const m = new Map<string, { name: string; uom: string }>()
-    for (const rows of model.recipesByCode.values()) {
-      for (const r of rows) if (!m.has(r.Material_Code)) m.set(r.Material_Code, { name: r.Material_Name, uom: r.UOM })
-    }
-    return m
-  }, [model])
+  const matName = useMemo(() => materialMeta(model), [model])
 
   const agg = useMemo(() => {
     // SQM dedup per (date, tag, code) — legacy lines 5909–5935.
