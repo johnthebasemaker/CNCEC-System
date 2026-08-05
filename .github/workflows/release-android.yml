@@ -72,6 +72,32 @@ jobs:
         working-directory: frontend
         run: npx cap sync android
 
+      # `cap add android` writes versionName "1.0" / versionCode 1 from
+      # Capacitor's own template, and android/ is gitignored (regenerated every
+      # build), so there is no checked-in file to correct — the workflow is the
+      # only place that CAN own the APK's internal version. Without this the
+      # v1.2.0 release installed as "1.0" and Android refused the upgrade,
+      # because it compares versionCode and 1 is never greater than 1.
+      #
+      # versionCode must be a monotonically increasing integer, so the semver
+      # is packed positionally: 1.2.0 → 10200. Two digits per component caps a
+      # component at 99, which is far beyond anything this project will reach.
+      - name: Stamp the release version into the Android project
+        working-directory: frontend/android
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -p "require('../package.json').version")"
+          fi
+          IFS=. read -r MAJOR MINOR PATCH <<< "${VERSION%%-*}"
+          CODE=$(( ${MAJOR:-0} * 10000 + ${MINOR:-0} * 100 + ${PATCH:-0} ))
+          echo "versionName=$VERSION versionCode=$CODE"
+          sed -i "s/versionName \".*\"/versionName \"${VERSION}\"/" app/build.gradle
+          sed -i "s/versionCode .*/versionCode ${CODE}/" app/build.gradle
+          grep -E "versionCode|versionName" app/build.gradle
+
       # On failure, surface Gradle's "What went wrong" section as ::error::
       # annotations — run LOGS need a signed-in session, annotations don't.
       - name: Assemble debug APK

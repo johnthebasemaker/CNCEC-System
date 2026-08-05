@@ -32,6 +32,7 @@ import argparse
 import datetime
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -56,7 +57,10 @@ TABLE_BORDER      = (210, 220, 232)
 RULE_LINE         = (220, 224, 232)
 
 APP_NAME    = "General Industries Hub"
-APP_VERSION = "2.0"
+# Matches the shipped application version (frontend/src-tauri/tauri.conf.json,
+# frontend/package.json, frontend/src-tauri/Cargo.toml). A manual whose cover
+# disagrees with the installer someone just ran is worse than an undated one.
+APP_VERSION = "1.2.0"
 DOC_TITLE   = "Product Manual & User Catalogue"
 PAGE_W_MM   = 210
 PAGE_H_MM   = 297
@@ -266,8 +270,18 @@ def parse_markdown(md: str) -> list[Block]:
             continue
 
         # bullet list (collect contiguous bullets)
+        #
+        # ⚠️ CONTINUATION LINES BELONG TO THEIR BULLET. A wrapped list item —
+        #
+        #     - The connection runs outward, not inward. The server opens
+        #       a connection to the edge; the edge never opens one back.
+        #
+        # is ONE item. Reading only the first line and letting the indented
+        # remainder fall through to the paragraph branch split every wrapped
+        # bullet into a bullet plus an unindented orphan paragraph, which is
+        # what made lists look broken wherever a point ran past one line.
         if _BULLET_RE.match(line) or _NUMLI_RE.match(line):
-            items = []
+            items: list[tuple[str, str]] = []
             while i < n:
                 bm = _BULLET_RE.match(lines[i])
                 nm = _NUMLI_RE.match(lines[i])
@@ -278,6 +292,18 @@ def parse_markdown(md: str) -> list[Block]:
                 else:
                     break
                 i += 1
+                # Absorb the item's own wrapped lines: indented, non-blank, and
+                # not themselves the start of a new bullet or block.
+                while i < n:
+                    nxt = lines[i]
+                    if (not nxt.strip() or not nxt.startswith((" ", "\t"))
+                            or _BULLET_RE.match(nxt) or _NUMLI_RE.match(nxt)
+                            or _HEADING_RE.match(nxt) or _FENCE_RE.match(nxt.strip())
+                            or _is_table_row(nxt)):
+                        break
+                    bullet, body = items[-1]
+                    items[-1] = (bullet, f"{body} {nxt.strip()}")
+                    i += 1
             blocks.append(Block("ul", items=items))
             continue
 
@@ -359,12 +385,25 @@ _INLINE_PATTERNS = [
 ]
 
 
+_EMPHASIS_RE = re.compile(r"(?<![A-Za-z0-9])[*_]([^*_\n]+)[*_](?![A-Za-z0-9])")
+
+
 def _strip_md_punct(text: str) -> str:
-    """Last-resort cleanup for any markdown punctuation that slipped through."""
-    return (text
-            .replace("**", "")
-            .replace("`", "")
-            .replace("~~", ""))
+    """Remove markdown emphasis punctuation, keeping the words.
+
+    Paragraphs are rendered with a single font by design (see
+    `render_paragraph`) — mixing fonts mid-paragraph made fpdf2 overflow the
+    right margin. So emphasis is stripped rather than styled.
+
+    ⚠️ It must be stripped COMPLETELY. This used to remove `**` and backticks
+    but not single `*`, so `**bold**` came out as clean unstyled text while
+    `*italic*` came out as literal asterisks on the page — visible on any page
+    that emphasised a single word. The guards either side of the marker are what
+    keep it from eating an asterisk used as a footnote mark or a snake_case
+    identifier: `_severity_` is emphasis, `some_field_name` is not.
+    """
+    text = text.replace("**", "").replace("`", "").replace("~~", "")
+    return _EMPHASIS_RE.sub(r"\1", text)
 
 
 def inline_runs(text: str) -> list[tuple[str, dict]]:
@@ -487,7 +526,8 @@ class ManualPDF(FPDF):
         self.set_y(PAGE_H_MM - 14)
         self.set_text_color(255, 255, 255)
         self.set_font("helvetica", "", 9)
-        self.cell(0, 5, _ascii("GI Hub  ·  Streamlit + SQLite + Twilio + Ollama  ·  Multi-Site ERP"), align="L")
+        self.cell(0, 5, _ascii("GI Hub  ·  Multi-Site Inventory, Procurement "
+                               "& Asset Management"), align="L")
         self.skip_header = False
         # Re-enable auto-break for subsequent pages
         self.set_auto_page_break(auto=True, margin=22)
@@ -775,30 +815,68 @@ class ManualPDF(FPDF):
             # Always anchor table x to the left margin to avoid drift
             x_start = MARGIN_MM
             y_start = self.get_y()
-            # Find tallest cell for this row (helvetica char width ~ 1.7mm @ 9pt)
-            heights = []
-            for cell in cells:
-                cell_clean = _ascii(_strip_md_punct(cell))
-                w_per_char = 1.7
-                chars_per_line = max(1, int((col_w - 3) / w_per_char))
-                n_lines = max(1, (len(cell_clean) + chars_per_line - 1) // chars_per_line)
-                heights.append(line_h * min(4, n_lines))
-            row_h = max(heights)
+
+            # Measure each cell with the REAL font metrics, not a fixed
+            # millimetres-per-character guess.
+            #
+            # ⚠️ This used to estimate 1.7 mm per character and then cap every
+            # row at four lines, hard-truncating the overflow with "...". Any
+            # explanatory cell longer than that lost its ending mid-word — and a
+            # manual whose tables stop mid-sentence is worse than one with no
+            # tables. Nothing is truncated now; the row grows instead, and a row
+            # taller than the page breaks onto the next one.
+            texts = [_ascii(_strip_md_punct(c)) for c in cells]
+            inner_w = col_w - 3
+            wrapped = [self._wrap_cell(t, inner_w) for t in texts]
+            row_h = max(line_h * max(1, len(w)) for w in wrapped)
+
+            # A row taller than the remaining space breaks first, so a tall row
+            # can never be drawn off the bottom of the page.
+            if y_start + row_h > PAGE_H_MM - 25:
+                self.add_page()
+                y_start = self.get_y()
+
             # Background + borders first, content next, so wrapping never
             # paints over neighbouring columns.
             for i in range(n_cols):
                 self.rect(x_start + i * col_w, y_start, col_w, row_h, "DF" if fill else "D")
-            for i, cell in enumerate(cells):
-                cell_clean = _ascii(_strip_md_punct(cell))
-                # Hard truncate so multi_cell can never overflow into the next col
-                w_per_char = 1.7
-                max_chars = int((col_w - 3) / w_per_char) * 4
-                if len(cell_clean) > max_chars:
-                    cell_clean = cell_clean[:max_chars - 1] + "..."
+            for i, lines_ in enumerate(wrapped):
                 self.set_xy(x_start + i * col_w + 1.5, y_start + 0.8)
-                self.multi_cell(col_w - 3, line_h, cell_clean, align="L")
+                self.multi_cell(inner_w, line_h, "\n".join(lines_), align="L")
             self.set_xy(MARGIN_MM, y_start + row_h)
         self.ln(2)
+
+    def _wrap_cell(self, text: str, width_mm: float) -> list[str]:
+        """Break one table cell into lines that genuinely fit `width_mm`.
+
+        Uses fpdf2's own `get_string_width`, so the answer matches what the
+        renderer will actually draw. A single word longer than the column (a
+        long code, a URL) is split by character rather than allowed to run into
+        the next column.
+        """
+        if not text:
+            return [""]
+        lines: list[str] = []
+        for word in text.split():
+            if not lines:
+                lines.append(word)
+                continue
+            trial = f"{lines[-1]} {word}"
+            if self.get_string_width(trial) <= width_mm:
+                lines[-1] = trial
+                continue
+            lines.append(word)
+        # Any line still too wide is a single unbreakable token — split it.
+        out: list[str] = []
+        for ln in lines:
+            while self.get_string_width(ln) > width_mm and len(ln) > 1:
+                cut = len(ln)
+                while cut > 1 and self.get_string_width(ln[:cut]) > width_mm:
+                    cut -= 1
+                out.append(ln[:cut])
+                ln = ln[cut:]
+            out.append(ln)
+        return out or [""]
 
     def render_hr(self):
         self.ln(2)
@@ -920,14 +998,103 @@ _REPLACE = {
 }
 
 
+# Box-drawing and block characters. The manual no longer contains ASCII-art
+# diagrams — they were replaced with tables in 2026-08, because fpdf2's core
+# fonts are latin-1 and every one of these rendered as a literal "?", turning
+# whole pages into rows of question marks. Mapped anyway rather than left to the
+# latin-1 fallback: if a diagram is ever pasted back in, it should come out as
+# recognisable ASCII art rather than as noise.
+_REPLACE.update({c: sub for c, sub in (
+    ("─", "-"), ("━", "-"), ("═", "="), ("│", "|"), ("┃", "|"), ("║", "|"),
+    ("┌", "+"), ("┐", "+"), ("└", "+"), ("┘", "+"), ("├", "+"), ("┤", "+"),
+    ("┬", "+"), ("┴", "+"), ("┼", "+"), ("╔", "+"), ("╗", "+"), ("╚", "+"),
+    ("╝", "+"), ("╠", "+"), ("╣", "+"), ("╦", "+"), ("╩", "+"), ("╬", "+"),
+    ("▶", ">"), ("►", ">"), ("◀", "<"), ("◄", "<"), ("▲", "^"), ("▼", "v"),
+    ("█", "#"), ("▓", "#"), ("▒", ":"), ("░", "."), ("■", "*"), ("□", "-"),
+    ("●", "*"), ("○", "-"), ("◦", "-"), ("▪", "*"), ("▫", "-"),
+)})
+
+# Mathematical and comparison symbols. These carry MEANING — a dropped minus
+# sign changes a formula — so each one is spelled out rather than removed.
+_REPLACE.update({
+    "−": "-", "×": "x", "÷": "/", "±": "+/-", "≈": "~", "≠": "!=",
+    "≤": "<=", "≥": ">=", "Σ": "Sum", "∑": "Sum", "√": "sqrt", "∞": "inf",
+    "⌘": "Cmd", "⇧": "Shift", "⌥": "Alt", "⌃": "Ctrl", "⏎": "Enter",
+    "½": "1/2", "¼": "1/4", "¾": "3/4", "º": "deg", "‰": "per mille",
+})
+
+# Characters seen leaving the sanitiser unmapped, reported once at the end of a
+# build. Silence was the actual defect: a "?" in a PDF looks like a font problem
+# to whoever finds it months later, and nothing in the build said a word. The
+# first run with this warning turned up 56 of them, all of which are handled
+# above or by `_drop_decorative` below.
+_UNMAPPED: set[str] = set()
+
+
+def _drop_decorative(text: str) -> str:
+    """Remove emoji and other purely decorative symbols.
+
+    The interface labels its tabs with an emoji prefix — "Incoming PRs",
+    "DN Approvals", "Force-Close" — and the manual quotes those labels verbatim,
+    so a page describing eight tabs used to carry eight question marks. There is
+    no latin-1 equivalent to substitute and the emoji adds nothing to a printed
+    page, so it goes.
+
+    Category-based rather than a hand-written list: `_REPLACE` already tried the
+    list approach and every new interface emoji silently defeated it. `So`
+    (Symbol, other) covers emoji and pictographs, `Cf` (format) covers the
+    variation selectors and zero-width joiners that ride along with them.
+    """
+    out = []
+    for ch in text:
+        if ch in _REPLACE or ord(ch) < 128:
+            out.append(ch)
+            continue
+        if unicodedata.category(ch) in ("So", "Cf", "Sk"):
+            continue        # decorative — drop it, and the space it leaves
+        # Variation selectors and skin-tone modifiers are category Mn, which
+        # otherwise holds combining accents that DO matter in a person's name.
+        # Named by range rather than by category for exactly that reason.
+        if 0xFE00 <= ord(ch) <= 0xFE0F or 0x1F3FB <= ord(ch) <= 0x1F3FF:
+            continue
+        out.append(ch)
+    # Dropping a leading emoji leaves the space that followed it.
+    return re.sub(r"  +", " ", "".join(out)).strip()
+
+
 def _ascii(text: str) -> str:
     if not text:
         return ""
     for k, v in _REPLACE.items():
         if k in text:
             text = text.replace(k, v)
-    # Strip any remaining non-latin1 char so fpdf doesn't crash
-    return text.encode("latin-1", "replace").decode("latin-1")
+    try:
+        return text.encode("latin-1").decode("latin-1")
+    except UnicodeEncodeError:
+        pass
+    text = _drop_decorative(text)
+    try:
+        return text.encode("latin-1").decode("latin-1")
+    except UnicodeEncodeError:
+        # Genuinely unrepresentable and NOT decorative — a real gap. Name it in
+        # the build output rather than shipping a silent "?".
+        for ch in text:
+            try:
+                ch.encode("latin-1")
+            except UnicodeEncodeError:
+                _UNMAPPED.add(ch)
+        return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def report_unmapped() -> None:
+    """Print any character the PDF could not represent. Called after a build."""
+    if not _UNMAPPED:
+        return
+    listing = ", ".join(f"{ch!r} (U+{ord(ch):04X})" for ch in sorted(_UNMAPPED))
+    print(f"\n  WARNING  {len(_UNMAPPED)} character(s) could not be rendered "
+          f"and became '?' in the PDF:\n           {listing}\n"
+          f"           Add them to _REPLACE in build_manual_pdf.py, or remove "
+          f"them from the markdown.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1121,4 +1288,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    report_unmapped()
+    sys.exit(code)

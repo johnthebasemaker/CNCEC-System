@@ -1,9 +1,16 @@
 # SESSION HANDOVER — read this first, then `PROJECT_HANDOVER.md`
 
-> **Written 2026-08-04**, closing a long working session. Branch **`main`**,
-> clean, at commit **`482d176`** (PR #25 merged).
+> **Updated 2026-08-05**, closing the asset-management + documentation session.
+> Branch **`main`**, clean, at **`5cd44b7`** (PR #30 merged), plus
+> `chore/version-bump-and-docs-polish` for the version and manual work.
 > The project is **feature-complete and stable**. Every gate is green.
 > **Nothing is mid-flight — there is no half-finished work to pick up.**
+>
+> **Shipped version is `1.2.0`**, and three files must always agree on it:
+> `frontend/src-tauri/tauri.conf.json`, `frontend/package.json`,
+> `frontend/src-tauri/Cargo.toml`. They had drifted to `0.1.0 / 0.0.0 / 0.1.0`,
+> which is why the v1.2.0 release published installers named `0.1.0`.
+> `release-desktop.yml` now **fails the build** on drift or on a tag mismatch.
 
 ---
 
@@ -88,7 +95,36 @@ written.
 
 ## 3. What was added most recently
 
-> **2026-08-05 — the overnight asset/SME programme.** Six phases on
+> **2026-08-05 (late) — locations from the workbook, and the documentation pass.**
+> `feat/excel-location-sync-and-ui` (PR #30) and
+> `chore/version-bump-and-docs-polish`. Full account in
+> [`EXCEL_LOCATION_SYNC_RUNLOG.md`](EXCEL_LOCATION_SYNC_RUNLOG.md).
+>
+> * **THE GOLDEN RULE — a `Location` on a Consumption Log row is what MAKES it
+>   a reusable asset.** Blank means consumable. Nothing else is consulted, and
+>   that matters: 1,165 of 1,166 real rows are blank, so any looser test would
+>   manufacture a thousand phantom assets on the first run.
+> * **THE WORKBOOK SEEDS, THE APP OWNS.** `storage_locations` upserts
+>   `DO NOTHING`; a SAP with any existing rack assignment is skipped; an
+>   existing asset keeps its status, rack and GPS fix. One narrow exception,
+>   guarded on `last_seen_by = 'excel-sync'` **and** no coordinates: a unit the
+>   app has never touched does take a corrected Location text.
+> * ⚠️ **Both new columns are effectively EMPTY today** — `Rack/Current
+>   Location` is blank in 453 of 453 rows, `Location` is filled on 1 of 1,166
+>   (and that row has no serial, so it cannot be keyed and is reported back
+>   every run). A sync seeds nothing. That is correct, not a failure.
+> * **`asset_units.status` gained the operator's vocabulary** — `working`,
+>   `not_in_use`, `repair` — beside the custody values, in ONE field. The
+>   workbook has no Status column, so the app is where condition is recorded.
+> * **Material NAMES now sit beside every bare code** in six tables. The SME
+>   name comes from `sme_recipe`, **never** `sme_inventory_seed` — rule 1a makes
+>   the seed the sole source of every SME quantity, and a label lookup is how a
+>   quantity read sneaks in later. Suite BJ pins that.
+> * **Manuals rewritten for non-technical readers.** Every ASCII-art diagram,
+>   shell command and developer identifier is gone; **zero fenced code blocks
+>   remain**. `build_manual_pdf.py` gained three real fixes — see §4a.
+>
+> **2026-08-05 (earlier) — the overnight asset/SME programme.** Six phases on
 > `feat/overnight-asset-and-sme-upgrades`; the full account is
 > [`OVERNIGHT_ASSET_TRACKING_RUNLOG.md`](OVERNIGHT_ASSET_TRACKING_RUNLOG.md).
 > The headlines a fresh session needs:
@@ -127,7 +163,7 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1193 / 0** (suites A…BI) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1228 / 0** (suites A…BJ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
@@ -136,9 +172,34 @@ A change that lowers any of these is a regression, not a new normal.
 | Alembic | single head **`a71e93b4c2f8`** | `cd backend && alembic heads` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 
-> `tools/parity_check.py` (5/5) is meaningful **only** on CI or a freshly
-> cutover mirror — it fails against the live dev DB by design, because Postgres
-> is permanently ahead of the frozen SQLite.
+> ⚠️ **`tools/parity_check.py` can no longer pass and is NOT a gate.** It
+> compares the frozen legacy SQLite against Postgres, and they have diverged
+> permanently: `consumption` holds **1** row in SQLite against **1,133** in
+> Postgres, `inventory` 306 against 466. Every sync since cutover has written
+> Postgres only. Its failure carries no information about any code change —
+> **do not spend a session "fixing" it.** Retiring or re-baselining it is an
+> operator decision that has not been made.
+
+### 4a. `build_manual_pdf.py` — three defects fixed 2026-08-05
+
+Worth knowing because each one silently degraded every PDF:
+
+1. **`_ascii()` turned unmappable characters into `?`, silently.** Emoji in tab
+   names ("📥 Incoming PRs") meant a page describing eight tabs carried eight
+   question marks. Now: maths symbols are spelled out, decorative symbols are
+   dropped **by Unicode category** rather than by a hand-written list that every
+   new emoji defeated, and anything still unrepresentable is **named in the build
+   output**. That warning found 56 characters on its first run.
+2. **Wrapped list items were split into a bullet plus an orphan paragraph.** The
+   parser read only a bullet's first line and let its indented continuation fall
+   through to the paragraph branch.
+3. **Table cells were capped at four lines and hard-truncated with `...`.** Cells
+   are now measured with real font metrics (`get_string_width`) and the row grows.
+
+Also: `_strip_md_punct` removed `**` but not single `*`, so `*italic*` printed
+literal asterisks while `**bold**` printed clean. Both are stripped now — body
+text renders in one font by design, because mixing fonts mid-paragraph made
+fpdf2 overflow the right margin.
 
 ---
 
@@ -157,23 +218,57 @@ Regenerate the manual PDFs (master + one booklet per role):
 .venv/bin/python build_manual_pdf.py --role all
 ```
 
+### Re-cutting a release whose installers were mis-versioned
+
+The v1.2.0 assets were named `0.1.0`. To rebuild them under the correct version,
+after the version bump is merged to `main`:
+
+```bash
+gh release delete-asset v1.2.0 --yes $(gh release view v1.2.0 --json assets --jq '.assets[].name')
+git tag -d v1.2.0 && git push origin :refs/tags/v1.2.0
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+Deleting the assets first is what makes this safe to repeat: the release job
+attaches files, and a re-run against a release that still holds the old
+`GI Hub_0.1.0_*` files leaves both versions sitting side by side with no
+indication which is current. Deleting the **tag** is what makes the workflow fire
+again — pushing an existing tag is a no-op.
+
+> ⚠️ **Bump the three version files BEFORE re-tagging.** `release-desktop.yml`
+> now refuses to build when they disagree with each other or with the tag, so a
+> premature re-tag fails fast rather than publishing another mislabelled binary.
+
 ---
 
 ## 6. Open items — none of them blocking
 
-> Verified 2026-08-04. The first two items on this list are **done**:
-> `launchctl print-disabled` shows all four stale agents `disabled`, so the
-> ~2,880 daily respawns have stopped, and `deploy/cloudflared/config.yml` ends
-> cleanly at the `http_status:404` rule with no stray UUID.
+> Re-verified 2026-08-05. **The two items that used to head this list are now
+> DONE:** the Auditor reads the HOD executive-summary endpoints
+> (`require_roles("hod", "auditor")`, GET-only, `readonly.py` untouched), and the
+> login throttle is now **cross-worker**, backed by the `login_attempts` table
+> rather than per-process memory.
 
-1. **The Auditor cannot see the HOD group or the SME Estimator** — those are
-   exact-locked to `{hod, admin}`, and an exact-lock is not a level. If auditors
-   should read them, add `'auditor'` to those `anyRole` lists; the write guard
-   keeps them read-only regardless.
-2. **The per-account login throttle is per-process.** With N uvicorn workers the
-   effective budget is N × 8. Same caveat the existing IP limiter carries; a
-   shared store (Redis) is the fix when deploying behind more than one worker.
-3. **Hetzner deployment** — paused by decision. Runbook is ready.
+1. **Nothing has been registered in the new tables yet.** `storage_locations`,
+   `material_locations` and `asset_units` are all empty, and stay empty until
+   either the workbook columns are filled or somebody registers a tool in the
+   app. The features are live; the data is not there.
+2. **Two workbook data-quality items** the sync reports on every run:
+   Consumption Log row 9 (SAP 1169, `"At site"`) has a Location but **no serial**,
+   so no asset can be keyed from it; and `Tank No.` `J092` matches no equipment.
+3. **GPS capture needs HTTPS.** Over plain HTTP the browser refuses a position —
+   the move still saves, without coordinates. Fine on the hosted address and on
+   the native apps; a caveat only for local HTTP testing.
+4. **Three SAPs disagree with the workbook's Current Stock**, and two are
+   impossible states worth investigating: `1137` (workbook 0, DB **−15**), `1358`
+   (workbook 0, DB **−2**), `1190` (workbook 142, DB 134). Negative stock means
+   more was issued than ever arrived.
+5. **The Android APK's internal version is stamped by CI, not by a file.**
+   `frontend/android/` is gitignored and regenerated on every build, so
+   `release-android.yml` patches `versionName`/`versionCode` after
+   `cap add android`. `versionCode` packs the semver positionally (1.2.0 → 10200)
+   because Android requires a monotonically increasing integer.
+6. **Hetzner deployment** — paused by decision. Runbook is ready.
 
 ---
 
@@ -188,7 +283,10 @@ Regenerate the manual PDFs (master + one booklet per role):
 | [`docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md`](docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md) | PDF/xlsx engines, the Auditor role, `bin/` scripts |
 | [`docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`](docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md) | The subset rule, end to end |
 | [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md) | Tier segregation, per tab |
-| [`USER_MANUAL.md`](USER_MANUAL.md) | 21 chapters, user-facing. The chatbot's corpus — **edit carefully** |
+| [`EXCEL_LOCATION_SYNC_RUNLOG.md`](EXCEL_LOCATION_SYNC_RUNLOG.md) | Rack + asset seeding, "app wins", and what to type in the spreadsheet |
+| [`OVERNIGHT_ASSET_TRACKING_RUNLOG.md`](OVERNIGHT_ASSET_TRACKING_RUNLOG.md) | Asset schema, the GPS scanner, tank aliases |
+| [`USER_MANUAL.md`](USER_MANUAL.md) | 21 chapters, user-facing. **Also the chatbot's corpus, so edit carefully.** Written for non-technical readers: no ASCII art, no shell commands, no source identifiers — keep it that way |
+| [`docs/GI_Hub_Executive_Presentation.html`](docs/GI_Hub_Executive_Presentation.html) | 18-slide management deck. Open in a browser; ← → to navigate, `F` for fullscreen |
 
 ---
 

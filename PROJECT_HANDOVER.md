@@ -488,17 +488,66 @@ of them is a regression, not a new normal.
 > * **THE APP WINS on SQM.** `sme_equipment.SQM_Override` survives the workbook
 >   sync and `--sme-reseed`; the divergence is reported, never resolved silently.
 
+> **Updated again 2026-08-05 (late)** by `feat/excel-location-sync-and-ui` (PR #30)
+> and `chore/version-bump-and-docs-polish`. Full account:
+> [`EXCEL_LOCATION_SYNC_RUNLOG.md`](EXCEL_LOCATION_SYNC_RUNLOG.md).
+> Two additions to the LOCKED set:
+>
+> * **THE GOLDEN RULE — a `Location` on a Consumption Log row is what MAKES it a
+>   reusable asset.** Blank means consumable, and no `asset_units` row is created.
+>   Nothing else is consulted: not the category, not the SAP prefix, not whether a
+>   serial is present. 1,165 of 1,166 real rows are blank, so a looser test would
+>   manufacture a thousand phantom assets. A Location with **no serial** cannot be
+>   keyed on `(Site_ID, SAP_Code, serial_no)` and is **reported back, never given
+>   an invented serial** — one such row exists today (row 9, SAP 1169).
+> * **THE WORKBOOK SEEDS, THE APP OWNS.** `storage_locations` upserts
+>   `DO NOTHING`, a SAP with any existing rack assignment is skipped entirely, and
+>   an existing `asset_units` row keeps its status, its rack and above all its
+>   `current_lat`/`current_lng`. The single exception is guarded on
+>   `last_seen_by = 'excel-sync'` **AND** both coordinates NULL — every app write
+>   path stamps the real username, so the predicate is false the moment a human is
+>   involved. Do not "simplify" this into an unconditional `DO UPDATE`.
+>
+> Also: the SME material NAME shown beside a code comes from `sme_recipe`, never
+> `sme_inventory_seed`. Rule 1a makes the seed the sole source of every SME
+> quantity; adding a label lookup into it is precisely how a quantity read arrives
+> later. Suite BJ greps `sme_actuals.py` for the table object and fails if it
+> reappears.
+
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1193 / 0** (suites A…BI) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1228 / 0** (suites A…BJ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
-| Derived-view parity | **5 / 5** ⚠️ fresh cutover only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
+| ~~Derived-view parity~~ | ❌ **RETIRED as a gate 2026-08-05** — see below | `tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
 | Alembic | single head **`a71e93b4c2f8`** (`users_email`) | see ARCHITECTURE §8 |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
+
+> ⚠️ **`tools/parity_check.py` can no longer pass, and its failure means nothing.**
+> It compares the frozen legacy SQLite against PostgreSQL. They have diverged
+> permanently — `consumption` holds **1** row in SQLite against **1,133** in
+> Postgres; `inventory` 306 against 466; `receipts` 70 against 575 — because every
+> sync since cutover has written Postgres only, by design. It was a cutover-era
+> guard and the cutover is over. **Do not spend a session trying to make it
+> green.** Retiring the file outright, or re-baselining it against a fresh mirror,
+> is an operator decision that has not been taken; it is left in place, unchanged,
+> and off the gate list.
+
+**Version numbers must agree across three files.**
+`frontend/src-tauri/tauri.conf.json`, `frontend/package.json` and
+`frontend/src-tauri/Cargo.toml` all carry the app version, currently **`1.2.0`**.
+They had drifted to `0.1.0 / 0.0.0 / 0.1.0`, and because `tauri build` names every
+installer from `tauri.conf.json`, tag **v1.2.0 published assets called
+`GI Hub_0.1.0_x64-setup.exe`** — with no way to tell which build an installer came
+from. `release-desktop.yml` now fails the build if the three disagree, or if they
+disagree with the tag. The Android APK's internal version cannot live in a file
+(`frontend/android/` is gitignored and regenerated every build), so
+`release-android.yml` stamps it after `cap add android`; `versionCode` packs the
+semver positionally (1.2.0 → 10200) because Android requires a monotonically
+increasing integer and would otherwise refuse the upgrade.
 
 **Local Cloudflare tunnelling is resolved and stable.** Verified 2026-07-30: a
 single managed tunnel is running (the root LaunchDaemon,
@@ -582,10 +631,25 @@ availability on top of a full order.
 
 ## FUTURE — what happens next
 
-### Immediate next phase: Feature Fine-Tuning and UI Polish
+### Immediate next phase: put data in the new tables
 
-The next session's focus. No deployment work. Suggested starting points, none of
-them committed to:
+`storage_locations`, `material_locations` and `asset_units` are all **empty**. The
+features are live and tested; nothing has been registered in them. Two routes, and
+they compose:
+
+1. **Fill the workbook columns.** `Rack/Current Location` on the Inventory sheet
+   seeds shelves; `Location` **plus** `Serial No.` on the Consumption Log seeds
+   assets. Both are read on the next `--erp` sync. `EXCEL_LOCATION_SYNC_RUNLOG.md`
+   has a "what to type in the spreadsheet" section.
+2. **Register in the app.** Assets → Register, and Locator → new rack. Anything
+   entered this way is authoritative and no later sync will overwrite it.
+
+Then: Assets → Move to set each tool's condition, since the workbook has no Status
+column and the app is the only place condition can be recorded.
+
+### Also worth an operator read-through
+
+Suggested starting points, none of them committed to:
 
 * The four multi-component materials now render as 4 rows each — worth an operator
   read-through of the SME Session Report, Execution Plan and Procurement views to
@@ -625,6 +689,8 @@ revert-verification and the caveats:
 
 | Log | Covers |
 |---|---|
+| [`EXCEL_LOCATION_SYNC_RUNLOG.md`](EXCEL_LOCATION_SYNC_RUNLOG.md) | **The Golden Rule** and **the workbook seeds / the app owns**: rack + asset seeding, "app wins" conflict resolution, material names beside codes, and what to type in the spreadsheet |
+| [`OVERNIGHT_ASSET_TRACKING_RUNLOG.md`](OVERNIGHT_ASSET_TRACKING_RUNLOG.md) | The asset + locator schema, the GPS scanner, tank aliases, the app-wins SQM override |
 | [`OVERNIGHT_OPTIMIZATION_RUNLOG.md`](OVERNIGHT_OPTIMIZATION_RUNLOG.md) | Rules 9-11: the manual fence bug, BM25 retrieval, idle logout, per-account throttle, benchmarked indexes, ⌘K material search |
 | [`docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md`](docs/EXPORTS_ROLES_SYSADMIN_RUNLOG.md) | Rules 7-8: the PDF overlap measurements, the global xlsx template, the Auditor role, power.sh + backup_db.sh |
 | [`docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md`](docs/SME_ORDERED_SUBSET_RULE_RUNLOG.md) | Rule 1c: the double-count, the 22,951-unit buy-list correction, suite BC |

@@ -1,8 +1,11 @@
 [package]
 name = "app"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+# Kept in step with tauri.conf.json and package.json — all three must read the
+# same number. `tauri build` names every installer from tauri.conf.json's
+# `version`, which is how v1.2.0 shipped as "GI Hub_0.1.0_x64-setup.exe".
+version = "1.2.0"
+description = "GI Hub — multi-site warehouse inventory and asset-management ERP"
+authors = ["General Industries"]
 license = ""
 repository = ""
 edition = "2021"
