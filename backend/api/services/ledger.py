@@ -102,6 +102,47 @@ async def write_audit(session: AsyncSession, username: str, action_type: str,
         target_table=target_table, details=details))
 
 
+async def attach_material_names(session: AsyncSession, items: list[dict], *,
+                                sap_key: str = "SAP_Code",
+                                code_key: str | None = None) -> list[dict]:
+    """Fill `Equipment_Description` (and the missing code) in-place from the
+    inventory master, for lists that carry only an identifier.
+
+    2026-08-05. A screen showing a bare `GI-6000012` or `1169` asks the reader
+    to know 452 codes by heart, so every list that names a material names it in
+    words too. Written as ONE helper rather than a join per endpoint because the
+    lists differ in which identifier they hold — lots and burn-rate carry the
+    SAP, PO returns carry the `Material_Code` — and both need the same answer.
+
+    Matched on TRIM, like every other SAP comparison in this file: the workbook
+    ships padded codes. Rows with no master entry keep a NULL description rather
+    than being dropped; the caller is showing history and an unmatched row is
+    the one most worth seeing.
+    """
+    if not items:
+        return items
+    lookup_by_code = code_key is not None and not any(i.get(sap_key) for i in items)
+    key = code_key if lookup_by_code else sap_key
+    wanted = {str(i[key]).strip() for i in items if i.get(key)}
+    if not wanted:
+        return items
+    col = inventory_t.c["Material_Code" if lookup_by_code else "SAP_Code"]
+    rows = (await session.execute(
+        select(func.trim(col).label("k"), inventory_t.c["SAP_Code"],
+               inventory_t.c["Material_Code"],
+               inventory_t.c["Equipment_Description"], inventory_t.c["UOM"])
+        .where(func.trim(col).in_(wanted)))).mappings().all()
+    master = {r["k"]: r for r in rows}
+    for i in items:
+        m = master.get(str(i.get(key) or "").strip())
+        i["Equipment_Description"] = m["Equipment_Description"] if m else None
+        i.setdefault("UOM", m["UOM"] if m else None)
+        for other in ("SAP_Code", "Material_Code"):
+            if not i.get(other):
+                i[other] = m[other] if m else None
+    return items
+
+
 async def sap_exists(session: AsyncSession, sap_code: str) -> bool:
     stmt = select(func.count()).select_from(inventory_t).where(
         func.trim(inventory_t.c["SAP_Code"]) == (sap_code or "").strip())

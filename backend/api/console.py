@@ -40,7 +40,7 @@ from .config import async_database_url
 from .db import get_session
 from .services import emailer
 from .services import whatsapp as wa
-from .services.ledger import _MD, write_audit
+from .services.ledger import _MD, attach_material_names, write_audit
 from .services.notifications import dispatch, notify
 from .stock import SQL_SITE_STOCK
 
@@ -354,7 +354,11 @@ async def admin_lots(status: Optional[str] = None, sap_code: Optional[str] = Non
         stmt = stmt.where(lots_t.c["Status"] == status)
     if sap_code:
         stmt = stmt.where(func.trim(lots_t.c["SAP_Code"]) == sap_code.strip())
-    return {"items": [dict(m) for m in (await session.execute(stmt)).mappings().all()]}
+    items = [dict(m) for m in (await session.execute(stmt)).mappings().all()]
+    # A lot is quarantined or disposed by SAP code alone; say what the thing IS
+    # before an admin takes stock out of circulation.
+    await attach_material_names(session, items)
+    return {"items": items}
 
 
 @admin.post("/lots/{lot_id}/status", summary="Quarantine / dispose / release a lot")

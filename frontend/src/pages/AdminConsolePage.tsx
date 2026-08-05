@@ -305,6 +305,7 @@ function LotsTab() {
   const cols: ColumnsType<ApiRow> = [
     { title: 'Lot', dataIndex: 'Lot_Number', key: 'Lot_Number' },
     { title: 'SAP', dataIndex: 'SAP_Code', key: 'SAP_Code' },
+    { title: 'Description', dataIndex: 'Equipment_Description', key: 'd', ellipsis: true },
     { title: 'Site', dataIndex: 'Site_ID', key: 'Site_ID' },
     { title: 'Received', dataIndex: 'Received_Date', key: 'r', render: (v) => v ?? '—' },
     { title: 'Expiry', dataIndex: 'Expiry_Date', key: 'e', render: (v) => v ?? '—' },

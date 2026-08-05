@@ -40,7 +40,32 @@ const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
 const STATUS_COLOR: Record<string, string> = {
   in_stock: 'green', issued: 'blue', returned: 'cyan',
   lost: 'red', scrapped: 'default',
+  working: 'green', not_in_use: 'gold', repair: 'orange',
 }
+
+/** The status picker, grouped by what the value actually says.
+ *
+ * Mirrors `assets._STATUS_VALUES` — the API rejects anything else with a 422,
+ * so a value added on one side and not the other fails loudly rather than
+ * writing a status nothing renders.
+ *
+ * CONDITION comes first because it is what somebody standing in front of the
+ * hammer knows: the workbook has no Status column, so this picker is where the
+ * condition gets recorded at all. */
+const STATUS_GROUPS = [
+  { label: 'Condition', options: [
+    { value: 'working', label: 'working' },
+    { value: 'not_in_use', label: 'not in use' },
+    { value: 'repair', label: 'under repair' },
+  ] },
+  { label: 'Custody', options: [
+    { value: 'in_stock', label: 'in stock' },
+    { value: 'issued', label: 'issued' },
+    { value: 'returned', label: 'returned' },
+    { value: 'lost', label: 'lost' },
+    { value: 'scrapped', label: 'scrapped' },
+  ] },
+]
 
 export default function AssetsPage() {
   const { message } = App.useApp()
@@ -327,7 +352,19 @@ export default function AssetsPage() {
           <Form.Item name="location_note" label="…or describe where it is">
             <Input placeholder="With the subcontractor, Bay 4" />
           </Form.Item>
-          <Form.Item name="holder" label="Held by"><Input /></Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="status" label="Status"
+                extra="The workbook has no Status column — this is where the
+                       condition gets recorded.">
+                <Select allowClear placeholder="working / in stock / …"
+                  options={STATUS_GROUPS} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="holder" label="Held by"><Input /></Form.Item>
+            </Col>
+          </Row>
           <Button type="primary" htmlType="submit" loading={register.isPending}>
             Register
           </Button>
@@ -358,8 +395,7 @@ export default function AssetsPage() {
             <Row gutter={8}>
               <Col span={12}>
                 <Form.Item name="status" label="Status">
-                  <Select options={['in_stock', 'issued', 'returned', 'lost', 'scrapped']
-                    .map((s) => ({ value: s, label: s }))} />
+                  <Select options={STATUS_GROUPS} />
                 </Form.Item>
               </Col>
               <Col span={12}>

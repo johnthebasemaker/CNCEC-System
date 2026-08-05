@@ -732,7 +732,8 @@ function VendorReturns() {
 
   const columns: ColumnsType<Row> = [
     { title: 'PO', dataIndex: 'PO_Number' },
-    { title: 'Material', dataIndex: 'Material_Code', render: (v) => v ?? '—' },
+    { title: 'Material', dataIndex: 'Material_Code', width: 130, render: (v) => v ?? '—' },
+    { title: 'Description', dataIndex: 'Equipment_Description', ellipsis: true },
     { title: 'Qty', dataIndex: 'Qty', align: 'right', render: (v) => Number(v) },
     { title: 'Reason', dataIndex: 'Reason', ellipsis: true },
     { title: 'Resupply', dataIndex: 'Expected_Resupply', render: (v) => (v ? String(v) : '—') },
