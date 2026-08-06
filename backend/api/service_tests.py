@@ -11457,6 +11457,61 @@ async def test_export_formula_injection():
           ws.cell(_XD, len(payloads) + 3).value == "Rubber Sheet 3mm",
           repr(ws.cell(_XD, len(payloads) + 3).value))
 
+    # --- Layer 1b: numbers-as-strings are NOT formulas --------------------------
+    # `-5` opens with a risky character but Excel reads it as the number -5.
+    # Defusing it would be pointless AND destructive: the SME workbooks sum
+    # their already-coerced rows with float(), so an apostrophe turns a negative
+    # subtotal into 0.0 in the GRAND TOTAL row.
+    from .reports import _defuse
+    numeric_strs = ["-5", "+3.2", "-1e4", "-0"]
+    check("bk: a string that is simply a NUMBER is left alone — Excel evaluates "
+          "nothing in '-5', and defusing it would break float() arithmetic",
+          all(_defuse(s) == s for s in numeric_strs),
+          repr([(s, _defuse(s)) for s in numeric_strs]))
+    check("bk: …but an EXPRESSION that merely starts like a number is still "
+          "defused — '-1+1' is the case that actually matters",
+          _defuse("-1+1") == "'-1+1" and _defuse("+1+1") == "'+1+1",
+          repr((_defuse("-1+1"), _defuse("+1+1"))))
+
+    # --- Layer 1c: the SME workbooks (xlsxwriter, NOT openpyxl) -----------------
+    # These bypass xlsx_style.xl_val entirely — different writer, different type
+    # dispatch — so they need their own coverage or the fix silently misses them.
+    from .sme_export_layouts import _cell as _sme_cell, _num as _sme_num, single_table_xlsx
+
+    check("bk: SME _cell defuses a formula, preserves real numbers, and still "
+          "maps None → '' (its original contract)",
+          _sme_cell('=1+1') == "'=1+1" and _sme_cell(-5) == -5
+          and _sme_cell(2.5) == 2.5 and _sme_cell(None) == "",
+          repr([_sme_cell(x) for x in ('=1+1', -5, 2.5, None)]))
+    check("bk: SME arithmetic invariant — _num(_cell(x)) still reads every "
+          "numeric form, including the negative strings _num() parses",
+          _sme_num(_sme_cell("-5")) == -5.0 and _sme_num(_sme_cell(-2.5)) == -2.5,
+          repr((_sme_num(_sme_cell("-5")), _sme_num(_sme_cell(-2.5)))))
+
+    SME_TAG = "svc-sme-formula"
+    sme_bytes = single_table_xlsx([{
+        "name": "BK", "title": "BK", "color_scheme": "dashboard",
+        "columns": ["Material", "Qty"],
+        "rows": [{"Material": f'=HYPERLINK("https://attacker.invalid","{SME_TAG}")',
+                  "Qty": 10.5},
+                 {"Material": "Rubber Sheet 3mm", "Qty": -2.5}],
+    }], "svc")
+    sws = _px.load_workbook(_io.BytesIO(sme_bytes)).active
+    scells = {(c.row, c.column): c for row in sws.iter_rows() for c in row}
+    tagged = [c for c in scells.values() if SME_TAG in str(c.value or "")]
+    gt_row = next((c.row for c in scells.values() if c.value == "GRAND TOTAL"), None)
+    check("bk: SME workbook — the payload exports defused and is NOT a formula "
+          "cell, even though this path writes through xlsxwriter",
+          len(tagged) == 1 and str(tagged[0].value).startswith("'=")
+          and tagged[0].data_type != "f",
+          f"n={len(tagged)} " + (f"{str(tagged[0].value)[:60]!r} {tagged[0].data_type}"
+                                 if tagged else ""))
+    check("bk: SME workbook — the GRAND TOTAL still sums to the true value "
+          "(10.5 + -2.5 = 8.0); this is the row that silently goes 0.0 if the "
+          "guard ever starts apostrophe-prefixing numbers",
+          gt_row is not None and sws.cell(gt_row, 2).value == 8.0,
+          f"gt_row={gt_row} value={sws.cell(gt_row, 2).value!r}" if gt_row else "no GRAND TOTAL row")
+
     # --- Layer 2: the real exploit path ----------------------------------------
     TAG = "svc-formula-injection"
     DATE = "2026-08-06"
