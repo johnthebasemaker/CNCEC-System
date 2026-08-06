@@ -52,14 +52,29 @@ def _hex(c: str) -> str:
 
 def xl_val(v):
     """Coerce to something openpyxl can write, preserving numeric types so the
-    cell stays a number in Excel rather than becoming text."""
+    cell stays a number in Excel rather than becoming text.
+
+    Strings are additionally run through `reports._defuse`, which apostrophe-
+    prefixes anything Excel would otherwise evaluate as a formula. openpyxl
+    infers the cell's data type from the value, so a bare `=…` string becomes a
+    FORMULA cell — and the free-text columns here (Remarks, override reasons,
+    force-close notes) are written by the lowest-privileged role and read by
+    admins. See `reports._defuse` for the full rationale.
+
+    The numeric branches below are deliberately untouched: `_defuse` only ever
+    rewrites `str`, so quantities, unit costs and valuations keep their Excel
+    number type. Do not "simplify" this by defusing before the type checks.
+    """
     if v is None:
         return ""
     if isinstance(v, bool):
         return v
     if isinstance(v, Decimal):
         return float(v)
-    if isinstance(v, (int, float, str)):
+    if isinstance(v, str):
+        from .reports import _defuse  # deferred: reports imports this module
+        return _defuse(v)
+    if isinstance(v, (int, float)):
         return v
     if isinstance(v, datetime):
         return v

