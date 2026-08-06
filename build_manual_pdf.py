@@ -106,6 +106,11 @@ ROLE_MANUAL_RECIPES = {
             "10. Data Model & Concept Reference",
             "11. Status Codes, Reason Codes & Glossary",
             "12. FAQ — Master Index by Role",
+            # Chapter 21 carries the Locator, the serialised Assets register and
+            # the note about apostrophes in downloads. Both of those pages are
+            # minLevel 0 and a Store Keeper uses them daily, so leaving 21 out
+            # shipped a booklet that never mentioned two of their own menu items.
+            "21. 2026-08 Feature Update — What Changed",
         ],
     },
     "supervisor": {
@@ -157,6 +162,10 @@ ROLE_MANUAL_RECIPES = {
             "15. Warehouse Portal Manual",
             "16. Cross-Role Procurement Walk-through",
             "11. Status Codes, Reason Codes & Glossary",
+            # Same reason as the Store Keeper booklet: scanning a rack to get a
+            # count checklist, and the serialised asset register, are warehouse
+            # work described only in chapter 21.
+            "21. 2026-08 Feature Update — What Changed",
         ],
     },
     "admin": {

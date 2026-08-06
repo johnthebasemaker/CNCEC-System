@@ -1,16 +1,19 @@
 # SESSION HANDOVER — read this first, then `PROJECT_HANDOVER.md`
 
-> **Updated 2026-08-05**, closing the asset-management + documentation session.
-> Branch **`main`**, clean, at **`5cd44b7`** (PR #30 merged), plus
-> `chore/version-bump-and-docs-polish` for the version and manual work.
-> The project is **feature-complete and stable**. Every gate is green.
-> **Nothing is mid-flight — there is no half-finished work to pick up.**
+> **Updated 2026-08-06**, closing the security-audit session.
+> Branch **`main`**, clean, at **`7e89674`** (PR #33 merged).
+> The project is **feature-complete, stable and security-audited**.
+> Every live gate is green. **Nothing is mid-flight — there is no half-finished
+> work to pick up.**
 >
 > **Shipped version is `1.2.0`**, and three files must always agree on it:
 > `frontend/src-tauri/tauri.conf.json`, `frontend/package.json`,
 > `frontend/src-tauri/Cargo.toml`. They had drifted to `0.1.0 / 0.0.0 / 0.1.0`,
 > which is why the v1.2.0 release published installers named `0.1.0`.
 > `release-desktop.yml` now **fails the build** on drift or on a tag mismatch.
+>
+> **Your first decision next session is a CHOICE, not a queue** — Tier 1 security
+> hardening or the Hetzner deployment. Both are spelled out in §8 below.
 
 ---
 
@@ -95,6 +98,41 @@ written.
 
 ## 3. What was added most recently
 
+> **2026-08-06 — the security audit.** A full-codebase review (`SECURITY_REVIEW_2026-08-05.md`),
+> then two fix branches: PR #32 `fix/formula-injection-and-csp` and PR #33
+> `fix/sme-export-and-nginx-headers`. Forward roadmap in
+> [`SECURITY_SUGGESTIONS.md`](SECURITY_SUGGESTIONS.md).
+>
+> * **The audit result is the headline: no High-severity findings.** No SQL
+>   injection, no authentication bypass, no XSS sink, no unsafe deserialization.
+>   Auth, RBAC, secrets handling and the AI NL→SQL lane all held up under
+>   deliberate attack review. Several defenses are better than typical — refresh
+>   families that revoke on replay, view-only enforced by middleware rather than
+>   per-endpoint, scoping that fails closed on `''`.
+> * **One Medium finding, now fixed and pinned: spreadsheet formula injection.**
+>   `consumption."Remarks"` is typed by a store keeper (level 0) and exported to
+>   an HOD's Excel. `=HYPERLINK(...)` in that field exfiltrated the row on one
+>   click. See **rule 12** in `PROJECT_HANDOVER.md` — it is the one with a trap.
+> * ⚠️ **THE TRAP, worth reading before you touch an export.** The guard must
+>   never apostrophe-prefix a NUMBER, including a numeric string. In the SME
+>   workbooks `_cell()` runs BEFORE `_num()` sums those rows into GRAND TOTAL,
+>   and `_num()` parses with `float()`. Defusing `"-5"` makes every negative
+>   subtotal silently become `0.0` in a total that still looks plausible. So a
+>   string that IS a number is left alone; `-1+1` is not a number and IS defused.
+> * **Three export writers, three different libraries, all must be hooked** —
+>   `csv.writer`, openpyxl and xlsxwriter. The SME path was missed on the first
+>   pass precisely because xlsxwriter does its own type dispatch and could never
+>   inherit the openpyxl guard.
+> * **A Content-Security-Policy now ships** in `deploy/nginx.conf`, tuned against
+>   the real build. `style-src` keeps `'unsafe-inline'` because Ant Design v5 is
+>   CSS-in-JS and the UI blanks without it. `X-Frame-Options` stays `SAMEORIGIN`,
+>   not `DENY` — the Document Library previews PDFs in a same-origin iframe.
+> * ⚠️ **nginx `add_header` REPLACES, it does not merge.** `location /assets/`
+>   declares `Cache-Control` and so had been silently dropping every security
+>   header from the bundles. The three are now repeated verbatim inside it.
+>   **Add a header to the server block and you must add it there too.**
+> * **Gate moved: service tests 1228 → 1245** (suite BK, 17 checks).
+>
 > **2026-08-05 (late) — locations from the workbook, and the documentation pass.**
 > `feat/excel-location-sync-and-ui` (PR #30) and
 > `chore/version-bump-and-docs-polish`. Full account in
@@ -163,7 +201,7 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1228 / 0** (suites A…BJ) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1245 / 0** (suites A…BK) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
@@ -286,8 +324,50 @@ again — pushing an existing tag is a no-op.
 | [`EXCEL_LOCATION_SYNC_RUNLOG.md`](EXCEL_LOCATION_SYNC_RUNLOG.md) | Rack + asset seeding, "app wins", and what to type in the spreadsheet |
 | [`OVERNIGHT_ASSET_TRACKING_RUNLOG.md`](OVERNIGHT_ASSET_TRACKING_RUNLOG.md) | Asset schema, the GPS scanner, tank aliases |
 | [`USER_MANUAL.md`](USER_MANUAL.md) | 21 chapters, user-facing. **Also the chatbot's corpus, so edit carefully.** Written for non-technical readers: no ASCII art, no shell commands, no source identifiers — keep it that way |
+| [`SECURITY_REVIEW_2026-08-05.md`](SECURITY_REVIEW_2026-08-05.md) | The audit itself — the one Medium finding, and an eleven-category "verified clean" list so the next audit does not re-tread it |
+| [`SECURITY_SUGGESTIONS.md`](SECURITY_SUGGESTIONS.md) | Forward hardening roadmap in three tiers, sequenced, with a "deliberately NOT recommended" section |
 | [`docs/GI_Hub_Executive_Presentation.html`](docs/GI_Hub_Executive_Presentation.html) | 18-slide management deck. Open in a browser; ← → to navigate, `F` for fullscreen |
 
 ---
 
-**Status: stable, fully documented, all gates green. Safe to restart.**
+## 8. Start here next session — choose ONE track
+
+Nothing is half-finished, so this is a genuine choice rather than a queue.
+
+### Track A — Tier 1 security hardening (~3 days)
+
+From [`SECURITY_SUGGESTIONS.md`](SECURITY_SUGGESTIONS.md). None of these fix a
+known-exploitable hole; they reduce residual risk.
+
+1. **Enforce 2FA on `admin` and `logistics`.** The single highest-value item on
+   the whole list. TOTP is fully built and correctly hardened — including the
+   step-up password check most implementations miss — but it is **opt-in**, so
+   an admin password is currently the only factor guarding user creation, every
+   other account's password reset, and the database backup.
+   ⚠️ **Enrol at least two admin accounts BEFORE enforcement flips**, or you lock
+   yourselves out of your own console.
+2. **Move the OTP and 2FA limiters to a shared store.** `deploy/Dockerfile.api`
+   runs `--workers 4` and those budgets are per-process dictionaries, so the real
+   limits are roughly 4x what the code says. The OTP guard is the one worth doing
+   first — it is the limiter with a direct financial cost per bypass. The login
+   throttle already shows the pattern (`login_attempts` table).
+3. **Add dependency + static scanning to CI.** There is none today, and no
+   Dependabot. Add `pip-audit`, `npm audit`, `bandit` as a **non-blocking** job
+   first — a blocking gate on day one against an Ant Design tree just teaches
+   everyone to bypass it.
+
+### Track B — Hetzner production deployment
+
+Unchanged, ready, paused by decision. Runbook
+[`tools/migration/README.md`](tools/migration/README.md), kit
+[`docs/DEPLOY.md`](docs/DEPLOY.md) + [`deploy/`](deploy/). Operator items are
+listed under *FUTURE* in `PROJECT_HANDOVER.md` — generate the real `JWT_SECRET`
+and `POSTGRES_PASSWORD`, set `GI_ENV=production`, approve the last Meta template,
+add the Cloudflare Access bypass for the native apps.
+
+> **If deployment is imminent, do A1 and A3 first.** Both are cheap, and both are
+> harder to retrofit once real users are on the box.
+
+---
+
+**Status: stable, fully documented, security-audited, all gates green. Safe to restart.**

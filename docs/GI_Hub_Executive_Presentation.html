@@ -134,7 +134,7 @@
       <span class="pill">v1.2.0 · Web · Windows · macOS · Android</span>
       <span class="pill">React · FastAPI · PostgreSQL</span>
       <span class="pill">7 Roles · Multi-Site</span>
-      <span class="pill">1,917 automated checks</span>
+      <span class="pill">1,934 automated checks</span>
       <span class="pill">Private on-premise AI</span>
     </div>
   </section>
@@ -148,7 +148,7 @@
       one database with role-based controls and a full audit trail.</p>
     <div class="grid g4">
       <div class="card"><div class="stat">7</div><div class="stat-l">Role-based portals</div></div>
-      <div class="card"><div class="stat">1,917</div><div class="stat-l">Automated checks green</div></div>
+      <div class="card"><div class="stat">1,934</div><div class="stat-l">Automated checks green</div></div>
       <div class="card"><div class="stat">4</div><div class="stat-l">Platforms shipped</div></div>
       <div class="card"><div class="stat">100%</div><div class="stat-l">Audited write paths</div></div>
     </div>
@@ -198,7 +198,7 @@
       <div class="card"><h3><span class="ico">🔌</span>Services</h3><p>On-premise AI assistant, WhatsApp Business, e-mail, PDF and Excel generation, nightly backups — each isolated and independently replaceable.</p></div>
     </div>
     <div class="note">
-      <b>Quality gate:</b> <b>1,917 automated checks</b> guard every release — 1,228 service-level tests,
+      <b>Quality gate:</b> <b>1,934 automated checks</b> guard every release — 1,245 service-level tests,
       599 data-integrity checks, 57 end-to-end browser journeys and 33 estimator-arithmetic assertions,
       plus 1,313 cross-engine parity comparisons. <b>No change ships unless every suite is green.</b>
     </div>
@@ -419,11 +419,20 @@
     <div class="kicker">Trust the numbers</div>
     <h2>Built for <span class="acc">integrity</span></h2>
     <div class="grid g2">
-      <div class="card"><h3><span class="ico">🧪</span>1,917 automated checks</h3><p>Schema, every workflow, permission lock, estimator calculation and end-to-end browser journey. Runs before every release; the build is gated on green.</p></div>
+      <div class="card"><h3><span class="ico">🧪</span>1,934 automated checks</h3><p>Schema, every workflow, permission lock, estimator calculation and end-to-end browser journey. Runs before every release; the build is gated on green.</p></div>
       <div class="card"><h3><span class="ico">🧾</span>Immutable audit trail</h3><p>Posted records are never edited in place. Corrections happen through reversals; rejected items are archived, not deleted. Asset movements are append-only.</p></div>
       <div class="card"><h3><span class="ico">📐</span>Derived, not declared</h3><p>Stock and estimator figures are computed from movements — eliminating the "someone typed the wrong number" class of error entirely.</p></div>
       <div class="card"><h3><span class="ico">🔒</span>Fail-closed permissions</h3><p>Checked centrally by request type rather than screen by screen — so a feature written next year is closed to a read-only account from the moment it exists.</p></div>
     </div>
+    <div class="note" style="border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.08)">
+      <b style="color:var(--green)">✔ Independent security audit passed — August 2026.</b>
+      A line-by-line review of the entire codebase — sign-in, permissions, database access, file uploads,
+      the AI assistant and the browser application — returned <b style="color:var(--green)">zero
+      high-severity vulnerabilities</b>. No way to bypass a login, no way to reach another site's data,
+      no way to make the server run something it should not. The single moderate finding was
+      <b>closed the same week</b>: exported spreadsheets are now hardened so that text typed by a user can
+      never execute as a formula when a manager opens the file — while every quantity, price and total in
+      those files stays a working number.</div>
     <div class="note"><b>Why "fail-closed" is the load-bearing word:</b> a permission check added screen by screen is
       only as reliable as the developer who remembers it, and <b>the one that gets forgotten fails open</b> — the
       write succeeds and nothing looks wrong. Checking centrally inverts that. <b>126 of the 143 state-changing
@@ -481,12 +490,16 @@
       <tr><td><b>Warehouse Rack Locator</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live · New</span></td><td>Search and ⌘K integration shipped. Awaiting shelf labels to be assigned.</td></tr>
       <tr><td><b>Native applications</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Shipped</span></td><td>v1.2.0 for Windows, macOS and Android, built automatically from a release tag.</td></tr>
       <tr><td><b>Auditor role &amp; AI assistant</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Live</span></td><td>Read-only auditing and the on-premise assistant both in production.</td></tr>
-      <tr><td><b>Server deployment</b></td><td><span class="pill" style="border-color:var(--low);color:var(--low)">▶ Remaining</span></td><td>The full stack, reverse proxy, TLS and continuous deployment are built and tested; provisioning the server is the last step.</td></tr>
-      <tr><td><b>Next capabilities</b></td><td><span class="pill" style="border-color:var(--indigo);color:var(--indigo)">▷ Planned</span></td><td>Stock reservations, unit-of-measure conversion, automatic purchase-request drafting.</td></tr>
+      <tr><td><b>Security audit</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Passed · New</span></td><td>Full-codebase review, August 2026. Zero high-severity findings; the one moderate finding closed and permanently guarded by an automated test.</td></tr>
+      <tr><td><b>Version 1.2.0</b></td><td><span class="pill" style="border-color:var(--green);color:var(--green)">● Released</span></td><td>Asset tracking, the rack locator, corrected estimator order logic and role-specific manuals — all live.</td></tr>
+      <tr><td><b>Security hardening — stage 1</b></td><td><span class="pill" style="border-color:var(--low);color:var(--low)">▶ Next</span></td><td>Mandatory two-step sign-in for administrators, stricter limits on verification codes, and automated checking of third-party components. Roughly three days.</td></tr>
+      <tr><td><b>Server deployment</b></td><td><span class="pill" style="border-color:var(--low);color:var(--low)">▶ Next</span></td><td>The full stack, reverse proxy, TLS and continuous deployment are built and tested; provisioning the server is the last step.</td></tr>
+      <tr><td><b>Future capabilities</b></td><td><span class="pill" style="border-color:var(--indigo);color:var(--indigo)">▷ Planned</span></td><td>Stock reservations, unit-of-measure conversion, automatic purchase-request drafting.</td></tr>
     </table>
-    <div class="note"><b>Direction:</b> the platform is <b>feature-complete for its current scope</b> — inventory,
-      procurement, material and labor planning, and now asset management. <b>One task remains before full
-      production: provisioning the server.</b></div>
+    <div class="note"><b>Direction:</b> <b>version 1.2.0 is released</b> and the platform is
+      <b>feature-complete for its current scope</b> — inventory, procurement, material and labor planning,
+      asset management, and an independently audited security posture. <b>Two tasks remain, and they can run
+      in either order: stage-one security hardening, and provisioning the production server.</b></div>
   </section>
 
   <!-- 13 · CLOSE -->
@@ -496,7 +509,7 @@
     <div class="grid g4" style="margin-top:2rem;width:min(900px,90%)">
       <div class="card center"><div class="stat">1</div><div class="stat-l">Source of truth</div></div>
       <div class="card center"><div class="stat">7</div><div class="stat-l">Governed roles</div></div>
-      <div class="card center"><div class="stat">1,917</div><div class="stat-l">Checks green</div></div>
+      <div class="card center"><div class="stat">1,934</div><div class="stat-l">Checks green</div></div>
       <div class="card center"><div class="stat">0</div><div class="stat-l">Hand-edited stock</div></div>
     </div>
     <p class="sub" style="text-align:center;margin-left:auto;margin-right:auto">
