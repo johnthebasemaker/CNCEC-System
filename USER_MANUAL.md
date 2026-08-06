@@ -225,9 +225,9 @@ Every page shares this sidebar. Reading top to bottom:
 
 | Variant | Used by | Visual |
 |---|---|---|
-| `render_brand_header` | Live Dashboard, Entry Log | Gold subtitle accent + current date |
-| `render_brand_header_hod` | HOD Portal | Purple subtitle accent + current date |
-| `render_brand_header_admin` | Admin Portal | Gold accent + green/amber pulse chip ("All systems operational" / "Degraded") + current date |
+| Standard header | Live Dashboard, Entry Log | Gold subtitle accent + current date |
+| HOD header | HOD Portal | Purple subtitle accent + current date |
+| Admin header | Admin Portal | Gold accent + green/amber pulse chip ("All systems operational" / "Degraded") + current date |
 
 ## 3.4 Bug / Feature reporting dialog
 
@@ -274,7 +274,7 @@ Sits between the role card and the navigation radio. Every signed-in user sees t
 | Vendor return raised (Logistics) | Any role raising a return |
 | Delivery reminder T-2 / T-1 / T-0 | The daily sweep job (see §9) |
 
-The bell is tolerant — if a notification helper errors, the badge silently shows 0 instead of crashing the sidebar. In-app notifications ALWAYS fire; the WhatsApp side is gated by toggles in `config.WHATSAPP_TRIGGERS` (see §9).
+The bell is tolerant — if the notification lookup fails, the badge silently shows 0 instead of breaking the sidebar. In-app notifications ALWAYS fire; the WhatsApp side is gated by the per-event WhatsApp toggles in the system settings (see §9).
 
 ## 3.5 Overdue Returnable banner (Store Keepers only)
 
@@ -406,7 +406,7 @@ When activated:
 
 #### F. 2. Fill Entry Details (dynamic form)
 
-Fields appear based on the `pending_issues` schema. Every required field is marked with `*`.
+The form shows a field for every detail an issue entry carries. Every required field is marked with an asterisk.
 
 | Field | Type | Purpose |
 |---|---|---|
@@ -437,7 +437,7 @@ Validates that:
 - Quantity ≤ current site stock (over-issue guard)
 - Expiry override is checked when needed
 
-On success: inserts a `pending_issues` row with `status='draft'`, toasts `✅ Added to staging queue`, reruns the page.
+On success: the entry is added to your staging queue as a draft, a "✅ Added to staging queue" confirmation appears, and the page refreshes.
 
 ### 4.3.4 Staging Queue section
 
@@ -446,7 +446,7 @@ On success: inserts a `pending_issues` row with `status='draft'`, toasts `✅ Ad
 | **📋 Staging Queue header + count badge** | Shows how many draft rows you've accumulated |
 | **Data editor table** | Edit any row inline before submitting |
 | **💾 Save Draft Edits button** | Persists edits in-place (rows stay as drafts) |
-| **📨 Submit Grid to HOD button** | Flips all draft rows to `status='pending_hod'` + queues a WhatsApp alert to the site HOD with the full item list |
+| **📨 Submit Grid to HOD button** | Moves every draft row to awaiting-HOD-approval and queues a WhatsApp alert to the site HOD with the full item list |
 
 After submission, the rows are locked from your view — they appear in HOD Portal → EOD Commit tab for approval.
 
@@ -487,7 +487,7 @@ When picked, a blue-tinted info card shows:
 
 #### C. Add to Receipt Queue ⬇️ button
 
-Validates: material picked, required fields populated. Inserts a `pending_receipts` row with `status='draft'`.
+Checks that a material is picked and every required field is filled, then adds the line to your receipt draft queue.
 
 ### 4.4.0 🚚 Incoming Delivery Notes from Warehouse (NEW in v3.0)
 
@@ -512,7 +512,7 @@ When DNs are inbound, each appears as its own container:
 - Partial receipts (the current flow assumes you confirm the full DN qty — for partials, raise a Vendor Return on the diff after confirming and ask your HOD)
 
 This is the FINAL step in the procurement chain. After you click Mark as Received:
-- Logistics sees `dn_received_by_sk` in their notifications
+- Logistics sees a "DN received at site" entry in their notifications
 - Warehouse sees the same
 - The PO and PR move toward closure if this DN completes the order
 
@@ -523,7 +523,7 @@ This is the FINAL step in the procurement chain. After you click Mark as Receive
 | **📋 Receipt Draft Queue header + count badge** | Number of drafts you've accumulated |
 | **Data editor table** | Inline edit before submit |
 | **💾 Save Draft Edits button** | Persists |
-| **📨 Submit to HOD for Approval button** | Flips drafts to `status='pending_hod'` + WhatsApp alert to HOD with item list |
+| **📨 Submit to HOD for Approval button** | Moves your drafts to awaiting-HOD-approval and sends the HOD a WhatsApp alert with the item list |
 
 ---
 
@@ -546,7 +546,7 @@ A two-step camera flow sits at the top of the tab. Use it to skip typing borrowe
 **Step 2 — Scan the tool**
 
 4. After a successful badge scan, a second camera input appears. Point it at the tool.
-5. The active YOLO model (managed in **Admin Portal → 🛠️ Tool Catalogue**, see also `docs/cv_training_guide.md` for how the model gets trained and promoted) classifies the image. Three outcomes:
+5. The active image-recognition model (managed in **Admin Portal → 🛠️ Tool Catalogue**, which is also where a new model is trained and promoted) classifies the image. Three outcomes:
    - **Confidence ≥ 0.75** → ✅ Auto-fill. The detected tool name + borrower details flow into the manual form below; review and click "Issue Item 📤".
    - **Confidence 0.30–0.74** → ⚠️ A "Top candidates" radio appears. Pick the right one and click "Use this tool". The form pre-fills.
    - **No active CV model** OR **confidence < 0.30** → 🤖 An info banner explains the fallback. Borrower fields stay pre-filled; type the tool name into the manual form yourself.
@@ -555,7 +555,7 @@ A two-step camera flow sits at the top of the tab. Use it to skip typing borrowe
 
 **What happens if the AI is wrong**
 
-You're never locked in. Every Smart Scan write-through goes into the *manual* form's fields — Name, Phone, Material name. Edit anything that's wrong before clicking "Issue Item 📤". The submitted record stores `cv_detected=1` and `cv_confidence` so admin reports can later show adoption + accuracy telemetry. Manually-corrected loans don't get tagged as CV — that's intentional, see §10 for the data model details.
+You're never locked in. Every Smart Scan write-through goes into the *manual* form's fields — Name, Phone, Material name. Edit anything that's wrong before clicking "Issue Item 📤". The submitted record records that the camera made the identification, and how confident it was, so admin reports can later show adoption and accuracy. Manually-corrected loans are not tagged as camera-identified — that's intentional, see §10 for the data model details.
 
 **Automatic WhatsApp reminders (Phase 6E)**
 
@@ -568,7 +568,7 @@ Once a loan is in the system, the WhatsApp worker fires four reminders automatic
 | **T+2h** (2 hours overdue) | warning | Site SK badge | Borrower + every Site SK |
 | **T+24h** (24 hours overdue) | critical | Site SK + Supervisor badges | Borrower + every Site SK + every Site Supervisor |
 
-The borrower's phone is resolved first from the Employees master (CV-scanned loans) and falls back to the manually-typed `borrower_phone` column for legacy/manual loans. The system de-dupes per loan + offset so restarting the worker mid-day never causes double-fires. Admins can mute any of the four events via `config.WHATSAPP_TRIGGERS` if a particular escalation gets too noisy.
+The borrower's phone is taken first from the Employees master (for badge-scanned loans) and falls back to the phone number typed on the loan itself for older or manually-entered loans. The system remembers which reminders it has already sent for each loan, so restarting the reminder service mid-day never causes double-fires. Admins can mute any of the four events with the per-event WhatsApp toggles if a particular escalation gets too noisy.
 
 ### 4.5.1 ➕ Issue a Returnable Item — expander (expanded by default)
 
@@ -591,7 +591,7 @@ Shows all borrowed (not yet returned) items at your site.
 - **Borrowed items table (styled HTML)** with columns: ID, Material, UOM, Qty, Borrower, Phone, Given Time, Expected Return, **Status** (pill: green "On Loan" / red "⚠️ Overdue")
 - **Mark as Returned section:**
   - **Selectbox** of borrowed items
-  - **✅ Mark as Returned button** — updates `status='returned'`, busts cache, toast confirms
+  - **✅ Mark as Returned button** — marks the loan returned, refreshes the figures, and confirms on screen
 
 ---
 
@@ -642,7 +642,7 @@ For reconciling physical shelf count with system stock when they don't match (da
 | Element | Purpose |
 |---|---|
 | **Amber warning banner** | "Submitting this sends the count to your HOD for approval. No stock changes until they approve." |
-| **📤 Submit Count for HOD Approval button** | Disabled while variance = 0. On success: writes to `stock_adjustments` with `status='pending_hod'`, queues WhatsApp to site HOD with count details, audit-logs. |
+| **📤 Submit Count for HOD Approval button** | Disabled while the variance is 0. On success the count is filed as a stock adjustment awaiting HOD approval, a WhatsApp with the count details goes to the site HOD, and the submission is audit-logged. |
 
 ### 4.6.4 Recent Adjustments at This Site (history)
 
@@ -767,7 +767,7 @@ The Live Dashboard is the at-a-glance view of every catalogue item with current 
 
 ### 5.2.1 Brand header
 
-`render_brand_header("Live Warehouse Stock Dashboard")` — gold subtitle + today's date.
+Reads "Live Warehouse Stock Dashboard" — gold subtitle + today's date.
 
 ### 5.2.2 Hero metric strip (4 cards)
 
@@ -778,19 +778,19 @@ The Live Dashboard is the at-a-glance view of every catalogue item with current 
 | **Below minimum** | Count | Green=0, Amber<10, Red>=10. Delta: "all healthy" or "needs reorder" |
 | **Expiring / expired** | Count | Green=0, Amber<10, Red>=10. Delta: "shelf-life clear" or "review HOD Portal" |
 
-### 5.2.3 🤖 Ask in plain English (AI search) — expander (if AI_ENABLED)
+### 5.2.3 🤖 Ask in plain English (AI search) — expander (when the local AI assistant is switched on)
 
-If Ollama is running locally with the `qwen2.5-coder:7b` model:
+Available when the local AI service is installed and running on the server:
 
 | Element | Purpose |
 |---|---|
-| **Your question text input** | Natural language query, e.g., "items below minimum at site B" |
-| **Search button** | Translates to SQL via local LLM, runs read-only |
+| **Your question text input** | Ask in ordinary words, e.g., "items below minimum at site B" |
+| **Search button** | The local AI turns your question into a database lookup and runs it in read-only mode |
 | **Clear button** | Resets the panel |
 | **Result table** | Returned rows |
-| **"Show SQL the AI generated" expander** | Shows the safe SELECT the LLM produced |
+| **Show the lookup the AI built** | Reveals the read-only query the assistant produced, so you can check it before trusting the answer. It can only read — it is never allowed to change anything. |
 
-If Ollama is NOT running: an amber card displays setup instructions (`ollama serve`).
+If the local AI service is not running, an amber card explains how an Admin starts it.
 
 ### 5.2.4 Burn alert banner
 
@@ -808,7 +808,7 @@ Appears at the top of the table area when there are items burning to zero within
 | Minimum_Qty | `inventory.Minimum_Qty` | Reorder threshold |
 | Unit_Cost | `inventory.Unit_Cost` | Set via Admin → DB Editor |
 | Stock_Value | Computed | `Current_Stock × Unit_Cost`, rounded 2 dp |
-| **Status** | Computed badge | OK / Low / Below Min / Empty with colored pill via `STATUS_BADGE_JS` |
+| **Status** | Computed badge | OK / Low / Below Min / Empty, shown as a colour-coded pill |
 
 You can sort by any column — sorting by `Stock_Value` shows your biggest SAR exposure first.
 
@@ -862,7 +862,7 @@ A: By design — site isolation. Only Admin sees all sites. If you need to know 
 A: Items have no `Unit_Cost` set. Ask Admin to enter costs in Admin → Master DB Editor → inventory table.
 
 **Q: AI search says "Ollama not running."**
-A: Local AI is optional. Admin must install Ollama and pull the `qwen2.5-coder:7b` model. Without it, the system still works — you just type into the standard grid filters.
+A: Local AI is optional. An Admin has to install the local AI service and download the language model it uses. Without it, the system still works — you just type into the standard grid filters.
 
 **Q: The Stock_Value column is empty for some items.**
 A: Those items have `Unit_Cost = 0`. The valuation is correct — they're tracked in qty but not in money.
@@ -896,17 +896,17 @@ The HOD owns their site's inventory ledger. Every transaction flows through thei
 
 ### 6.2.1 Page header
 
-`render_brand_header_hod("HOD Management Portal")` — purple subtitle + today's date.
+Reads "HOD Management Portal" — purple subtitle + today's date.
 - **Page title:** "📋 HOD Portal" + "Managing Site: <SITE_ID>"
 
 ### 6.2.2 Hero metric strip (4 cards)
 
 | Card | Source | Notes |
 |---|---|---|
-| **Site stock value** | `cached_total_inventory_value(site_id)` | Delta: `<SAR>` consumed (30d) — site-scoped |
-| **Below minimum (site)** | `cached_low_stock_items(site_id)` count | Green/amber/red |
-| **Expiring / expired** | `cached_short_dated_stock(site_id)` count | Green/amber/red |
-| **Pending receipts to approve** | Count from `pending_receipts` where `status='pending_hod'` at your site | Neutral or amber |
+| **Site stock value** | Total value of stock held at your site | Delta: SAR consumed in the last 30 days — site-scoped |
+| **Below minimum (site)** | Count of items at your site below their reorder threshold | Green/amber/red |
+| **Expiring / expired** | Count of short-dated and expired items at your site | Green/amber/red |
+| **Pending receipts to approve** | Receipts at your site waiting on your approval | Neutral or amber |
 
 ### 6.2.3 Tab strip (10 tabs)
 
@@ -952,7 +952,7 @@ The single most consequential action in the system: committing the day's staged 
 
 | Button | Action |
 |---|---|
-| **✅ Approve All Pending** | Sets every pending row to `status='approved'`. Disabled when count = 0. |
+| **✅ Approve All Pending** | Approves every pending row in one action. Disabled when there are none. |
 | **📤 Commit EOD to Master** | Opens the type-COMMIT modal. See §6.3.7 |
 
 ### 6.3.5 Main pending-issues table
@@ -986,8 +986,8 @@ Below the table, top 20 actionable rows render as cards:
 |---|---|
 | **Card line 1** | SAP · Material Code · Material name · **Qty UOM** |
 | **Card line 2** | Date · Work Type · PR · Tank · Serial · By · To · Remarks (only fields with values) |
-| **✓ button** | Approve this single row (sets `status='approved'`) |
-| **✗ button** | Reject this single row (sets `status='rejected'`) |
+| **✓ button** | Approve this single row |
+| **✗ button** | Reject this single row |
 
 ### 6.3.7 EOD Commit confirmation modal (type-COMMIT dialog)
 
@@ -1011,7 +1011,7 @@ Before committing, the system checks that nothing would push stock below zero. I
 | **Warning banner** | "You are about to commit N pending row(s)..." |
 | **Type COMMIT text input** | Must type exactly `COMMIT` to enable the button |
 | **Cancel button** | Abort |
-| **Confirm Commit button (red)** | moves rows to `consumption`, deletes from `pending_issues`, busts caches, queues a post-EOD low-stock alert to the HOD if applicable. |
+| **Confirm Commit button (red)** | Moves every approved row out of staging and into the permanent consumption ledger, refreshes the stock figures, and — if the commit leaves anything below its minimum — queues a post-EOD low-stock alert to the HOD. |
 
 A confirmation appears once the commit succeeds.
 
@@ -1048,7 +1048,7 @@ For requesting material from another branch.
 |---|---|
 | **📊 Live Stock at <target> header** | Shows availability at the target site |
 | **Available Quantity metric** | Live stock at target |
-| **Suggested Transfer Qty metric** | `min(requested, available)` |
+| **Suggested Transfer Qty metric** | Whichever is smaller — the quantity you asked for, or the quantity actually available at the target site |
 | **➕ Add to List button** | Adds to the cart |
 
 ### 6.4.3 🛒 Your Request Cart section
@@ -1068,8 +1068,8 @@ Where a HOD sees requests **addressed to their site** from other HODs.
 | **Intro caption** | "Requests addressed to <site>" |
 | **Incoming table (styled HTML)** | From · SAP · Material · Qty · By · Notes · When |
 | **Per-row Approve / Reject controls** (top 10) | ✓ Approve and ✗ Reject buttons |
-| Approval action | Calls `update_request_status(status='approved')` + audit |
-| Rejection action | Same with `status='rejected'` |
+| Approval action | Marks the request approved and writes an audit entry |
+| Rejection action | Marks the request rejected, also audited |
 
 ---
 
@@ -1109,13 +1109,13 @@ Amber banner: "⏳ N pending receipt(s) require your approval before stock level
 
 ### 6.6.2 ✅ Approve All button
 
-Bulk: calls `commit_pending_receipts(site_id, username)` which:
-1. Iterates every pending receipt
-2. Calls `process_receipt_delivery` (which creates lots if Expiry_Date set)
-3. Posts to `receipts` table
-4. Auto-closes PR if fulfilled
-5. Deletes the staged rows
-6. Busts caches, audit-logs, success toast
+Approves every pending receipt at your site in one action. For each one, the system:
+1. Works through every pending receipt in turn
+2. Records the delivery (creating a lot record where an expiry date was entered)
+3. Posts it to the permanent receipts ledger
+4. Auto-closes the PR if it is now fully fulfilled
+5. Removes the staged row
+6. Refreshes the stock figures, writes an audit entry, and confirms with a success message
 
 ### 6.6.3 Receipt table
 
@@ -1126,7 +1126,7 @@ Columns: Date · SAP · Equipment_Description · UOM · Quantity · Supplier · 
 | Element | Purpose |
 |---|---|
 | **Card line** | SAP · Qty UOM · Supplier |
-| **✗ Reject button** | Soft-reject (row stays as `status='rejected'`), preserves audit, audit-logs with reason |
+| **✗ Reject button** | Marks the row rejected rather than deleting it, so the history is preserved, and records your reason in the audit log |
 
 ---
 
@@ -1154,8 +1154,8 @@ Below the table:
 |---|---|
 | **Card line 1** | SAP · Material · System X → Counted Y · Variance |
 | **Card line 2** | Reason label · submitted by · notes |
-| **✓ button** | Calls `approve_stock_adjustment(adj_id, approver)`. **Atomically posts a synthetic ledger row** — if variance < 0, inserts into `consumption` with Work_Type=`STOCK_ADJUSTMENT`; if > 0, inserts into `receipts` with Supplier=`STOCK_ADJUSTMENT`. The `posted_txn_ref` ('C:rowid' or 'R:rowid') links back to the adjustment for full audit. |
-| **✗ button** | Soft-reject. Row stays as `status='rejected'` for audit. |
+| **✓ button** | Approves the adjustment and, in the same step, **posts a matching correcting entry to the ledger** — a shortfall is written as a consumption entry marked "stock adjustment"; a surplus is written as a receipt from supplier "stock adjustment". The adjustment keeps a reference to the ledger entry it created, so the two can always be tied together in an audit. |
+| **✗ button** | Rejects the adjustment. The row is kept, marked rejected, so the audit trail stays complete. |
 
 ### 6.7.4 Recent Adjustments History (last 30)
 
@@ -1178,21 +1178,21 @@ Manage Purchase Requests (PRs) for your site.
 | **Estimated Cost (SAR)** | Optional |
 | **UOM** | Auto-filled, editable |
 | **Notes** | Optional |
-| **📋 Create PR Draft button** | Calls `insert_manual_pr(...)`. Sets `status='open'`, `workflow_state='draft'` |
+| **📋 Create PR Draft button** | Creates the PR as an open request in draft state |
 
-### 6.8.2 📄 Upload PR PDF (auto-extract via pdfplumber) — expander
+### 6.8.2 📄 Upload PR PDF (details read automatically from the file) — expander
 
 | Element | Purpose |
 |---|---|
 | **File uploader (PDF only)** | Upload Purchase Request PDF |
-| **Process Upload button** | extracts PR number + Material Codes (GI-XXXXXXX pattern), matches to inventory's `Material_Code`, inserts pr_master rows |
+| **Process Upload button** | Reads the PR number and the material codes (anything in the GI-XXXXXXX format) out of the document, matches them against the material codes in the inventory master, and creates the PR lines |
 | **Result banner** | Green success or amber warning (if some materials unmatched) |
 
 ### 6.8.3 Current PRs table
 
 Columns: PR No. · SAP · Material · UOM · Qty Req · Qty Pending · Supplier · Est. SAR · **Workflow pill**
 
-`Pending_Qty = Requested_Qty − SUM(receipts where PR_Number matches)`
+**Qty Pending = Requested Qty − everything already received against that PR number.**
 
 ### 6.8.4a 🚚 Submit PR(s) to Logistics Portal (NEW in v3.0)
 
@@ -1201,13 +1201,13 @@ A new expander sits between the PR list and the email/PDF block. It opens the pr
 | Element | Purpose |
 |---|---|
 | **Multi-select** | All open PRs at your site that haven't yet been submitted to Logistics |
-| **📨 Submit Selected to Logistics button** | Their `logistics_status` flips to `submitted` and the row appears in Logistics Portal → 📥 Incoming PRs. A `pr_submitted_to_logistics` notification fires to the Logistics role inbox + WhatsApp (if enabled). |
+| **📨 Submit Selected to Logistics button** | The PR is marked as submitted to Logistics and appears in Logistics Portal → 📥 Incoming PRs. A "PR submitted to Logistics" notification fires to the Logistics inbox, and to WhatsApp if that event is enabled. |
 
 The legacy email path (§6.8.4) **still works** — your team can use it for direct-to-vendor relationships that don't go through central Logistics. Both paths coexist. The email path is marked for future deprecation once procurement chain adoption reaches the agreed threshold.
 
 ### 6.8.4 📧 Notify Logistics section
 
-When at least one PR has `status='open'`:
+Shown whenever at least one PR is still open:
 
 | Element | Purpose |
 |---|---|
@@ -1236,11 +1236,11 @@ For HOD-direct receipts (when a HOD logs a delivery themselves, e.g., direct pur
 | **Delivery Date** | Date (today) | When |
 | **Expiry Date** | Date (optional) | Lot expiry trigger |
 | **Logistics extras** | Text inputs | All non-system columns on `receipts` (Vehicle_No, Driver_Name, DN_No, Supplier, Remarks, etc.) |
-| **💾 Save Receipt button** | instantly posts to `receipts` AND creates a `lots` master row if Expiry_Date is set. Auto-closes PR if fulfilled. Busts caches. |
+| **💾 Save Receipt button** | Posts straight to the receipts ledger, and creates a lot record if an expiry date is set. Auto-closes the PR if it is now fulfilled, and refreshes the stock figures. |
 
 ### 6.9.3 📋 Receipt History (last 50)
 
-Below the form, a table showing recent receipts for this site: rowid · Date · SAP · Material · Quantity · Supplier · PR_Number · Expiry_Date.
+Below the form, a table showing recent receipts for this site: entry no. · Date · SAP · Material · Quantity · Supplier · PR_Number · Expiry_Date.
 
 ---
 
@@ -1280,19 +1280,19 @@ Manual WhatsApp sends + alert threshold tuning.
 |---|---|
 | **Recipient phone number** | E.g., `+966 5X XXX XXXX` |
 | **Message textarea** | Up to several hundred characters |
-| **📱 Send WhatsApp button** | Queues to `whatsapp_queue` with status='pending'; the background worker picks it up. Audit-logs `MANUAL_WHATSAPP`. |
+| **📱 Send WhatsApp button** | Adds the message to the outbound queue; the background sending service picks it up from there. The send is audit-logged as a manual WhatsApp. |
 
 ### 6.11.2 ⚙️ Alert Thresholds card
 
-3 sliders writing to `app_settings`:
+Three sliders. Each is remembered until it is changed again:
 
-| Slider | Range | Default | Stored key |
+| Slider | Range | Default | What it controls |
 |---|---|---|---|
-| Low stock alert (days of supply) | 1–60 | 5 | `low_stock_days` |
-| Burn-rate warning (days remaining) | 1–60 | 7 | `burn_alert_days` |
-| Expiry warning (days before) | 1–120 | 30 | `expiry_warn_days` |
+| Low stock alert (days of supply) | 1–60 | 5 | How few days of cover before an item counts as low |
+| Burn-rate warning (days remaining) | 1–60 | 7 | How close to running out before the burn banner appears |
+| Expiry warning (days before) | 1–120 | 30 | How far ahead of expiry an item starts being flagged |
 
-**💾 Save Thresholds button** — persists + audit-logs `UPDATE_THRESHOLDS`.
+**💾 Save Thresholds button** — saves the values and writes an audit entry recording the change.
 
 > Note: The Notification Log table moved to Admin Portal → WhatsApp Console for global visibility.
 
@@ -1308,12 +1308,12 @@ Columns: # · To Site · SAP · Qty · **Status pill** · Created
 
 ### 6.12.2 Mark Incoming Transfers as Received
 
-When at least one request has `status='approved'`:
+Shown whenever at least one of your requests has been approved:
 
 | Element | Purpose |
 |---|---|
 | **Select Approved Request selectbox** | List of approved request IDs |
-| **Confirm Delivery Received button** | Calls `update_request_status(status='fulfilled')` + busts caches. This is where you confirm the transfer physically arrived. |
+| **Confirm Delivery Received button** | Marks the request fulfilled and refreshes the stock figures. This is where you confirm the transfer physically arrived. |
 
 ---
 
@@ -1404,7 +1404,7 @@ Custom table showing your full reschedule history for THIS site:
 
 ### 6.16.3 Sub-tab: 🛑 Force-closures affecting me
 
-Read-only audit table showing every PR / PO / line that Logistics force-closed, scoped to your site. Three-way fallback join means closures on records with NULL Site_ID still appear correctly via their PR or PO parent.
+Read-only audit table showing every PR / PO / line that Logistics force-closed, scoped to your site. Where a closure record itself carries no site, the system traces it back through its parent PR or PO, so nothing goes missing from your list.
 
 | Column | Source |
 |---|---|
@@ -1490,7 +1490,7 @@ A: Pre-flight is blocking because consuming the staged amount would create negat
 A: Check the filter pills (you may be filtering by Approved/Rejected only). Switch to "All" or "Pending".
 
 **Q: I approved an adjustment but the live stock didn't change.**
-A: It should change within 30 seconds (cache TTL). Refresh the page. If it still doesn't, check audit log for the APPROVE_ADJUSTMENT entry to confirm the synthetic ledger row was posted.
+A: It should change within 30 seconds — the stock figures refresh on that cycle. Refresh the page. If it still doesn't, check the audit log for the adjustment-approved entry to confirm the correcting ledger entry was posted.
 
 **Q: I got a WhatsApp about a "bulk cross-site request" — what is it?**
 A: Another HOD at a different site has requested more than 5 items from your site. Go to Cross-Site → 📥 Incoming to review.
@@ -1511,7 +1511,7 @@ A: The extractor matches material codes in the format `GI-XXXXXXX`. Items not in
 A: Admin sees all pending in Admin Portal → 📨 Pending Requests. If urgent, queue a WhatsApp from Notifications. Or for >5 items, the target-site HOD can also approve directly.
 
 **Q: I want to see all FEFO overrides logged by my Store Keepers.**
-A: Filter Admin → 📜 Audit Logs by action `FEFO_OVERRIDE`. Or query the `consumption` table for `FEFO_Override IS NOT NULL`.
+A: Filter Admin → 📜 Audit Logs by the FEFO override action. Every consumption entry that used an override also carries the override reason on the row itself.
 
 ---
 
@@ -1530,15 +1530,15 @@ The Admin is the system owner. The Admin Portal has **11 tabs** as of v3.0 — t
 
 ### 7.2.1 Page header
 
-`render_brand_header_admin(...)` — gold subtitle + pulse status chip (green "All systems operational" or amber "Degraded — see Overview" if global low-stock count > 20).
+Gold subtitle + pulse status chip (green "All systems operational", or amber "Degraded — see Overview" when more than 20 items are low on stock across all sites).
 
 ### 7.2.2 Hero strip (3 cards)
 
 | Card | Source |
 |---|---|
 | **Sites managed** | Count of distinct sites |
-| **Pending cross-site requests** | Count from `requests` where `status='pending'` |
-| **Critical items (all sites)** | `low + expiry` count summed globally |
+| **Pending cross-site requests** | Transfer requests still waiting on a decision |
+| **Critical items (all sites)** | Below-minimum count plus expiring/expired count, summed across every site |
 
 ### 7.2.3 Tab strip (9 tabs)
 
@@ -1562,19 +1562,19 @@ System health at a glance.
 
 | Card | Source |
 |---|---|
-| 🗄️ **DB size** | File size of `gi_database.db` on disk (MB) |
+| 🗄️ **DB size** | How much space the database file takes up on disk (MB) |
 | 👥 **Users** | Count of non-suspended users |
-| 📊 **Total transactions** | `consumption + receipts` row count |
-| 📜 **Audit events** | All-time count from `system_audit_log` |
+| 📊 **Total transactions** | Every consumption and receipt entry ever recorded |
+| 📜 **Audit events** | All-time count of audit-log entries |
 
 ### 7.3.2 4-card valuation strip (financial)
 
 | Card | Source |
 |---|---|
 | 💰 **Total stock value** | all sites |
-| 🏭 **Biggest-value site** | `cached_value_by_site().iloc[0]` + share of total |
-| 🔥 **30-day consumption value** | `cached_consumption_value(days=30)` |
-| 📦 **Pending receipts value** | Placeholder showing source: `pr_master.Est_Cost_SAR` |
+| 🏭 **Biggest-value site** | The single site holding the most stock value, and its share of the total |
+| 🔥 **30-day consumption value** | Value of everything consumed in the last 30 days |
+| 📦 **Pending receipts value** | Placeholder — it reads the estimated cost carried on the Purchase Requests |
 
 ### 7.3.3 🔧 Service Health card
 
@@ -1583,8 +1583,8 @@ Per-service row with a pulse dot + status + note:
 | Service | Up indicator | Source |
 |---|---|---|
 | Database | Reachable, with its current size |
-| WhatsApp Queue | If `whatsapp_queue` reachable | Pending count or "queue clear" |
-| Ollama / AI | `OLLAMA_AVAILABLE` if AI_ENABLED | "ready" / "not reachable" |
+| WhatsApp Queue | The outbound message queue is reachable | Pending count or "queue clear" |
+| Ollama / AI | The local AI service answers, when AI is switched on | "ready" / "not reachable" |
 | Mail / SMTP | Informational | "Outlook + mailto fallback" |
 
 ### 7.3.4 📊 Database Stats card
@@ -1601,7 +1601,7 @@ Per-service row with a pulse dot + status + note:
 
 ### 7.3.5 📋 Live Activity Feed (last 12)
 
-Per-row card from `system_audit_log`:
+Per-row card, drawn from the audit log:
 - A red, amber or green severity icon, set automatically from the kind of action recorded
 - Timestamp (gold monospace)
 - Action name
@@ -1616,7 +1616,7 @@ Approve or reject cross-site material requests from HODs.
 
 ### 7.4.1 Pending requests data editor
 
-Editable table with a `☑️ Select` checkbox column (all other columns disabled). Source: `get_pending_requests(status='pending')`.
+Editable table with a ☑️ Select checkbox column (every other column is read-only). It lists every cross-site request still waiting for a decision.
 
 ### 7.4.2 Admin Notes text input
 
@@ -1626,8 +1626,8 @@ Optional when approving; **required when rejecting** — the requester is shown 
 
 | Button | Action |
 |---|---|
-| **✅ Approve Selected** | For each selected row: looks up Material Code/Description, updates `requests.status='approved'`. Then for each unique requester: queues a WhatsApp with item list + admin notes. For each unique target site: queues a "TRANSFER ORDER" WhatsApp to the target HOD with packing instructions. |
-| **❌ Reject Selected** | Same multi-row loop but sets `status='rejected'`. Notes are MANDATORY for rejection. WhatsApp queued to each rejected requester with reason. |
+| **✅ Approve Selected** | For each selected row: looks up the material code and description, then marks the request approved. Each requester then gets one WhatsApp listing their items plus your notes, and each target site's HOD gets a "TRANSFER ORDER" WhatsApp with packing instructions. |
+| **❌ Reject Selected** | Works through the selected rows the same way but marks them rejected. Notes are MANDATORY for rejection. Each rejected requester gets a WhatsApp with the reason. |
 
 ---
 
@@ -1638,7 +1638,7 @@ Cross-site inventory viewer (read-only).
 | Element | Purpose |
 |---|---|
 | **Site selectbox** | "All Sites (Global)" or pick one |
-| **Inventory dataframe** | Calls `cached_live_inventory(site_id=…)` |
+| **Inventory table** | Live stock for the chosen site, or for every site at once |
 
 Useful before approving a cross-site request to confirm the target site really has the stock.
 
@@ -1660,7 +1660,7 @@ Delegates entirely to the system which provides:
 
 ## 7.7 Admin Portal → 🗄️ Master DB Editor
 
-**This is the most powerful tab. Use with care.** Lets Admin view, edit, and modify any table's data and schema.
+**This is the most powerful tab. Use with care.** It lets an Admin view and edit the contents of any table, and change which columns that table has.
 
 ### 7.7.1 Table selector
 
@@ -1680,7 +1680,7 @@ Delegates entirely to the system which provides:
 | **📄 Export as PDF button** | Produces a PDF of the whole table |
 | **Data editor table** | Edit any cell. Password hashes are masked as `••••••••`. |
 | **🏷️ Print Label checkbox column** | Only on `inventory` table — select items to print QR labels |
-| **💾 Save Table Updates button** | **DELETE the table, INSERT_ALL from the edited dataframe.** Audit-logs `DB_EDIT`. Busts inventory + settings caches. |
+| **💾 Save Table Updates button** | **Clears the whole table and re-writes every row from what is on screen.** The edit is audit-logged, and the stock and settings figures are refreshed. |
 | **🖨️ Generate QR Labels for Selected button** | Only on inventory — A print sheet for items where label checkbox is checked |
 | **📥 Download QR Labels PDF button** | Appears after generation |
 
@@ -1691,7 +1691,7 @@ Delegates entirely to the system which provides:
 Form generation depends on the table:
 
 - **For `users`**: warns to use User Management tab instead (safer)
-- **For `receipts`**: opens the full Logistics Receipt form (Site, Open PR linker, Material, Qty, Date, Expiry, Supplier, Remarks). Posts via `process_receipt_delivery` → also creates lot if Expiry set.
+- **For `receipts`**: opens the full Logistics Receipt form (Site, Open PR linker, Material, Qty, Date, Expiry, Supplier, Remarks). It records the delivery the same way the Logistics portal does, and creates a lot record if an expiry date is entered.
 - **For any "transaction table"** (has SAP_Code, isn't inventory): 2-section form — Section 1 picks material (shows MatCode + UOM info card), Section 2 dynamically generates inputs for every editable column.
 - **For inventory itself**: dynamic 3-column form for all editable columns.
 
@@ -1699,11 +1699,11 @@ Form generation depends on the table:
 
 | Element | Purpose |
 |---|---|
-| **➕ Add Column section** | Column name text input + Add button → `ALTER TABLE ADD COLUMN <name> TEXT` |
-| **✏️ Rename Column section** | Column dropdown + new name + Rename button → `ALTER TABLE RENAME COLUMN` |
+| **➕ Add Column section** | Type a column name and click Add — a new free-text column is appended to the table |
+| **✏️ Rename Column section** | Pick a column, type the new name, click Rename |
 | **🗑️ Drop Column section** | Pick a column and delete it. **This destroys the data in that column and cannot be undone** — take a backup first, every time. |
 
-> The `users` table is protected — schema changes are blocked here ("managed by auth.py").
+> The `users` table is protected — its columns cannot be changed here, because the sign-in system owns that table. Use the Users tab instead.
 
 ---
 
@@ -1745,10 +1745,10 @@ Outbound message queue + manual sends + thresholds + event mapping.
 
 | Card | Source |
 |---|---|
-| ✅ Sent | `whatsapp_queue` where status='sent' |
-| ⏳ Pending | status='pending' |
-| ⚙️ Processing | status='processing' |
-| ❌ Failed | status='failed' |
+| ✅ Sent | Messages the queue has delivered |
+| ⏳ Pending | Waiting to be picked up |
+| ⚙️ Processing | Being sent right now |
+| ❌ Failed | Could not be delivered |
 
 ### 7.9.2 📤 Send Manual WhatsApp card
 
@@ -1756,11 +1756,11 @@ Outbound message queue + manual sends + thresholds + event mapping.
 |---|---|
 | **Recipient phone** | E.g., `+966 5X XXX XXXX` |
 | **Message textarea** | The message to send |
-| **📱 Send WhatsApp button** | Queues to `whatsapp_queue` + audit-logs `MANUAL_WHATSAPP` |
+| **📱 Send WhatsApp button** | Adds the message to the outbound queue and audit-logs it as a manual WhatsApp |
 
 ### 7.9.3 ⚙️ Alert Thresholds card (global)
 
-Same 3 sliders as HOD Notifications (low_stock_days / burn_alert_days / expiry_warn_days). Persists to `app_settings`. Admin's value is the global default.
+The same three sliders as HOD Notifications — low-stock days, burn-rate warning days and expiry warning days. The Admin's values are the system-wide defaults.
 
 ### 7.9.4 ⚡ Event → Recipient (current wiring) — read-only summary
 
@@ -1782,8 +1782,8 @@ A reference table showing **what auto-triggers exist in the codebase**:
 
 ### 7.9.5 📋 Outbound Queue Log (last 80)
 
-Styled HTML table from `get_whatsapp_log(limit=80)`:
-**Status pill** · Recipient (monospace) · Message (truncated with tooltip) · Queued at · Sent at
+Styled table of the 80 most recent outbound messages:
+**Status pill** · Recipient · Message (shortened, hover for the full text) · Queued at · Sent at
 
 ---
 
@@ -1793,15 +1793,15 @@ Styled HTML table from `get_whatsapp_log(limit=80)`:
 
 | Element | Purpose |
 |---|---|
-| **Current Work Types caption** | Comma-separated list from `system_settings` |
+| **Current Work Types caption** | Comma-separated list of the options currently configured |
 | **New Work Type Name text input** | Add a new option |
-| **Add to Dropdown button** | INSERT into `system_settings` (category='Work_Type') + busts settings cache |
+| **Add to Dropdown button** | Saves the new Work Type and makes it available in the dropdown straight away |
 
 ### 7.10.2 🔧 Maintenance Mode card
 
 | Element | Purpose |
 |---|---|
-| **Enable maintenance mode toggle** | Persists to `app_settings.maintenance_mode='1'` |
+| **Enable maintenance mode toggle** | Turns maintenance mode on and keeps it on until you turn it off |
 | **Status caption** | "ACTIVE — Non-admin sessions will be told to come back later" or "Off" |
 
 The change is recorded in the audit history with who made it and when. Sign-in enforces it immediately — while maintenance is on, only Admin can sign in.
@@ -1810,23 +1810,23 @@ The change is recorded in the audit history with who made it and when. Sign-in e
 
 | Element | Purpose |
 |---|---|
-| **Last manual backup caption** | From `app_settings.last_backup_at` |
-| **💾 Backup Now button** | Calls `shutil.copy2()` of `gi_database.db` into `backups/gi_database_YYYYMMDD_HHMMSS.db`. Updates last_backup_at + audit `DB_BACKUP`. |
+| **Last manual backup caption** | When the last manual backup was taken |
+| **💾 Backup Now button** | Copies the whole database into the backups folder, date- and time-stamped. Records the new backup time and writes an audit entry. |
 
 ### 7.10.4 🏭 Site Management
 
 | Element | Purpose |
 |---|---|
 | **Sites table (styled HTML)** | Site Name · Code (first 4 chars upper) · Users count · Status (always "Active") |
-| **➕ Add New Site expander** | Type name + button → INSERT into `system_settings` (category='Site') + audit `ADD_SITE` |
+| **➕ Add New Site expander** | Type the site name and click the button — the site is registered and the action is audited |
 
 ### 7.10.5 ⚠️ Danger Zone (red bordered card)
 
 | Element | Purpose |
 |---|---|
-| **Purge old draft pending_issues card** | "Delete all `pending_issues` rows older than 30 days that are still `status='draft'`" |
-| **Type PURGE to confirm** | Text input must equal `PURGE` to enable |
-| **Run Purge button** | Executes the DELETE, audit-logs `PURGE_DRAFTS` |
+| **Purge old draft issues card** | "Delete every staged issue older than 30 days that is still sitting in draft" — approved and committed entries are never touched |
+| **Type PURGE to confirm** | The button stays disabled until you type PURGE exactly |
+| **Run Purge button** | Deletes those drafts and writes an audit entry |
 
 ---
 
@@ -1834,7 +1834,7 @@ The change is recorded in the audit history with who made it and when. Sign-in e
 
 ### 7.11.1 🖥️ Recent Sign-Ins (last 10)
 
-Per-row card from `system_audit_log` filtered to LOGIN/LOGIN_SUCCESS/LOGIN_FAILED/LOGOUT:
+Per-row card, drawn from the audit log and filtered to sign-in, failed sign-in and sign-out events:
 - Pulse dot (green=success, red=failed)
 - Username
 - Action label
@@ -1844,11 +1844,11 @@ Per-row card from `system_audit_log` filtered to LOGIN/LOGIN_SUCCESS/LOGIN_FAILE
 
 | Field | Purpose |
 |---|---|
-| **Target user selectbox** | From `users` table |
-| **New password** | Type input (password mask) |
+| **Target user selectbox** | Pick any registered user |
+| **New password** | Typed masked |
 | **Confirm** | Must match |
 | **Amber warning** | "User must log in again immediately." |
-| **🔑 Reset Password button** | Validates length ≥ 8 + match → `hash_password(new_pwd)` → UPDATE users SET password_hash + audit `FORCE_PASSWORD_RESET` |
+| **🔑 Reset Password button** | Checks the password is at least 8 characters and that both entries match, stores it as a one-way scramble, and writes an audit entry for the forced reset |
 
 ### 7.11.3 🛡️ Security Policy
 
@@ -1873,9 +1873,9 @@ Six cards at the top:
 | Card | Source |
 |---|---|
 | **OPEN PRs** | Count — awaiting PO issuance |
-| **OPEN POs** | Count from `list_pos(open_only=True)` |
+| **OPEN POs** | Count of Purchase Orders still open |
 | **ACTIVE DNs** | Count of DNs in pipeline states (pending_logistics, logistics_approved, pending_hod, pending_sk) |
-| **VENDOR RETURNS** | Open returns from `list_vendor_returns(open_only=True)` |
+| **VENDOR RETURNS** | Count of vendor returns still open |
 | **RESCHEDULES** | Pending reschedule decisions |
 | **FORCE-CLOSURES** | Lifetime audit count |
 
@@ -1926,7 +1926,7 @@ Six cards at the top:
 1. Admin Portal → ⚙️ Settings
 2. 💾 Backup Now → confirms file path: `backups/gi_database_YYYYMMDD_HHMMSS.db`
 3. Note the timestamp in "Last manual backup" field
-4. Now perform the risky operation (bulk import, schema change, etc.)
+4. Now perform the risky operation (bulk import, adding or dropping a column, etc.)
 5. If something breaks: restore by copying the backup back over `gi_database.db` (with the app stopped)
 
 ### Use Case 4: Investigate a suspicious series of FEFO overrides
@@ -1985,13 +1985,13 @@ A: Use the search text input at the bottom of the audit filter row — searches 
 A: The notification service runs separately from the application, so the application can be perfectly healthy while messages are not going out. Ask your Admin to check it. Messages queue up in the meantime and deliver once it is running again.
 
 **Q: My DB Editor save crashed mid-way and lost rows.**
-A: Restore from `backups/`. The Save action does DELETE-then-INSERT and is not crash-safe. Always backup before bulk edits.
+A: Restore from the backups folder. The Save action clears the table and re-writes it, so it is not crash-safe. Always take a backup before bulk edits.
 
 **Q: Maintenance Mode is on but non-admins can still log in.**
 A: The toggle is remembered, and sign-in respects it — during maintenance only Admin can get in. Confirm with your Admin if you are unsure whether it is currently on.
 
 **Q: Can I delete an audit log entry?**
-A: No — they're meant to be immutable. If you need to free space, do a SQL purge with a date filter via DB Editor → Manage Columns... but this is itself audited.
+A: No — they're meant to be permanent. If you genuinely need to free space, an Admin can purge old entries by date from the Master DB Editor — but that purge is itself audited.
 
 **Q: A cross-site request is stuck pending and the requester is asking why.**
 A: Admin Portal → 📨 Pending Requests. Confirm it's actually in the queue. If yes, approve or reject with notes. The HOD will get a WhatsApp.
@@ -1999,17 +1999,17 @@ A: Admin Portal → 📨 Pending Requests. Confirm it's actually in the queue. I
 **Q: I want to set per-user 2FA.**
 A: Currently unsupported in the security model (placeholder shown in Access Control). Future enhancement.
 
-**Q: How do I know if Ollama (local AI) is up?**
+**Q: How do I know if the local AI service is up?**
 A: Admin Portal → 🖥️ Overview → 🔧 Service Health card. If "Ollama / AI" pulses green, it's reachable.
 
 **Q: What's the difference between approving a Pending Receipt vs Pending Issue?**
 A: Receipts ADD to stock (your team RECEIVED material). Issues SUBTRACT from stock (your team CONSUMED material). Both flow through approval. Issues commit via EOD (batch); Receipts commit individually via Pending Receipts tab.
 
 **Q: Stock_Value column shows nothing on the dashboard.**
-A: Inventory items have `Unit_Cost = 0`. Use DB Editor to set costs.
+A: Those inventory items have a unit cost of 0. Use the Master DB Editor to set their costs.
 
 **Q: A HOD set thresholds different from mine — whose wins?**
-A: Both HOD and Admin write to the same `app_settings` keys. Last-writer-wins. Decide a policy and lock it via convention.
+A: HOD and Admin both write to the same settings, so the most recent save wins. Agree a policy between you and stick to it.
 
 **Q: How big can the database grow before performance degrades?**
 A: The current deployment runs comfortably at this site's user count, and the database it uses scales well beyond it. Growth in sites or users is a hosting decision rather than a rebuild.
@@ -2022,7 +2022,7 @@ Available to: **Supervisor, HOD, Admin**. Site scope: locked for Supervisor + HO
 
 ## 8.1 Page header + 4 tabs
 
-`render_brand_header("Reports & Analytics")`. Tabs:
+The header reads "Reports & Analytics". Tabs:
 
 1. 📊 Generate Report
 2. 📅 Scheduled
@@ -2131,7 +2131,7 @@ Each schedule renders as a card with:
 
 ## 8.4 Reports → 🤖 AI Insights
 
-If AI_ENABLED and Ollama is running with `llama3.1:8b`:
+Available when AI is switched on and the local AI service is running:
 
 ### 8.4.1 Header bar
 
@@ -2139,7 +2139,7 @@ If AI_ENABLED and Ollama is running with `llama3.1:8b`:
 
 | Button | Action |
 |---|---|
-| **🔄 Regenerate** | Re-runs all 5 fixed SQL probes + LLM commentary |
+| **🔄 Regenerate** | Re-runs all 5 standard checks and rewrites the AI commentary |
 
 ### 8.4.2 5 Insight cards (collapsible)
 
@@ -2149,21 +2149,21 @@ Each card has a left-border in severity color, then:
 |---|---|
 | Icon + Title | "Abnormal Consumption Spike — MAT-XXXX" |
 | Severity pill (Critical/Warning/Positive) | Color-coded |
-| Confidence % with progress bar | LLM-reported confidence |
+| Confidence % with progress bar | How sure the AI is of this finding |
 | Right-side metric callout | Headline number with sub-label |
-| Body paragraph | LLM-generated explanation grounded in the SQL probe result |
+| Body paragraph | The AI's explanation, written from the figures the check returned |
 | 💡 Recommendations list | Up to 3 numbered actions |
 | 📧 Share button | Shares with HOD team |
 | ✅ Add to Actions button | Logs as a follow-up |
 
-The 5 fixed probes:
+The 5 standard checks:
 1. Abnormal consumption spike (vs trailing average)
 2. Items approaching reorder
 3. FEFO compliance rate
 4. Procurement cost optimization (supplier consolidation)
 5. Inventory health score
 
-If Ollama is not running: a graceful fallback explains setup steps.
+If the local AI service is not running, the tab explains what an Admin needs to start.
 
 ---
 
@@ -2193,8 +2193,8 @@ Per-row Actions:
 
 The system automatically queues messages on key events. There are now THREE notification surfaces:
 1. **WhatsApp** — messages queue and are sent by a background service, so a WhatsApp outage delays them but never loses them. There is a master on/off switch plus a per-event switch, so you can silence WhatsApp for one kind of event while leaving the in-app bell untouched for it.
-2. **In-app notifications bell (NEW in v3.0)** — `app_notifications` table, surfaced via the sidebar bell described in §3.6. ALWAYS fires regardless of WhatsApp toggle.
-3. **Email** — same Outlook / Mail.app / mailto: + SMTP paths as before.
+2. **In-app notifications bell (NEW in v3.0)** — every event is also written to your personal inbox and surfaced by the sidebar bell described in §3.6. It ALWAYS fires, regardless of the WhatsApp toggle.
+3. **Email** — the same Outlook / Mail app / mail-link and mail-server paths as before.
 
 ## 9.1 WhatsApp triggers (auto-fire)
 
@@ -2213,35 +2213,35 @@ The system automatically queues messages on key events. There are now THREE noti
 | Returnable item overdue | Borrower + Store Keeper | Background scheduler | Time-driven, not in current scope |
 | New self-registration request | All Admins | Registration form | Includes username + role + site |
 | Self-registration approved | Requesting user | Admin User Mgmt | "ACCESS GRANTED · Welcome" |
-| Manual send | Free | HOD Notifications / Admin WhatsApp Console | Audit `MANUAL_WHATSAPP` |
-| **PR submitted to Logistics (v3.0)** | Logistics role | HOD PR tab → 🚚 Submit PR(s) to Logistics | Event key `pr_submitted_to_logistics` |
-| **PO issued (v3.0)** | Site HOD | Logistics → 💾 Save PO | Event key `po_issued` |
-| **PO assigned to Warehouse (v3.0)** | Warehouse users at that WH | Logistics → 📨 Assign | Event key `po_assigned_to_warehouse` |
-| **Warehouse acknowledged (v3.0)** | Logistics | Warehouse → ✅ Acknowledge | Event key `warehouse_acknowledged` (off by default) |
-| **Warehouse received goods (v3.0)** | Logistics | Warehouse → 📥 Record receipt | Event key `warehouse_received` |
-| **DN logistics approved (v3.0)** | Site HOD | Logistics → ✅ Approve DN | Event key `dn_logistics_approved` |
-| **DN HOD approved → SK (v3.0)** | Site SK | HOD → 🚚 DN Approvals → ✅ Approve | Event key `dn_auto_generated` (reuses slot for SK ping) |
-| **DN received at site (v3.0)** | Logistics + Warehouse | SK → ✅ Mark as Received | Event key `dn_received_by_sk` (off by default) |
-| **Reschedule requested (v3.0)** | Logistics | Warehouse / HOD → 🔁 Request reschedule | Event key `reschedule_requested` |
-| **Reschedule decided (v3.0)** | Requester | Logistics → ✅ Approve / ❌ Reject | Event key `reschedule_decided` |
-| **Vendor return raised (v3.0)** | Logistics | Any role → ↩️ Raise return | Event key `vendor_return_raised` |
-| **PR force-closed (v3.0)** | Admin + originating Site HOD | Logistics → 🛑 Force-Close | Event key `pr_force_closed`, severity `critical` |
-| **PO force-closed (v3.0)** | Admin + originating Site HOD | Logistics → 🛑 Force-Close | Event key `po_force_closed`, severity `critical` |
-| **Delivery reminder T-2 / T-1 / T-0 (v3.0)** | Logistics + HOD + Warehouse (per DN) | Daily sweep job — see §9.3 | Event keys `delivery_reminder_t_minus_2/_minus_1/_zero` |
+| Manual send | Free | HOD Notifications / Admin WhatsApp Console | Recorded in the audit log as a manual WhatsApp |
+| **PR submitted to Logistics (v3.0)** | Logistics role | HOD PR tab → 🚚 Submit PR(s) to Logistics | On by default |
+| **PO issued (v3.0)** | Site HOD | Logistics → 💾 Save PO | On by default |
+| **PO assigned to Warehouse (v3.0)** | Warehouse users at that WH | Logistics → 📨 Assign | On by default |
+| **Warehouse acknowledged (v3.0)** | Logistics | Warehouse → ✅ Acknowledge | **Off by default** — low value, kept quiet |
+| **Warehouse received goods (v3.0)** | Logistics | Warehouse → 📥 Record receipt | On by default |
+| **DN logistics approved (v3.0)** | Site HOD | Logistics → ✅ Approve DN | On by default |
+| **DN HOD approved → SK (v3.0)** | Site SK | HOD → 🚚 DN Approvals → ✅ Approve | On by default; shares the DN-generated toggle |
+| **DN received at site (v3.0)** | Logistics + Warehouse | SK → ✅ Mark as Received | **Off by default** |
+| **Reschedule requested (v3.0)** | Logistics | Warehouse / HOD → 🔁 Request reschedule | On by default |
+| **Reschedule decided (v3.0)** | Requester | Logistics → ✅ Approve / ❌ Reject | On by default |
+| **Vendor return raised (v3.0)** | Logistics | Any role → ↩️ Raise return | On by default |
+| **PR force-closed (v3.0)** | Admin + originating Site HOD | Logistics → 🛑 Force-Close | On by default; critical severity |
+| **PO force-closed (v3.0)** | Admin + originating Site HOD | Logistics → 🛑 Force-Close | On by default; critical severity |
+| **Delivery reminder T-2 / T-1 / T-0 (v3.0)** | Logistics + HOD + Warehouse (per DN) | Daily sweep — see §9.3 | Each of the three lead times has its own toggle |
 
 ## 9.2 Email triggers
 
 | Event | Trigger location | Mechanism |
 |---|---|---|
-| Logistics PR follow-up | HOD PR tab → 📧 Draft Outlook Email | Mac: AppleScript-driven Mail.app with HTML table. Windows: COM Outlook with HTMLBody. Fallback: mailto: with monospace plain-text table |
-| EOD report email | mailer.py SMTP | Configurable via `.env` (SMTP_SERVER, SMTP_USER, SMTP_PASS) |
-| Report delivery (scheduled) | Reports → Scheduled | Same SMTP pipeline |
+| Logistics PR follow-up | HOD PR tab → 📧 Draft Outlook Email | Mac: opens the Mail app with a formatted table. Windows: opens Outlook with a formatted table. If neither is available, it falls back to a plain-text mail link |
+| EOD report email | Sent by the mail server | The mail server address and sign-in details are set up once by an Admin |
+| Report delivery (scheduled) | Reports → Scheduled | Uses the same mail server |
 
 ---
 
 ## 9.3 In-app notifications bell (NEW in v3.0)
 
-See §3.6 for the UI. Backed by the `app_notifications` table; queried with role + site + warehouse scoping. Per-event severity (`info` / `warning` / `success` / `critical`) drives the colour-coded left border on each card.
+See §3.6 for the UI. Every notification is stored against the recipient and read back scoped to their role, their site and their warehouse — you only ever see your own. Each event carries a severity — info, success, warning or critical — and that is what colours the left border of the card.
 
 ## 9.4 Delivery reminder daily sweep (NEW in v3.0)
 
@@ -2249,17 +2249,17 @@ Once a day the system looks ahead at upcoming deliveries and sends reminders two
 
 | Watched | When | Severity |
 |---|---|---|
-| `purchase_orders.Expected_Delivery` | T-2 / T-1 / T-0 | `warning` / `warning` / `critical` |
-| `delivery_notes.DN_Date` | T-2 / T-1 / T-0 | `warning` / `warning` / `critical` |
+| A Purchase Order's expected delivery date | T-2 / T-1 / T-0 | warning / warning / critical |
+| A Delivery Note's delivery date | T-2 / T-1 / T-0 | warning / warning / critical |
 
 PO reminders ping: Logistics + originating Site HOD.
 DN reminders ping: Logistics + Site HOD + Warehouse user(s) at the receiving warehouse.
 
-**Idempotency** — the sweep cannot double-fire for the same target on the same day. Two guards:
-1. UNIQUE(`ref_type`, `ref_number`, `target_date`, `offset_days`) on the `delivery_reminders_sent` table.
-2. Day-marker stored in `app_settings.delivery_reminders_last_run` — the 60-sec worker poll loop skips the sweep query entirely on second-and-later ticks of the same day.
+**No duplicates** — the sweep cannot fire twice for the same delivery on the same day. Two guards:
+1. Every reminder sent is recorded against the document, its delivery date and how many days out it was, and the same combination can only ever be recorded once.
+2. The system also stamps the date it last ran the sweep, so once it has run for the day the check is skipped entirely rather than repeated every minute.
 
-Restarting the worker mid-day is safe. Re-running the sweep manually on the same day fires zero new notifications.
+Restarting the reminder service mid-day is safe. Re-running the sweep manually on the same day sends zero new notifications.
 
 **Customising the cadence** — the two-day, one-day and same-day pattern is currently fixed. Making it configurable per site is on the backlog; ask if you need a different rhythm.
 
@@ -2269,14 +2269,14 @@ Restarting the worker mid-day is safe. Re-running the sweep manually on the same
 
 | Table | What it stores | Identity-math role |
 |---|---|---|
-| `inventory` | Master catalogue: SAP_Code (PK), Description, Material_Code, UOM, Minimum_Qty, Unit_Cost | The "items that exist" — defines what can be moved |
+| `inventory` | Master catalogue: SAP_Code (the unique identifier), Description, Material_Code, UOM, Minimum_Qty, Unit_Cost | The "items that exist" — defines what can be moved |
 | `receipts` | Every received unit (post-commit). Includes Lot_Number, Expiry_Date, Supplier, PR_Number, Unit_Cost | + adds to stock |
 | `consumption` | Every consumed unit (post-EOD-commit). Includes Lot_Number, FEFO_Override, Work_Type | − subtracts from stock |
 | `returns` | Tools and equipment returned to inventory | + adds back |
 | `pending_issues` | Pre-commit staging for consumption (status: draft → pending_hod → approved/rejected → committed) | — does NOT affect stock |
 | `pending_receipts` | Pre-commit staging for receipts | — does NOT affect stock |
 
-**Identity formula:** `Current_Stock = Total_Received − Total_Consumed − Total_Returned` — computed live in `v_site_stock` view.
+**Identity formula:** Current Stock = Total Received − Total Consumed − Total Returned. It is never stored as a number anyone can type over; it is recalculated from the ledger every time it is shown.
 
 ## 10.2 Document-type tables
 
@@ -2298,7 +2298,7 @@ Restarting the worker mid-day is safe. Re-running the sweep manually on the same
 | `system_settings` | Dropdown values (Work_Type, Site) |
 | `app_settings` | Key/value config (thresholds, maintenance_mode, last_backup_at) |
 | `whatsapp_queue` | Outbound message queue |
-| `pwa_tokens` | API tokens for offline PWA |
+| `pwa_tokens` | Access tokens for the offline-capable mobile app |
 | `bug_reports` | User-submitted issues/ideas |
 | `report_schedules` | Scheduled report definitions |
 | `report_archive` | Generated report metadata |
@@ -2318,8 +2318,8 @@ Restarting the worker mid-day is safe. Re-running the sweep manually on the same
 | `po_returns` | Vendor returns (raised by any role) | `open` → `vendor_acknowledged` / `resupplied` / `cancelled` |
 | `po_reschedule_requests` | Date-change asks | `pending` → `approved` / `rejected` |
 | `po_force_closures` | Force-closure audit log | (terminal — write-once) |
-| `app_notifications` | In-app bell inbox | `read_at IS NULL` (unread) → timestamp (read) |
-| `delivery_reminders_sent` | T-2/T-1/T-0 idempotency log | (terminal — UNIQUE constraint) |
+| `app_notifications` | In-app bell inbox | Unread → read, stamped with the time it was read |
+| `delivery_reminders_sent` | Record of which T-2 / T-1 / T-0 reminders have gone out | Write-once — the same reminder can never be recorded twice |
 
 ## 10.4 Views
 
@@ -2411,11 +2411,11 @@ Vendor return: `open` → `vendor_acknowledged` / `resupplied` / `cancelled`
 
 | Tag | Meaning | Detection rule |
 |---|---|---|
-| `RL` | Rubber Lining | Substring `RL-`, `RUBBER LINING`, `RUBBER-LINING` in Material_Code OR Description |
-| `BL` | Brick Lining | Substring `BL-`, `BRICK LINING`, `BRICK-LINING`, `BRICK MATERIAL` |
-| `NULL` | Neither family | Default |
+| `RL` | Rubber Lining | The Material Code or Description contains "RL-", "RUBBER LINING" or "RUBBER-LINING" |
+| `BL` | Brick Lining | It contains "BL-", "BRICK LINING", "BRICK-LINING" or "BRICK MATERIAL" |
+| (none) | Neither family | The default when nothing above matches |
 
-Logic in the system. NEVER a combo string — RL takes precedence if both tokens are present.
+The system works this out for you. An item is never tagged as both — if the wording matches both families, RL wins.
 
 ## 11.4f Notification severity (NEW v3.0)
 
@@ -2529,7 +2529,7 @@ Either field can be blank — the receipt still goes through. What changes is HO
 - Click **✉️ Draft Logistics Email** to open a pre-filled email to the logistics team listing SAP, description, lot, qty.
 - Sending (or clicking "Mark all as sent") flips the rubber rows to `sent_to_logistics`.
 
-The logistics email recipient defaults to `LOGISTICS_EMAIL` env var (`logistics@generalindustries.net` if unset). On Windows it opens Outlook; on macOS it opens Mail.app; on Linux it opens the default mailto handler.
+The logistics email recipient is configured once by an Admin, and falls back to logistics@generalindustries.net if nothing is set. On Windows it opens Outlook; on macOS it opens the Mail app; on Linux it opens whichever mail program is set as the default.
 
 ## 13.7 Document attachments — Entry Log + HOD DOC tab
 
@@ -2540,7 +2540,7 @@ Store Keepers can attach reference documents (PDF / JPEG / JPG / XLSX) on:
 | **Consumption Log** | Auto = `DDMMYY` of the date | Pick scope: "Whole entry (batch)" or "Specific date". |
 | **Receipt Staging** | DN No. of the row (or manual override) | Falls back to `DN-DDMMYY` if no DN_No found. |
 
-Files are stored **as BLOBs inside the database** (authoritative copy) and **mirrored to `uploads/<Site_ID>/<doc_type>/<doc_number>/`** for local browsing. The disk mirror is gitignored; only the DB BLOB is portable.
+Each file is stored **inside the database itself** — that is the authoritative copy, and it travels with a backup. A **second copy is also written to an uploads folder on the server**, arranged by site, document type and document number, purely so files can be browsed on that machine. Only the copy held in the database is portable.
 
 **HOD Portal → 📎 DOC** is a new tab with three sub-tabs: **📋 Consumption / 📥 Receipt / ↩️ Return**. Each shows period (From/To dates) and Doc Number text filters, with a per-file ⬇️ download button.
 
@@ -2618,7 +2618,7 @@ Which category requires a material certificate is a single setting, so extending
 - **HOD Portal → Site Config → 📐 WBS Numbers** lets the HOD add, close, or re-open WBS numbers for their site. Each WBS carries an optional Description and an `active` / `closed` status.
 - **Entry Log → Consumption Log and Receipt Staging** show a **WBS Number** dropdown filtered to the SK's site. If the HOD hasn't added any WBS yet, the SK sees a warning and a free-text fallback so work isn't blocked.
 - **Reports → 📐 WBS Report** rolls everything up by WBS for a chosen date range, scoped to the user's site. Columns: `WBS_Number`, `Consumption_Rows`, `Consumption_Qty`, `Consumption_Value_SAR`, `Receipt_Rows`, `Receipt_Qty`, `Receipt_Value_SAR`. Sorted by consumption value descending.
-- DB column `wbs` is now self-healed on `consumption`, `receipts`, `pending_issues`, `pending_receipts`. Old rows show as `(no WBS)` in the report; new rows carry the picked WBS through SK → HOD commit untouched.
+- The WBS field is added automatically wherever it was missing on consumption, receipts and both staging queues. Entries made before the field existed show as "(no WBS)" in the report; new entries carry the WBS you picked all the way through from Store Keeper to HOD commit, untouched.
 
 ## 13.15 Site_ID badge in sidebar
 
@@ -2630,11 +2630,11 @@ The dashboard filter row no longer waits for Enter. Typing into any of the four 
 
 Header reads "Filters (live) — searchable on SAP / Mat Code / Description / Category".
 
-The package `streamlit-keyup` powers the live updates; if it's not installed, the dashboard falls back to plain `st.text_input` (still works, just needs Enter).
+Live typing needs an optional add-on to be installed on the server. Without it the dashboard falls back to ordinary search boxes — still fully working, they just need Enter.
 
 ## 13.17 Sidebar Hub Assistant — role-aware Q&A
 
-A new sidebar expander **💬 Ask Hub Assistant** lets any signed-in user ask plain-English questions about the system. The answer is generated by the local Ollama `llama3.1:8b` model. **Role filtering happens at the RAG context layer, not just the system prompt** — a Store Keeper's question never sees the Admin chapter, so the model physically cannot answer about admin features even if asked.
+A new sidebar expander **💬 Ask Hub Assistant** lets any signed-in user ask plain-English questions about the system. The answer is written by the local AI service running on the server. **The role filter is applied to the manual chapters BEFORE the question is answered, not merely to the instructions given to the AI** — a Store Keeper's question is never shown the Admin chapter, so the assistant physically cannot answer about admin features even if asked.
 
 Section visibility:
 - **Store Keeper**: §1, §2, §3, §4, §11, §13
@@ -2642,7 +2642,7 @@ Section visibility:
 - **HOD**: Supervisor list + §6, §9
 - **Admin**: everything
 
-The widget streams the answer token-by-token. Click **Clear** to reset.
+The answer appears a few words at a time as it is written. Click **Clear** to reset.
 
 ## 13.18 GMT+3 (Asia/Riyadh) timestamps
 
@@ -2733,7 +2733,7 @@ Loads the PR into Tab 2 (Create PO). Selectbox state is preserved so you can swi
 
 ## 14.3 Tab 2: 🧾 Create PO
 
-Two sub-tabs: **✍️ Manual entry** and **📄 PDF upload**. Both funnel into the same `purchase_orders` insert path.
+Two sub-tabs: **✍️ Manual entry** and **📄 PDF upload**. Both create the Purchase Order the same way — the only difference is where the details come from.
 
 ### 14.3.1 Vendor picker
 
@@ -2764,19 +2764,19 @@ Editable columns: Include · Material_Code · Description · Qty · UOM · Unit_
 | Element | Purpose |
 |---|---|
 | **File uploader** | Drop the PO PDF |
-| **🔎 Extract from PDF button** | regex-based extraction of header (PO Number, Vendor, Inco/Payment, Quotation refs, totals) + line items (Sr. No, Material_Code, Description, Qty, UOM, Unit_Price, Total_Price) + PO Annexure delivery schedule (Shipment N / Material Group / Date) |
+| **🔎 Extract from PDF button** | Reads the document and pulls out the header (PO Number, Vendor, Inco/Payment terms, Quotation refs, totals), the line items (Sr. No, Material_Code, Description, Qty, UOM, Unit_Price, Total_Price) and the PO Annexure delivery schedule (Shipment N / Material Group / Date) |
 | **Review extracted PO** | Editable preview of every extracted field. The header form pre-fills. The line items grid pre-fills. Edit anything before saving. |
 | **Delivery schedule** | If Annexure parsed, a table shows shipment_no · material_group · target_date |
-| **💾 Save PO (from PDF)** | Persists the PO + items + shipment schedule. The original PDF is stored as a BLOB on the `purchase_orders` row (`attachment_blob`/`_name`/`_mime`) for audit. |
+| **💾 Save PO (from PDF)** | Saves the PO, its line items and its shipment schedule. The original PDF is kept attached to the PO itself, so the source document is always available for audit. |
 
 **On PO numbers with X-masking:** the sample PDF has the last 4 digits masked as `XXXX` for security. The extractor preserves whatever is on the page verbatim. In production, vendors send full 10-digit numbers and those pass through unchanged.
 
 ### 14.3.5 Side-effects on save
 
-- New row in `purchase_orders` with status `'open'`
-- One row per item in `po_items` with `rl_bl_family` auto-tagged
-- Linked PR rows (matching `PR_Number` + `Site_ID`) flip to `logistics_status='in_po'` so they leave your Incoming PRs queue
-- Site HOD gets `po_issued` notification (in-app + WhatsApp gated)
+- A new Purchase Order is created, open
+- One line is created per item, each auto-tagged with its RL/BL family
+- The matching PR lines — same PR number, same site — are marked as now covered by a PO, so they leave your Incoming PRs queue
+- The site HOD gets a "PO issued" notification in-app, and on WhatsApp if that event is enabled
 
 ## 14.4 Tab 3: 📋 Open POs
 
@@ -2812,9 +2812,9 @@ Expected Delivery date + Notes (visible to Warehouse).
 
 ### 14.5.4 📨 Assign to Warehouse button
 
-- Subset = if all items included, encoded as `None` (cleaner audit)
-- Subset = if partial, encoded as `JSON list of po_items.id` in `po_assignments.items_subset_json`
-- Warehouse user(s) at the chosen WH get a `po_assigned_to_warehouse` notification (in-app + gated WhatsApp)
+- If every line is included, the assignment is recorded as covering the whole PO — which reads more cleanly in an audit than listing each line
+- If only some lines are included, the assignment records exactly which PO lines were routed
+- Warehouse users at the chosen warehouse get a "PO assigned to warehouse" notification in-app, and on WhatsApp if that event is enabled
 - PO header's Expected_Delivery auto-fills with this date if not set
 - Audit log entry: `ASSIGN_PO_TO_WAREHOUSE`
 
@@ -2834,7 +2834,7 @@ If no pending requests: empty-state card.
 | **Subline** | requested_by + role + reason |
 | **Decide popover** | Decision notes textbox + ✅ Approve / ❌ Reject buttons (reject requires reason) |
 
-Approval auto-pushes the new date to: the PO header `Expected_Delivery`, the `po_assignments.Expected_Delivery`, and the DN `DN_Date` (if linked).
+Approval automatically pushes the new date everywhere it matters: the PO's expected delivery date, the warehouse assignment's expected delivery date, and the Delivery Note's date if one is linked.
 
 ## 14.7 Tab 6: 🛑 Force-Close
 
@@ -2846,7 +2846,7 @@ Use sparingly. Force-closing notifies Admin + originating Site HOD immediately w
 
 ### 14.7.2 Reason textbox
 
-Mandatory, minimum 3 characters. Logged verbatim to `po_force_closures` + audit.
+Mandatory, minimum 3 characters. Stored word-for-word on the force-closure record and in the audit log.
 
 ### 14.7.3 Target picker (changes per radio)
 
@@ -2857,11 +2857,11 @@ Mandatory, minimum 3 characters. Logged verbatim to `po_force_closures` + audit.
 ### 14.7.4 🛑 Force-close button
 
 Single confirm-and-execute. Behind it:
-- `pr_master.status='closed'` + `logistics_status='force_closed'` (for PR target)
-- `purchase_orders.status='force_closed'` + line statuses for `force_closed` (for PO target)
-- `po_items.line_status='force_closed'` (for line target)
-- New row in `po_force_closures` with reason
-- Notifications fan-out: Admin (`recipient_role='admin'`) + originating Site HOD (`recipient_role='hod', recipient_site=<site>`), severity = `critical`
+- **PR target:** the PR is closed and marked force-closed in the Logistics queue
+- **PO target:** the PO and all of its lines are marked force-closed
+- **Line target:** only that one PO line is marked force-closed
+- A force-closure record is written, carrying your reason
+- Notifications go out to every Admin and to the HOD of the site the document came from, at critical severity
 
 ### 14.7.5 Recent force-closures (audit)
 
@@ -2884,10 +2884,10 @@ PO selectbox (all POs incl. closed). Then radio: `Whole PO` or `Single line`. If
 
 ### 14.8.3 ↩️ Raise vendor return button
 
-- New row in `po_returns` with `raised_by_role='logistics'`
-- `po_items.Returned_Qty` bumps; `line_status` flips back to `partially_delivered` or `open`
-- If the PO had been closed, header flips back to `partially_delivered` and `closed_by` / `closed_at` / `close_reason` are nulled
-- Notification: `vendor_return_raised` to logistics inbox + WhatsApp gated
+- A return record is created, showing it was raised by Logistics
+- The PO line's returned quantity goes up, and the line reopens as either partly delivered or open
+- If the PO had already been closed, it reopens as partly delivered and its closure details are cleared
+- A "vendor return raised" notification goes to the Logistics inbox, and to WhatsApp if that event is enabled
 
 ### 14.8.4 Open returns table
 
@@ -2898,7 +2898,7 @@ A table of all open returns. Read-only.
 Read-only archive. Two sub-tabs: **Closed POs** and **Closed PRs**.
 
 - Closed POs: status in `closed` / `force_closed` / `cancelled`
-- Closed PRs: any PR where `pr_status='closed'` OR `logistics_status` in `force_closed`/`closed`/`in_po`
+- Closed PRs: any PR that is itself closed, or that Logistics has closed, force-closed, or already turned into a PO
 
 For force-closures with the reason history, use Tab 6 → Recent force-closures table.
 
@@ -2929,7 +2929,7 @@ For force-closures with the reason history, use Tab 6 → Recent force-closures 
 
 1. 🔁 Reschedules → review the request (reason text + current vs requested date)
 2. Decide → notes + ✅ Approve
-3. PO Expected_Delivery auto-updates; Warehouse + requester get the decision notification
+3. The PO's expected delivery date updates automatically; Warehouse and the requester get the decision notification
 
 ### Use Case 5: Force-close a stale PR
 
@@ -2947,7 +2947,7 @@ A: PR lines come from the Site HOD's inventory catalogue. If the Material_Code i
 A: The Review preview is editable. Always check Qty / Unit_Price / Total_Price before saving. The extractor is calibrated against the General Industries sample layout; other vendor templates may need template additions.
 
 **Q: I want to assign a PO to multiple warehouses.**
-A: Two separate 🏭 Assign actions — one per warehouse. The `items_subset_json` field on each assignment row keeps them distinct.
+A: Two separate 🏭 Assign actions — one per warehouse. Each assignment records its own set of PO lines, so the two never overlap.
 
 **Q: Why can't I see prices in Tab 4 / on assignment cards?**
 A: You CAN see prices in Tab 3 (Open POs drilldown). Tab 4 (Assign to Warehouse) shares the read with Warehouse users, so prices are hidden there for consistency.
@@ -2981,13 +2981,13 @@ The Warehouse Portal is the physical-receiving and DN-preparation side. Role-loc
 
 ## 15.2 Sidebar warehouse resolution
 
-- A `warehouse_user` is bound to a single warehouse via `users.Warehouse_ID`. The portal auto-resolves from the user's profile.
-- An `admin` shadowing the portal gets a sidebar `"🏭 Shadow warehouse"` selectbox listing every active warehouse.
-- If neither resolves: red error card `"🛑 Your account is not bound to a warehouse. Ask Admin to set your Warehouse_ID in Admin Portal → Users."`
+- A Warehouse User is tied to a single warehouse on their own user record. The portal works out which one from their profile.
+- An Admin shadowing the portal gets a "🏭 Shadow warehouse" picker in the sidebar listing every active warehouse.
+- If neither applies, a red error card appears: "🛑 Your account is not bound to a warehouse. Ask Admin to set your Warehouse ID in Admin Portal → Users."
 
 ## 15.3 Page title
 
-`🏭 Warehouse <ID>` in gold, with `(prices hidden — Logistics-only)` muted caption next to it as a permanent visual reminder.
+"🏭 Warehouse <ID>" in gold, with a muted "(prices hidden — Logistics-only)" caption next to it as a permanent visual reminder.
 
 ## 15.4 Tab 1: 🔔 Incoming Assignments
 
@@ -2997,9 +2997,9 @@ POs Logistics has routed to this warehouse.
 
 | Card | Source |
 |---|---|
-| **AWAITING ACK** | Count of assignments with `status='assigned'` |
-| **ACKED** | Status = `acknowledged` (you've seen them, waiting on goods) |
-| **IN/RECEIVED** | Status in `partial` / `received` |
+| **AWAITING ACK** | Assignments routed to you that you have not acknowledged yet |
+| **ACKED** | Acknowledged — you've seen them, waiting on the goods |
+| **IN/RECEIVED** | Partly or fully received |
 
 ### 15.4.2 Assignments grid
 
@@ -3007,7 +3007,7 @@ A table with columns: Assign # · PO No. · PR No. · Vendor · Dest Site · Exp
 
 ### 15.4.3 Acknowledge action
 
-Selectbox of `status='assigned'` rows. Picking one → ✅ Acknowledge button → flips to `acknowledged` and pings Logistics with `warehouse_acknowledged` notification (off by default in WhatsApp toggles to keep noise low).
+A picker listing every assignment still awaiting acknowledgement. Choose one, click ✅ Acknowledge, and it moves to acknowledged and pings Logistics with a "warehouse acknowledged" notification (this one is off by default in the WhatsApp toggles to keep the noise down).
 
 ## 15.5 Tab 2: 📦 Receive Goods
 
@@ -3015,7 +3015,7 @@ Record qty actually received at this warehouse against an acknowledged assignmen
 
 ### 15.5.1 Assignment picker
 
-Selectbox of `status IN ('acknowledged', 'partial')` rows.
+A picker listing every assignment you have acknowledged but not yet fully received.
 
 ### 15.5.2 PO snapshot card (no prices)
 
@@ -3046,12 +3046,12 @@ Editable grid showing every line on the assignment:
 
 ### 15.5.4 📥 Record receipt button
 
-- Validates: at least one row with `Receive Now > 0`
-- Over-deliver guard: `Delivered_Qty − Returned_Qty + new_qty` may NOT exceed ordered Qty. If it does, the entire batch is rejected with a friendly message naming the line.
-- On success: bumps each line's `Delivered_Qty`, flips `line_status` (`delivered` if `Delivered − Returned ≥ Qty`, else `partially_delivered`)
-- Rolls assignment status (`received` if every line on the parent PO is `delivered`, else `partial`)
-- Rolls PO header status to match
-- Notification: `warehouse_received` to Logistics with line count
+- Validates: at least one row has a Receive Now quantity above zero
+- Over-deliver guard: what has been delivered, less anything returned, plus what you are recording now, may NOT exceed the quantity ordered. If it does, the whole batch is rejected with a friendly message naming the line.
+- On success: each line's delivered quantity goes up, and the line is marked delivered once the net delivered amount covers the ordered quantity, or partly delivered otherwise
+- The assignment moves to received once every line on the parent PO is delivered, and to partly received otherwise
+- The PO itself is updated to match
+- A "warehouse received goods" notification goes to Logistics with the line count
 
 ## 15.6 Tab 3: 📝 Prepare DN
 
@@ -3059,7 +3059,7 @@ Build a Delivery Note for a site. **RL/BL strict separation is enforced here** �
 
 ### 15.6.1 Source pickers
 
-- PO No. selectbox (assignments with status `acknowledged` / `partial` / `received`)
+- PO No. picker — assignments you have acknowledged, partly received or fully received
 - Destination Site selectbox
 
 ### 15.6.2 Items grid
@@ -3080,9 +3080,9 @@ Three-column row: DN Date · Vehicle No · Driver Name · Driver Phone · Prepar
 ### 15.6.4 📝 Save DN draft button
 
 - Validates: at least one row with Ship Qty > 0
-- Over-ship guard: `available = Delivered_Qty − Returned_Qty − Σ(live DN qty)` per line; ship qty cannot exceed available
+- Over-ship guard: for each line, what you may ship is what was delivered to you, less anything already returned, less anything already committed on other live Delivery Notes. Ship quantity cannot exceed that.
 - RL/BL strict-separation check: if the items span both families, REJECTED
-- On success: new `delivery_notes` row with `status='draft'` and one `dn_items` row per line. The DN header carries `rl_bl_family` if non-NULL.
+- On success: a new Delivery Note is created as a draft, with one line per item shipped. The DN header records the RL/BL family where the items carry one.
 - Toast: 📝 DN <number>
 
 ### 15.6.5 DN numbering convention
@@ -3095,7 +3095,7 @@ Track every DN this warehouse has prepared.
 
 ### 15.7.1 Status filter
 
-Multi-select of every DN status. Defaults to `draft`, `pending_logistics`, `pending_hod`, `pending_sk` (the active ones).
+Multi-select of every DN status. Defaults to the active ones — draft, awaiting Logistics, awaiting HOD and awaiting Store Keeper.
 
 ### 15.7.2 DN grid
 
@@ -3103,7 +3103,7 @@ A table of every matching DN with full state metadata.
 
 ### 15.7.3 Submit-to-Logistics action
 
-When the filter shows any `draft` row, a "Submit a draft to Logistics" section appears with a selectbox of drafts + 📨 Submit to Logistics button. Submission flips status to `pending_logistics` and pings Logistics with the DN-approval-queue notification.
+Whenever the filter shows a draft, a "Submit a draft to Logistics" section appears with a picker of your drafts and a 📨 Submit to Logistics button. Submitting moves the DN into the Logistics approval queue and sends them the DN-approval notification.
 
 ### 15.7.4 Per-DN drilldown
 
@@ -3111,7 +3111,7 @@ Select a DN → section card showing PO, Site, Status, RL/BL family, Vehicle/Dri
 
 ### 15.7.5 🔁 Request reschedule expander
 
-If the date you targeted isn't going to work, raise a reschedule from here. Same flow as the HOD's In-Transit tab (defaults, min_value=today, mandatory reason).
+If the date you targeted isn't going to work, raise a reschedule from here. Same flow as the HOD's In-Transit tab — you cannot pick a date in the past, and a reason is mandatory.
 
 ## 15.8 Tab 5: ↩️ Returns from Site
 
@@ -3131,9 +3131,9 @@ Mandatory.
 
 ### 15.8.4 ↩️ Raise return to vendor button
 
-- Internally calls the system which fans out to the system per affected line
-- Each line: `po_returns` row written with `raised_by_role='warehouse_user'`, dn_item flagged `returned`, parent po_item's `Returned_Qty` bumps and `line_status` flips back to `partially_delivered` or `open`
-- PO header reopens if it had been `closed`
+- One return is raised per affected line
+- For each line: a return record is created showing it was raised by the Warehouse, the DN line is flagged as returned, the parent PO line's returned quantity goes up, and that line reopens as either partly delivered or open
+- If the PO had already been closed, it reopens
 - Notification fires to Logistics
 
 ## 15.9 Tab 6: 📂 History
@@ -3208,24 +3208,24 @@ Site GI-PS01 needs 50 RL panels and 20 BL bricks. Total 3 working days from PR r
 |---|---|---|
 | Day 1 — 8:00 AM | **Site HOD** | Opens HOD Portal → 📋 Purchase Requests. Creates 2 PR lines (50 RL panels, 20 BL bricks) with PR Number 3000099999, WBS Number 4003951, Network 4003951-PROJ-A, Plant GI-PS01, Delivery_Date Day 3. |
 | Day 1 — 8:15 AM | **Site HOD** | Opens the **🚚 Submit PR(s) to Logistics Portal** expander → multi-selects PR 3000099999 → 📨 Submit Selected to Logistics. |
-| Day 1 — 8:15 AM | (auto) | `pr_submitted_to_logistics` notification → Logistics inbox (red badge). WhatsApp ping if enabled. |
+| Day 1 — 8:15 AM | (auto) | A "PR submitted to Logistics" notification lands in the Logistics inbox with a red badge, plus a WhatsApp ping if that event is enabled. |
 | Day 1 — 9:00 AM | **Logistics** | Sees PR 3000099999 in 📥 Incoming PRs queue. Drills in — 2 lines, RL + BL. Clicks 🧾 Use this PR to create a PO. |
 | Day 1 — 9:30 AM | **Logistics** | Switches to 🧾 Create PO → manual entry. Picks vendor "Carborundum Universal" (0000110341), Inco/Payment auto-fill, fills PO Number 4720033030, Unit_Price per line, Total_Price computed. 💾 Save PO. |
-| Day 1 — 9:30 AM | (auto) | PR rows flip to `logistics_status='in_po'` → disappear from Logistics queue. Site HOD gets `po_issued` notification with vendor + PO number. |
+| Day 1 — 9:30 AM | (auto) | The PR lines are marked as covered by a PO and disappear from the Logistics queue. The site HOD gets a "PO issued" notification with the vendor and PO number. |
 | Day 1 — 10:00 AM | **Logistics** | 🏭 Assign to Warehouse → picks PO 4720033030 + Warehouse WH-A + Expected Delivery Day 2 evening. 📨 Assign. |
-| Day 1 — 10:00 AM | (auto) | `po_assigned_to_warehouse` notification → WH-A users' inbox. WhatsApp ping if enabled. |
+| Day 1 — 10:00 AM | (auto) | A "PO assigned to warehouse" notification lands in the WH-A users' inbox, plus a WhatsApp ping if that event is enabled. |
 | Day 1 — 11:00 AM | **Warehouse user (WH-A)** | 🔔 Incoming Assignments → ✅ Acknowledge assignment #N. Goes about their day. |
-| Day 2 — 5:00 PM | **Warehouse user** | Physical truck arrives from vendor. 📦 Receive Goods → assignment #N → type 50 in Receive Now for the RL line, 20 for the BL line. 📥 Record receipt. Both lines flip to `delivered`. |
+| Day 2 — 5:00 PM | **Warehouse user** | Physical truck arrives from vendor. 📦 Receive Goods → assignment #N → type 50 in Receive Now for the RL line, 20 for the BL line. 📥 Record receipt. Both lines are marked delivered. |
 | Day 2 — 5:30 PM | **Warehouse user** | 📝 Prepare DN → pick PO 4720033030, destination GI-PS01. Types Ship Qty 50 for RL line, attempts to add BL line — rejected (RL/BL strict separation). Saves DN-WH-A-20260617-001 for RL only. |
 | Day 2 — 5:35 PM | **Warehouse user** | Repeats: new DN with only the BL line → DN-WH-A-20260617-002. |
 | Day 2 — 5:40 PM | **Warehouse user** | ✈️ Outbound DNs → submits both drafts to Logistics. |
 | Day 2 — 5:45 PM | **Logistics** | Sees DN-WH-A-20260617-001 + 002 in their DN approval queue. Confirms delivery date Day 3 AM. Approves both. |
-| Day 2 — 5:45 PM | (auto) | DN status flips to `pending_hod`. Site HOD gets `dn_logistics_approved` notification. |
+| Day 2 — 5:45 PM | (auto) | Both DNs move to awaiting-HOD-approval. The site HOD gets the "DN approved by Logistics" notification. |
 | Day 2 — 6:00 PM | **Site HOD** | Logs in, sees red bell badge `2 unread`. Opens inbox → drills into the DNs via 🚚 DN Approvals tab. Approves both. |
-| Day 2 — 6:00 PM | (auto) | DN status `pending_sk`. Two mirror rows in `pending_receipts.status='pending_sk'`. Site SK gets `dn_auto_generated` notification. |
+| Day 2 — 6:00 PM | (auto) | Both DNs move to awaiting-Store-Keeper, and a matching draft receipt appears in the site's Receipt Staging for each. The site SK gets the incoming-DN notification. |
 | Day 3 — 8:30 AM | **Truck arrives at site GI-PS01** | |
 | Day 3 — 8:45 AM | **Site SK** | Opens Entry Log → 📦 Receipt Staging. The new **🚚 Incoming Delivery Notes from Warehouse** expander is open at the top, showing both DNs. Inspects both, confirms physical match, clicks ✅ Mark as Received on each. |
-| Day 3 — 8:45 AM | (auto) | Two `receipts` rows written (with DN_Number, Warehouse_ID, PO_Number_Source). Both DNs flip to `received`. `pending_receipts` mirror rows deleted. Inventory cache busted. Live Dashboard shows the new stock immediately. |
+| Day 3 — 8:45 AM | (auto) | Two receipts are posted to the ledger, each carrying its DN number, source warehouse and originating PO. Both DNs are marked received, the staged drafts are cleared, and the Live Dashboard shows the new stock immediately. |
 
 ## 16.3 Side-path examples
 
@@ -3233,7 +3233,7 @@ Site GI-PS01 needs 50 RL panels and 20 BL bricks. Total 3 working days from PR r
 
 Same scenario, but on Day 2 at 6:00 PM, Site HOD inspects the line preview on DN-002 and notices the BL qty doesn't match the PR. Rejects DN-002 with note "BL qty in DN is 25, PR asked for 20 — bounce back".
 
-- DN-002 status → `rejected`, `rejection_reason` stored
+- DN-002 is marked rejected, and the reason is stored with it
 - Warehouse user gets the rejection notification with the reason
 - The BL line on the PO frees up qty (the over-ship guard recalculates available since DN-002 is no longer "live")
 - Warehouse prepares DN-003 with correct qty
@@ -3613,17 +3613,17 @@ Locations and equipment types come from the system settings, so the drop-downs s
 | 🏭 **Equipment Report** | Per-equipment three-section breakdown (requirement / available / shortfall), exportable as a multi-sheet workbook. |
 | 🗂️ **Execution Plan** | Critical-items card + procurement-priority + production-detail blocks for executing a work package. |
 | 📈 **Total Overview** | Whole-site rollup: 6-card KPI strip + master table + per-system-code drill-downs. |
-| ⚙️ **Master Data** | CRUD for Equipment, Recipe, and the SME Materials baseline + Locations/Types. **Writes go only to the SME-owned tables — never the ERP inventory ledger.** |
+| ⚙️ **Master Data** | Add, edit and remove Equipment, Recipes, the SME Materials baseline, and Locations/Types. **Changes are written only to the estimator's own records — never to the warehouse inventory ledger.** |
 
 ## 18.3 How SME consumption reaches the ledger
 
-The SME does **not** issue stock itself. Day-to-day consumption is entered on the **Store Keeper → SK Consumption** page (the `🧪 SME Multi-Material Entry` grid): pick an equipment tag → system codes → SQM per system → auto-computed materials → submit a batch. That flows through the **normal EOD commit pipeline** (HOD approval → `commit_eod`), and the SME's `Done_SQM` advances on commit. So the estimator's "available" figures stay in sync with real ledger movements.
+The SME does **not** issue stock itself. Day-to-day consumption is entered on the **Store Keeper → SK Consumption** page, in the 🧪 SME Multi-Material Entry grid: pick an equipment tag → system codes → SQM per system → auto-computed materials → submit a batch. That flows through the **normal end-of-day commit route** — HOD approval, then the EOD commit — and the SME's completed-SQM figure advances at that moment. So the estimator's "available" figures stay in step with real ledger movements.
 
 ## 18.4 Key rules (for support)
 
 - **SME inventory is isolated from ERP `inventory`.** The SME baseline lives in its own seed table; quantities shown are derived, not stored. Do not expect SME edits to change the Live Dashboard stock and vice-versa.
 - **Master-data grids order by an explicit key** (not row order); if a grid says "No records found" but data exists, it's a known historical bug class — refresh / report it.
-- Bootstrap/seed is loaded by Admin via `scripts/sme_bootstrap.py --site-id <SITE>`.
+- The initial SME baseline is loaded per site by an Admin as a one-off setup step.
 
 ---
 
@@ -3633,7 +3633,7 @@ The SME does **not** issue stock itself. Day-to-day consumption is entered on th
 
 ## 19.1 What it is
 
-Man-Hours tracks **labor** the way the Material Estimator tracks material: log who worked, where, and for how long; record SQM produced; define the **required** man-hours for a scope; then compare **estimated vs actual** to surface over-runs. It is fully **site-scoped** and **isolated** — it reads the Material Estimator's Equipment / System-Code / Location lists (read-only) for its dropdowns, and writes only to its own `mh_*` tables. Nothing here touches inventory, the EOD path, or the SME data.
+Man-Hours tracks **labor** the way the Material Estimator tracks material: log who worked, where, and for how long; record SQM produced; define the **required** man-hours for a scope; then compare **estimated vs actual** to surface over-runs. It is fully **site-scoped** and **isolated** — it reads the Material Estimator's Equipment / System-Code / Location lists for its dropdowns without ever changing them, and writes only to its own man-hours records. Nothing here touches inventory, the end-of-day path, or the SME data.
 
 ## 19.2 Tabs (5)
 
@@ -3643,20 +3643,20 @@ Per-site labor roster. Add/update a worker with **Code, Name, Designation, Type 
 ### 19.2.2 🕒 Daily Timesheet
 Two ways to enter actuals, plus team-SQM:
 
-- **📤 Excel upload** — upload an attendance workbook in the `to_john_Attendance` format (sheets `ADD EMPLOYEE` + `SAR`). The system previews the parsed counts, then on import you choose:
+- **📤 Excel upload** — upload an attendance workbook in the standard site attendance format (the one with an "ADD EMPLOYEE" sheet and a "SAR" sheet). The system shows you what it read before saving anything, then on import you choose:
   - **Replace rows for these dates** (recommended) — deletes this site's existing timesheets for the dates in the file, then inserts (safe to re-upload a corrected file — no duplicates), or
   - **Append** — adds the rows as-is.
   Unknown workers are auto-created into the roster. Location / Equipment / System import blank (the source file doesn't carry them) and are assigned afterward here.
 - **🕒 Manual per-day batch grid** — pick a **Work Date**, **Equipment Tag**, **System Code** (drop-downs from the Material Estimator's equipment), and a break (default 60 min). The grid lists active workers; tick **Worked** and set In/Out (default 07:30–16:30). On save, one timesheet row is written per worker.
-- **📐 Team SQM** — record the SQM the crew completed on that date/tag/system and choose **even** (equal per worker) or **by-hours** (pro-rata on hours) distribution; each worker's share lands in their row's `Allocated_SQM`.
+- **📐 Team SQM** — record the SQM the crew completed on that date/tag/system and choose **even** (equal per worker) or **by-hours** (pro-rata on hours) distribution; each worker's share is recorded as their allocated SQM for the day.
 
-**Hours math:** `Total = (Out − In) − break`; **Normal = min(Total, 8 h)**; **OT = max(0, Total − 8 h)**. (Example: 07:30–16:30 with a 1 h break = 8 h Total / 8 Normal / 0 OT.) The source file's own hour columns are ignored — hours are always recomputed.
+**Hours math:** Total = time out minus time in, less the break. **Normal hours** are the Total capped at 8; **overtime** is anything above 8, and never less than zero. (Example: 07:30–16:30 with a 1 h break = 8 h Total / 8 Normal / 0 OT.) The source file's own hour columns are ignored — hours are always recomputed.
 
 ### 19.2.3 📐 Estimator
 Define the **required** man-hours for a scope: pick Equipment Tag + System Code, enter Estimated man-hours (and optionally Estimated SQM → yields a man-hours-per-SQM norm) + a basis note. One estimate per Tag/System (re-saving updates it).
 
 ### 19.2.4 📊 Estimate vs Actual
-The variance dashboard. KPI strip (scopes tracked / over-consuming / total actual man-hours) + a table where **over-runs >10 % are highlighted red** and on-or-under-budget rows green. `Variance = Actual − Estimated`, `Variance % = Variance ÷ Estimated`. A "Where the most man-hours went" table ranks the top consumers. An expander lets you record a **reason** for an over-consumption (saved per Tag/System and shown back in the table).
+The variance dashboard. KPI strip (scopes tracked / over-consuming / total actual man-hours) + a table where **over-runs >10 % are highlighted red** and on-or-under-budget rows green. Variance is Actual minus Estimated, and Variance % is that variance divided by the estimate. A "Where the most man-hours went" table ranks the top consumers. An expander lets you record a **reason** for an over-consumption (saved per Tag/System and shown back in the table).
 
 ### 19.2.5 🧑‍🔧 Employee-wise
 The "where did each person work, date by date" view. Pick an employee (or *All*) and a date range; get a clean, date-ordered list of every tag/system they worked with hours and allocated SQM — the un-cluttered per-person timeline.
@@ -3682,8 +3682,8 @@ far more common mistake than deliberately wanting two copies of the same day.
 
 ## 19.4 Key rules (for support)
 
-- **Isolated `mh_*` data.** Man-Hours never changes inventory, SME data, or the EOD ledger.
-- **Site-scoped.** HOD sees only their site; Admin switches sites with the sidebar picker. Each timesheet/estimate carries `Site_ID`.
+- **Its own data, kept apart.** Man-Hours never changes inventory, SME data, or the end-of-day ledger.
+- **Site-scoped.** HOD sees only their site; Admin switches sites with the sidebar picker. Every timesheet and estimate is stamped with the site it belongs to.
 - **One timesheet line per (employee, date, equipment-tag, system-code).** A worker split across two tags in a day has two rows.
 - Equipment-Tag / System-Code / Location drop-downs come from the **Material Estimator's** equipment master — keep that seeded for a site or the lists will be empty.
 
@@ -3761,19 +3761,21 @@ Any request that would change data from a view-only account is refused before it
 reaches the feature at all, and the user is told plainly that their account is
 view-only and the action is not permitted.
 
-Why that design matters to you: a per-endpoint permission check is only as
-reliable as the developer who remembers to add it, and the one that gets
-forgotten **fails open** — the write succeeds and nothing looks wrong. Keying
-on the method inverts that, so a feature added next year is closed to Auditors
-from the moment it is written. **126 of the system's 143 state-changing
-endpoints are blocked**; the 17 that are not are sign-in, sign-out, token
-refresh, the user's own 2FA and phone-change flows, and read-only calculation
-endpoints that use `POST` only because the request is too large for a URL.
+Why that design matters to you: a permission check added screen by screen is
+only as reliable as the person who remembers to add it, and the one that gets
+forgotten **fails open** — the change succeeds and nothing looks wrong. Checking
+centrally inverts that, so a feature added next year is closed to Auditors from
+the moment it is written. **126 of the system's 143 data-changing actions are
+blocked**; the 17 that are not are sign-in, sign-out, staying signed in, the
+user's own two-factor and phone-change steps, and a handful of read-only
+calculations that are technically submissions only because the figures are too
+large to fit in a web address.
 
 Two consequences to be aware of:
 
-- An Auditor probing a URL that does not exist gets **403, not 404**. The guard
-  runs before routing, so it cannot be used to map the system.
+- An Auditor probing an address that does not exist is told "not permitted"
+  rather than "not found". The check runs first, so it cannot be used to map
+  the system.
 - Blocking is by role, not by page. Even if an Auditor somehow reached a write
   page, every button on it would still fail server-side.
 
@@ -3882,11 +3884,11 @@ those — a **97.7 % smaller prompt for Admins**, and noticeably better answers
 for everyone, because the relevant paragraph is now present in full instead of
 being cut off.
 
-A parsing bug was fixed at the same time: shell comments inside the code blocks
-in the Operations chapter (`# 1. Pull the new code`) were being read as chapter
+A parsing bug was fixed at the same time: numbered comment lines inside the
+worked examples in the Operations chapter were being mistaken for chapter
 headings, which silently replaced chapters 1–4 — Introduction, Roles &
 Permissions, Login, and the Store Keeper Manual — with fragments of a restore
-script. Ask "how do I log in?" today and you get §3.1, the login screen.
+procedure. Ask "how do I log in?" today and you get §3.1, the login screen.
 
 The role filter is unchanged and still applied **before** retrieval: a Store
 Keeper's context physically cannot contain an Admin chapter.
