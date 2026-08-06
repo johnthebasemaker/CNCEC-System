@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { App } from 'antd'
 import { api, detectClientType, setAuthRole, setAuthToken, TOKEN_KEY } from '../api/client'
 import { isReadOnly as roleIsReadOnly } from './readOnly'
+import { clearIfDifferentUser, clearOnLogout } from './sessionState'
 
 export interface User {
   username: string
@@ -39,7 +40,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (t) {
       api
         .get<User>('/auth/me')
-        .then((r) => setUser(r.data))
+        .then((r) => {
+          // Boot is a sign-in too. A browser reopened on a restored tab never
+          // passes through login(), so this is where a swapped user is caught
+          // when the previous session was simply abandoned.
+          clearIfDifferentUser(r.data.username)
+          setUser(r.data)
+        })
         .catch(() => setAuthToken(null))
         .finally(() => setReady(true))
     } else {
@@ -67,6 +74,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
     if (data.mfa_required) return { mfa: true, mfaToken: data.mfa_token as string }
     setAuthToken(data.access_token)
+    // Before the new user's screens mount: if this is somebody else, drop the
+    // previous person's UI state (see auth/sessionState.ts — offline caches are
+    // explicitly NOT touched).
+    clearIfDifferentUser(data.user.username)
     setUser(data.user)
     return { mfa: false }
   }
@@ -74,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loginMfa = async (mfaToken: string, code: string) => {
     const { data } = await api.post('/auth/login/2fa', { mfa_token: mfaToken, code })
     setAuthToken(data.access_token)
+    clearIfDifferentUser(data.user.username)
     setUser(data.user)
   }
 
@@ -81,6 +93,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Revoke the server-side refresh session too (fire-and-forget).
     api.post('/auth/logout').catch(() => {})
     setAuthToken(null)
+    // Hand the machine over clean: session UI state and the shareable
+    // ?scenario= param go now, rather than waiting for the next sign-in to
+    // notice the user changed. Form drafts survive — the same person signing
+    // back in should still find what they were typing.
+    clearOnLogout()
     setUser(null)
   }
 

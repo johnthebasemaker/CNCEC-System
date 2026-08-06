@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Alert, App, Button, Card, Col, Collapse, Radio, Row, Skeleton, Space } from 'antd'
 import { FileExcelOutlined, FilePdfOutlined, PlusOutlined } from '@ant-design/icons'
 import { postDownloadDocument, useSmeSnapshot } from '../api/hooks'
+import { useAuth } from '../auth/AuthContext'
 import { buildModel, runPlan } from './engine'
 import type { SmeModel } from './engine'
 import { allUnits, fcDot, locColor } from './insights'
@@ -169,8 +170,13 @@ function ScopeSection({ model, order, onOrder, siteId, scopeTitle, slug, showSug
 
 export default function LocationReport({ siteId }: { siteId?: string }) {
   const { data: snap, isLoading } = useSmeSnapshot(siteId)
+  const { user } = useAuth()
   const [mode, setMode] = useState<'loc' | 'all'>('loc')
-  const siteKey = siteId ?? 'all'
+  // Scoped by USER as well as site — same reason as ScenarioContext v2: keyed
+  // by site alone, an admin's drag order was inherited by the next person to
+  // sign in at that site. auth/sessionState.ts additionally clears these keys
+  // on a user change; the scoping is the belt to that braces.
+  const siteKey = `${user?.username ?? 'anon'}::${siteId ?? 'all'}`
   const { orders: locOrders, save: saveLoc } = usePersistedOrders('gi.sme.locorder.v1', siteKey)
   const { orders: allOrders, save: saveAll } = usePersistedOrders('gi.sme.alleqorder.v1', siteKey)
 

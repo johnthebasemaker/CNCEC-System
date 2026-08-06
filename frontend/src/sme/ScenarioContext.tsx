@@ -2,15 +2,27 @@
  * frontend/src/sme/ScenarioContext.tsx — persistent SME planning scenario
  * (Phase S1). Holds the equipment priority order that drives the client-side
  * cascade engine. State is React-only (the backend stays read-only per the
- * SME Canon) and persists to localStorage per site key, so a planning session
- * survives refresh/logout — something the Streamlit portal never could.
+ * SME Canon) and persists to localStorage, so a planning session survives a
+ * refresh — something the Streamlit portal never could.
+ *
+ * ⚠️ SCOPED BY USER *AND* SITE (v2). v1 keyed this store by site alone, so
+ * signing out of an admin account and back in as an HOD at that site handed
+ * the HOD the admin's selected equipment, still sitting in the tab. The key is
+ * now `username::siteKey`. Two things follow, and both are deliberate:
+ *   · the same person returning still finds their planning work — scoping is
+ *     not the same as wiping;
+ *   · a DIFFERENT person can never address the previous one's entry, whatever
+ *     happens to the storage clear in auth/sessionState.ts.
+ * The v1 key is not migrated: it is unattributable (nothing records who wrote
+ * it), and inheriting it is precisely the bug. sessionState.ts deletes it.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useAuth } from '../auth/AuthContext'
 
-const STORAGE_KEY = 'gi.sme.scenario.v1'
+const STORAGE_KEY = 'gi.sme.scenario.v2'
 
-type Store = Record<string, string[]> // siteKey → ordered equipment tags
+type Store = Record<string, string[]> // "username::siteKey" → ordered tags
 
 function readStore(): Store {
   try {
@@ -64,6 +76,14 @@ export interface ScenarioState {
   order: string[]
   setOrder: (next: string[]) => void
   addTag: (tag: string) => void
+  /**
+   * Append many tags in ONE update, preserving the given order and skipping
+   * any already in the session. Returns nothing; read `order` for the result.
+   * Bulk add exists as its own action because looping `addTag` would write
+   * localStorage once per tag and re-cascade the whole plan on every step —
+   * with "Select all" over 29 equipment that is 29 full engine runs.
+   */
+  addTags: (tags: string[]) => void
   removeTag: (tag: string) => void
   /** Move the tag at `from` to position `to` (dnd-kit reorder handler). */
   moveTag: (from: number, to: number) => void
@@ -75,26 +95,31 @@ export interface ScenarioState {
 const ScenarioContext = createContext<ScenarioState | null>(null)
 
 export function ScenarioProvider({ siteId, children }: { siteId?: string; children: ReactNode }) {
+  const { user } = useAuth()
   const siteKey = siteId ?? 'all'
+  // The storage address. Signed out (never rendered in practice — SmePage sits
+  // behind the route guard) falls back to 'anon', which simply means nothing
+  // reachable by a real account.
+  const storeKey = `${user?.username ?? 'anon'}::${siteKey}`
   const [order, setOrderState] = useState<string[]>(
-    () => readUrlOrder() ?? readStore()[siteKey] ?? [])
+    () => readUrlOrder() ?? readStore()[storeKey] ?? [])
 
   // First mount: a ?scenario= URL wins (and is persisted so refresh keeps it).
-  // Site switch afterwards: load that site's persisted scenario.
+  // A site switch — or a user switch — afterwards loads that scope's scenario.
   const firstMount = useRef(true)
   useEffect(() => {
     const fromUrl = firstMount.current ? readUrlOrder() : null
     firstMount.current = false
-    const next = fromUrl ?? readStore()[siteKey] ?? []
+    const next = fromUrl ?? readStore()[storeKey] ?? []
     setOrderState(next)
-    if (fromUrl) writeStore({ ...readStore(), [siteKey]: fromUrl })
+    if (fromUrl) writeStore({ ...readStore(), [storeKey]: fromUrl })
     writeUrlOrder(next)
-  }, [siteKey])
+  }, [storeKey])
 
   const persist = useCallback((next: string[]) => {
-    writeStore({ ...readStore(), [siteKey]: next })
+    writeStore({ ...readStore(), [storeKey]: next })
     writeUrlOrder(next)
-  }, [siteKey])
+  }, [storeKey])
 
   const setOrder = useCallback((next: string[]) => {
     const clean = [...new Set(next.map((t) => t.trim()).filter(Boolean))]
@@ -107,6 +132,23 @@ export function ScenarioProvider({ siteId, children }: { siteId?: string; childr
       const t = tag.trim()
       if (!t || prev.includes(t)) return prev
       const next = [...prev, t]
+      persist(next)
+      return next
+    })
+  }, [persist])
+
+  const addTags = useCallback((tags: string[]) => {
+    setOrderState((prev) => {
+      const have = new Set(prev)
+      const fresh: string[] = []
+      for (const raw of tags) {
+        const t = raw.trim()
+        if (!t || have.has(t)) continue
+        have.add(t)      // also de-dupes repeats WITHIN the incoming list
+        fresh.push(t)
+      }
+      if (!fresh.length) return prev   // nothing new — do not touch storage
+      const next = [...prev, ...fresh]
       persist(next)
       return next
     })
@@ -135,8 +177,8 @@ export function ScenarioProvider({ siteId, children }: { siteId?: string; childr
   const shareUrl = useCallback(() => window.location.href, [])
 
   const value = useMemo(
-    () => ({ siteKey, order, setOrder, addTag, removeTag, moveTag, clear, shareUrl }),
-    [siteKey, order, setOrder, addTag, removeTag, moveTag, clear, shareUrl],
+    () => ({ siteKey, order, setOrder, addTag, addTags, removeTag, moveTag, clear, shareUrl }),
+    [siteKey, order, setOrder, addTag, addTags, removeTag, moveTag, clear, shareUrl],
   )
   return <ScenarioContext.Provider value={value}>{children}</ScenarioContext.Provider>
 }
