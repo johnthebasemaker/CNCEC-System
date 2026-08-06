@@ -461,8 +461,21 @@ def _defuse(v):
     here as int/float/Decimal and MUST pass through untouched — prefixing a
     number would turn every accounting column into text and break the exports
     this function exists to protect. See `xlsx_style.xl_val` for the twin.
+
+    A string that is simply a NUMBER is also left alone. `-5` and `+3.2` open
+    with a risky character, but Excel reads them as the numbers they are, not
+    as formulas, so defusing them would buy nothing and cost real arithmetic:
+    the SME workbooks build their rows through `sme_export_layouts._cell` and
+    then sum those same rows with `_num()`, which parses with `float()`. An
+    apostrophe there turns every negative subtotal into 0.0 in a GRAND TOTAL
+    row. `-1+1` parses as no number at all and is still defused, which is the
+    case that actually matters.
     """
-    if isinstance(v, str) and v[:1] in _RISKY:
+    if not isinstance(v, str) or v[:1] not in _RISKY:
+        return v
+    try:
+        float(v)          # a plain number — there is nothing here to evaluate
+    except ValueError:
         return "'" + v
     return v
 

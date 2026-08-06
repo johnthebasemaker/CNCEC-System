@@ -117,7 +117,27 @@ def _header_block(ws, fmts: dict, title: str, n_cols: int, username: str) -> Non
 
 
 def _cell(v):
-    return "" if v is None else v
+    """The single coercion every SME data cell passes through before xlsxwriter
+    writes it — and therefore the one place to stop formula injection here.
+
+    These workbooks are built with **xlsxwriter**, not openpyxl, so they do NOT
+    inherit `xlsx_style.xl_val`'s guard; `ws.write()` does its own type
+    dispatch and hands a leading `=` straight to `write_formula`. Material and
+    equipment names reach these sheets from master data, so the same CWE-1236
+    exposure the 2026-08-05 audit found in `/reports/*` applies.
+
+    `reports._defuse` is deliberately reused rather than reimplemented — one
+    definition, one set of risky characters, one regression suite (BK). It
+    leaves every non-string and every plain numeric string untouched, which is
+    what keeps `_num()` below (and so every GRAND TOTAL) arithmetically intact.
+
+    Imported inside the function on purpose: `reports` pulls in FastAPI, the DB
+    session and the stock SQL, and this module is otherwise a stdlib-only leaf
+    that `xlsx_style` imports at module scope. Deferring keeps that import
+    graph acyclic. The cost is a `sys.modules` lookup per cell.
+    """
+    from .reports import _defuse
+    return "" if v is None else _defuse(v)
 
 
 def _num(v) -> float:
