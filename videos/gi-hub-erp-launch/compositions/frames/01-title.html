@@ -1,0 +1,303 @@
+<template id="frame-01-title-template">
+  <div
+    id="root"
+    data-composition-id="01-title"
+    data-width="1920"
+    data-height="1080"
+    data-duration="5.6"
+  >
+    <!-- Scene 0 — the ground. Full-bleed background rides on a clip layer, never #root. -->
+    <div
+      id="t01-ground" class="clip t01-ground"
+      data-start="0"
+      data-duration="5.6"
+      data-track-index="0"
+    >
+      <div class="t01-grid"></div>
+      <div class="t01-vignette"></div>
+    </div>
+
+    <!-- Scene 1-2 — the wordmark lockup -->
+    <div
+      id="t01-lockup" class="clip t01-lockup"
+      data-start="0"
+      data-duration="5.6"
+      data-track-index="1"
+    >
+      <div class="t01-mark">
+        <span class="t01-word" id="t01-w1">GI</span>
+        <span class="t01-word" id="t01-w2">HUB</span>
+        <span class="t01-word t01-erp" id="t01-w3">ERP</span>
+      </div>
+    </div>
+
+    <!-- Scene 3 — the payoff pill -->
+    <div
+      id="t01-pillwrap" class="clip t01-pillwrap"
+      data-start="0"
+      data-duration="5.6"
+      data-track-index="2"
+    >
+      <div class="t01-pill" id="t01-pill">v1.2.0</div>
+    </div>
+
+    <!-- Scene 4 — thesis line + the carried hairline -->
+    <div
+      id="t01-thesis" class="clip t01-thesis"
+      data-start="0"
+      data-duration="5.6"
+      data-track-index="3"
+    >
+      <div class="t01-thesis-line">
+        <span class="t01-tw">Multi-site</span>
+        <span class="t01-tw">warehouse</span>
+        <span class="t01-tw">inventory.</span>
+        <span class="t01-tw t01-accent">One</span>
+        <span class="t01-tw t01-accent">source</span>
+        <span class="t01-tw t01-accent">of</span>
+        <span class="t01-tw t01-accent">truth.</span>
+      </div>
+    </div>
+
+    <div
+      id="t01-rulewrap" class="clip t01-rulewrap"
+      data-start="0"
+      data-duration="5.6"
+      data-track-index="4"
+    >
+      <svg class="t01-rule" viewBox="0 0 1920 2" preserveAspectRatio="none">
+        <path id="t01-rulepath" d="M 0 1 L 1920 1" />
+      </svg>
+    </div>
+
+    <style>
+      #root {
+        position: absolute;
+        inset: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        font-family: "Inter", sans-serif;
+      }
+
+      .t01-ground {
+        position: absolute;
+        inset: 0;
+        background: #0b0d10;
+      }
+      .t01-grid {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        background-image:
+          linear-gradient(to right, rgba(245, 247, 250, 0.055) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(245, 247, 250, 0.055) 1px, transparent 1px);
+        background-size: 80px 80px;
+      }
+      .t01-vignette {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(
+          ellipse 62% 52% at 50% 44%,
+          rgba(240, 180, 41, 0.07),
+          rgba(11, 13, 16, 0) 70%
+        );
+      }
+
+      .t01-lockup {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 330px;
+        display: flex;
+        justify-content: center;
+      }
+      .t01-mark {
+        display: flex;
+        align-items: baseline;
+        gap: 30px;
+        white-space: nowrap;
+      }
+      .t01-word {
+        display: inline-block;
+        font-family: "Inter", sans-serif;
+        font-weight: 900;
+        font-size: 188px;
+        line-height: 0.9;
+        letter-spacing: -0.045em;
+        color: #f5f7fa;
+        opacity: 0;
+      }
+      .t01-erp {
+        color: #f0b429;
+      }
+
+      .t01-pillwrap {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 566px;
+        display: flex;
+        justify-content: center;
+      }
+      .t01-pill {
+        font-family: "IBM Plex Mono", monospace;
+        font-weight: 700;
+        font-size: 26px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #0b0d10;
+        background: #f0b429;
+        padding: 13px 30px 12px;
+        opacity: 0;
+      }
+
+      .t01-thesis {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 668px;
+        display: flex;
+        justify-content: center;
+      }
+      .t01-thesis-line {
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 13px;
+        overflow: hidden;
+        padding-bottom: 10px;
+      }
+      .t01-tw {
+        display: inline-block;
+        font-family: "Inter", sans-serif;
+        font-weight: 400;
+        font-size: 33px;
+        line-height: 1.35;
+        letter-spacing: 0.005em;
+        color: #a8adb6;
+        opacity: 0;
+      }
+      .t01-accent {
+        color: #f5f7fa;
+        font-weight: 700;
+      }
+
+      .t01-rulewrap {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 778px;
+        height: 2px;
+      }
+      .t01-rule {
+        display: block;
+        width: 1920px;
+        height: 2px;
+      }
+      .t01-rule path {
+        stroke: #f0b429;
+        stroke-width: 2;
+        fill: none;
+      }
+    </style>
+
+    <script src="assets/vendor/gsap.min.js"></script>
+    <script>
+      (function () {
+        const id = '[data-composition-id="01-title"]';
+        const tl = gsap.timeline({ paused: true });
+
+        // ONE tempo grid drives every entrance — kinetic-beat-slam.
+        const PULSE = 0.4;
+        const BEATS = [PULSE * 0.375, PULSE * 1.375, PULSE * 3.375];
+
+        // Scene 1 (0.0-1.3s) — GI, then HUB, one word per beat.
+        // Distinct entrance per phrase: scale + blur slam.
+        tl.fromTo(
+          id + " #t01-w1",
+          { scale: 1.55, filter: "blur(18px)", opacity: 0 },
+          {
+            scale: 1,
+            filter: "blur(0px)",
+            opacity: 1,
+            duration: 0.5,
+            ease: "power4.out",
+          },
+          BEATS[0]
+        );
+        tl.fromTo(
+          id + " #t01-w2",
+          { scale: 1.55, filter: "blur(18px)", opacity: 0 },
+          {
+            scale: 1,
+            filter: "blur(0px)",
+            opacity: 1,
+            duration: 0.5,
+            ease: "power4.out",
+          },
+          BEATS[1]
+        );
+
+        // Scene 2 (1.3-2.4s) — ERP snaps in from the right, closing the lockup.
+        tl.fromTo(
+          id + " #t01-w3",
+          { x: 300, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" },
+          BEATS[2]
+        );
+        // the grid field rises behind as the ground
+        tl.fromTo(
+          id + " .t01-grid",
+          { opacity: 0 },
+          { opacity: 1, duration: 0.9, ease: "power2.out" },
+          1.5
+        );
+
+        // Scene 3 (2.4-3.4s) — the payoff: gold version pill spring-pops.
+        tl.fromTo(
+          id + " #t01-pill",
+          { scale: 0, opacity: 0 },
+          {
+            scale: 1,
+            opacity: 1,
+            duration: 0.55,
+            ease: "back.out(1.7)",
+          },
+          2.5
+        );
+
+        // Scene 4 (3.4-5.0s) — thesis waterfalls in word by word.
+        tl.fromTo(
+          id + " .t01-tw",
+          { yPercent: 115, opacity: 0 },
+          {
+            yPercent: 0,
+            opacity: 1,
+            duration: 0.62,
+            stagger: 0.055,
+            ease: "power3.out",
+          },
+          3.4
+        );
+
+        // ...and the carrier hairline draws left to right.
+        const path = document.querySelector(id + " #t01-rulepath");
+        if (path) {
+          const len = path.getTotalLength();
+          path.style.strokeDasharray = len;
+          tl.fromTo(
+            path,
+            { strokeDashoffset: len },
+            { strokeDashoffset: 0, duration: 1.05, ease: "power2.inOut" },
+            3.75
+          );
+        }
+
+        // Frame holds STILL from 4.8s — no drift, no breathing.
+
+        window.__timelines = window.__timelines || {};
+        window.__timelines["01-title"] = tl;
+      })();
+    </script>
+  </div>
+</template>

@@ -1,0 +1,237 @@
+<template id="frame-05-lockup-template">
+  <div
+    id="root"
+    data-composition-id="05-lockup"
+    data-width="1920"
+    data-height="1080"
+    data-duration="6"
+  >
+    <div
+      id="l05-ground" class="clip l05-ground"
+      data-start="0"
+      data-duration="6"
+      data-track-index="0"
+    >
+      <div class="l05-grid" id="l05-grid"></div>
+      <div class="l05-bloom" id="l05-bloom"></div>
+    </div>
+
+    <!-- handoff_in: the carrier hairline arrives at y=130 and travels to centre -->
+    <div
+      id="l05-rulewrap" class="clip l05-rulewrap"
+      data-start="0"
+      data-duration="6"
+      data-track-index="2"
+    >
+      <div class="l05-rule" id="l05-rule"></div>
+    </div>
+
+    <div
+      id="l05-lockup" class="clip l05-lockup"
+      data-start="0"
+      data-duration="6"
+      data-track-index="3"
+    >
+      <div class="l05-markmask">
+        <div class="l05-mark">
+          <span class="l05-word">GI</span>
+          <span class="l05-word">HUB</span>
+          <span class="l05-word l05-erp">ERP</span>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="l05-tail" class="clip l05-tail"
+      data-start="0"
+      data-duration="6"
+      data-track-index="4"
+    >
+      <div class="l05-cta" id="l05-cta">v1.2.0 &mdash; Available now.</div>
+      <div class="l05-org" id="l05-org">
+        General Industries &nbsp;&middot;&nbsp; Multi-site inventory, procurement and planning
+      </div>
+    </div>
+
+    <style>
+      #root {
+        position: absolute;
+        inset: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        font-family: "Inter", sans-serif;
+      }
+
+      .l05-ground {
+        position: absolute;
+        inset: 0;
+        background: #0b0d10;
+      }
+      .l05-grid {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(to right, rgba(245, 247, 250, 0.05) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(245, 247, 250, 0.05) 1px, transparent 1px);
+        background-size: 80px 80px;
+      }
+      .l05-bloom {
+        position: absolute;
+        left: 460px;
+        top: 300px;
+        width: 1000px;
+        height: 500px;
+        opacity: 0;
+        background: radial-gradient(
+          ellipse 50% 50% at 50% 50%,
+          rgba(240, 180, 41, 0.2),
+          rgba(11, 13, 16, 0) 70%
+        );
+      }
+
+
+
+      /* ---- the carrier rule ---- */
+      .l05-rulewrap {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .l05-rule {
+        position: absolute;
+        left: 0;
+        top: 130px;
+        width: 1920px;
+        height: 2px;
+        background: #f0b429;
+      }
+
+      /* ---- the lockup ---- */
+      .l05-lockup {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 372px;
+        display: flex;
+        justify-content: center;
+      }
+      .l05-markmask {
+        overflow: hidden;
+        padding-bottom: 16px;
+      }
+      .l05-mark {
+        display: flex;
+        align-items: baseline;
+        gap: 28px;
+        white-space: nowrap;
+      }
+      .l05-word {
+        display: inline-block;
+        font-family: "Inter", sans-serif;
+        font-weight: 900;
+        font-size: 172px;
+        line-height: 0.9;
+        letter-spacing: -0.045em;
+        color: #f5f7fa;
+        opacity: 0;
+      }
+      .l05-erp {
+        color: #f0b429;
+      }
+
+      /* ---- the tail ---- */
+      .l05-tail {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 596px;
+        text-align: center;
+      }
+      .l05-cta {
+        font-family: "IBM Plex Mono", monospace;
+        font-weight: 700;
+        font-size: 32px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #f0b429;
+        opacity: 0;
+      }
+      .l05-org {
+        margin-top: 34px;
+        font-family: "Inter", sans-serif;
+        font-weight: 400;
+        font-size: 25px;
+        letter-spacing: 0.02em;
+        color: #7e838c;
+        opacity: 0;
+      }
+    </style>
+
+    <script src="assets/vendor/gsap.min.js"></script>
+    <script>
+      (function () {
+        const id = '[data-composition-id="05-lockup"]';
+        const tl = gsap.timeline({ paused: true });
+        // Scene 1 (0.0-1.0s) — the stage opens clear: only the carrier rule is present.
+
+        // the grid recedes so the closing plane is quieter than the proof beats
+        tl.fromTo(
+          id + " #l05-grid",
+          { opacity: 1 },
+          { opacity: 0.45, duration: 0.9, ease: "power2.out" },
+          0.1
+        );
+
+        // handoff_in: the carrier hairline arrives at y=130 and glides to centre (y=540).
+        tl.fromTo(
+          id + " #l05-rule",
+          { y: 0 },
+          { y: 410, duration: 0.95, ease: "power3.inOut" },
+          0.1
+        );
+
+        // Scene 2 (1.0-2.2s) — the wordmark reveals above the settled rule.
+        tl.fromTo(
+          id + " .l05-word",
+          { yPercent: 118, opacity: 0 },
+          {
+            yPercent: 0,
+            opacity: 1,
+            duration: 0.78,
+            stagger: 0.11,
+            ease: "power3.out",
+          },
+          1.0
+        );
+
+        // Scene 3 (2.2-3.4s) — the CTA spring-pops beneath the rule.
+        tl.fromTo(
+          id + " #l05-cta",
+          { scale: 0.72, opacity: 0 },
+          { scale: 1, opacity: 1, duration: 0.6, ease: "back.out(1.6)" },
+          2.25
+        );
+
+        // Scene 4 (3.4-4.4s) — the organisation line fades up. Opacity only, no travel.
+        tl.fromTo(
+          id + " #l05-org",
+          { opacity: 0 },
+          { opacity: 1, duration: 0.7, ease: "power2.out" },
+          3.4
+        );
+
+        // Scene 5 (4.4-6.0s) — one slow bloom settles, then everything rests.
+        tl.fromTo(
+          id + " #l05-bloom",
+          { opacity: 0, scale: 0.9 },
+          { opacity: 1, scale: 1, duration: 1.05, ease: "power2.out" },
+          4.3
+        );
+
+        window.__timelines = window.__timelines || {};
+        window.__timelines["05-lockup"] = tl;
+      })();
+    </script>
+  </div>
+</template>

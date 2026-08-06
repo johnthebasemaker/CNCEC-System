@@ -1,0 +1,1 @@
+no assets were captured — this project runs the no-capture path. GI Hub is an internal system with no public marketing site. No images, logos or screenshots are available; every frame is typographic and abstract.

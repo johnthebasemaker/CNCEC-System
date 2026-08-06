@@ -69,3 +69,14 @@ reports_archive/
 # tools/excel_sync.py — never commit; archived snapshots in data-archive/
 # and legacy/scripts/sme_seed_data/ predate this rule and stay tracked).
 *.xlsx
+
+# HyperFrames tooling — vendored third-party skill packages, reinstallable with
+# `npx skills add heygen-com/hyperframes`. Not part of this project's source.
+/.agents/
+/.claude/skills/
+/skills-lock.json
+/videos/*/.agents/
+/videos/*/node_modules/
+/videos/*/.hyperframes/
+/videos/*/snapshots/
+/videos/*/assets/vendor/

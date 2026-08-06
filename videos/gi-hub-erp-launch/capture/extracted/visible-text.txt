@@ -1,0 +1,64 @@
+GI HUB ERP — v1.2.0
+
+Multi-site warehouse inventory. One source of truth.
+
+A multi-site warehouse inventory ERP and procurement chain built for General
+Industries. Runs as a React single-page application over an async FastAPI
+backend against PostgreSQL, with native desktop and Android builds.
+
+---
+
+FEATURE 1 — SMART MATERIAL ESTIMATOR
+
+Know what you can build today.
+
+Turns a work scope into an exact material demand.
+Separates stock on the shelf from stock still on order — never mixes the two.
+Twin calculation engines, proven identical across 1,313 checks.
+
+Detail: the estimator resolves a recipe against every component's own stock
+pool, keyed on material code and variant SAP code together. Physical stock
+alone drives every "can we build it today" figure; ordered-but-undelivered
+stock feeds only the forward-looking projections and the net buy list. The
+browser engine and the server engine are line-for-line mirrors, held equal by
+a golden-parity gate of 1,313 comparisons.
+
+---
+
+FEATURE 2 — ASSET & TOOL GEOLOCATION
+
+Every tool, tracked to the shelf.
+
+Serialised assets with a full custody and location history.
+GPS-tagged the moment a tool moves.
+Rack Locator: scan a rack, see everything that should be on it.
+
+Detail: each serialised unit carries its own record, its condition, its current
+rack and its last known position. Moving a tool captures coordinates where the
+browser allows it. The Locator works in both directions — find the rack holding
+a material, or scan a rack and get back the checklist of everything that should
+be on it, which turns a stock count into a list to tick off.
+
+---
+
+FEATURE 3 — ENFORCED ROLE-BASED ACCESS
+
+Permission by design, not by memory.
+
+Access is enforced centrally — never screen by screen.
+View-only accounts are blocked from 126 of 143 data-changing actions.
+A feature added next year is locked down the day it is written.
+
+Detail: the view-only restriction is applied once, centrally, keyed on the kind
+of request rather than annotated onto each individual feature. A check added
+feature by feature is only as reliable as the person who remembers to add it,
+and the one that gets forgotten fails open. Checking centrally inverts that
+default, so a feature written next year is closed from the moment it exists.
+
+---
+
+CLOSING
+
+GI HUB ERP
+v1.2.0 — Available now.
+General Industries · Multi-site inventory, procurement and planning.
