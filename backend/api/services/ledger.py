@@ -323,17 +323,30 @@ async def stage_consumption(session: AsyncSession, *, username: str, data: dict)
     inserts into `pending_issues` directly and would walk straight past a
     guard placed only here.
 
-    The import is deliberately lazy — `quality` imports this module for its
-    metadata and `write_audit`, so a top-level import would be a cycle. Same
-    pattern as `notifications.digest_loop`'s lazy `db.SessionLocal`.
+    QSEP slice 4 also makes this the PPE handover: when the material is PPE,
+    `ppe.validate_issue` demands the employee and the safety approval, and a
+    `ppe_distributions` row is written beside the staged issue. Option A —
+    there is ONE issue form, and PPE gets no parallel stock ledger. The
+    quantity leaves the shelf through pending_issues → consumption exactly
+    like everything else, so stock, FEFO, burn rate and the QC gate need no
+    PPE-shaped exception.
+
+    Both imports are deliberately lazy — `quality` and `ppe` import this
+    module for its metadata and `write_audit`, so a top-level import would
+    be a cycle. Same pattern as `notifications.digest_loop`'s lazy
+    `db.SessionLocal`.
     """
-    from . import quality
+    from . import ppe, quality
 
     sap = data["SAP_Code"].strip()
     await quality.assert_qc_cleared(
         session, sap_code=sap, site_id=data["Site_ID"],
         qty=float(data["Quantity"]), lot=(data.get("Lot_Number") or None),
         actor=username)
+    # Validated BEFORE anything is written, so a bad PPE line raises while
+    # there is still nothing to unwind. Returns None for every non-PPE
+    # material, which is what leaves the ordinary issue path untouched.
+    ppe_plan = await ppe.validate_issue(session, data=data)
     values = {
         "Date": data["Date"], "SAP_Code": sap, "Quantity": float(data["Quantity"]),
         "Work_Type": data.get("Work_Type") or None, "Issued_To": data.get("Issued_To") or None,
@@ -349,7 +362,24 @@ async def stage_consumption(session: AsyncSession, *, username: str, data: dict)
            .returning(pending_issues_t.c["id"]))).scalar_one()
     await write_audit(session, username, "STAGE_ISSUE", "pending_issues",
                       f"id={pid} sap={sap} site={data['Site_ID']} qty={float(data['Quantity']):g}")
-    return {"pending_id": pid, "status": PENDING, "message": "Issue submitted for HOD approval"}
+    out = {"pending_id": pid, "status": PENDING,
+           "message": "Issue submitted for HOD approval"}
+    if ppe_plan is not None:
+        # Written at STAGE, not at approval. The boots are on the worker's
+        # feet the moment the SK hands them over, and if the record only
+        # appeared on the HOD's approval a second pair could be staged in
+        # the gap and both would pass the duplicate check. A rejection voids
+        # the row (ppe.void_rejected), so nothing is stranded.
+        did = await ppe.record_distribution(session, plan=ppe_plan, data=data,
+                                            pending_id=pid, username=username)
+        out["ppe_distribution_id"] = did
+        out["ppe_expires_on"] = ppe_plan["expires_on"]
+        out["message"] = (
+            f"Issue submitted for HOD approval · PPE recorded against "
+            f"{ppe_plan['employee_name']}"
+            + (f", replace by {ppe_plan['expires_on']}" if ppe_plan["expires_on"]
+               else " (no usable time configured for this item)"))
+    return out
 
 
 async def stage_return(session: AsyncSession, *, username: str, data: dict) -> dict:
@@ -422,6 +452,8 @@ async def commit_receipt(session: AsyncSession, *, approver: str, pending_id: in
 
 
 async def commit_consumption(session: AsyncSession, *, approver: str, pending_id: int) -> dict:
+    from . import ppe                       # lazy: ppe imports this module
+
     row = await _load_pending(session, pending_issues_t, pending_id)
     if row is None:
         return {"error": "not found or already handled"}
@@ -430,6 +462,11 @@ async def commit_consumption(session: AsyncSession, *, approver: str, pending_id
         await session.execute(update(consumption_t)
                               .where(consumption_t.c["id"] == res.get("consumption_id", res.get("id", -1)))
                               .values(WBS=row["wbs"]))
+    # QSEP — bind a PPE distribution staged alongside this issue to the ledger
+    # row it became. Done BEFORE the delete below, because the pending id is
+    # the only handle the two share. No-op for non-PPE issues.
+    await ppe.link_committed(session, pending_id=pending_id,
+                             consumption_id=res.get("consumption_id"))
     await session.execute(delete(pending_issues_t).where(pending_issues_t.c["id"] == pending_id))
     return {"committed": True, **res}
 
@@ -507,6 +544,14 @@ async def reject_pending(session: AsyncSession, *, approver: str, kind: str,
         (table.c["id"] == pending_id) & (table.c["status"] == PENDING)).values(**vals))
     if res.rowcount == 0:
         return {"error": "not found or already handled"}
+    voided = 0
+    if kind == "issue":
+        # QSEP — void any PPE distribution staged alongside this issue, and
+        # restore the pair it replaced. Without the restore the worker would
+        # hold nothing on record while still wearing the old boots.
+        from . import ppe                   # lazy: ppe imports this module
+        voided = await ppe.void_rejected(session, pending_id=pending_id)
     await write_audit(session, approver, f"REJECT_{kind.upper()}", table.name,
-                      f"id={pending_id} reason={reason or '-'}")
-    return {"rejected": True, "id": pending_id}
+                      f"id={pending_id} reason={reason or '-'}"
+                      + (" ppe_voided=1" if voided else ""))
+    return {"rejected": True, "id": pending_id, "ppe_voided": voided}

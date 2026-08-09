@@ -1296,6 +1296,14 @@ async def test_manhours():
                     "DELETE FROM mh_timesheets WHERE \"Employee_Code\" LIKE 'SVC-%'"))
                 await s.execute(_text(
                     "DELETE FROM mh_employees WHERE \"Employee_Code\" LIKE 'SVC-%'"))
+                # QSEP: /mh/import now MIRRORS the roster into `employees`,
+                # the PERSON registry — so this suite creates rows in a second
+                # table it never used to touch. Without this line every run
+                # leaves three fictional workers in the live employee master,
+                # visible on the Employees page and pickable on a real
+                # supervisor material request.
+                await s.execute(_text(
+                    "DELETE FROM employees WHERE \"ID_Number\" LIKE 'SVC-IMP-%'"))
                 await s.execute(_text(
                     "DELETE FROM mh_production WHERE \"Equipment_Tag\" = 'SVC-TAG' "
                     "OR \"Work_Date\" LIKE '2031-%'"))
@@ -12354,6 +12362,569 @@ async def test_qc_issuance_block():
     await _qsep_cleanup()
 
 
+# --- Suite BO: PPE — the integrated issue, and the forecast -------------------
+async def test_ppe_distribution_and_forecast():
+    """Suite BO — PPE rides the ORDINARY issue form, and gets no second ledger.
+
+    Option A (operator ruling, 2026-08-09): a Store Keeper hands out safety
+    goggles through the same form as everything else. When the material is
+    PPE the form grows two fields and the backend does two things in one
+    transaction — the ordinary stock consumption AND a `ppe_distributions`
+    row.
+
+    **The property that matters most is a NEGATIVE one**, and it is checked
+    first below: the quantity still leaves the shelf through
+    `pending_issues`. If PPE ever grew its own stock path, stock, FEFO, the
+    burn rate, every report and the QC gate would each need a PPE-shaped
+    exception, and the ones nobody remembered would be wrong silently.
+
+    The lifecycle is the other half. The row is written at STAGE, not at
+    approval, because the boots are on the worker's feet the moment the SK
+    hands them over — and if the record only appeared on the HOD's approval,
+    a second pair could be staged in the gap and both would pass the
+    duplicate check. A rejection therefore has to VOID the row and RESTORE
+    the pair it replaced, or the worker ends up holding nothing on record
+    while still wearing the old ones.
+
+    ⚠️ `usable_days_applied` and `expires_on` are STORED, not derived. An
+    operator shortening Safety Shoes from 6 months to 4 must not retroactively
+    rewrite when the boots already issued were deemed to expire; there is a
+    check that changes a rule and requires the existing row not to move.
+    """
+    import datetime as _d
+
+    from fastapi import HTTPException as _HX
+    from sqlalchemy import text as _sqt
+
+    from .services import ppe as ppesvc
+
+    await _qsep_seed_users()
+    dist_t = _MD.tables["ppe_distributions"]
+    rules_t = _MD.tables["ppe_rules"]
+    SITE, WORKER = "CNCEC", "SVCQ-W-PPE"
+    TODAY = _d.date.today().isoformat()
+
+    async def _one(sql: str, **p):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), p)).first()
+
+    ppe_sap = await _one('SELECT "SAP_Code" FROM inventory '
+                         "WHERE \"Category\" = 'PPE' ORDER BY \"SAP_Code\" LIMIT 1")
+    plain = await _one('SELECT "SAP_Code" FROM inventory WHERE "Category" NOT IN '
+                       "('PPE','Surface Shields') ORDER BY \"SAP_Code\" LIMIT 1")
+    check("bo-data: the operator's PPE category is present in the live master "
+          "(9 SAPs at the time of writing) — if this fails the category was "
+          "renamed and every check below is proving nothing",
+          ppe_sap is not None and plain is not None, f"{ppe_sap} {plain}")
+    if ppe_sap is None or plain is None:
+        return
+    SAP, PSAP = ppe_sap[0], plain[0]
+
+    # A worker and a signed safety approval to hang everything off.
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM employees WHERE \"ID_Number\" LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt(
+            'INSERT INTO employees ("ID_Number", "Name", "Site_ID", status, created_by) '
+            "VALUES (:w, 'QSEP PPE Worker', :site, 'active', 'svc')"),
+            {"w": WORKER, "site": SITE})
+        DOC = (await s.execute(_sqt(
+            'INSERT INTO entry_attachments ("Site_ID", doc_type, doc_number, '
+            "file_name, uploaded_by) VALUES (:site,'safety_approval','SVCQ',"
+            "'signed.pdf','SVCQ-sk') RETURNING id"), {"site": SITE})).scalar()
+        WRONGDOC = (await s.execute(_sqt(
+            'INSERT INTO entry_attachments ("Site_ID", doc_type, doc_number, '
+            "file_name, uploaded_by) VALUES (:site,'consumption','SVCQ',"
+            "'note.pdf','SVCQ-sk') RETURNING id"), {"site": SITE})).scalar()
+        await s.commit()
+
+    def _issue(**kw):
+        return {"Date": TODAY, "SAP_Code": SAP, "Quantity": 1, "Site_ID": SITE, **kw}
+
+    # ── 1. add_days, pure ────────────────────────────────────────────────────
+    check("bo: add_days is exact — an off-by-one expiry is invisible until "
+          "somebody is reissued boots a day early",
+          ppesvc.add_days("2026-01-31", 1) == "2026-02-01"
+          and ppesvc.add_days("2026-02-28", 1) == "2026-03-01"      # 2026 is not a leap year
+          and ppesvc.add_days("2026-08-10", 90) == "2026-11-08",
+          f'{ppesvc.add_days("2026-02-28", 1)} / {ppesvc.add_days("2026-08-10", 90)}')
+
+    # ── 2. what counts as PPE: two signals, two jobs ─────────────────────────
+    async with SessionLocal() as s:
+        check("bo: the operator's inventory Category is one signal",
+              await ppesvc.is_ppe(s, SAP), SAP)
+        check("bo: an ordinary material is not PPE — the flow must not appear "
+              "for the other ~450 materials in the master",
+              not await ppesvc.is_ppe(s, PSAP), PSAP)
+        await s.execute(_sqt(
+            'INSERT INTO ppe_rules ("SAP_Code", usable_days, created_by) '
+            "VALUES (:s, 30, 'svc')"), {"s": PSAP})
+        check("bo: a RULE is the other signal — an SK writing a usable time is "
+              "a stronger claim than a category, so it counts even when the "
+              "master disagrees", await ppesvc.is_ppe(s, PSAP), PSAP)
+        await s.rollback()
+
+    # ── 3. rule precedence: a site row beats the global one ──────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt('INSERT INTO ppe_rules ("SAP_Code", "Site_ID", '
+                             "usable_days, created_by) VALUES (:s, NULL, 90, 'svc')"),
+                        {"s": SAP})
+        g = await ppesvc.rule_for(s, sap_code=SAP, site_id=SITE)
+        check("bo: with only a global rule, the global rule applies",
+              g and g["usable_days"] == 90 and g["Site_ID"] is None, str(g))
+        await s.execute(_sqt('INSERT INTO ppe_rules ("SAP_Code", "Site_ID", '
+                             "usable_days, created_by) VALUES (:s, :site, 45, 'svc')"),
+                        {"s": SAP, "site": SITE})
+        r = await ppesvc.rule_for(s, sap_code=SAP, site_id=SITE)
+        check("bo: a SITE rule overrides the global default, and precedence "
+              "lives in the query rather than being re-derived by each caller",
+              r and r["usable_days"] == 45 and r["Site_ID"] == SITE, str(r))
+        other = await ppesvc.rule_for(s, sap_code=SAP, site_id="SOMEWHERE-ELSE")
+        check("bo: …and another site still gets the global 90, not the 45",
+              other and other["usable_days"] == 90, str(other))
+        await s.rollback()
+
+    # ── 4. the Option A gate refuses what it must ────────────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt('INSERT INTO ppe_rules ("SAP_Code", usable_days, '
+                             "created_by) VALUES (:s, 90, 'svc')"), {"s": SAP})
+        cases = [
+            ("no employee named", _issue(), "name the employee"),
+            ("unknown employee", _issue(employee_id_number="NOBODY"),
+             "not in the employee master"),
+            ("no safety approval", _issue(employee_id_number=WORKER),
+             "Safety Approval"),
+            ("wrong document type",
+             _issue(employee_id_number=WORKER, safety_doc_id=WRONGDOC),
+             "not a safety approval"),
+        ]
+        for label, payload, fragment in cases:
+            raised = None
+            try:
+                await ledger.stage_consumption(s, username="SVCQ-sk", data=payload)
+            except _HX as e:
+                raised = e
+            check(f"bo: PPE issue with {label} is refused, and the message says "
+                  "what to do", raised is not None and fragment in str(raised.detail),
+                  str(raised.detail if raised else "the issue was ALLOWED"))
+
+        # a worker at ANOTHER site
+        await s.execute(_sqt('UPDATE employees SET "Site_ID" = :o WHERE "ID_Number" = :w'),
+                        {"o": "ELSEWHERE", "w": WORKER})
+        raised = None
+        try:
+            await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(
+                employee_id_number=WORKER, safety_doc_id=DOC))
+        except _HX as e:
+            raised = e
+        check("bo: PPE cannot be issued to somebody who works at another site "
+              "— the message points at the transfer, which is the actual fix",
+              raised is not None and "transfer them first" in str(raised.detail),
+              str(raised.detail if raised else "the issue was ALLOWED"))
+        await s.rollback()
+
+    # ── 5. the happy path, and NO parallel stock ledger ──────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt('INSERT INTO ppe_rules ("SAP_Code", usable_days, '
+                             "created_by) VALUES (:s, 90, 'svc')"), {"s": SAP})
+        pend_before = await _count(s, pending_issues_t)
+        res = await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(
+            employee_id_number=WORKER, safety_doc_id=DOC))
+        pend_after = await _count(s, pending_issues_t)
+        check("bo: THE NEGATIVE PROPERTY — a PPE issue still stages an ordinary "
+              "pending_issues row. PPE gets NO parallel stock path, so stock, "
+              "FEFO, burn rate, every report and the QC gate keep working with "
+              "no PPE-shaped exception carved into them",
+              pend_after == pend_before + 1 and res.get("pending_id") is not None,
+              f"{pend_before}→{pend_after}")
+        row = (await s.execute(select(dist_t).where(
+            dist_t.c["pending_issue_id"] == res["pending_id"]))).mappings().first()
+        check("bo: …and a distribution is written beside it, in the SAME "
+              "transaction", row is not None, "no ppe_distributions row")
+        check("bo: expiry is computed from the rule and STORED, not derived on "
+              "read", row and row["expires_on"] == ppesvc.add_days(TODAY, 90)
+              and row["usable_days_applied"] == 90,
+              f'{row["expires_on"] if row else None} vs {ppesvc.add_days(TODAY, 90)}')
+        check("bo: the distribution keys on the PERSON (employee_id_number), "
+              "which is what lets the history survive a site transfer (R1)",
+              row and row["employee_id_number"] == WORKER, str(row and dict(row)))
+
+        # ⚠️ history must not move when the rule changes
+        await s.execute(_sqt('UPDATE ppe_rules SET usable_days = 5 '
+                             'WHERE TRIM("SAP_Code") = :s'), {"s": SAP})
+        again = (await s.execute(select(dist_t.c["expires_on"], dist_t.c["usable_days_applied"])
+                 .where(dist_t.c["id"] == row["id"]))).first()
+        check("bo: shortening the rule from 90 days to 5 does NOT move gear "
+              "already handed out — usable_days_applied and expires_on are "
+              "stored precisely so history cannot be rewritten under somebody",
+              again[0] == ppesvc.add_days(TODAY, 90) and again[1] == 90,
+              f"{again[0]} / {again[1]}")
+        await s.rollback()
+
+    # ── 6. early replacement ─────────────────────────────────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt('INSERT INTO ppe_rules ("SAP_Code", usable_days, '
+                             "created_by) VALUES (:s, 90, 'svc')"), {"s": SAP})
+        first = await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(
+            employee_id_number=WORKER, safety_doc_id=DOC))
+        raised = None
+        try:
+            await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(
+                employee_id_number=WORKER, safety_doc_id=DOC))
+        except _HX as e:
+            raised = e
+        check("bo: replacing PPE that has NOT expired demands a reason, and "
+              "names the date it is good until — same shape as create_smr's "
+              "existing 'old PPE not returned' guard",
+              raised is not None and "give a reason for replacing it early"
+              in str(raised.detail),
+              str(raised.detail if raised else "the early replacement was ALLOWED"))
+        second = await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(
+            employee_id_number=WORKER, safety_doc_id=DOC,
+            early_reason="lens cracked on site"))
+        rows = [dict(r) for r in (await s.execute(
+            select(dist_t).where(dist_t.c["employee_id_number"] == WORKER)
+            .order_by(dist_t.c["id"]))).mappings().all()]
+        check("bo: with a reason it goes through, flagged early and carrying "
+              "the reason", len(rows) == 2 and rows[1]["early_replacement"] == 1
+              and rows[1]["early_reason"] == "lens cracked on site", str(rows))
+        check("bo: the pair it replaced flips to 'replaced', so the person "
+              "holds exactly one active item and the duplicate check stays true",
+              rows[0]["status"] == "replaced" and rows[1]["status"] == "active"
+              and rows[1]["replaces_distribution_id"] == rows[0]["id"],
+              f'{rows[0]["status"]} / {rows[1]["status"]}')
+
+        # ── 7. reject → void AND restore the predecessor ─────────────────────
+        await ledger.reject_pending(s, approver="SVCQ-hod", kind="issue",
+                                    pending_id=second["pending_id"], reason="not needed")
+        rows = [dict(r) for r in (await s.execute(
+            select(dist_t).where(dist_t.c["employee_id_number"] == WORKER)
+            .order_by(dist_t.c["id"]))).mappings().all()]
+        check("bo: an HOD rejection VOIDS the staged distribution AND restores "
+              "the pair it replaced. Voiding alone would leave the worker "
+              "holding nothing on record while still wearing the old gear",
+              rows[1]["status"] == "void" and rows[0]["status"] == "active",
+              f'{rows[0]["status"]} / {rows[1]["status"]}')
+
+        # ── 8. approve → bind to the ledger row ──────────────────────────────
+        res = await ledger.commit_consumption(s, approver="SVCQ-hod",
+                                              pending_id=first["pending_id"])
+        bound = (await s.execute(select(dist_t.c["consumption_id"])
+                 .where(dist_t.c["id"] == rows[0]["id"]))).scalar()
+        check("bo: approving the issue binds the distribution to the "
+              "consumption row it became, so 'who has it' and 'what left the "
+              "shelf' are one story",
+              bound is not None and bound == res.get("consumption_id"),
+              f'{bound} vs {res.get("consumption_id")}')
+        await s.rollback()
+
+    # ── 9. history crosses sites; the forecast nets and names ────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt('INSERT INTO ppe_rules ("SAP_Code", usable_days, '
+                             "created_by) VALUES (:s, 10, 'svc')"), {"s": SAP})
+        await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(
+            employee_id_number=WORKER, safety_doc_id=DOC))
+        # a second row written as though it were issued at ANOTHER site
+        await s.execute(_sqt(
+            'INSERT INTO ppe_distributions ("Site_ID", employee_id_number, '
+            'employee_name, "SAP_Code", "Qty", issued_on, expires_on, status, '
+            "issued_by) VALUES ('OTHER-SITE', :w, 'QSEP PPE Worker', :s, 1, "
+            ":d, :e, 'active', 'svc')"),
+            {"w": WORKER, "s": PSAP, "d": TODAY, "e": ppesvc.add_days(TODAY, 3)})
+        hist = await ppesvc.history_for(s, id_number=WORKER)
+        sites = {h["Site_ID"] for h in hist}
+        check("bo: the history is the PERSON's, across EVERY site they have "
+              "worked at. A site-filtered history would hide exactly the rows "
+              "the destination Store Keeper needs after a transfer",
+              sites == {SITE, "OTHER-SITE"}, str(sites))
+
+        fc = await ppesvc.forecast(s, site_id=SITE, days=15)
+        item = next((i for i in fc["items"] if i["SAP_Code"] == SAP), None)
+        check("bo: the 15-day forecast picks up gear expiring inside the "
+              "window", item is not None and item["expiring_qty"] == 1.0, str(fc))
+        check("bo: and it carries the NAMES. A list of quantities cannot be "
+              "sanity-checked by a human; a list of names can, and it is how "
+              "the SK knows whose gear to go and look at",
+              item and item["people"] and item["people"][0]["employee_name"]
+              == "QSEP PPE Worker", str(item and item["people"]))
+        check("bo: the site filter holds — OTHER-SITE's row is not in CNCEC's "
+              "shopping list", all(i["SAP_Code"] != PSAP for i in fc["items"]),
+              str([i["SAP_Code"] for i in fc["items"]]))
+        check("bo: suggested = expiring − on hand − on order, floored at zero. "
+              "Netting against open POs is the same instinct as SME rule 1c "
+              "(never order what is already coming) computed from ERP tables "
+              "only", item is not None
+              and abs(item["suggested_order_qty"]
+                      - max(item["expiring_qty"] - item["on_hand"]
+                            - item["on_order"], 0)) < 1e-9,
+              str(item))
+        narrow = await ppesvc.forecast(s, site_id=SITE, days=1)
+        check("bo: a 1-day window excludes gear expiring in 10 — the window is "
+              "a real filter, not decoration",
+              all(i["SAP_Code"] != SAP for i in narrow["items"]),
+              str([i["SAP_Code"] for i in narrow["items"]]))
+        await s.rollback()
+
+    # ── 10. rule 1a + rule 12 ────────────────────────────────────────────────
+    pcode = _code_only(_read_src("backend/api/services/ppe.py"))
+    leaked = [t for t in ("sme_inventory_seed", "sme_recipe", "sme_equipment",
+                          "sme_consumption_log", "sme_sqm_progress") if t in pcode]
+    check("bo: services/ppe.py names NO sme_* table in its code. The "
+          "forecast's 'what do we hold, what is already ordered' netting has "
+          "the same SHAPE as SME rule 1c and is not the same thing — rule 1a "
+          "makes sme_inventory_seed the sole source of every SME number",
+          not leaked, f"leaked: {leaked}")
+    pexport = _code_only(_read_src("backend/api/ppe.py"))
+    check("bo: the PPE exports go through reports._FORMATS, whose writers all "
+          "route cells through _defuse. early_reason is free text typed by a "
+          "STORE KEEPER and read by an HOD in Excel — the exact privilege "
+          "path rule 12 closed, so a hand-rolled csv.writer here would reopen it",
+          "_FORMATS" in pexport and "csv.writer" not in pexport,
+          "PPE export is not using the shared defusing renderers")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM entry_attachments WHERE doc_number = 'SVCQ'"))
+        await s.execute(_sqt("DELETE FROM employees WHERE \"ID_Number\" LIKE 'SVCQ-W%'"))
+        await s.commit()
+    await _qsep_cleanup()
+
+
+# --- Suite BP: employee identity and transfers --------------------------------
+async def test_employee_identity_and_transfers():
+    """Suite BP — one person, one ID, and a history that follows them.
+
+    THE FINDING THIS SUITE GUARDS. There were two employee registries and
+    nothing joined them: `employees` (ID_Number UNIQUE globally) and
+    `mh_employees` (UNIQUE per Site_ID + Employee_Code). The attendance
+    workbook — the only bulk employee upload in the product — wrote the
+    second ONLY, so a worker imported from the roster could not be named on
+    a supervisor material request: `create_smr` looks them up in `employees`
+    and answers "worker not in employee master". The join column,
+    `mh_employees.linked_id_number`, had existed since the baseline
+    migration and was never written or read by anything.
+
+    RULING R1: `employees.ID_Number` is the PERSON; `mh_employees` is a
+    per-site EMPLOYMENT RECORD. That is not a preference — `mh_employees` is
+    keyed on (Site_ID, Employee_Code), so a transfer NECESSARILY creates a
+    second row, and anything hung off it forks. The requirement is that PPE
+    history carries over, which is only implementable if it keys on the
+    person. The checks below drive exactly that.
+
+    ⚠️ The transfer must NOT move the source roster row. `mh_timesheets` is
+    keyed on (Site_ID, Employee_Code, Work_Date), so moving it would orphan
+    every hour the person has already worked. There is a check for that,
+    because "tidy up the old row" is the obvious-looking wrong thing to do.
+    """
+    import datetime as _d
+
+    from sqlalchemy import text as _sqt
+
+    from .services import ppe as ppesvc
+
+    await _qsep_seed_users()
+    dist_t = _MD.tables["ppe_distributions"]
+    movements_t = _MD.tables["employee_movements"]
+    mh_emp_t = _MD.tables["mh_employees"]
+    WORKER, A, B = "SVCQ-W-MOVE", "CNCEC", "SVCQ-SITE-B"
+    TODAY = _d.date.today().isoformat()
+
+    transport = ASGITransport(app=app)
+
+    # ── 1. the backfill and the dead join key ────────────────────────────────
+    async with SessionLocal() as s:
+        row = (await s.execute(_sqt(
+            'SELECT "Site_ID" FROM employees WHERE "ID_Number" = \'30816\''))).scalar()
+        check("bp: employee 30816 has a site. It was '' — and a site-less "
+              "employee is invisible to EVERY supervisor request, because "
+              "create_smr tests (site or '') != site_id and no site satisfies "
+              "that. Nothing anywhere said so; alembic d2f84b19e57c backfilled "
+              "it to CNCEC on the operator's instruction",
+              (row or "") == "CNCEC", f"Site_ID is {row!r}")
+
+    src = _code_only(_read_src("backend/api/manhours.py"))
+    check("bp: the attendance import now writes linked_id_number — the column "
+          "has existed since the baseline migration and was never written by "
+          "anything, which is precisely why the roster and the SMR worker "
+          "list disagreed", "linked_id_number" in src,
+          "mh import still leaves the join key dead")
+    check("bp: …and mirrors the roster into the `employees` PERSON registry, "
+          "so an imported worker can actually be named on a material request",
+          "_sync_employee_master" in src, "mh import writes only mh_employees")
+    # Driven rather than grepped: the earlier version matched the literal
+    # source `index_elements=["ID_Number"]` and failed on token spacing while
+    # the code was correct. What matters is the BEHAVIOUR under a re-import
+    # from a second site, so import twice and count rows.
+    from .manhours import _sync_employee_master
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM employees WHERE \"ID_Number\" = 'SVCQ-W-DUP'"))
+        person = [{"code": "SVCQ-W-DUP", "name": "Twice Imported",
+                   "designation": "Painter", "worker_type": "OWN", "company": "GI"}]
+        await _sync_employee_master(s, A, person)
+        await _sync_employee_master(s, B, person)
+        rows = [dict(r) for r in (await s.execute(_sqt(
+            'SELECT "ID_Number", "Site_ID" FROM employees '
+            "WHERE \"ID_Number\" = 'SVCQ-W-DUP'"))).mappings().all()]
+        await s.rollback()
+    check("bp: importing the SAME person from a second site UPDATES the one "
+          "row rather than inserting a second. employees.ID_Number is UNIQUE "
+          "GLOBALLY, so a naive insert 409s on the second site's import and "
+          "takes the whole attendance transaction down with it",
+          len(rows) == 1 and rows[0]["Site_ID"] == B, str(rows))
+
+    # ── 2. a transfer moves the person, not the timesheets ───────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM employees WHERE \"ID_Number\" LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt("DELETE FROM mh_employees WHERE \"Employee_Code\" LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt("DELETE FROM mh_timesheets WHERE \"Employee_Code\" LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt(
+            'INSERT INTO employees ("ID_Number", "Name", "Site_ID", status, created_by) '
+            "VALUES (:w, 'QSEP Mover', :a, 'active', 'svc')"), {"w": WORKER, "a": A})
+        await s.execute(_sqt(
+            'INSERT INTO mh_employees ("Site_ID", "Employee_Code", "Name", '
+            '"Worker_Type", linked_id_number, created_by) '
+            "VALUES (:a, :w, 'QSEP Mover', 'OWN', :w, 'svc')"), {"a": A, "w": WORKER})
+        await s.execute(_sqt(
+            'INSERT INTO mh_timesheets ("Site_ID", "Employee_Code", "Work_Date", '
+            '"Total_Hours", created_by) VALUES (:a, :w, :d, 8, \'svc\')'),
+            {"a": A, "w": WORKER, "d": TODAY})
+        # PPE issued at the ORIGIN site — the thing that has to travel.
+        await s.execute(_sqt(
+            'INSERT INTO ppe_distributions ("Site_ID", employee_id_number, '
+            'employee_name, "SAP_Code", "Qty", issued_on, expires_on, '
+            "usable_days_applied, status, issued_by) VALUES (:a, :w, "
+            "'QSEP Mover', '1229', 1, :d, :e, 90, 'active', 'SVCQ-sk')"),
+            {"a": A, "w": WORKER, "d": TODAY, "e": ppesvc.add_days(TODAY, 90)})
+        await s.commit()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H_hod = await _qsep_login(ac, "SVCQ-hod")      # HOD at CNCEC
+        H_hod2 = await _qsep_login(ac, "SVCQ-hod2")    # HOD at SVCQ-SITE-B
+        H_sk = await _qsep_login(ac, "SVCQ-sk")
+
+        r = await ac.post(f"/hr/employees/{WORKER}/transfer", headers=H_hod2,
+                          json={"to_site": B, "reason": "steal them"})
+        check("bp: an HOD may not transfer ANOTHER site's employee (403) — "
+              "without this any HOD could reassign any site's workforce",
+              r.status_code == 403, f"{r.status_code} {r.text[:160]}")
+        r = await ac.post(f"/hr/employees/{WORKER}/transfer", headers=H_sk,
+                          json={"to_site": B, "reason": "no"})
+        check("bp: a Store Keeper cannot transfer anybody (403)",
+              r.status_code == 403, f"{r.status_code} {r.text[:160]}")
+        r = await ac.post(f"/hr/employees/{WORKER}/transfer", headers=H_hod,
+                          json={"to_site": "NOT-A-SITE", "reason": "typo"})
+        check("bp: the destination must be an admin-created site (422)",
+              r.status_code == 422, f"{r.status_code} {r.text[:160]}")
+
+        r = await ac.post(f"/hr/employees/{WORKER}/transfer", headers=H_hod,
+                          json={"to_site": B, "reason": "shutdown cover"})
+        moved = r.status_code == 201
+        check("bp: the owning HOD transfers, and it takes effect IMMEDIATELY "
+              "(ruling R4) — only a QC *account* transfer needs an admin's "
+              "second signature, because that one rewrites an auth row",
+              moved and r.json().get("to_site") == B,
+              f"{r.status_code} {r.text[:200]}")
+        check("bp: the response states how much PPE travelled with them, so "
+              "the HOD sees it without opening another page",
+              moved and r.json().get("ppe_carried_over") == 1,
+              str(r.json() if moved else r.text[:160]))
+
+        async with SessionLocal() as s:
+            site_now = (await s.execute(_sqt(
+                'SELECT "Site_ID" FROM employees WHERE "ID_Number" = :w'),
+                {"w": WORKER})).scalar()
+            roster = sorted(x[0] for x in (await s.execute(_sqt(
+                'SELECT "Site_ID" FROM mh_employees WHERE "Employee_Code" = :w'),
+                {"w": WORKER})).all())
+            ts_sites = sorted(x[0] for x in (await s.execute(_sqt(
+                'SELECT DISTINCT "Site_ID" FROM mh_timesheets WHERE "Employee_Code" = :w'),
+                {"w": WORKER})).all())
+            n_moves = await _count(s, movements_t,
+                                   movements_t.c["employee_id_number"] == WORKER)
+            ppe_rows = [dict(x) for x in (await s.execute(select(
+                dist_t.c["Site_ID"], dist_t.c["status"]).where(
+                dist_t.c["employee_id_number"] == WORKER))).mappings().all()]
+
+        check("bp: the PERSON moved — one row, one Site_ID",
+              site_now == B, f"Site_ID is {site_now!r}")
+        check("bp: a roster row exists at the DESTINATION so timesheets can be "
+              "entered there from day one", B in roster, str(roster))
+        check("bp: ⚠️ the SOURCE roster row is LEFT IN PLACE. mh_timesheets is "
+              "keyed on (Site_ID, Employee_Code, Work_Date), so moving or "
+              "deleting it would orphan every hour already worked — 'tidying "
+              "up' here is the obvious-looking wrong thing",
+              A in roster and ts_sites == [A], f"roster={roster} timesheets={ts_sites}")
+        check("bp: the move is recorded as a MOVEMENT, so the history is a "
+              "series rather than a single current value",
+              n_moves == 1, f"{n_moves} movement rows")
+        check("bp: ⚠️ THE REQUIREMENT — the PPE row did not move and did not "
+              "need to. It keys on employee_id_number, so it is already "
+              "visible from the new site; keying it on the per-site roster "
+              "row would have forked the history on exactly this transfer",
+              len(ppe_rows) == 1 and ppe_rows[0]["Site_ID"] == A
+              and ppe_rows[0]["status"] == "active", str(ppe_rows))
+
+        # ── 3. the destination SK can SEE it, which is the whole point ───────
+        H_sk2 = H_sk
+        r = await ac.get(f"/ppe/employees/{WORKER}", headers=H_hod2)
+        seen = r.status_code == 200 and len(r.json().get("active", [])) == 1
+        check("bp: the DESTINATION site's HOD reads the worker's full PPE "
+              "history, including the item issued at the site they came from. "
+              "That is what stops a second pair being handed out on their "
+              "first morning", seen, f"{r.status_code} {r.text[:200]}")
+        n = await _count_notif_for(B)
+        check("bp: and the destination site is NOTIFIED, with what the worker "
+              "already holds spelled out — the history travelling is the hard "
+              "part, telling somebody is the part that makes it useful",
+              n >= 1, f"{n} employee_transferred notification(s) for {B}")
+        _ = H_sk2
+
+        # ── 4. the timeline the admin dashboard draws ────────────────────────
+        r = await ac.get(f"/hr/employees/{WORKER}/timeline", headers=H_hod2)
+        tl = r.json() if r.status_code == 200 else {}
+        segs = tl.get("segments") or []
+        check("bp: the timeline returns closed SEGMENTS, not raw moves — four "
+              "callers each re-deriving 'from when to when' is four chances to "
+              "get it different", r.status_code == 200 and len(segs) == 2,
+              f"{r.status_code} segments={segs}")
+        check("bp: it opens with a synthesised segment for the site the person "
+              "was at BEFORE the movements table existed, so a worker hired "
+              "last year does not render as a chart with no beginning",
+              segs and segs[0]["site"] == A and segs[0]["origin"] == "opening"
+              and segs[-1]["site"] == B, str(segs))
+        check("bp: and it carries the PPE and the man-hour presence, so the "
+              "admin page is one request rather than four",
+              len(tl.get("ppe_active", [])) == 1 and len(tl.get("worked_at", [])) == 1,
+              f'ppe={len(tl.get("ppe_active", []))} worked={len(tl.get("worked_at", []))}')
+
+        # ── 5. data quality is REPORTED, never guessed ───────────────────────
+        async with SessionLocal() as s:
+            await s.execute(_sqt('UPDATE employees SET "Site_ID" = \'\' '
+                                 'WHERE "ID_Number" = :w'), {"w": WORKER})
+            await s.commit()
+        r = await ac.get("/hr/data-quality", headers=H_hod)
+        ids = [x["ID_Number"] for x in r.json().get("siteless_employees", [])]
+        check("bp: a site-less employee is REPORTED, not assigned by a "
+              "heuristic — same discipline as the Consumption-Log row that "
+              "has a Location and no serial. One such row existed for months "
+              "with nothing pointing at it",
+              r.status_code == 200 and WORKER in ids, f"{r.status_code} {ids}")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM ppe_distributions WHERE employee_id_number LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt("DELETE FROM employee_movements WHERE employee_id_number LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt("DELETE FROM mh_timesheets WHERE \"Employee_Code\" LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt("DELETE FROM mh_employees WHERE \"Employee_Code\" LIKE 'SVCQ-W%'"))
+        await s.execute(_sqt("DELETE FROM employees WHERE \"ID_Number\" LIKE 'SVCQ-W%'"))
+        await s.commit()
+    await _qsep_cleanup()
+
+
+async def _count_notif_for(site: str) -> int:
+    async with SessionLocal() as s:
+        return await _count(s, notif_t,
+                            notif_t.c["event_key"] == "employee_transferred",
+                            notif_t.c["recipient_site"] == site)
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -12498,6 +13069,12 @@ async def main() -> int:
     print("\n BN. QSEP — the quality block at issue, at BOTH mouths of the "
           "issue path, without touching the FEFO allow-and-log rule")
     await test_qc_issuance_block()
+    print("\n BO. QSEP — PPE rides the ordinary issue form (Option A) and gets "
+          "no parallel stock ledger; the 15-day forecast nets and names")
+    await test_ppe_distribution_and_forecast()
+    print("\n BP. QSEP — one person, one ID: transfers move the worker, not "
+          "their timesheets, and the PPE history follows them for free")
+    await test_employee_identity_and_transfers()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

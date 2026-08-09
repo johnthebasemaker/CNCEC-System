@@ -29,7 +29,11 @@ export default function EntryDocsUpload({
   docType, siteId, docNumber, value, onChange, required = true,
   ocrKind, onOcrResult,
 }: {
-  docType: 'consumption' | 'receipt' | 'return'
+  // 'safety_approval' (QSEP slice 4) is the PPE distribution's mandatory
+  // document. It reuses this component and the same /entry/attachments store
+  // rather than getting its own: the BLOB handling, the size cap, the MIME
+  // allowlist, the camera capture and the audit row are all already right here.
+  docType: 'consumption' | 'receipt' | 'return' | 'safety_approval'
   siteId?: string
   docNumber?: string
   value: EntryDoc[]
@@ -121,11 +125,20 @@ export default function EntryDocsUpload({
     },
   }
 
+  // The heading names the document the caller actually wants. It used to be
+  // hardcoded to "hand-written note / delivery note", which is right for the
+  // three entry types and wrong for a safety approval — the PPE panel showed
+  // an SK the wrong instruction directly under a field labelled "Signed
+  // Safety Approval".
+  const heading = docType === 'safety_approval'
+    ? { label: 'Signed safety approval', hint: 'the signed form authorising this issue' }
+    : { label: 'Supporting documents', hint: 'hand-written note / delivery note' }
+
   return (
     <div style={{ marginBottom: 12 }}>
       <Typography.Text strong>
-        <PaperClipOutlined /> Supporting documents
-        {required ? ' (required — hand-written note / delivery note)' : ' (optional)'}
+        <PaperClipOutlined /> {heading.label}
+        {required ? ` (required — ${heading.hint})` : ' (optional)'}
       </Typography.Text>
       <div style={{ marginTop: 6 }}>
         <Space size={[6, 6]} wrap>

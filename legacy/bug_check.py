@@ -1467,7 +1467,15 @@ def check_models_schema_parity() -> None:
                ("mtc_documents", "Material_Code_Ref"),
                ("mtc_documents", "po_item_id"),
                ("mtc_documents", "DN_Number"),
-               ("mtc_documents", "qc_inspection_id")}
+               ("mtc_documents", "qc_inspection_id"),
+               # 2026-08-10 QSEP slice 5 (alembic d2f84b19e57c): what the
+               # attendance workbook already supplies about a person, mirrored
+               # onto the `employees` master so the roster and the SMR worker
+               # list stop disagreeing. New-stack only — the frozen legacy
+               # portal has one employee screen and it predates the roster.
+               ("employees", "Designation"),
+               ("employees", "Worker_Type"),
+               ("employees", "Company")}
     extra = model_only - allowed
     assert not extra, f"unexpected model-only columns (update models.py or DB): {extra}"
 

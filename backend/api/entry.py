@@ -193,6 +193,16 @@ class ConsumptionIn(BaseModel):
     FEFO_Override: Optional[str] = None
     wbs: Optional[str] = Field(None, description="WBS Number (required once the site has active WBS)")
     attachment_ids: list[int] = Field(default_factory=list)
+    # QSEP slice 4 — the PPE half of the ORDINARY issue form (Option A).
+    # Optional here and mandatory in services/ppe.py, because whether they
+    # are required depends on the material the user picked: making them
+    # required in the schema would break every non-PPE issue in the product.
+    employee_id_number: Optional[str] = Field(
+        None, description="PPE only: who is receiving it (employees.ID_Number)")
+    safety_doc_id: Optional[int] = Field(
+        None, description="PPE only: entry_attachments id, doc_type='safety_approval'")
+    early_reason: Optional[str] = Field(
+        None, description="PPE only: mandatory when replacing gear that has not expired")
 
 
 class ReturnIn(BaseModel):

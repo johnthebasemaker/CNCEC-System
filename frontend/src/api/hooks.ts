@@ -1646,3 +1646,145 @@ export function useDecideQcTransfer() {
     },
   })
 }
+
+// ── QSEP: PPE and employee identity ──────────────────────────────────────────
+// There is no "issue PPE" hook, on purpose. PPE goes out through the ORDINARY
+// issue form (Option A) — `useEntry('consumption')` with three extra fields —
+// so a second mutation here would be a second stock path.
+
+/** Materials that offer the PPE flow, and the usable-time rule that applies. */
+export function usePpeEligible(site?: string) {
+  return useQuery({
+    queryKey: ['/ppe/eligible', site],
+    queryFn: async () =>
+      (await api.get<{ items: Row[] }>('/ppe/eligible',
+        { params: { site_id: site } })).data.items,
+    staleTime: 60_000,
+  })
+}
+
+export function usePpeRules() {
+  return useQuery({
+    queryKey: ['/ppe/rules'],
+    queryFn: async () => (await api.get<{ items: Row[] }>('/ppe/rules')).data.items,
+  })
+}
+
+export function useSavePpeRule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { SAP_Code: string; usable_days: number; site_id?: string;
+                         requires_safety_doc?: boolean; notes?: string }) =>
+      api.post('/ppe/rules', body).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/ppe/rules'] })
+      qc.invalidateQueries({ queryKey: ['/ppe/eligible'] })
+      qc.invalidateQueries({ queryKey: ['/ppe/forecast'] })
+    },
+  })
+}
+
+export function useDeletePpeRule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.delete(`/ppe/rules/${id}`).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/ppe/rules'] })
+      qc.invalidateQueries({ queryKey: ['/ppe/eligible'] })
+    },
+  })
+}
+
+/**
+ * One person's PPE, across every site they have worked at. `enabled` is what
+ * makes this usable from the issue form: it fires only once an ID has been
+ * typed, and its answer is what warns the SK that the worker already holds
+ * this item before they submit.
+ */
+export function usePpeEmployee(idNumber?: string) {
+  return useQuery({
+    queryKey: ['/ppe/employees', idNumber],
+    enabled: !!idNumber && idNumber.trim().length >= 3,
+    retry: false,          // a typo'd ID is a 404, not something to retry
+    queryFn: async () =>
+      (await api.get<Row>(`/ppe/employees/${encodeURIComponent(idNumber!.trim())}`)).data,
+  })
+}
+
+export function usePpeForecast(site?: string, days = 15) {
+  return useQuery({
+    queryKey: ['/ppe/forecast', site, days],
+    queryFn: async () =>
+      (await api.get<Row>('/ppe/forecast', { params: { site_id: site, days } })).data,
+  })
+}
+
+export function useHrEmployees(params: { site_id?: string; q?: string } = {}) {
+  return useQuery({
+    queryKey: ['/hr/employees', params],
+    queryFn: async () =>
+      (await api.get<{ items: Row[] }>('/hr/employees', { params })).data.items,
+  })
+}
+
+export function useEmployeeTimeline(idNumber?: string) {
+  return useQuery({
+    queryKey: ['/hr/employees', idNumber, 'timeline'],
+    enabled: !!idNumber,
+    retry: false,
+    queryFn: async () =>
+      (await api.get<Row>(
+        `/hr/employees/${encodeURIComponent(idNumber!)}/timeline`)).data,
+  })
+}
+
+export function useTransferEmployee() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id_number, to_site, reason }:
+      { id_number: string; to_site: string; reason?: string }) =>
+      api.post(`/hr/employees/${encodeURIComponent(id_number)}/transfer`,
+        { to_site, reason }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/hr/employees'] })
+      qc.invalidateQueries({ queryKey: ['/hr/movements'] })
+      qc.invalidateQueries({ queryKey: ['/ppe/forecast'] })
+    },
+  })
+}
+
+export function useEmployeeMovements(site?: string) {
+  return useQuery({
+    queryKey: ['/hr/movements', site],
+    queryFn: async () =>
+      (await api.get<{ items: Row[] }>('/hr/movements',
+        { params: { site_id: site } })).data.items,
+  })
+}
+
+export function useHrDataQuality() {
+  return useQuery({
+    queryKey: ['/hr/data-quality'],
+    queryFn: async () => (await api.get<Row>('/hr/data-quality')).data,
+  })
+}
+
+/** PPE history / forecast download (xlsx | csv | pdf). */
+export async function downloadPpe(
+  key: 'history' | 'forecast', format: string,
+  params: Record<string, unknown>,
+) {
+  const res = await api.get(`/ppe/export/${key}`, {
+    params: { format, ...params }, responseType: 'blob',
+  })
+  const cd = (res.headers['content-disposition'] as string | undefined) ?? ''
+  const name = cd.match(/filename="?([^"]+)"?/)?.[1] ?? `ppe-${key}.${format}`
+  const url = URL.createObjectURL(res.data as Blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
