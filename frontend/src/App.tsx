@@ -33,6 +33,8 @@ const WarehousePage = lazy(() => import('./pages/WarehousePage'))
 const IncomingDeliveriesPage = lazy(() => import('./pages/IncomingDeliveriesPage'))
 const SupervisorPage = lazy(() => import('./pages/SupervisorPage'))
 const SkRequestsPage = lazy(() => import('./pages/SkRequestsPage'))
+const QcInspectionsPage = lazy(() => import('./pages/QcInspectionsPage'))
+const QcAccountsPage = lazy(() => import('./pages/QcAccountsPage'))
 const SmePage = lazy(() => import('./pages/SmePage'))
 const UsersPage = lazy(() => import('./pages/UsersPage'))
 const PendingUsersPage = lazy(() => import('./pages/PendingUsersPage'))
@@ -71,6 +73,8 @@ export default function App() {
         <Route path="site/incoming" element={<IncomingDeliveriesPage />} />
         <Route path="supervisor" element={<SupervisorPage />} />
         <Route path="sk/requests" element={<SkRequestsPage />} />
+        <Route path="qc/inspections" element={<QcInspectionsPage />} />
+        <Route path="qc/accounts" element={<QcAccountsPage />} />
         <Route path="sme" element={<SmePage />} />
         <Route path="bulk-import" element={<BulkImportPage />} />
         <Route path="hod/approvals" element={<ApprovalsPage />} />

@@ -1557,3 +1557,92 @@ export async function downloadReport(key: string, format: string, params: Record
   a.remove()
   URL.revokeObjectURL(url)
 }
+
+// ── QSEP: Quality Control ────────────────────────────────────────────────────
+// Accounts, transfers and the inspection ledger. Scoping is entirely
+// server-side (auth.qc_scope): the pages never send a site or warehouse they
+// picked for themselves, so a site inspector cannot ask for another site's
+// queue by editing a query string.
+
+export function useQcInspections(params: { status?: string; sap_code?: string } = {}) {
+  return useQuery({
+    queryKey: ['/qc/inspections', params],
+    queryFn: async () =>
+      (await api.get<{ items: Row[] }>('/qc/inspections', { params })).data.items,
+  })
+}
+
+export function useQcDecide() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, approved_qty, reason }:
+      { id: number; approved_qty: number; reason?: string }) =>
+      api.post(`/qc/inspections/${id}/decide`, { approved_qty, reason }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/qc/inspections'] })
+      qc.invalidateQueries({ queryKey: ['/meta/work-queues'] })
+    },
+  })
+}
+
+/** What the issue form needs to explain a refusal BEFORE the user submits. */
+export function useQcClearance(sap?: string, site?: string) {
+  return useQuery({
+    queryKey: ['/qc/clearance', sap, site],
+    enabled: !!sap,
+    queryFn: async () =>
+      (await api.get<Row>('/qc/clearance',
+        { params: { sap_code: sap, site_id: site } })).data,
+  })
+}
+
+export function useQcAccounts() {
+  return useQuery({
+    queryKey: ['/qc/accounts'],
+    queryFn: async () => (await api.get<{ items: Row[] }>('/qc/accounts')).data.items,
+  })
+}
+
+export function useCreateQcAccount() {
+  const qc = useQueryClient()
+  return useMutation({
+    // Note there is no `role` here on purpose: the endpoint mints qc accounts
+    // and nothing else, and sending one would be silently ignored anyway.
+    mutationFn: (body: { username: string; password: string;
+                         site_id?: string; warehouse_id?: string;
+                         phone_number?: string }) =>
+      api.post('/qc/accounts', body).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/qc/accounts'] }),
+  })
+}
+
+export function useQcTransfers(status?: string) {
+  return useQuery({
+    queryKey: ['/qc/transfers', status],
+    queryFn: async () =>
+      (await api.get<{ items: Row[] }>('/qc/transfers', { params: { status } })).data.items,
+  })
+}
+
+export function useRequestQcTransfer() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ username, to_site, reason }:
+      { username: string; to_site: string; reason: string }) =>
+      api.post(`/qc/accounts/${username}/transfer`, { to_site, reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['/qc/transfers'] }),
+  })
+}
+
+export function useDecideQcTransfer() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, action, notes }:
+      { id: number; action: 'approve' | 'reject'; notes?: string }) =>
+      api.post(`/qc/transfers/${id}/decide`, { action, notes }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/qc/transfers'] })
+      qc.invalidateQueries({ queryKey: ['/qc/accounts'] })
+    },
+  })
+}

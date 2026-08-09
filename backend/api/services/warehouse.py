@@ -17,6 +17,7 @@ import datetime as _dt
 from sqlalchemy import case, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import quality
 from .ledger import _MD, write_audit
 from .notifications import dispatch, notify
 
@@ -115,16 +116,38 @@ async def acknowledge(session: AsyncSession, *, username: str, assignment_id: in
 
 
 async def receive(session: AsyncSession, *, username: str, assignment_id: int,
-                  received_map: dict) -> dict:
-    a = (await session.execute(select(po_assignments_t.c["PO_Number"], po_assignments_t.c["status"])
-         .where(po_assignments_t.c["id"] == assignment_id))).first()
+                  received_map: dict, mtc_map: dict | None = None) -> dict:
+    """Record goods arriving at the warehouse against a PO assignment.
+
+    QSEP added two things to this function, both for controlled
+    (Surface-Shield) lines only — the other 430 materials in the master go
+    through exactly as before:
+
+      * **A Material Test Certificate is mandatory.** `mtc_map` maps the same
+        PO line ids as `received_map` to an `mtc_documents.id`. A controlled
+        line with no certificate is refused with a 422 that names it. This
+        used to be enforced only on the site-side Store Keeper's own receipt
+        form, so shields could be booked into a warehouse — and shipped on —
+        with no paperwork anywhere in the chain.
+      * **A quality inspection is opened**, so the warehouse QC is told there
+        is material to look at. Opening it does NOT gate the delivery: the
+        operator ruled on 2026-08-09 that uninspected material may travel to
+        site, and only ISSUE is blocked. Stranding a truck behind an inspector
+        who is not on shift is the failure that ruling avoids.
+    """
+    a = (await session.execute(select(
+        po_assignments_t.c["PO_Number"], po_assignments_t.c["status"],
+        po_assignments_t.c["Warehouse_ID"])
+        .where(po_assignments_t.c["id"] == assignment_id))).first()
     if a is None:
         return {"error": "assignment not found"}
     if a[1] in ("closed", "cancelled"):
         return {"error": f"assignment is {a[1]}"}
-    po_number = a[0]
+    po_number, warehouse_id = a[0], a[2]
+    mtc_map = mtc_map or {}
 
     affected = 0
+    inspections: list[int] = []
     for raw_id, raw_qty in received_map.items():
         try:
             item_id, qty = int(raw_id), float(raw_qty)
@@ -133,7 +156,8 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
         if qty <= 0:
             continue
         line = (await session.execute(select(
-            po_items_t.c["Qty"], po_items_t.c["Delivered_Qty"], po_items_t.c["Returned_Qty"])
+            po_items_t.c["Qty"], po_items_t.c["Delivered_Qty"], po_items_t.c["Returned_Qty"],
+            po_items_t.c["Material_Code"], po_items_t.c["Description"])
             .where((po_items_t.c["id"] == item_id) & (po_items_t.c["PO_Number"] == po_number)))).first()
         if line is None:
             continue
@@ -142,9 +166,24 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
         if new_delivered - returned > ordered + 1e-9:
             return {"error": f"cannot receive {qty}: over-delivers line {item_id} "
                              f"(ordered {ordered}, already {already})"}
+        # MTC gate. Raises 422 for a controlled line with no certificate;
+        # returns None (and asks for nothing) for everything else.
+        material_code = line[3]
+        mtc_id = await quality.assert_mtc(
+            session, material_code=material_code, warehouse_id=warehouse_id,
+            po_item_id=item_id, mtc_id=mtc_map.get(str(item_id), mtc_map.get(item_id)),
+            where=f"line {item_id} can be booked into warehouse {warehouse_id}")
         new_status = "delivered" if new_delivered - returned >= ordered - 1e-9 else "partially_delivered"
         await session.execute(update(po_items_t).where(po_items_t.c["id"] == item_id)
                               .values(Delivered_Qty=new_delivered, line_status=new_status))
+        sap = await quality.resolve_sap(session, material_code)
+        if sap:
+            iid = await quality.open_inspection(
+                session, sap_code=sap, material_code=material_code, lot=None, qty=qty,
+                source_type="warehouse_receipt", source_ref=f"{assignment_id}:{item_id}",
+                warehouse_id=warehouse_id, mtc_document_id=mtc_id, created_by=username)
+            if iid:
+                inspections.append(iid)
         affected += 1
 
     if affected == 0:
@@ -163,8 +202,20 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
         await session.execute(update(purchase_orders_t).where(purchase_orders_t.c["PO_Number"] == po_number).values(status="partially_delivered"))
 
     await write_audit(session, username, "WAREHOUSE_RECEIVE", "po_items",
-                      f"PO={po_number} assignment={assignment_id} lines={affected}")
-    return {"received": True, "po_number": po_number, "lines": affected}
+                      f"PO={po_number} assignment={assignment_id} lines={affected}"
+                      + (f" qc_inspections={len(inspections)}" if inspections else ""))
+    # QSEP notification gap #2: goods physically arriving was audited and
+    # otherwise silent, so nobody downstream learned the PO had landed.
+    await dispatch(session, event_key="po_goods_received", severity="success",
+                   recipient_role="logistics", wa_template="status_update",
+                   title=f"Goods received at {warehouse_id} — PO {po_number}",
+                   body=(f"{username} booked in {affected} line(s)."
+                         + (f" {len(inspections)} awaiting quality inspection."
+                            if inspections else "")),
+                   link_page="/logistics", related_table="po_items",
+                   related_ref=po_number, created_by=username)
+    return {"received": True, "po_number": po_number, "lines": affected,
+            "qc_inspections": inspections}
 
 
 async def _generate_dn_number(session: AsyncSession, warehouse_id: str) -> str:
@@ -213,6 +264,27 @@ async def create_dn(session: AsyncSession, *, username: str, po_number: str, war
             return {"error": f"line {iid}: shipping {qty} exceeds available {available:g} "
                              f"(delivered {delivered}, returned {returned}, on live DNs {float(shipped or 0):g})"}
 
+    # QSEP — THE MTC GATE, at the point where material leaves for a site.
+    #
+    # This is where the operator's rule bites: a Surface Shield may not be
+    # SENT without a Material Test Certificate. Note what is deliberately NOT
+    # checked here — whether QC has inspected it. Uninspected material is
+    # allowed to travel and wait at the site; it is the ISSUE that is blocked
+    # (services/quality.assert_qc_cleared). Fusing the two would strand every
+    # delivery behind an inspector's shift pattern.
+    #
+    # Matching is on Material_Code because that is all a DN line has. A gate
+    # written against SAP_Code alone would find nothing here and pass silently.
+    mtc_ids: dict[int, int] = {}
+    for li in line_items:
+        iid = int(li["po_item_id"])
+        found = await quality.assert_mtc(
+            session, material_code=by_id[iid][1], warehouse_id=warehouse_id,
+            po_item_id=iid, mtc_id=li.get("mtc_document_id"),
+            where=f"line {iid} can be put on a Delivery Note to {site_id}")
+        if found is not None:
+            mtc_ids[iid] = found
+
     dn_number = await _generate_dn_number(session, warehouse_id)
     h = header or {}
     await session.execute(insert(delivery_notes_t).values(
@@ -231,9 +303,18 @@ async def create_dn(session: AsyncSession, *, username: str, po_number: str, war
             Expiry_Date=li.get("Expiry_Date"), Remarks=li.get("Remarks"),
             rl_bl_family=base[4], status="pending"))
 
+    # Stamp the DN onto every certificate that cleared it, so "which note did
+    # this material travel on" is answerable from the document itself.
+    for mid in set(mtc_ids.values()):
+        await session.execute(update(_MD.tables["mtc_documents"])
+                              .where(_MD.tables["mtc_documents"].c["id"] == mid)
+                              .values(DN_Number=dn_number))
+
     await write_audit(session, username, "CREATE_DN", "delivery_notes",
-                      f"DN={dn_number} PO={po_number} site={site_id} lines={len(line_items)}")
-    return {"created": True, "dn_number": dn_number, "lines": len(line_items)}
+                      f"DN={dn_number} PO={po_number} site={site_id} lines={len(line_items)}"
+                      + (f" mtc={sorted(set(mtc_ids.values()))}" if mtc_ids else ""))
+    return {"created": True, "dn_number": dn_number, "lines": len(line_items),
+            "mtc_documents": sorted(set(mtc_ids.values()))}
 
 
 # --- DN multi-stage approval (Phase 6) --------------------------------------
@@ -403,6 +484,7 @@ async def stage_dn_receipt(session: AsyncSession, *, username: str, dn_number: s
         return {"error": "DN has no items"}
 
     staged = 0
+    inspections: list[int] = []
     for it in items:
         qty = float(it.get("Qty") or 0)
         if qty <= 0:
@@ -411,19 +493,51 @@ async def stage_dn_receipt(session: AsyncSession, *, username: str, dn_number: s
         sap_row = (await session.execute(select(inventory_t.c["SAP_Code"])
                    .where(inventory_t.c["Material_Code"] == mat).limit(1))).first()
         sap = sap_row[0] if sap_row else mat
-        await session.execute(insert(pending_receipts_t).values(
+        pid = (await session.execute(insert(pending_receipts_t).values(
             Date=_dt.date.today().isoformat(), SAP_Code=sap, Quantity=qty, Site_ID=site_id,
             Supplier="WAREHOUSE", DN_No=dn_number, DN_Number=dn_number, Warehouse_ID=wh_id,
             PO_Number_Source=po_no, Lot_Number=it.get("Lot_Number"),
             Expiry_Date=it.get("Expiry_Date"), Remarks=f"Received via DN {dn_number}",
-            status="pending_hod"))
+            status="pending_hod").returning(pending_receipts_t.c["id"]))).scalar_one()
         await session.execute(update(dn_items_t).where(dn_items_t.c["id"] == it["id"])
                               .values(status="received", sk_received_qty=qty))
+        # QSEP — controlled material has now physically reached the site, so
+        # the SITE's QC gets an inspection. The source_ref is the DN line id
+        # rather than the pending receipt, because the DN line is what a
+        # retry would replay; the unique constraint then makes it idempotent.
+        iid = await quality.open_inspection(
+            session, sap_code=str(sap), material_code=mat,
+            lot=it.get("Lot_Number"), qty=qty, source_type="dn_receipt",
+            source_ref=f"{dn_number}:{it['id']}", site_id=site_id,
+            created_by=username)
+        if iid:
+            inspections.append(iid)
+        _ = pid
         staged += 1
 
     await session.execute(update(delivery_notes_t).where(delivery_notes_t.c["DN_Number"] == dn_number)
                           .values(status="received", sk_received_at=func.now(), sk_received_by=username))
     await write_audit(session, username, "DN_RECEIVE_STAGED", "pending_receipts",
-                      f"DN={dn_number} PO={po_no} site={site_id} lines={staged}")
+                      f"DN={dn_number} PO={po_no} site={site_id} lines={staged}"
+                      + (f" qc_inspections={len(inspections)}" if inspections else ""))
+    # QSEP notification gap #3. This hop wrote an audit row and nothing else:
+    # N receipts landed in the HOD's approval queue and the HOD was never
+    # told, while the warehouse never learned its DN had arrived.
+    await dispatch(session, event_key="dn_receipt_staged", recipient_role="hod",
+                   recipient_site=site_id, wa_template="action_required",
+                   title=f"DN {dn_number} received — {staged} receipt(s) to approve",
+                   body=(f"{username} received DN {dn_number} from {wh_id}."
+                         + (f" {len(inspections)} line(s) await quality inspection "
+                            "before they can be issued." if inspections else "")),
+                   link_page="/hod/approvals", related_table="delivery_notes",
+                   related_ref=dn_number, created_by=username)
+    await dispatch(session, event_key="dn_receipt_staged", severity="success",
+                   recipient_role="warehouse_user", recipient_warehouse=wh_id,
+                   wa_template="status_update",
+                   title=f"DN {dn_number} delivered to {site_id}",
+                   body=f"{username} confirmed receipt of {staged} line(s).",
+                   link_page="/warehouse", related_table="delivery_notes",
+                   related_ref=dn_number, created_by=username)
     return {"received": True, "dn_number": dn_number, "staged": staged, "site_id": site_id,
+            "qc_inspections": inspections,
             "message": f"Staged {staged} receipt(s) from DN {dn_number} for HOD approval"}

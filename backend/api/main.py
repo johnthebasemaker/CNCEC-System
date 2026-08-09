@@ -70,6 +70,7 @@ from .bulk_import import router as bulk_import_router  # noqa: E402
 from .stock import router as stock_router  # noqa: E402
 from .warehouse import router as warehouse_router  # noqa: E402
 from .dashboard import router as dashboard_router  # noqa: E402
+from .qc import router as qc_router  # noqa: E402
 
 _MD = models.Base.metadata
 
@@ -238,6 +239,10 @@ app.include_router(warehouse_router)
 
 # Site receiving — in-transit DN → stage pending_receipts (closes the loop; self-guarded).
 app.include_router(receiving_router)
+
+# QSEP — Quality Control: accounts, site transfers, and the inspection ledger
+# whose approvals gate what a Store Keeper may issue (self-guarded per route).
+app.include_router(qc_router)
 
 # Supervisor material requests — create → SK approve → pending_issues (self-guarded).
 app.include_router(requests_router)

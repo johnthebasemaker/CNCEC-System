@@ -3013,10 +3013,17 @@ async def test_entry_guards():
     pr = ledger._MD.tables["pending_receipts"]
     RUB, UOMSAP = "SVC-RUBBER", "SVC-UOM"
 
+    insp = ledger._MD.tables["qc_inspections"]
+
     async def _cleanup():
         async with SessionLocal() as s:
             await s.execute(delete(pr).where(pr.c["SAP_Code"].in_([RUB, UOMSAP])))
             await s.execute(delete(mtc).where(mtc.c["SAP_Code"] == RUB))
+            # QSEP: SVC-RUBBER sits in the controlled category, so staging a
+            # receipt for it now also opens a quality inspection. This fixture
+            # commits, so without this line each run leaves a row behind and
+            # the QC worklist slowly fills with test data.
+            await s.execute(delete(insp).where(insp.c["SAP_Code"].in_([RUB, UOMSAP])))
             await s.execute(delete(uom).where(uom.c["SAP_Code"] == UOMSAP))
             await s.execute(delete(inv).where(inv.c["SAP_Code"].in_([RUB, UOMSAP])))
             await s.commit()
@@ -9664,8 +9671,12 @@ async def test_auditor_read_only():
           f"{len(blocked)} blocked of {len(mutating)}")
 
     # ── 3. the OTHER roles are untouched (the operator's explicit constraint) ─
+    # `qc` joins this loop the day the role is added (QSEP). The list is
+    # hardcoded on purpose — deriving it from ROLE_META would make a new role
+    # silently self-certify, and the whole value of this check is that adding
+    # one is a deliberate edit here.
     for role in ("admin", "hod", "logistics", "store_keeper", "supervisor",
-                 "warehouse_user", None, "", "nonsense"):
+                 "warehouse_user", "qc", None, "", "nonsense"):
         n = sum(1 for r in mutating if blocks_request(role, *r))
         check(f"bd: role {role!r} is completely unaffected — 0 of "
               f"{len(mutating)} mutating routes blocked", n == 0,
@@ -11599,6 +11610,750 @@ def _read_src(rel: str) -> str:
     return (pathlib.Path(__file__).resolve().parents[2] / rel).read_text()
 
 
+def _code_only(src: str) -> str:
+    """Python source with comments and docstrings stripped, for source greps.
+
+    Written because the first version of suite BM's "create_dn must NOT call
+    assert_qc_cleared" check failed against correct code: the function's own
+    comment explains where the quality gate lives instead, and says the name
+    out loud. A grep that cannot tell code from prose is a grep that reports
+    the documentation as the defect — and the fix must not be to stop
+    writing the comment.
+
+    Uses the tokenizer rather than a regex, so a '#' inside a string literal
+    is not mistaken for a comment.
+    """
+    import io
+    import tokenize
+
+    out, prev_was_code = [], False
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.COMMENT:
+                continue
+            if tok.type == tokenize.STRING and not prev_was_code:
+                continue                      # a bare string == a docstring
+            if tok.type in (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                            tokenize.DEDENT):
+                out.append("\n")
+                prev_was_code = False
+                continue
+            out.append(tok.string)
+            out.append(" ")
+            prev_was_code = True
+    except tokenize.TokenError:               # truncated slice — grep it raw
+        return src
+    return "".join(out)
+
+
+# ===========================================================================
+# QSEP — Quality · Safety · Employees · Procurement (2026-08).
+#
+# Suites BL / BM / BN cover slices 1-3: the QC role and its dual scoping,
+# the MTC gate at dispatch, and the quality block at issue. Deliberately NOT
+# called "Phase 6" — entry.py, notifications.py and warehouse.py already use
+# that name for the 2026-07-10 UAT work.
+# ===========================================================================
+_QSEP_PW = "svc-qsep-2026-quality"
+
+
+async def _qsep_seed_users() -> None:
+    """Throwaway accounts for the QSEP suites, prefixed SVCQ- so the cleanup
+    is a single LIKE. bcrypt rounds=4 because 12 rounds × 6 logins is four
+    seconds of nothing."""
+    import bcrypt as _bc
+    from sqlalchemy import text as _sqt
+
+    h = _bc.hashpw(_QSEP_PW.encode(), _bc.gensalt(rounds=4)).decode()
+    rows = [
+        ("SVCQ-hod", "hod", "CNCEC", None),
+        ("SVCQ-hod2", "hod", "SVCQ-SITE-B", None),
+        ("SVCQ-sk", "store_keeper", "CNCEC", None),
+        ("SVCQ-wh", "warehouse_user", None, "WH-01"),
+        ("SVCQ-qc", "qc", "CNCEC", None),
+        ("SVCQ-qcwh", "qc", None, "WH-01"),
+        ("SVCQ-qcbroken", "qc", None, None),
+        ("SVCQ-admin", "admin", None, None),
+        ("SVCQ-log", "logistics", None, None),
+    ]
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCQ-%'"))
+        for uname, role, site, wh in rows:
+            await s.execute(_sqt(
+                'INSERT INTO users (username, password_hash, role, "Site_ID", '
+                '"Warehouse_ID") VALUES (:u, :h, :r, :s, :w)'),
+                {"u": uname, "h": h, "r": role, "s": site, "w": wh})
+        # A second admin-created site, so the transfer has somewhere to go.
+        await s.execute(_sqt(
+            "INSERT INTO system_settings (category, value) "
+            "SELECT 'Site', 'SVCQ-SITE-B' WHERE NOT EXISTS ("
+            "  SELECT 1 FROM system_settings WHERE category='Site' "
+            "  AND value='SVCQ-SITE-B')"))
+        await s.commit()
+
+
+async def _qsep_cleanup() -> None:
+    from sqlalchemy import text as _sqt
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM qc_transfer_requests "
+                             "WHERE username LIKE 'SVCQ-%' OR requested_by LIKE 'SVCQ-%'"))
+        await s.execute(_sqt("DELETE FROM qc_inspections WHERE created_by LIKE 'SVCQ-%' "
+                             "OR source_ref LIKE 'SVCQ-%'"))
+        await s.execute(_sqt("DELETE FROM mtc_documents WHERE submitted_by LIKE 'SVCQ-%'"))
+        await s.execute(_sqt("DELETE FROM refresh_sessions WHERE username LIKE 'SVCQ-%'"))
+        await s.execute(_sqt("DELETE FROM app_notifications WHERE related_table IN "
+                             "('qc_inspections','qc_transfer_requests') "
+                             "AND created_at > now() - interval '1 hour'"))
+        await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCQ-%'"))
+        await s.execute(_sqt("DELETE FROM system_settings WHERE category='Site' "
+                             "AND value='SVCQ-SITE-B'"))
+        await s.commit()
+
+
+async def _qsep_login(ac, username: str) -> dict:
+    from . import ratelimit as _rl
+    _rl._hits.clear()
+    r = await ac.post("/auth/login", json={"username": username, "password": _QSEP_PW})
+    if r.status_code != 200:
+        return {}
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+# --- Suite BL: the QC role and its dual scoping -------------------------------
+async def test_qc_role_and_scoping():
+    """Suite BL — a Quality Controller belongs to a site OR to a warehouse.
+
+    `qc` is the first DUAL-SCOPE role in the system, and that is the whole
+    reason this suite is long. Every other role answers "what may I see?"
+    on one axis: a store keeper has a site, a warehouse user has a
+    warehouse. A quality inspector has exactly one of the two, and which
+    one decides everything.
+
+    Three failure modes are pinned here, and each of them was a real hazard
+    in the design rather than a hypothetical:
+
+    1. **The `warehouse_scope` inheritance trap.** That function reads "any
+       KNOWN role that is not warehouse_user is unrestricted". The moment
+       `qc` appeared in ROLE_META it would therefore have inherited GLOBAL
+       warehouse visibility — for a level-1 role whose entire purpose is
+       being scoped. Adding a role to ROLE_META and forgetting auth.py is
+       the mistake; this suite is the thing that notices.
+
+    2. **The registration fall-through.** `/auth/register` validates against
+       _SCOPED_REG_ROLES then _UNSCOPED_REG_ROLES, and a role in NEITHER set
+       falls out of the if/elif with no validation at all — no site
+       required, no site forbidden. Silence is not a safe default, so `qc`
+       gets an explicit third branch demanding exactly one binding.
+
+    3. **The '' wildcard.** A half-configured QC (neither binding, or both)
+       must see NOTHING. `if scope:` is how a site-less account ends up
+       reading every site — the class suite AR exists for.
+
+    Plus the transfer flow, whose two-step shape is not bureaucracy: approval
+    rewrites `users.Site_ID`, and site_id rides INSIDE the 15-minute access
+    token, so approval is also where the sessions die (audit A03-F9).
+    """
+    from sqlalchemy import text as _sqt
+
+    from .auth import ROLE_META, qc_scope, warehouse_scope
+    from .readonly import blocks_request
+
+    await _qsep_seed_users()
+
+    # ── 1. the role itself ───────────────────────────────────────────────────
+    check("bl: the qc role exists at level 1 — the PARALLEL ladder beside "
+          "warehouse_user and supervisor, which is what makes a SITE inspector "
+          "site-scoped for free (SITE_SCOPE_MIN_LEVEL = 3)",
+          ROLE_META.get("qc", {}).get("level") == 1, str(ROLE_META.get("qc")))
+    check("bl: qc is NOT a read-only role — it decides inspections, and every "
+          "one of its writes must reach the database",
+          not blocks_request("qc", "POST", "/qc/inspections/1/decide"),
+          "qc is being blocked by the view-only guard")
+
+    # ── 2. warehouse_scope: the inheritance trap ─────────────────────────────
+    check("bl: a WAREHOUSE qc is pinned to its own warehouse, exactly like a "
+          "warehouse_user",
+          warehouse_scope({"role": "qc", "site_id": "", "warehouse_id": "WH-01"}) == "WH-01",
+          "warehouse qc is not pinned")
+    check("bl: a SITE qc gets '' from warehouse_scope — matches NOTHING. This "
+          "is THE trap: the generic branch returns None (= unrestricted) for "
+          "every known non-warehouse_user role, so without an explicit qc "
+          "branch a site inspector would read every warehouse in the company",
+          warehouse_scope({"role": "qc", "site_id": "CNCEC", "warehouse_id": ""}) == "",
+          "site qc inherited global warehouse visibility")
+    check("bl: the roles that legitimately oversee every warehouse still do",
+          all(warehouse_scope({"role": r, "warehouse_id": ""}) is None
+              for r in ("admin", "logistics", "hod", "supervisor", "store_keeper")),
+          "oversight roles lost their global warehouse reach")
+
+    # ── 3. qc_scope: both axes, and failing closed ───────────────────────────
+    site_qc = {"role": "qc", "site_id": "CNCEC", "warehouse_id": "", "level": 1}
+    wh_qc = {"role": "qc", "site_id": "", "warehouse_id": "WH-01", "level": 1}
+    check("bl: a site inspector resolves to its site and to NO warehouse",
+          qc_scope(site_qc) == {"site": "CNCEC", "warehouse": ""}, str(qc_scope(site_qc)))
+    check("bl: a warehouse inspector resolves to its warehouse and to NO site",
+          qc_scope(wh_qc) == {"site": "", "warehouse": "WH-01"}, str(qc_scope(wh_qc)))
+    check("bl: a qc with NEITHER binding fails closed — {'', ''} matches no "
+          "row. A half-configured account must see nothing, never everything",
+          qc_scope({"role": "qc", "site_id": "", "warehouse_id": "", "level": 1})
+          == {"site": "", "warehouse": ""}, "unbound qc did not fail closed")
+    check("bl: a qc with BOTH bindings also fails closed — two scopes is not a "
+          "richer permission, it is a row nothing legitimate can create, so it "
+          "is not trusted with either",
+          qc_scope({"role": "qc", "site_id": "A", "warehouse_id": "B", "level": 1})
+          == {"site": "", "warehouse": ""}, "dual-bound qc was granted a scope")
+    check("bl: an unknown role string fails closed on BOTH axes (the "
+          "users.role typo class — audit A02-F9)",
+          qc_scope({"role": "Quality_Control", "site_id": "CNCEC", "level": 4})
+          == {"site": "", "warehouse": ""}, "unknown role got a scope")
+    check("bl: oversight roles (level ≥ 3) are unrestricted on both axes, so "
+          "logistics and admin still read every inspection",
+          all(qc_scope({"role": r, "level": 3}) == {"site": None, "warehouse": None}
+              for r in ("logistics", "auditor")),
+          "oversight lost its cross-site inspection reach")
+
+    # ── 4. registration demands EXACTLY ONE binding ──────────────────────────
+    from .auth import (_DUAL_SCOPE_REG_ROLES, _SCOPED_REG_ROLES,
+                       _UNSCOPED_REG_ROLES)
+    check("bl: qc is in the DUAL-scope registration set and in neither of the "
+          "other two — a role present in none of the three falls through "
+          "/auth/register's if/elif with NO validation whatsoever",
+          "qc" in _DUAL_SCOPE_REG_ROLES
+          and "qc" not in _SCOPED_REG_ROLES and "qc" not in _UNSCOPED_REG_ROLES,
+          "qc registration category is wrong")
+    check("bl: every registerable role sits in exactly one of the three "
+          "categories, so the silent fall-through cannot return by accident",
+          all(sum(r in s for s in (_SCOPED_REG_ROLES, _UNSCOPED_REG_ROLES,
+                                   _DUAL_SCOPE_REG_ROLES)) == 1
+              for r in set(ROLE_META) - {"admin"}),
+          "a registerable role belongs to no category (or to two)")
+
+    # ── 5. real HTTP ─────────────────────────────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H_hod = await _qsep_login(ac, "SVCQ-hod")
+        H_hod2 = await _qsep_login(ac, "SVCQ-hod2")
+        H_wh = await _qsep_login(ac, "SVCQ-wh")
+        H_sk = await _qsep_login(ac, "SVCQ-sk")
+        H_admin = await _qsep_login(ac, "SVCQ-admin")
+        check("bl: a qc account can sign in", bool(await _qsep_login(ac, "SVCQ-qc")),
+              "qc login failed")
+
+        r = await ac.post("/auth/register", json={
+            "username": "SVCQ-reg-both", "password": "qsep-register-pw",
+            "role": "qc", "site_id": "CNCEC", "warehouse_id": "WH-01"})
+        check("bl: registering a qc with BOTH a site and a warehouse is a 422 "
+              "— that is how the state qc_scope has to fail closed on never "
+              "gets created in the first place",
+              r.status_code == 422, f"{r.status_code} {r.text[:160]}")
+        r = await ac.post("/auth/register", json={
+            "username": "SVCQ-reg-none", "password": "qsep-register-pw", "role": "qc"})
+        check("bl: registering a qc with NEITHER is a 422 too",
+              r.status_code == 422, f"{r.status_code} {r.text[:160]}")
+
+        # creation, scoped to the creator
+        r = await ac.post("/qc/accounts", headers=H_hod, json={
+            "username": "SVCQ-new-siteqc", "password": "qsep-created-pw-01"})
+        ok = r.status_code == 201 and r.json().get("site_id") == "CNCEC"
+        check("bl: an HOD creates a SITE inspector, and the site comes from the "
+              "ACTOR — never from the request body, or a level-1 caller could "
+              "bind an account to a site they have no authority over",
+              ok, f"{r.status_code} {r.text[:200]}")
+        r = await ac.post("/qc/accounts", headers=H_wh, json={
+            "username": "SVCQ-new-whqc", "password": "qsep-created-pw-02"})
+        ok = r.status_code == 201 and r.json().get("warehouse_id") == "WH-01"
+        check("bl: a warehouse user creates a WAREHOUSE inspector bound to its "
+              "own warehouse", ok, f"{r.status_code} {r.text[:200]}")
+        r = await ac.post("/qc/accounts", headers=H_sk, json={
+            "username": "SVCQ-nope", "password": "qsep-created-pw-03"})
+        check("bl: a store keeper cannot create a QC account (403) — the route "
+              "is opened to the three roles that manage inspectors, not to "
+              "everyone below admin", r.status_code == 403,
+              f"{r.status_code} {r.text[:160]}")
+        r = await ac.post("/qc/accounts", headers=H_hod, json={
+            "username": "SVCQ-elev", "password": "qsep-created-pw-04",
+            "role": "admin"})
+        created_role = None
+        if r.status_code == 201:
+            async with SessionLocal() as s:
+                created_role = (await s.execute(_sqt(
+                    "SELECT role FROM users WHERE username='SVCQ-elev'"))).scalar()
+        check("bl: a `role` in the body is IGNORED — this endpoint mints qc "
+              "accounts and nothing else, so it can never become a way for a "
+              "level-1 caller to create an admin",
+              created_role == "qc", f"created role was {created_role!r}")
+
+        # transfers
+        r = await ac.post("/qc/accounts/SVCQ-qc/transfer", headers=H_hod2,
+                          json={"to_site": "SVCQ-SITE-B", "reason": "cover the B shutdown"})
+        check("bl: an HOD may NOT transfer another site's inspector (403) — "
+              "without this check any HOD could reassign any site's staff",
+              r.status_code == 403, f"{r.status_code} {r.text[:160]}")
+        r = await ac.post("/qc/accounts/SVCQ-qc/transfer", headers=H_hod,
+                          json={"to_site": "SVCQ-SITE-B", "reason": "cover the B shutdown"})
+        tid = r.json().get("id") if r.status_code == 201 else None
+        check("bl: the owning HOD raises a transfer, and it lands as "
+              "pending_admin rather than taking effect",
+              r.status_code == 201 and r.json().get("status") == "pending_admin",
+              f"{r.status_code} {r.text[:200]}")
+        r2 = await ac.post("/qc/accounts/SVCQ-qc/transfer", headers=H_hod,
+                           json={"to_site": "SVCQ-SITE-B", "reason": "again"})
+        check("bl: a second transfer for the same inspector is a 409 while one "
+              "is still awaiting the admin", r2.status_code == 409,
+              f"{r2.status_code} {r2.text[:160]}")
+
+        site_before = None
+        async with SessionLocal() as s:
+            site_before = (await s.execute(_sqt(
+                'SELECT "Site_ID" FROM users WHERE username=\'SVCQ-qc\''))).scalar()
+        r = await ac.post(f"/qc/transfers/{tid}/decide", headers=H_hod,
+                          json={"action": "approve"})
+        check("bl: an HOD cannot approve its own transfer request (403) — the "
+              "second signature is the point of the two-step",
+              r.status_code == 403, f"{r.status_code} {r.text[:160]}")
+
+        # A live session for the account about to move, so the revocation is
+        # observable rather than merely coded.
+        H_moving = await _qsep_login(ac, "SVCQ-qc")
+        r = await ac.post(f"/qc/transfers/{tid}/decide", headers=H_admin,
+                          json={"action": "approve", "notes": "agreed"})
+        approved = r.status_code == 200 and r.json().get("status") == "approved"
+        async with SessionLocal() as s:
+            site_after = (await s.execute(_sqt(
+                'SELECT "Site_ID" FROM users WHERE username=\'SVCQ-qc\''))).scalar()
+            live = (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM refresh_sessions WHERE username='SVCQ-qc' "
+                "AND is_revoked = false"))).scalar()
+        check("bl: the admin approves and the inspector actually moves",
+              approved and site_before == "CNCEC" and site_after == "SVCQ-SITE-B",
+              f"{site_before!r} → {site_after!r} · {r.status_code} {r.text[:160]}")
+        check("bl: approving REVOKES every session the moved account holds. "
+              "site_id is baked into the access token and read straight back "
+              "out with no database lookup, so without this the inspector "
+              "keeps reading their OLD site for up to 15 minutes (A03-F9)",
+              live == 0, f"{live} live refresh session(s) survived the transfer")
+        _ = H_moving
+        r = await ac.post(f"/qc/transfers/{tid}/decide", headers=H_admin,
+                          json={"action": "reject"})
+        check("bl: a decided transfer cannot be decided twice (409)",
+              r.status_code == 409, f"{r.status_code} {r.text[:160]}")
+
+        r = await ac.post("/qc/accounts/SVCQ-qcwh/transfer", headers=H_hod,
+                          json={"to_site": "CNCEC", "reason": "move to site"})
+        check("bl: a WAREHOUSE inspector cannot be site-transferred by an HOD "
+              "(409) — it is not bound to a site to move it from, and quietly "
+              "re-binding it would change which warehouse's goods it inspects",
+              r.status_code == 409, f"{r.status_code} {r.text[:200]}")
+
+    await _qsep_cleanup()
+
+
+# --- Suite BM: the MTC gate + the inspection ledger ---------------------------
+async def test_mtc_gate_and_inspections():
+    """Suite BM — a Surface Shield does not leave a warehouse without paper.
+
+    The rule the operator set on 2026-08-09 has two halves that bind at
+    DIFFERENT points, and this suite exists mostly to keep them apart:
+
+      * the MTC (a document) is mandatory at RECEIPT and at DISPATCH;
+      * QC approval (an inspection) is required only at ISSUE.
+
+    Uninspected material is allowed to travel and wait at the site. Fusing
+    the two would strand every delivery behind an inspector's shift pattern,
+    which is the failure that ruling avoids — so there is an explicit check
+    below that DN creation still succeeds with no inspection in sight.
+
+    The gate itself had three holes before this programme. `warehouse.receive`,
+    `warehouse.create_dn` and `warehouse.stage_dn_receipt` all bypassed the
+    category test, which lived inlined in entry.py and was wired to exactly
+    two call sites. Shields could be booked into a warehouse and shipped to a
+    site with no certificate anywhere in the chain.
+
+    ⚠️ THE TRAP, and the reason `Material_Code_Ref` exists: `dn_items` carry
+    a Material_Code and NO SAP at all. A category lookup written only against
+    inventory."SAP_Code" matches nothing on the DN path and passes every line
+    — a gate that is present, green, and doing absolutely nothing. The
+    `find_mtc`/`is_controlled` pair takes either key, and the checks below
+    drive the Material_Code side deliberately.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import quality
+
+    await _qsep_seed_users()
+
+    async def _one(sql: str, **p):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), p)).first()
+
+    shield = await _one('SELECT "SAP_Code", "Material_Code" FROM inventory '
+                        "WHERE \"Category\" = 'Surface Shields' "
+                        'ORDER BY "SAP_Code" LIMIT 1')
+    plain = await _one('SELECT "SAP_Code", "Material_Code" FROM inventory '
+                       "WHERE \"Category\" <> 'Surface Shields' "
+                       'AND "Material_Code" IS NOT NULL ORDER BY "SAP_Code" LIMIT 1')
+    check("bm-data: the live master still has a Surface Shields category to "
+          "gate (36 SAPs at the time of writing) — if this ever fails, the "
+          "category was renamed and every check below is proving nothing",
+          shield is not None and plain is not None,
+          f"shield={shield} plain={plain}")
+    if shield is None or plain is None:
+        return
+    s_sap, s_mat = shield[0], shield[1]
+    p_sap = plain[0]
+
+    # ── 1. what is controlled, by either key ─────────────────────────────────
+    async with SessionLocal() as s:
+        check("bm: the trigger is an EXACT Category match, ported verbatim "
+              "from the legacy MTC_REQUIRED_CATEGORY — never a description "
+              "token, which would drag in everything merely mentioning shields",
+              (await quality.controlled_category(s)) == "Surface Shields",
+              await quality.controlled_category(s))
+        check("bm: a shield is controlled by SAP_Code",
+              await quality.is_controlled(s, sap_code=s_sap), s_sap)
+        check("bm: THE TRAP — the same material is controlled by MATERIAL_CODE "
+              "too. dn_items carry no SAP, so a SAP-only lookup would find "
+              "nothing on the DN path and wave every line through",
+              await quality.is_controlled(s, material_code=s_mat), str(s_mat))
+        check("bm: an ordinary material is controlled by neither key — the "
+              "gate covers 36 SAPs, not the 466-row master",
+              not await quality.is_controlled(s, sap_code=p_sap)
+              and not await quality.is_controlled(s, material_code=plain[1]),
+              p_sap)
+        check("bm: Material_Code → SAP_Code resolves, which is how the DN path "
+              "reaches the inspection ledger at all",
+              (await quality.resolve_sap(s, s_mat)) == s_sap, str(s_mat))
+
+    # ── 2. decision_status, every branch ─────────────────────────────────────
+    check("bm: decision_status is ONE definition of what 'partially approved' "
+          "means, so the route, the service and this suite cannot disagree",
+          (quality.decision_status(10, 10) == "approved"
+           and quality.decision_status(10, 4) == "partially_approved"
+           and quality.decision_status(10, 0) == "rejected"
+           and quality.decision_status(10, 9.9999999999) == "approved"),
+          "decision_status branches drifted")
+
+    # ── 3. the gate raises, and only for controlled material ─────────────────
+    from fastapi import HTTPException as _HX
+    async with SessionLocal() as s:
+        raised = None
+        try:
+            await quality.assert_mtc(s, sap_code=s_sap, warehouse_id="WH-01",
+                                     where="this test")
+        except _HX as e:
+            raised = e
+        check("bm: a shield with no certificate is refused with a 422 that "
+              "names the material and says what to do next",
+              raised is not None and raised.status_code == 422
+              and "Material Test Certificate" in str(raised.detail),
+              str(raised.detail if raised else "no exception raised"))
+        got = await quality.assert_mtc(s, sap_code=p_sap, warehouse_id="WH-01")
+        check("bm: an ordinary material is asked for nothing and returns None",
+              got is None, str(got))
+
+        # file a certificate, then the same call passes
+        mid = (await s.execute(_sqt(
+            'INSERT INTO mtc_documents ("Site_ID", "Warehouse_ID", "SAP_Code", '
+            '"Material_Code_Ref", mtc_number, submitted_by, status) '
+            "VALUES (NULL, 'WH-01', :sap, :mat, 'SVCQ-MTC-1', 'SVCQ-wh', 'attached') "
+            "RETURNING id"), {"sap": s_sap, "mat": s_mat})).scalar()
+        found = await quality.assert_mtc(s, sap_code=s_sap, warehouse_id="WH-01")
+        check("bm: with a certificate filed at that warehouse the gate opens",
+              found == mid, f"{found} vs {mid}")
+        found_by_mat = await quality.find_mtc(s, material_code=s_mat,
+                                              warehouse_id="WH-01")
+        check("bm: and it is findable by Material_Code, which is the only key "
+              "a DN line has", found_by_mat == mid, f"{found_by_mat} vs {mid}")
+        wrong = await quality.find_mtc(s, sap_code=p_sap, mtc_id=mid)
+        check("bm: naming an EXPLICIT certificate that belongs to a different "
+              "material returns None. 'Attach any MTC you happen to have' is "
+              "the obvious bypass, and a mandatory document that accepts the "
+              "wrong document is theatre", wrong is None, str(wrong))
+        found_other_wh = await quality.find_mtc(s, sap_code=s_sap,
+                                                warehouse_id="WH-99")
+        check("bm: a certificate filed at WH-01 does not clear WH-99 — the "
+              "paperwork travels with the goods, not with the material code",
+              found_other_wh is None, str(found_other_wh))
+        await s.rollback()
+
+    # ── 4. the inspection ledger, and its idempotency ────────────────────────
+    async with SessionLocal() as s:
+        n0 = await _count(s, _MD.tables["qc_inspections"])
+        i1 = await quality.open_inspection(
+            s, sap_code=s_sap, material_code=s_mat, lot="SVCQ-LOT-1", qty=25,
+            source_type="warehouse_receipt", source_ref="SVCQ-1:1",
+            warehouse_id="WH-01", created_by="SVCQ-wh")
+        i2 = await quality.open_inspection(
+            s, sap_code=s_sap, material_code=s_mat, lot="SVCQ-LOT-1", qty=25,
+            source_type="warehouse_receipt", source_ref="SVCQ-1:1",
+            warehouse_id="WH-01", created_by="SVCQ-wh")
+        n1 = await _count(s, _MD.tables["qc_inspections"])
+        check("bm: opening an inspection for arriving controlled goods works",
+              i1 is not None and n1 == n0 + 1, f"{i1} · {n0}→{n1}")
+        check("bm: RE-opening the SAME source is a no-op, not a second row. "
+              "The caller is inside a warehouse-receive transaction that can "
+              "legitimately be retried, and a duplicate would split the "
+              "approved quantity across two rows — letting the issuance guard "
+              "authorise the same physical units twice",
+              i2 is None and n1 == n0 + 1, f"second open returned {i2}, count {n1}")
+        i3 = await quality.open_inspection(
+            s, sap_code=p_sap, material_code=plain[1], lot=None, qty=5,
+            source_type="warehouse_receipt", source_ref="SVCQ-2:1",
+            warehouse_id="WH-01", created_by="SVCQ-wh")
+        check("bm: an ordinary material opens NO inspection — the QC's queue "
+              "must not fill with the 430 materials nobody inspects",
+              i3 is None and await _count(s, _MD.tables["qc_inspections"]) == n1,
+              str(i3))
+        notif = await _count(
+            s, notif_t, notif_t.c["related_table"] == "qc_inspections",
+            notif_t.c["related_ref"] == str(i1))
+        check("bm: opening one notifies the QC role — an inspection nobody is "
+              "told about is an inspection nobody does", notif >= 1, f"{notif}")
+        await s.rollback()
+
+    # ── 5. the two halves bind at DIFFERENT points (the operator's ruling) ───
+    # Comments are stripped first. The create_dn check below is a NEGATIVE
+    # one, and the function's own comment explains where the quality gate
+    # lives instead — naming it. Grepping raw source reports that comment as
+    # the defect, and the fix must not be to stop writing the comment.
+    src = _code_only(_read_src("backend/api/services/warehouse.py"))
+    dn_body = src[src.index("async def create_dn ("):src.index("async def _dn_row (")]
+    check("bm: create_dn enforces the MTC — the point at which material is "
+          "SENT to a site is where the paperwork rule bites",
+          "assert_mtc" in dn_body, "create_dn has no MTC gate")
+    check("bm: create_dn does NOT require a QC approval. The operator ruled "
+          "that uninspected material may travel and wait at the site; only "
+          "ISSUE is blocked. Fusing the two would strand every delivery "
+          "behind an inspector's shift pattern",
+          "assert_qc_cleared" not in dn_body,
+          "create_dn is blocking on inspection status — that is the fused "
+          "behaviour the 2026-08-09 ruling rejected")
+    recv_body = src[src.index("async def receive ("):src.index("async def _generate_dn_number (")]
+    check("bm: warehouse goods-in enforces the MTC too, and opens the "
+          "inspection — this path had NO category test at all before QSEP",
+          "assert_mtc" in recv_body and "open_inspection" in recv_body,
+          "warehouse.receive is still ungated")
+    stage_body = src[src.index("async def stage_dn_receipt ("):]
+    check("bm: DN receipt at the site opens a SITE inspection — it inserts "
+          "pending_receipts directly and never called the entry guards",
+          "open_inspection" in stage_body, "stage_dn_receipt opens no inspection")
+
+    # ── 6. rule 1a — this module must never read SME data ────────────────────
+    # Comments stripped for the same reason, in the other direction: this
+    # module's docstring names sme_inventory_seed while EXPLAINING that it
+    # must never read it, and a raw grep would fail on the explanation.
+    qcode = _code_only(_read_src("backend/api/services/quality.py"))
+    leaked = [t for t in ("sme_inventory_seed", "sme_recipe", "sme_equipment",
+                          "sme_consumption_log", "sme_sqm_progress")
+              if t in qcode]
+    check("bm: quality.py names NO sme_* table in its CODE. The 'how much is "
+          "approved, how much is gone' arithmetic looks like the SME "
+          "estimator's shape and is not — rule 1a says every SME number comes "
+          "from sme_inventory_seed and an ERP movement must never move one",
+          not leaked, f"leaked: {leaked}")
+    check("bm: …and the comment-stripper is actually working, so the check "
+          "above is not passing because it read an empty string",
+          "assert_mtc" in qcode and len(qcode) > 2000, f"{len(qcode)} chars")
+
+    await _qsep_cleanup()
+
+
+# --- Suite BN: the issuance block ---------------------------------------------
+async def test_qc_issuance_block():
+    """Suite BN — no Surface Shield reaches the field without QC approval.
+
+    This is the FIRST hard block on the issue path, and that deserves saying
+    out loud. The standing rule is "FEFO + over-issue stay allow-and-log —
+    never add a hard block", and it still holds: that rule is about STOCK
+    arithmetic, where the shelf is often right and the ledger often lags.
+    This gate is about QUALITY STATUS, it was separately authorised by the
+    operator on 2026-08-09, and it covers only the 36 SAPs in the controlled
+    category. There is a check below that over-issuing an ORDINARY material
+    is still allowed and logged, because the day someone implements this by
+    promoting the FEFO warning to an error, that check is what fails.
+
+    **The issue path has TWO mouths and both are driven here.**
+    `ledger.stage_consumption` serves /entry/consumption and the consumption
+    branch of /entry/bulk. `supervisor.approve_smr` inserts into
+    pending_issues DIRECTLY — a guard placed only in the first would be
+    bypassed by every supervisor material request, silently, for the one
+    material class that most needs the gate. Testing one mouth would have
+    looked exactly as green as testing both.
+
+    The arithmetic is Σ approved − Σ issued, and the two judgement calls
+    inside it are pinned here too: clearance pools at (site, SAP) rather
+    than per-lot, because at STAGE time the lot is frequently unknown and
+    FEFO only resolves it at COMMIT; and in-flight staged issues count,
+    because two staged issues each checked against committed consumption
+    alone would both pass and the second one is the over-issue.
+    """
+    from fastapi import HTTPException as _HX
+    from sqlalchemy import text as _sqt
+
+    from .services import quality, supervisor
+
+    await _qsep_seed_users()
+    insp_t = _MD.tables["qc_inspections"]
+
+    async def _one(sql: str, **p):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), p)).first()
+
+    shield = await _one('SELECT "SAP_Code" FROM inventory '
+                        "WHERE \"Category\" = 'Surface Shields' "
+                        'ORDER BY "SAP_Code" LIMIT 1')
+    plain = await _one('SELECT "SAP_Code" FROM inventory '
+                       "WHERE \"Category\" <> 'Surface Shields' "
+                       'ORDER BY "SAP_Code" LIMIT 1')
+    if shield is None or plain is None:
+        check("bn-data: the master still has both a controlled and an ordinary "
+              "material to compare", False, f"shield={shield} plain={plain}")
+        return
+    s_sap, p_sap = shield[0], plain[0]
+    SITE = "CNCEC"
+
+    def _issue(sap, qty, lot=None):
+        return {"Date": "2026-08-09", "SAP_Code": sap, "Quantity": qty,
+                "Site_ID": SITE, "Lot_Number": lot}
+
+    # ── 1. no inspection at all → blocked, with a message that explains ──────
+    async with SessionLocal() as s:
+        await s.execute(_sqt('DELETE FROM qc_inspections WHERE TRIM("SAP_Code") = :s '
+                             'AND COALESCE("Site_ID",\'\') = :site'),
+                        {"s": s_sap, "site": SITE})
+        raised = None
+        try:
+            await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(s_sap, 1))
+        except _HX as e:
+            raised = e
+        check("bn: issuing a Surface Shield with NO inspection on record is "
+              "refused (422), and the message says why rather than just "
+              "failing", raised is not None and raised.status_code == 422
+              and "no quality inspection exists" in str(raised.detail),
+              str(raised.detail if raised else "the issue was ALLOWED"))
+        await s.rollback()
+
+    # ── 2. the FEFO rule is untouched ────────────────────────────────────────
+    async with SessionLocal() as s:
+        res = await ledger.stage_consumption(
+            s, username="SVCQ-sk", data=_issue(p_sap, 999999))
+        check("bn: a WILDLY over-drawn issue of an ORDINARY material is still "
+              "allowed and staged. This is the check that fails the day "
+              "somebody implements the quality gate by promoting the FEFO "
+              "over-issue warning to an error — the two rules are separate "
+              "and only one of them blocks",
+              res.get("pending_id") is not None, str(res))
+        await s.rollback()
+
+    # ── 3. a PENDING inspection releases nothing ─────────────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO qc_inspections ("Site_ID", "SAP_Code", "Lot_Number", '
+            "source_type, source_ref, submitted_qty, status, created_by) "
+            "VALUES (:site, :sap, 'SVCQ-LOT-N', 'site_receipt', 'SVCQ-N-1', "
+            "100, 'pending', 'SVCQ-sk')"), {"site": SITE, "sap": s_sap})
+        raised = None
+        try:
+            await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(s_sap, 1))
+        except _HX as e:
+            raised = e
+        check("bn: 100 units sitting in a PENDING inspection release NOTHING "
+              "— arrival is not approval, and that distinction is the entire "
+              "point of the role",
+              raised is not None and "awaiting quality approval" in str(raised.detail),
+              str(raised.detail if raised else "the issue was ALLOWED"))
+        await s.rollback()
+
+    # ── 4. partial approval releases exactly what was approved ───────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO qc_inspections ("Site_ID", "SAP_Code", "Lot_Number", '
+            "source_type, source_ref, submitted_qty, approved_qty, rejected_qty, "
+            "status, decision_reason, created_by) VALUES (:site, :sap, "
+            "'SVCQ-LOT-P', 'site_receipt', 'SVCQ-N-2', 100, 40, 60, "
+            "'partially_approved', 'blistering on 60', 'SVCQ-qc')"),
+            {"site": SITE, "sap": s_sap})
+        summary = await quality.clearance_summary(s, sap_code=s_sap, site_id=SITE)
+        check("bn: a partial approval of 40 of 100 reports 40 available and "
+              "does not report 100 — the rejected 60 stay in stock as "
+              "unusable, exactly as the operator asked, and are simply never "
+              "issuable", abs(summary["approved_qty"] - 40) < 1e-9
+              and abs(summary["available_for_issue"] - 40) < 1e-9, str(summary))
+        ok = await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(s_sap, 40))
+        check("bn: issuing exactly the approved 40 succeeds",
+              ok.get("pending_id") is not None, str(ok))
+        raised = None
+        try:
+            await ledger.stage_consumption(s, username="SVCQ-sk", data=_issue(s_sap, 1))
+        except _HX as e:
+            raised = e
+        check("bn: the NEXT unit is refused, because the staged 40 already "
+              "counts against the pool. In-flight staged issues must count: "
+              "two issues each checked against committed consumption alone "
+              "would both pass, and the second one is the over-issue",
+              raised is not None and "already issued or staged" in str(raised.detail),
+              str(raised.detail if raised else "the 41st unit was ALLOWED"))
+        await s.rollback()
+
+    # ── 5. THE SECOND MOUTH — supervisor requests ────────────────────────────
+    async with SessionLocal() as s:
+        worker = (await s.execute(_sqt(
+            'SELECT "ID_Number" FROM employees WHERE status=\'active\' '
+            'AND "Site_ID" = :site LIMIT 1'), {"site": SITE})).scalar()
+        if worker is None:
+            await s.execute(_sqt(
+                'INSERT INTO employees ("ID_Number", "Name", "Site_ID", status, '
+                "created_by) VALUES ('SVCQ-W1', 'QSEP Test Worker', :site, "
+                "'active', 'SVCQ-sk')"), {"site": SITE})
+            worker = "SVCQ-W1"
+        created = await supervisor.create_smr(
+            s, supervisor="SVCQ-hod", site_id=SITE, worker_id=worker,
+            job_tank_place="QSEP tank", old_ppe_returned=1, no_return_reason=None,
+            items=[{"SAP_Code": s_sap, "Requested_Qty": 5}])
+        rid = created.get("request_id")
+        check("bn-setup: a supervisor request for a Surface Shield is created "
+              "(requesting is fine — it is the ISSUE that is gated)",
+              rid is not None, str(created))
+        raised = None
+        if rid is not None:
+            try:
+                await supervisor.approve_smr(s, sk_username="SVCQ-sk", request_id=rid)
+            except _HX as e:
+                raised = e
+        check("bn: THE SECOND MOUTH — approving that request is refused too. "
+              "approve_smr writes pending_issues DIRECTLY and never calls "
+              "stage_consumption, so a guard placed only in the ledger service "
+              "would be bypassed by every supervisor request, silently, for "
+              "the one material class that most needs the gate",
+              raised is not None and raised.status_code == 422,
+              str(raised.detail if raised else "the SMR approval was ALLOWED"))
+        await s.rollback()
+
+    # ── 6. the guard sits in BOTH services, in source ────────────────────────
+    for rel, fn in (("backend/api/services/ledger.py", "stage_consumption"),
+                    ("backend/api/services/supervisor.py", "approve_smr")):
+        body = _code_only(_read_src(rel))
+        check(f"bn: {fn} calls assert_qc_cleared — pinned in source as well as "
+              "behaviour, so deleting the call fails here even if no fixture "
+              "happens to exercise that path",
+              "assert_qc_cleared" in body, f"{rel} lost its quality gate")
+
+    # ── 7. an uncontrolled material never pays for any of this ───────────────
+    async with SessionLocal() as s:
+        summary = await quality.clearance_summary(s, sap_code=p_sap, site_id=SITE)
+        check("bn: an ordinary material reports controlled=False and "
+              "blocked=False, so the issue form shows no quality chrome for "
+              "the 430 materials this does not apply to",
+              summary["controlled"] is False and summary["blocked"] is False,
+              str(summary))
+        await s.rollback()
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM employees WHERE \"ID_Number\" = 'SVCQ-W1'"))
+        await s.commit()
+    await _qsep_cleanup()
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -11734,6 +12489,15 @@ async def main() -> int:
     print("\n BK. Export formula injection — a store keeper's Remarks never "
           "becomes a live formula in an admin's spreadsheet")
     await test_export_formula_injection()
+    print("\n BL. QSEP — the QC role: dual scoping, creation inside your own "
+          "scope, and transfers that revoke the moved account's sessions")
+    await test_qc_role_and_scoping()
+    print("\n BM. QSEP — the MTC gate at dispatch + the inspection ledger "
+          "(paperwork blocks the truck; inspection does not)")
+    await test_mtc_gate_and_inspections()
+    print("\n BN. QSEP — the quality block at issue, at BOTH mouths of the "
+          "issue path, without touching the FEFO allow-and-log rule")
+    await test_qc_issuance_block()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

@@ -218,7 +218,11 @@ class LocateAnythingCalls(Base):
 class MtcDocuments(Base):
     __tablename__ = "mtc_documents"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    Site_ID = Column(Text, nullable=False)
+    # NULLABLE since alembic b4d17c8e93a2. A WAREHOUSE certificate has no site
+    # — the goods have not been allocated to one yet — and the old NOT NULL
+    # made the mandatory gate at warehouse goods-in unsatisfiable. Exactly one
+    # of Site_ID / Warehouse_ID is set; entry.upload_mtc enforces that.
+    Site_ID = Column(Text)
     SAP_Code = Column(Text, nullable=False)
     Material_Code = Column(Text)
     Lot_Number = Column(Text)
@@ -233,6 +237,15 @@ class MtcDocuments(Base):
     submitted_by = Column(Text, nullable=False)
     submitted_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     logistics_emailed_at = Column(DateTime)
+    # QSEP (alembic b4d17c8e93a2). An MTC used to be a site-side artefact
+    # bolted to one staged receipt. It now also has to answer "does THIS
+    # warehouse hold a certificate for THIS PO line", because the mandatory
+    # gate moved to warehouse goods-in and DN creation.
+    Warehouse_ID = Column(Text)
+    Material_Code_Ref = Column(Text)   # dn_items carry Material_Code, not SAP
+    po_item_id = Column(Integer)
+    DN_Number = Column(Text)
+    qc_inspection_id = Column(Integer)
 
 class PendingIssues(Base):
     __tablename__ = "pending_issues"
@@ -1546,6 +1559,83 @@ class GeneratedReport(Base):
     token_hash = Column(Text, nullable=False, unique=True)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     expires_at = Column(DateTime, nullable=False)
+
+
+# ==========================================================================
+# 6b. Quality Control — the QSEP programme (alembic b4d17c8e93a2)
+#
+# "QSEP" = Quality · Safety · Employees · Procurement, the 2026-08 programme.
+# It is deliberately NOT called "Phase 6": that name is already used in
+# entry.py, notifications.py and warehouse.py for the 2026-07-10 UAT work,
+# and two meanings for one label is how a comment stops being readable.
+# ==========================================================================
+
+class QcInspections(Base):
+    """One quality decision about one lot of one material at one place.
+
+    Keyed to the LOT, because that is the granularity `lots` already uses
+    (UNIQUE Lot_Number/SAP_Code/Site_ID). A partial approval is
+    approved_qty < submitted_qty; the remainder is rejected_qty and a
+    decision_reason is mandatory whenever anything is rejected.
+
+    The UNIQUE on (source_type, source_ref, SAP_Code, Lot_Number) is what
+    makes the trigger idempotent — re-running a warehouse receipt must not
+    open a second inspection for the same physical goods.
+
+    Exactly one of Site_ID / Warehouse_ID is set: an inspection happens
+    either at a site or at a warehouse, never both.
+    """
+    __tablename__ = "qc_inspections"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text)
+    Warehouse_ID = Column(Text)
+    SAP_Code = Column(Text, nullable=False)
+    Material_Code = Column(Text)
+    Lot_Number = Column(Text)
+    # warehouse_receipt | dn_receipt | site_receipt
+    source_type = Column(Text, nullable=False)
+    source_ref = Column(Text, nullable=False)
+    mtc_document_id = Column(Integer)
+    submitted_qty = Column(Float, nullable=False)
+    approved_qty = Column(Float, nullable=False, server_default=text('0'))
+    rejected_qty = Column(Float, nullable=False, server_default=text('0'))
+    # pending | approved | partially_approved | rejected
+    status = Column(Text, nullable=False, server_default=text("'pending'"))
+    decision_reason = Column(Text)
+    inspected_by = Column(Text)
+    inspected_at = Column(DateTime)
+    created_by = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("source_type", "source_ref", "SAP_Code", "Lot_Number",
+                         name="uq_qc_inspection_source"),
+        # The issuance guard reads (Site_ID, SAP_Code, status) on every
+        # surface-shield issue. NOT indexed yet — rule 11 says an index is
+        # benchmarked before it is added, and this table has zero rows.
+    )
+
+
+class QcTransferRequests(Base):
+    """An HOD asks to move a QC account to another site; an admin decides.
+
+    Requirement 1: QC users "can be transferred between sites by HODs with
+    Admin approval". The two-step exists because moving a users row changes
+    authority that rides inside a 15-minute access token — approval is also
+    where revoke_all_sessions() fires.
+    """
+    __tablename__ = "qc_transfer_requests"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(Text, nullable=False)
+    from_site = Column(Text)
+    to_site = Column(Text, nullable=False)
+    reason = Column(Text, nullable=False)
+    requested_by = Column(Text, nullable=False)
+    requested_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    # pending_admin | approved | rejected | cancelled
+    status = Column(Text, nullable=False, server_default=text("'pending_admin'"))
+    decided_by = Column(Text)
+    decided_at = Column(DateTime)
+    decision_notes = Column(Text)
 
 
 class SystemAuditLog(Base):

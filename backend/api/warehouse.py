@@ -53,6 +53,12 @@ async def _guard_row_warehouse(session: AsyncSession, table, key_col: str,
 
 class ReceiveIn(BaseModel):
     received: dict[str, float] = Field(..., description="{po_item_id: qty_received}")
+    # QSEP — {po_item_id: mtc_documents.id}. Mandatory for Surface-Shield
+    # lines and ignored for everything else, so existing callers receiving
+    # ordinary material are unaffected.
+    mtc: dict[str, int] = Field(
+        default_factory=dict,
+        description="{po_item_id: mtc_document_id} — required for Surface Shields")
 
 
 class DNLineIn(BaseModel):
@@ -61,6 +67,12 @@ class DNLineIn(BaseModel):
     Lot_Number: Optional[str] = None
     Expiry_Date: Optional[str] = None
     Remarks: Optional[str] = None
+    # QSEP. Optional: when absent, the gate looks for any certificate already
+    # filed against this PO line at this warehouse. Naming one explicitly is
+    # how a warehouse with several certificates for a material picks the right
+    # one — and it is validated against the material, so it cannot be used to
+    # wave through an unrelated document.
+    mtc_document_id: Optional[int] = None
 
 
 class CreateDNIn(BaseModel):
@@ -120,7 +132,8 @@ async def receive(assignment_id: int, body: ReceiveIn = Body(...),
         async with session.begin():
             await _guard_row_warehouse(session, _po_assignments_t, "id", assignment_id, user)
             res = await wh.receive(session, username=user["username"],
-                                   assignment_id=assignment_id, received_map=body.received)
+                                   assignment_id=assignment_id, received_map=body.received,
+                                   mtc_map=body.mtc)
         return _guard(res)
     except HTTPException:
         raise

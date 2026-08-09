@@ -2,15 +2,9 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "backend",
-      "runtimeExecutable": "/Users/johnsonandrew/GI_Hub_Project/.venv/bin/uvicorn",
-      "runtimeArgs": ["backend.api.main:app", "--host", "127.0.0.1", "--port", "8000"],
-      "port": 8000
-    },
-    {
-      "name": "frontend",
+      "name": "gi-hub-web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "/Users/johnsonandrew/GI_Hub_Project/frontend", "run", "dev"],
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
       "port": 5173
     }
   ]

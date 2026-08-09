@@ -29,6 +29,7 @@ from .db import get_session
 from . import entry_docs
 from .services import emailer
 from .services import ledger
+from .services import quality
 from .services import whatsapp as wa
 from .services.notifications import dispatch, notify
 from .stock import SQL_SITE_STOCK
@@ -77,14 +78,17 @@ class ReceiptIn(BaseModel):
         None, description="Optional extra receipts columns (logistics fields)")
 
 
-# --- receipt entry guards (Phase 6): MTC gate + pack→base UoM conversion -----
+# --- receipt entry guards (2026-07 UAT): MTC gate + pack→base UoM conversion -
+#
+# QSEP 2026-08: the category test moved to services/quality.py. It used to be
+# inlined here and wired to exactly TWO call sites, while warehouse goods-in,
+# DN creation and DN receipt all walked past it. `_mtc_category` is kept as a
+# thin alias because it is part of this module's tested surface.
 async def _mtc_category(session) -> str:
     """Parity A3 — the LEGACY rubber trigger is an exact inventory Category
     match (config.py MTC_REQUIRED_CATEGORY = "Surface Shields"), NOT a
     description token. Configurable via app_settings mtc_required_category."""
-    v = (await session.execute(text(
-        "SELECT value FROM app_settings WHERE key = 'mtc_required_category'"))).scalar()
-    return (v or "Surface Shields").strip()
+    return await quality.controlled_category(session)
 
 
 async def _receipt_meta(session, sap: str) -> dict:
@@ -92,8 +96,7 @@ async def _receipt_meta(session, sap: str) -> dict:
         'SELECT "UOM", "Category" FROM inventory WHERE TRIM("SAP_Code") = TRIM(:s) LIMIT 1'
     ), {"s": sap})).first()
     base_uom = row[0] if row else None
-    is_rubber = bool(row and str(row[1] or "").strip().lower()
-                     == (await _mtc_category(session)).lower())
+    is_rubber = await quality.is_controlled(session, sap_code=sap)
     convs = [dict(m) for m in (await session.execute(text(
         'SELECT "Pack_UOM", "Factor" FROM uom_conversions '
         'WHERE TRIM("SAP_Code") = TRIM(:s) ORDER BY "Pack_UOM"'), {"s": sap})).mappings().all()]
@@ -127,6 +130,25 @@ async def _link_mtc(session, mtc_id: Optional[int], pending_id) -> None:
         await session.execute(text(
             "UPDATE mtc_documents SET pending_receipt_id = :pid WHERE id = :mid"),
             {"pid": int(pending_id), "mid": int(mtc_id)})
+
+
+async def _open_site_inspection(session, *, data: dict, mtc_id: Optional[int],
+                                pending_id, actor: str) -> None:
+    """QSEP — controlled material arriving AT A SITE needs a QC to look at it.
+
+    Called after the receipt is staged, so the inspection can carry the
+    pending_receipts id as its source_ref and the unique constraint can make
+    a retried submission idempotent. `open_inspection` returns None for
+    anything outside the controlled category, so this is a no-op for the
+    other 430 materials in the master.
+    """
+    if pending_id is None:
+        return
+    await quality.open_inspection(
+        session, sap_code=str(data["SAP_Code"]).strip(), material_code=None,
+        lot=(data.get("Lot_Number") or None), qty=float(data["Quantity"]),
+        source_type="site_receipt", source_ref=str(pending_id),
+        site_id=data["Site_ID"], mtc_document_id=mtc_id, created_by=actor)
 
 
 _mtc_t = ledger._MD.tables["mtc_documents"]
@@ -223,6 +245,9 @@ async def create_receipt(
             mtc_id = await _apply_receipt_guards(session, data)  # MTC gate + UoM convert
             result = await ledger.stage_receipt(session, username=user["username"], data=data)
             await _link_mtc(session, mtc_id, result.get("pending_id"))
+            await _open_site_inspection(session, data=data, mtc_id=mtc_id,
+                                        pending_id=result.get("pending_id"),
+                                        actor=user["username"])
             await entry_docs.link_attachments(session, doc_ids,
                                               entry_table="pending_receipts",
                                               entry_date=body.Date)
@@ -396,29 +421,70 @@ async def receipt_meta(sap_code: str, user: dict = Depends(require_roles("store_
 
 
 @router.post("/mtc", status_code=201,
-             summary="Upload a Material Test Certificate (required for Rubber receipts)")
+             summary="Upload a Material Test Certificate (mandatory for Surface Shields)")
 async def upload_mtc(file: UploadFile = File(...), sap_code: str = Form(...),
-                     site_id: str = Form(...), mtc_number: Optional[str] = Form(None),
+                     site_id: Optional[str] = Form(None),
+                     warehouse_id: Optional[str] = Form(None),
+                     material_code: Optional[str] = Form(None),
+                     po_item_id: Optional[int] = Form(None),
+                     mtc_number: Optional[str] = Form(None),
                      lot_number: Optional[str] = Form(None),
-                     user: dict = Depends(require_roles("store_keeper")),
+                     quantity: Optional[float] = Form(None),
+                     user: dict = Depends(require_roles(
+                         "store_keeper", "warehouse_user", "logistics")),
                      session: AsyncSession = Depends(get_session)):
+    """Attach the certificate. QSEP widened this in three ways.
+
+    * **Warehouse uploads.** The mandatory gate now bites at warehouse
+      goods-in and at DN creation, so the people who need to satisfy it are
+      warehouse and logistics — not only the site Store Keeper who used to be
+      the sole caller. `site_id` is consequently optional, and exactly one of
+      site / warehouse must be named.
+    * **`material_code`.** `dn_items` carry a Material_Code and no SAP at all,
+      so a certificate findable only by SAP is a certificate the DN gate can
+      never match. It is resolved from the master when not supplied.
+    * **`po_item_id`.** Lets a certificate be pinned to the exact PO line it
+      covers, which is what `warehouse.receive()` looks for.
+    """
     blob = await file.read()
-    site = resolve_site_write(user, site_id)
+    site = wh = None
+    if warehouse_id and site_id:
+        raise HTTPException(422, "name a site OR a warehouse for this certificate, not both")
+    if warehouse_id:
+        from .auth import resolve_warehouse_param
+        wh = resolve_warehouse_param(user, warehouse_id.strip())
+    elif site_id:
+        site = resolve_site_write(user, site_id)
+    else:
+        # No place named: fall back to the caller's own binding, which is what
+        # a store keeper has always relied on.
+        site = resolve_site_write(user, None)
+    sap = sap_code.strip()
+    mat = (material_code or "").strip() or None
     async with session.begin():
+        if mat is None:
+            row = (await session.execute(text(
+                'SELECT "Material_Code" FROM inventory '
+                'WHERE TRIM("SAP_Code") = TRIM(:s) LIMIT 1'), {"s": sap})).first()
+            mat = row[0] if row else None
         mid = (await session.execute(insert(_mtc_t).values(
-            Site_ID=site, SAP_Code=sap_code.strip(), mtc_number=mtc_number,
-            Lot_Number=lot_number, file_name=file.filename, mime_type=file.content_type,
+            Site_ID=site, Warehouse_ID=wh, SAP_Code=sap,
+            Material_Code=mat, Material_Code_Ref=mat, mtc_number=mtc_number,
+            Lot_Number=lot_number, Quantity=quantity,
+            po_item_id=(int(po_item_id) if po_item_id is not None else None),
+            file_name=file.filename, mime_type=file.content_type,
             file_blob=blob, status="attached", submitted_by=user["username"]
         ).returning(_mtc_t.c["id"]))).scalar_one()
         # Tell logistics the certificate they were chasing has arrived.
         await dispatch(session, event_key="mtc_uploaded", recipient_role="logistics",
                        wa_template="status_update", severity="success",
-                       title=f"MTC uploaded for {sap_code.strip()}",
+                       title=f"MTC uploaded for {sap}",
                        body=(f"{user['username']} attached MTC {mtc_number or '—'} "
-                             f"(lot {lot_number or '—'}) at {site}."),
+                             f"(lot {lot_number or '—'}) at {site or wh}."),
                        link_page="/logistics", related_table="mtc_documents",
                        related_ref=str(mid), created_by=user["username"])
-    return {"id": mid, "file_name": file.filename}
+    return {"id": mid, "file_name": file.filename,
+            "site_id": site, "warehouse_id": wh, "material_code": mat}
 
 
 # --- Bulk entry (Phase 1) -----------------------------------------------------
@@ -481,6 +547,9 @@ async def create_bulk(body: BulkEntryIn = Body(...),
                 res = await stager(session, username=user["username"], data=row)
                 if body.kind == "receipt":
                     await _link_mtc(session, mtc_id, res.get("pending_id"))
+                    await _open_site_inspection(session, data=row, mtc_id=mtc_id,
+                                                pending_id=res.get("pending_id"),
+                                                actor=user["username"])
                 staged.append(res.get("pending_id"))
                 by_site[m.Site_ID] = by_site.get(m.Site_ID, 0) + 1
             await entry_docs.link_attachments(

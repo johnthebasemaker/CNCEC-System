@@ -316,7 +316,24 @@ async def stage_receipt(session: AsyncSession, *, username: str, data: dict) -> 
 
 
 async def stage_consumption(session: AsyncSession, *, username: str, data: dict) -> dict:
+    """Stage an issue for HOD approval.
+
+    QSEP: this is one of the TWO mouths of the issue path, and the quality
+    gate has to sit in both. The other is `supervisor.approve_smr`, which
+    inserts into `pending_issues` directly and would walk straight past a
+    guard placed only here.
+
+    The import is deliberately lazy — `quality` imports this module for its
+    metadata and `write_audit`, so a top-level import would be a cycle. Same
+    pattern as `notifications.digest_loop`'s lazy `db.SessionLocal`.
+    """
+    from . import quality
+
     sap = data["SAP_Code"].strip()
+    await quality.assert_qc_cleared(
+        session, sap_code=sap, site_id=data["Site_ID"],
+        qty=float(data["Quantity"]), lot=(data.get("Lot_Number") or None),
+        actor=username)
     values = {
         "Date": data["Date"], "SAP_Code": sap, "Quantity": float(data["Quantity"]),
         "Work_Type": data.get("Work_Type") or None, "Issued_To": data.get("Issued_To") or None,

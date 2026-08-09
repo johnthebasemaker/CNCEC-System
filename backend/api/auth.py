@@ -91,6 +91,12 @@ MFA_TTL = _dt.timedelta(minutes=5)
 # read-only guard in readonly.py regardless of level, so the level grants no
 # mutation power at all. See readonly.py for why the guard is method-based
 # rather than a per-endpoint annotation.
+#
+# `qc` is NEW-STACK ONLY too, and sits at level 1 — the parallel ladder
+# beside warehouse_user and supervisor. Level 1 is what makes a SITE quality
+# inspector site-scoped for free (SITE_SCOPE_MIN_LEVEL = 3). It also means a
+# level check can never isolate the role, exactly as it cannot isolate the
+# other two, so every /qc route uses require_roles(), never require_level().
 ROLE_META = {
     "admin":          {"label": "Admin",              "level": 4},
     "logistics":      {"label": "Logistics",          "level": 3},
@@ -98,6 +104,7 @@ ROLE_META = {
     "hod":            {"label": "Head of Department", "level": 2},
     "warehouse_user": {"label": "Warehouse",          "level": 1},
     "supervisor":     {"label": "Supervisor",         "level": 1},
+    "qc":             {"label": "Quality Control",    "level": 1},
     "store_keeper":   {"label": "Store Keeper",       "level": 0},
 }
 
@@ -113,6 +120,15 @@ _SCOPED_REG_ROLES = {"store_keeper", "supervisor", "hod"}
 # auditor is unscoped: it reads across every site, so binding it to one would
 # contradict the reason it exists.
 _UNSCOPED_REG_ROLES = {"warehouse_user", "logistics", "auditor"}
+# qc is the first DUAL-scope role: a quality inspector belongs either to a
+# site or to a warehouse, and which one decides everything they can see.
+#
+# It needs its own branch rather than a place in either set above, and the
+# reason is worth stating: a role that appears in NEITHER set falls through
+# /auth/register's if/elif with NO validation at all — no site required, no
+# site forbidden, nothing. That is a silent hole, not a safe default, so the
+# third category is explicit and requires EXACTLY ONE binding.
+_DUAL_SCOPE_REG_ROLES = {"qc"}
 
 _bearer = HTTPBearer(auto_error=False)
 _DUMMY_HASH = "$2b$12$0000000000000000000000000000000000000000000000000000"
@@ -359,9 +375,61 @@ def warehouse_scope(user: dict) -> str | None:
     role = user.get("role")
     if role not in ROLE_META:
         return ""                     # unknown role → matches nothing
+    if role == "qc":
+        # QSEP. A warehouse-bound QC is pinned to its warehouse exactly like a
+        # warehouse_user; a SITE-bound QC has no warehouse business at all, so
+        # it gets '' (matches nothing) rather than None (sees everything).
+        #
+        # This branch is not optional. The line below reads "any known role
+        # that is not warehouse_user is unrestricted", so the moment 'qc'
+        # appeared in ROLE_META it would have inherited GLOBAL warehouse
+        # visibility — for a level-1 role whose whole point is being scoped.
+        # Adding a role to ROLE_META and forgetting this file is the mistake
+        # this comment exists to prevent.
+        return (user.get("warehouse_id") or "").strip()
     if role != "warehouse_user":
         return None
     return (user.get("warehouse_id") or "").strip()
+
+
+# --- QC dual scoping (QSEP) ----------------------------------------------------
+def qc_scope(user: dict) -> dict:
+    """Where this caller's quality work lives: {"site": …, "warehouse": …}.
+
+    A QC belongs to EITHER a site or a warehouse/logistics department, so
+    neither site_scope() nor warehouse_scope() answers the question on its
+    own. Returns, for each axis, the single value the caller may read or
+    None for "unrestricted on this axis".
+
+    Fails closed, in the same shape as the rest of this module: a `qc`
+    account with neither binding resolves to {"site": "", "warehouse": ""},
+    and '' is a value that matches no row — never a wildcard. That is the
+    class of bug suite AR exists for, and a half-configured QC account is
+    exactly how it would arrive here.
+
+    Oversight roles (admin, logistics, auditor — level ≥ 3) are unrestricted
+    on both axes. HOD sees its own site's inspections and no warehouse's.
+    """
+    role = user.get("role")
+    if role not in ROLE_META:
+        return {"site": "", "warehouse": ""}      # unknown role → nothing
+    if role == "qc":
+        site = (user.get("site_id") or "").strip()
+        wh = (user.get("warehouse_id") or "").strip()
+        if site and not wh:
+            return {"site": site, "warehouse": ""}
+        if wh and not site:
+            return {"site": "", "warehouse": wh}
+        # Neither binding, or BOTH: fail closed. Both is not a richer
+        # permission, it is a misconfigured account — /qc/accounts and
+        # /auth/register each refuse to create one, so a row in that state
+        # was hand-edited and should not be trusted with either scope.
+        return {"site": "", "warehouse": ""}
+    if user.get("level", 0) >= SITE_SCOPE_MIN_LEVEL:
+        return {"site": None, "warehouse": None}
+    if role == "warehouse_user":
+        return {"site": None, "warehouse": (user.get("warehouse_id") or "").strip()}
+    return {"site": (user.get("site_id") or "").strip(), "warehouse": None}
 
 
 def resolve_warehouse_param(user: dict, requested: str | None) -> str | None:
@@ -660,12 +728,26 @@ async def register(body: RegisterIn, session: AsyncSession = Depends(get_session
     # check so a taken name keeps its historical 409 contract.
     site = (body.site_id or "").strip()
     location = (body.location or "").strip()
+    warehouse = (body.warehouse_id or "").strip()
     if body.role in _SCOPED_REG_ROLES:
         if not site:
             raise HTTPException(422, f"{body.role} requires a site")
         if site not in await _admin_site_names(session):
             raise HTTPException(422, f"unknown site {site!r} — pick an admin-created site")
         location = ""  # scoped users are identified by their site, not free text
+    elif body.role in _DUAL_SCOPE_REG_ROLES:
+        # QSEP — a quality inspector works at a site OR at a warehouse.
+        # EXACTLY one, because qc_scope() reads the pair to decide what the
+        # account can see and treats "both" as a misconfiguration it must
+        # fail closed on. Rejecting it here is how that state never exists.
+        if bool(site) == bool(warehouse):
+            raise HTTPException(
+                422, f"{body.role} needs EXACTLY ONE of site or warehouse — "
+                     "a quality inspector belongs to a site or to a warehouse, "
+                     "not to both and not to neither")
+        if site and site not in await _admin_site_names(session):
+            raise HTTPException(422, f"unknown site {site!r} — pick an admin-created site")
+        location = "" if site else location
     elif body.role in _UNSCOPED_REG_ROLES:
         if site:
             raise HTTPException(422,
@@ -676,7 +758,7 @@ async def register(body: RegisterIn, session: AsyncSession = Depends(get_session
     values = dict(username=uname, password_hash=pw_hash, role=body.role,
                   Site_ID=site,
                   Phone_Number=(normalize_phone(body.phone_number) if body.phone_number else None),
-                  Warehouse_ID=(body.warehouse_id or None), status="pending",
+                  Warehouse_ID=(warehouse or None), status="pending",
                   Location=(location or None))
     # username is UNIQUE in pending_users — if a prior (rejected) request exists,
     # revive it rather than colliding.
