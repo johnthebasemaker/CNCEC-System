@@ -129,6 +129,44 @@ which fails safe and is precisely why nobody noticed.
 
 ## 3. What was added most recently
 
+> **2026-08-10 — the agentic & optimisation pass.** One branch,
+> `chore/overnight-agentic-optimizations`. Nothing here changed a business
+> rule; the two behaviour changes are both bug fixes and both are pinned.
+>
+> * **A Morning Briefing agent** (`backend/api/health_monitor.py`) — eight
+>   probes at 07:00 local, dispatched per scope (admin all-sites, each HOD
+>   their own). **Every problem it finds is the ABSENCE of an event**, which is
+>   why no existing trigger could catch any of them. Three design rules, all
+>   load-bearing: a probe that raises degrades the digest instead of cancelling
+>   it; a clean run dispatches NOTHING but still writes an audit row; the body
+>   is one line because Meta rejects a newline in a template parameter.
+>   ⚠️ On live data its first run found **28 materials at negative stock** and
+>   **28 controlled materials with stock nobody can issue** — real, pre-existing,
+>   and worth an operator's attention.
+> * **A fail-open scope leak, fixed.** `entry.item_snapshot` gated its stock
+>   query on `site_filter_applies()` and the consumption sparkline six lines
+>   below on `if site_id:` — same scope value, two rules, one endpoint. A store
+>   keeper with no site of their own saw a correct zero for stock and **every
+>   site's consumption** in the trend beside it. Found by an AST sweep for that
+>   exact shape; it was the ONLY remaining instance in the codebase.
+> * **A PPE forecast correctness bug, fixed.** The all-sites forecast passed
+>   `site_id or ""` for on-hand, so it summed expiring gear from everywhere
+>   against stock from almost nowhere and suggested re-ordering PPE already on
+>   the shelf. Site-scoped forecasts were always right, which is why it had
+>   never been reported.
+> * **Query-count reductions, all proven answer-identical by suite BT:**
+>   `/ppe/eligible` N+1 → 1 (`rules_for_many`), the forecast 2N+1 → 3,
+>   `_cleared_totals` 5 → 3 (three same-predicate scans became one conditional
+>   aggregate, on the hot issue path), `/hod/pending` 4 → 1.
+> * **E2E 57 → 75**, translating the guide's highest-value cases: the QC gates,
+>   PPE distribution, and `TC-SEC-05` fail-closed scoping. The throwaway DB now
+>   seeds three QC accounts covering both scoping axes **and the unbound case**.
+> * ⚠️ **`asyncpg` cannot infer the type of a parameter used only in `IS NULL`
+>   or `= ANY()`.** Both new bulk queries needed `CAST(:p AS text)` /
+>   `CAST(:p AS text[])`. The failure is `AmbiguousParameterError` and it kills
+>   the process without a traceback — re-run with `-X faulthandler -u` to see
+>   it. It also does not reproduce on an empty table, so verify with rows.
+>
 > **2026-08-09 — QSEP (Quality · Safety · Employees · Procurement),** three
 > merged PRs (#36 `9f8be2e`, #37 `d481a37`, #38 `6447ddb`), then a documentation
 > and stabilisation pass. Plan: [`PROPOSED_PHASE_6_PLAN.md`](PROPOSED_PHASE_6_PLAN.md).
@@ -279,8 +317,8 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1401 / 0** (suites A…BR) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **57 / 57** | `cd tests/e2e && npm test` |
+| Backend service tests | **1428 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **75 / 75** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |

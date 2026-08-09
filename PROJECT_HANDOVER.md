@@ -673,8 +673,8 @@ of them is a regression, not a new normal.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1401 / 0** (suites A…BR) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **57 / 57** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **1428 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **75 / 75** (~26 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |

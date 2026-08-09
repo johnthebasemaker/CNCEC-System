@@ -91,6 +91,77 @@ export default async function globalSetup() {
     + "\"Location\", \"Lining_System_Code\", \"Surface_Area_SQM\") "
     + "VALUES ('CNCEC','E2E-TIER-TANK','E2E tier probe tank','TRAIN J','9101',100)", E2E_DB)
 
+  // ── 1d. the QSEP fixtures: QC accounts + a controlled material ───────────
+  // The legacy data predates the `qc` role, so there is nobody to log in as.
+  // Three accounts, because QC is the only DUAL-SCOPE role in the system and
+  // each axis is a different branch of auth.qc_scope():
+  //   e2e_qc       site-bound      → sees CNCEC inspections, no warehouse ones
+  //   e2e_qc_wh    warehouse-bound → sees WH-01 inspections, no site ones
+  //   e2e_qc_none  NEITHER         → must see NOTHING. This is the fail-closed
+  //                                  account, and the reason it exists is that
+  //                                  `if scope:` would hand it every site.
+  // Passwords are set by step 2 along with everybody else's.
+  psql(
+    "INSERT INTO users (username, password_hash, role, \"Site_ID\", \"Warehouse_ID\") "
+    + "VALUES ('e2e_qc','x','qc','CNCEC',NULL), "
+    + "('e2e_qc_wh','x','qc',NULL,'WH-01'), "
+    + "('e2e_qc_none','x','qc',NULL,NULL) "
+    + "ON CONFLICT (username) DO UPDATE SET role = excluded.role, "
+    + "\"Site_ID\" = excluded.\"Site_ID\", \"Warehouse_ID\" = excluded.\"Warehouse_ID\"",
+    E2E_DB)
+
+  // A Surface Shield with a known SAP so the QC specs never have to guess
+  // which of the 36 controlled materials is safe to experiment on, and a
+  // pending inspection against it so the queue is non-empty. Category is what
+  // makes a material controlled — see services/quality.controlled_category.
+  psql(
+    "INSERT INTO inventory (\"SAP_Code\", \"Material_Code\", "
+    + "\"Equipment_Description\", \"Category\", \"UOM\") "
+    + "VALUES ('E2EQC-1','E2EQC-MAT','E2E controlled shield','Surface Shields','EA') "
+    + "ON CONFLICT (\"SAP_Code\") DO UPDATE SET \"Category\" = excluded.\"Category\"",
+    E2E_DB)
+  psql(
+    "INSERT INTO qc_inspections (\"Site_ID\", \"SAP_Code\", \"Material_Code\", "
+    + "source_type, source_ref, submitted_qty, approved_qty, status, created_by) "
+    + "VALUES ('CNCEC','E2EQC-1','E2EQC-MAT','receipt','E2E-SEED',100,0,'pending','e2e-setup')",
+    E2E_DB)
+  // Stock of it on the shelf at CNCEC, so the issue path has something to
+  // refuse. Without a receipt the block would be untestable — the form would
+  // fail on stock long before it reached the quality gate.
+  psql(
+    "INSERT INTO receipts (\"Date\", \"SAP_Code\", \"Quantity\", \"Site_ID\", \"Received_by\") "
+    + "VALUES (CURRENT_DATE::text, 'E2EQC-1', 100, 'CNCEC', 'e2e-setup')", E2E_DB)
+
+  // ── 1e. the PPE fixtures ─────────────────────────────────────────────────
+  // A PPE-category material, a usable-time rule, an employee to receive it,
+  // and stock to issue. All four are needed before the issue form will even
+  // reach the PPE validation: no rule means no expiry (so no early-replacement
+  // case to test), and no employee means the first guard fires and the later
+  // ones are never exercised.
+  psql(
+    "INSERT INTO inventory (\"SAP_Code\", \"Material_Code\", "
+    + "\"Equipment_Description\", \"Category\", \"UOM\") "
+    + "VALUES ('E2EPPE-1','E2EPPE-MAT','E2E safety boots','PPE','PR') "
+    + "ON CONFLICT (\"SAP_Code\") DO UPDATE SET \"Category\" = excluded.\"Category\"",
+    E2E_DB)
+  psql(
+    "INSERT INTO ppe_rules (\"SAP_Code\", \"Site_ID\", usable_days, "
+    + "requires_safety_doc, created_by) "
+    + "VALUES ('E2EPPE-1', NULL, 90, 0, 'e2e-setup')", E2E_DB)
+  psql(
+    "INSERT INTO employees (\"ID_Number\", \"Name\", \"Site_ID\", status) "
+    + "VALUES ('E2E-EMP-1','E2E Worker One','CNCEC','active') "
+    + "ON CONFLICT (\"ID_Number\") DO UPDATE SET \"Site_ID\" = excluded.\"Site_ID\", "
+    + "status = excluded.status", E2E_DB)
+  psql(
+    "INSERT INTO employees (\"ID_Number\", \"Name\", \"Site_ID\", status) "
+    + "VALUES ('E2E-EMP-2','E2E Worker Two','SVCQ-OTHER','active') "
+    + "ON CONFLICT (\"ID_Number\") DO UPDATE SET \"Site_ID\" = excluded.\"Site_ID\"",
+    E2E_DB)
+  psql(
+    "INSERT INTO receipts (\"Date\", \"SAP_Code\", \"Quantity\", \"Site_ID\", \"Received_by\") "
+    + "VALUES (CURRENT_DATE::text, 'E2EPPE-1', 50, 'CNCEC', 'e2e-setup')", E2E_DB)
+
   // ── 2. known passwords for the role users (throwaway DB only) ────────────
   const resetScript = [
     'import bcrypt, sys',

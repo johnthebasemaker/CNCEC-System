@@ -41,6 +41,7 @@ from .entry import router as entry_router  # noqa: E402
 from .exec_summary import router as exec_summary_router  # noqa: E402
 from .lining_analytics import router as lining_analytics_router  # noqa: E402
 from .weekly_report import router as weekly_report_router, weekly_report_loop  # noqa: E402
+from .health_monitor import router as health_router, briefing_loop  # noqa: E402
 from .entry_docs import router as entry_docs_router  # noqa: E402
 from .hod import router as hod_router  # noqa: E402
 from .logistics import router as logistics_router  # noqa: E402
@@ -108,6 +109,7 @@ async def lifespan(app: FastAPI):
     task = None
     digest_task = None
     weekly_task = None
+    briefing_task = None
     if os.environ.get("GI_SCHEDULER", "1") != "0":
         import asyncio
         task = asyncio.create_task(scheduler_loop())
@@ -116,6 +118,10 @@ async def lifespan(app: FastAPI):
         digest_task = asyncio.create_task(digest_loop())
         # Weekly executive PDF (Phase 8-3): Friday 17:00 local render+dispatch.
         weekly_task = asyncio.create_task(weekly_report_loop())
+        # Morning Briefing agent: daily 07:00 local scan for operational
+        # anomalies nothing else can notice, because each one is the ABSENCE
+        # of an event rather than an event. Same GI_SCHEDULER=0 escape hatch.
+        briefing_task = asyncio.create_task(briefing_loop())
     # AI-job orphan sweep: queued/running rows from a dead process can never
     # finish (their asyncio task died with it) — fail them with a clear message.
     try:
@@ -142,6 +148,8 @@ async def lifespan(app: FastAPI):
         digest_task.cancel()
     if weekly_task:
         weekly_task.cancel()
+    if briefing_task:
+        briefing_task.cancel()
     await engine.dispose()
 
 
@@ -230,6 +238,9 @@ app.include_router(exec_summary_router)
 app.include_router(lining_analytics_router)
 # Phase 8-3 — weekly exec PDF: tokenized download + admin run-now.
 app.include_router(weekly_report_router)
+
+# Morning Briefing agent — preview (level 2) + manual run (admin).
+app.include_router(health_router)
 # Parity A1/A4 — entry documents (upload/library/download) + site WBS config.
 app.include_router(entry_docs_router)
 

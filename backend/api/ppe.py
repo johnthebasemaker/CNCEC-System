@@ -66,9 +66,15 @@ async def eligible(site_id: Optional[str] = None,
                         WHERE TRIM(r."SAP_Code") = TRIM(i."SAP_Code"))
          ORDER BY i."SAP_Code"
     '''), {"cat": svc.PPE_CATEGORY})).mappings().all()
+    # One query for every rule, not one per material. `rules_for_many` applies
+    # the same site-beats-global precedence `rule_for` does — see its docstring
+    # for why the two spellings are held to each other by a test rather than by
+    # good intentions.
+    rules = await svc.rules_for_many(
+        session, sap_codes=[str(r["SAP_Code"]) for r in rows], site_id=site)
     out = []
     for r in rows:
-        rule = await svc.rule_for(session, sap_code=r["SAP_Code"], site_id=site)
+        rule = rules.get(str(r["SAP_Code"]).strip())
         out.append({**dict(r),
                     "usable_days": (rule or {}).get("usable_days"),
                     "requires_safety_doc": bool((rule or {}).get("requires_safety_doc", 1)),

@@ -33,6 +33,7 @@ material to exist, which requires a receipt, which requires a purchase order.
 | 10 | Assets & serialised equipment | §3 |
 | 11 | Reports, exports & documents | any data |
 | 12 | Notifications | any workflow |
+| 12b | The Morning Briefing agent | any workflow |
 | 13 | Cross-cutting: RBAC, scoping, read-only | all |
 | 14 | Edge cases & how to drain any model | all |
 | 15 | Do's and Don'ts |  |
@@ -841,6 +842,39 @@ so that testing them produces a documented fact rather than a false defect.
 
 ---
 
+## 12b. The Morning Briefing agent (Daily System Health)
+
+| | |
+|---|---|
+| **Who** | Admin (all sites) and each HOD (their own site) receive it; anyone level 2+ can preview |
+| **What** | A daily scan for operational problems, dispatched as one digest |
+| **Where** | Sent to the bell and WhatsApp; previewed at *Daily System Health* |
+| **When** | Automatically at 07:00 server time; on demand from the preview |
+| **Why** | **Every problem it finds is the ABSENCE of an event.** A draft nobody submitted, an inspection nobody performed, a tool nobody returned. Nothing happens, so no ordinary notification fires, and the longer it stays broken the quieter it gets. |
+| **Which** | Eight probes: uninspected controlled stock · negative stock · stale DN drafts · overdue loans · ageing approvals · stale PRs · expiring PPE · failed outbound messages |
+
+⚠️ **A monitor's silence is a message, and the message is "nothing is wrong".**
+That makes every way it can go quiet a correctness bug. The three tests below
+are the ones that matter.
+
+| ID | Given / When / Then |
+|---|---|
+| TC-HM-01 | **Given** the briefing, **When** one probe raises an error, **Then** the other seven still report **and** the digest carries a finding naming the broken probe. ⚠️ **The most important case here.** A monitor that dies on one bad query goes silent, and silence is indistinguishable from a healthy morning. |
+| TC-HM-02 | **Given** a run with **no** findings, **Then** **nothing is dispatched** — but an audit row is still written. ⚠️ A daily "all clear" is read for a week and ignored forever; the audit row is how "did it run last night?" stays answerable without spending anybody's attention. |
+| TC-HM-03 | **Given** a run triggered with *force*, **Then** even a clean briefing is sent — the one case where "all clear" is the message somebody actually wants, because they are proving the channel works. |
+| TC-HM-04 | **Given** a scoped caller with **no site of their own**, **Then** the briefing contains no site data. ⛔ The one deliberate exception is the failed-message probe, which reports infrastructure counts with no row content. |
+| TC-HM-05 | **Given** an HOD, **When** they preview, **Then** they get their own site; **When** they ask for another site, refused. ⛔ |
+| TC-HM-06 | **Given** a store keeper, **When** they open the briefing, **Then** refused — it aggregates every site's operational state. ⛔ |
+| TC-HM-07 | **Given** an HOD, **When** they try to *trigger a dispatch*, **Then** refused. A preview reads; a run writes to everybody's phone. ⛔ |
+| TC-HM-08 | **Given** a draft 1 day old and one 30 days old with a 3-day threshold, **Then** only the 30-day one is reported. The probe filters **attention**; one that reports every draft is one nobody reads. |
+| TC-HM-09 | **Given** a threshold changed in Settings, **Then** the probe honours it without a release. **And given** a malformed value, **Then** it falls back to the default rather than erroring — a typo in one settings row must not be why nobody hears about a week-old draft. |
+| TC-HM-10 | **Given** any digest, **Then** the body is **one line**. Meta rejects a template parameter containing a newline, and the same body goes to WhatsApp and the bell — a multi-line body silently fails on one channel. |
+| TC-HM-11 | **Given** more findings than fit, **Then** the digest ends with an explicit "(+N more)", never mid-sentence. |
+| TC-HM-12 | **Given** findings of mixed severity, **Then** the worst are first — the top of a digest read on a phone is the part that matters. |
+| TC-HM-13 | **Given** the feature switched off in Settings, **Then** nothing is sent, force included. An operator in a known incident can silence it without stopping the API. |
+
+> **Automated:** service-test suite BS (19 checks) plus three Playwright cases.
+
 ## 13. Cross-cutting — RBAC, scoping and read-only
 
 **Run this section after any change that adds an endpoint or a page.**
@@ -1042,9 +1076,9 @@ regression, not a new normal.**
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1401 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1428 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
-| Playwright E2E | **57 / 57** | `cd tests/e2e && npm test` |
+| Playwright E2E | **75 / 75** | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Frontend build | clean | `npm run build --prefix frontend` |

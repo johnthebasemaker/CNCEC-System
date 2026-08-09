@@ -136,6 +136,41 @@ async def rule_for(session: AsyncSession, *, sap_code: str,
     return dict(row) if row else None
 
 
+async def rules_for_many(session: AsyncSession, *, sap_codes: list[str],
+                         site_id: str | None) -> dict[str, dict]:
+    """`rule_for` for a whole list, in ONE query — {SAP_Code: rule}.
+
+    The picker at `/ppe/eligible` called `rule_for` once per material, so a
+    catalogue of N PPE items cost N round trips to answer a question one query
+    answers. Nothing was wrong with the ANSWER, which is why it never showed up
+    as a bug — only as a page that got slower every time somebody added a rule.
+
+    ⚠️ PRECEDENCE MUST STAY IDENTICAL TO `rule_for`: a SITE row beats a global
+    one. `rule_for` expresses that as `ORDER BY Site_ID IS NULL LIMIT 1` so the
+    ordering lives in the query; here the rows for many SAPs come back together
+    and the pick happens in Python, so the two spellings have to agree. They
+    are tested against each other rather than trusted — a divergence would mean
+    the picker and the issue form disagreed about how long a boot lasts.
+    """
+    if not sap_codes:
+        return {}
+    c = rules_t.c
+    rows = (await session.execute(
+        select(c["id"], c["SAP_Code"], c["Site_ID"], c["usable_days"],
+               c["requires_safety_doc"], c["notes"])
+        .where(func.trim(c["SAP_Code"]).in_([s.strip() for s in sap_codes]))
+        .where((c["Site_ID"] == (site_id or "")) | (c["Site_ID"].is_(None)))
+    )).mappings().all()
+    out: dict[str, dict] = {}
+    for r in rows:
+        sap = str(r["SAP_Code"]).strip()
+        prev = out.get(sap)
+        # A site row wins; otherwise first-seen. Mirrors `ORDER BY Site_ID IS NULL`.
+        if prev is None or (prev.get("Site_ID") is None and r["Site_ID"] is not None):
+            out[sap] = dict(r)
+    return out
+
+
 async def active_holding(session: AsyncSession, *, id_number: str,
                          sap_code: str) -> dict | None:
     """The person's current, unreplaced issue of this item — or None.
@@ -348,25 +383,44 @@ async def history_for(session: AsyncSession, *, id_number: str) -> list[dict]:
 # shopping list rather than a wish list.
 FORECAST_DAYS = 15
 
-_ON_HAND_SQL = text('''
-    SELECT COALESCE((SELECT SUM("Quantity") FROM receipts
-                      WHERE TRIM("SAP_Code") = TRIM(:sap)
-                        AND COALESCE("Site_ID",'') = :site), 0)
-         - COALESCE((SELECT SUM("Quantity") FROM consumption
-                      WHERE TRIM("SAP_Code") = TRIM(:sap)
-                        AND COALESCE("Site_ID",'') = :site), 0)
-         - COALESCE((SELECT SUM("Quantity") FROM returns
-                      WHERE TRIM("SAP_Code") = TRIM(:sap)
-                        AND COALESCE("Site_ID",'') = :site), 0)
+# ⚠️ TWO BULK QUERIES, NOT TWO PER MATERIAL. These used to be single-row
+# lookups run inside the grouping loop — 2N round trips to build one forecast.
+# The site predicate is `:site IS NULL OR …`, which fixes a real defect at the
+# same time: the old per-SAP form passed `site_id or ""`, so an UNSCOPED
+# forecast (admin, all sites) counted on-hand only for rows whose Site_ID was
+# NULL or blank. Expiring quantity was summed across every site while stock was
+# summed across almost none, so the global view suggested ordering PPE that was
+# already on the shelf. Scoped forecasts were always correct; only the
+# all-sites one was wrong, which is why nobody had reported it.
+_ON_HAND_MANY_SQL = text('''
+    SELECT sap, SUM(q) AS on_hand FROM (
+        SELECT TRIM("SAP_Code") AS sap, SUM("Quantity") AS q FROM receipts
+         WHERE TRIM("SAP_Code") = ANY(CAST(:saps AS text[]))
+           AND (CAST(:site AS text) IS NULL OR COALESCE("Site_ID",'') = CAST(:site AS text)) GROUP BY 1
+        UNION ALL
+        SELECT TRIM("SAP_Code"), -SUM("Quantity") FROM consumption
+         WHERE TRIM("SAP_Code") = ANY(CAST(:saps AS text[]))
+           AND (CAST(:site AS text) IS NULL OR COALESCE("Site_ID",'') = CAST(:site AS text)) GROUP BY 1
+        UNION ALL
+        SELECT TRIM("SAP_Code"), -SUM("Quantity") FROM returns
+         WHERE TRIM("SAP_Code") = ANY(CAST(:saps AS text[]))
+           AND (CAST(:site AS text) IS NULL OR COALESCE("Site_ID",'') = CAST(:site AS text)) GROUP BY 1
+    ) t GROUP BY sap
 ''')
 
-_ON_ORDER_SQL = text('''
-    SELECT COALESCE(SUM(pi."Qty" - COALESCE(pi."Delivered_Qty",0)), 0)
+# On-order is unavoidably GLOBAL: `po_items` carries no site column, so an open
+# line cannot be attributed to a destination. Stated here rather than left to be
+# rediscovered — for a site-scoped forecast this can under-suggest by counting a
+# line bound for another site.
+_ON_ORDER_MANY_SQL = text('''
+    SELECT UPPER(TRIM(COALESCE(pi."Material_Code",''))) AS mat,
+           COALESCE(SUM(pi."Qty" - COALESCE(pi."Delivered_Qty",0)), 0) AS on_order
       FROM po_items pi
       JOIN purchase_orders po ON po."PO_Number" = pi."PO_Number"
-     WHERE UPPER(TRIM(COALESCE(pi."Material_Code",''))) = UPPER(TRIM(:mat))
+     WHERE UPPER(TRIM(COALESCE(pi."Material_Code",''))) = ANY(CAST(:mats AS text[]))
        AND COALESCE(pi.line_status,'open') NOT IN ('closed','cancelled')
        AND COALESCE(po.status,'open') NOT IN ('closed','cancelled')
+     GROUP BY 1
 ''')
 
 
@@ -424,14 +478,24 @@ async def forecast(session: AsyncSession, *, site_id: str | None,
         if str(r["expires_on"]) < str(g["earliest_expiry"]):
             g["earliest_expiry"] = r["expires_on"]
 
+    # Two queries for the whole forecast, whatever N is.
+    saps = list(by_sap)
+    mats = sorted({str(g["Material_Code"]).strip().upper()
+                   for g in by_sap.values() if g["Material_Code"]})
+    on_hand_by_sap: dict[str, float] = {}
+    on_order_by_mat: dict[str, float] = {}
+    if saps:
+        on_hand_by_sap = {r[0]: float(r[1] or 0) for r in (await session.execute(
+            _ON_HAND_MANY_SQL, {"saps": saps, "site": site_id or None})).all()}
+    if mats:
+        on_order_by_mat = {r[0]: float(r[1] or 0) for r in (await session.execute(
+            _ON_ORDER_MANY_SQL, {"mats": mats})).all()}
+
     items = []
     for sap, g in by_sap.items():
-        on_hand = float((await session.execute(
-            _ON_HAND_SQL, {"sap": sap, "site": site_id or ""})).scalar() or 0)
-        on_order = 0.0
-        if g["Material_Code"]:
-            on_order = float((await session.execute(
-                _ON_ORDER_SQL, {"mat": g["Material_Code"]})).scalar() or 0)
+        on_hand = on_hand_by_sap.get(sap, 0.0)
+        on_order = on_order_by_mat.get(
+            str(g["Material_Code"]).strip().upper(), 0.0) if g["Material_Code"] else 0.0
         g["on_hand"] = on_hand
         g["on_order"] = on_order
         g["suggested_order_qty"] = max(

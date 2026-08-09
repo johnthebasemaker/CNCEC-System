@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Alert, Input, Select, Skeleton, Space } from 'antd'
 import { Table } from '../lib/smartTable'
@@ -17,6 +17,9 @@ interface Props {
   extraParams?: ListParams
   toolbarExtra?: ReactNode
 }
+
+/** Hoisted so it is not a fresh object on every render. */
+const SCROLL_X = { x: 'max-content' as const }
 
 // Generic read-only browser: server-side pagination + optional Site_ID filter,
 // free-text search and category filter.
@@ -43,9 +46,48 @@ export default function BrowseTable({
     ...(category ? { category } : {}),
     ...extraParams,
   }
+  // `params` is rebuilt every render on purpose — TanStack hashes a query key
+  // STRUCTURALLY, so a fresh object with identical contents is the same key.
   const { data, isFetching, isError, error } = useList(path, params)
-  const rows = data?.items ?? []
+  const rows = useMemo(() => data?.items ?? [], [data])
 
+  // ── memoisation: everything below is handed to antd's Table ──────────────
+  //
+  // ⚠️ THE ROW CLONE WAS THE EXPENSIVE ONE. `dataSource` was
+  // `rows.map((r, i) => ({ ...r, __rk: i }))` written inline, so EVERY render
+  // produced a new array of newly-allocated row objects. antd compares rows by
+  // identity to decide what to repaint, so nothing ever matched and a full
+  // page of cells re-rendered on every keystroke in the search box, every
+  // category change, and every parent re-render — none of which had touched
+  // the data. The clone is now tied to the fetched rows, so it happens when
+  // the ROWS change and not when the COMPONENT renders.
+  const dataSource = useMemo(
+    () => rows.map((r, i) => ({ ...r, __rk: i })), [rows])
+
+  // buildColumns() walks the first row and allocates a fresh `render` closure
+  // per column. New closures mean new column identities, which is the second
+  // reason every cell repainted.
+  const columns = useMemo(() => buildColumns(rows), [rows])
+
+  const onPageChange = useCallback((p: number, ps: number) => {
+    setPage(p)
+    setPageSize(ps)
+  }, [])
+
+  const pagination = useMemo(() => ({
+    current: page,
+    pageSize,
+    total: data?.total ?? 0,
+    showSizeChanger: true,
+    showTotal: (t: number) => `${t} rows`,
+    onChange: onPageChange,
+  }), [page, pageSize, data?.total, onPageChange])
+
+  // `sticky` was `{ offsetHeader: 64 }` inline: a new object each render, and
+  // a hard-coded 64 that smartTable already replaces with the measured header
+  // height (the hard-coded value sat 8px low on a phone and opened a gap rows
+  // showed through). Passing `true` asks for the measured offset explicitly
+  // rather than supplying a number that is immediately overwritten.
   const hasToolbar = (hasSite && !siteScoped) || searchable || hasCategory || toolbarExtra
 
   return (
@@ -103,22 +145,12 @@ export default function BrowseTable({
       <Table
         size="small"
         loading={isFetching}
-        columns={buildColumns(rows)}
-        dataSource={rows.map((r, i) => ({ ...r, __rk: i }))}
+        columns={columns}
+        dataSource={dataSource}
         rowKey="__rk"
-        scroll={{ x: 'max-content' }}
-        sticky={{ offsetHeader: 64 }}
-        pagination={{
-          current: page,
-          pageSize,
-          total: data?.total ?? 0,
-          showSizeChanger: true,
-          showTotal: (t) => `${t} rows`,
-          onChange: (p, ps) => {
-            setPage(p)
-            setPageSize(ps)
-          },
-        }}
+        scroll={SCROLL_X}
+        sticky
+        pagination={pagination}
       />
       )}
     </div>
