@@ -38,21 +38,34 @@ from . import manual_index as mx
 # Which top-level USER_MANUAL.md sections each role may see. Lower roles
 # cannot see higher roles' sections. §18 (SME) + §19 (Man-Hours) are
 # hod/admin-locked features, mirroring the portal locks.
+#
+# ⚠️ A ROLE MISSING FROM THIS MAP IS NOT LOCKED OUT — IT IS GIVEN THE STORE
+# KEEPER'S CHAPTERS. `allowed_sections` falls back to "store_keeper" so an
+# unknown role can never be handed the whole manual, which is the right failure
+# direction, but it is still the WRONG answer: the QSEP release added the `qc`
+# role and forgot this map, so for a while a Quality inspector asking about
+# inspections was answered out of the Store Keeper chapter and told anything
+# else was "not in your section". Add the role here in the same commit that
+# adds it to `auth.ROLE_META`.
 _ROLE_ALLOWED: dict[str, set[int]] = {
-    "store_keeper":   {1, 2, 3, 4, 10, 11, 12, 13, 21},
-    "supervisor":     {1, 2, 3, 4, 5, 11, 12, 13, 21},
-    "hod":            {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 16, 18, 19, 21},
+    "store_keeper":   {1, 2, 3, 4, 10, 11, 12, 13, 21, 22},
+    "supervisor":     {1, 2, 3, 4, 5, 11, 12, 13, 21, 22},
+    "hod":            {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 16, 18, 19, 21, 22},
     # Strict isolation: Logistics never sees Warehouse internals (and vice
     # versa); neither sees site-level chapters 4–6.
-    "logistics":      {1, 2, 3, 9, 11, 12, 13, 14, 16, 21},
-    "warehouse_user": {1, 2, 3, 9, 11, 12, 13, 15, 16, 21},
+    "logistics":      {1, 2, 3, 9, 11, 12, 13, 14, 16, 21, 22},
+    "warehouse_user": {1, 2, 3, 9, 11, 12, 13, 15, 16, 21, 22},
+    # QC (2026-08-09) inspects and decides, and does nothing else. Chapter 22
+    # is its own; 4 and 15 are there because an inspector has to understand
+    # the issue and the goods-in they sit between, not to let them do either.
+    "qc":             {1, 2, 3, 4, 11, 12, 15, 21, 22},
     # The view-only Auditor (2026-08-03) reads across every site but can
     # open only Dashboard / Stock / Records / Reports / Lining Coverage.
     # Its chapters mirror exactly that: orientation, reporting, the data
     # model and the glossary. No role operational how-tos it could not
     # perform anyway, and not the hosting chapter.
-    "auditor":        {1, 2, 3, 8, 9, 10, 11, 12, 16, 20, 21},
-    "admin":          set(range(1, 22)),
+    "auditor":        {1, 2, 3, 8, 9, 10, 11, 12, 16, 20, 21, 22},
+    "admin":          set(range(1, 23)),
 }
 
 _SECTION_TITLES = {
@@ -77,6 +90,7 @@ _SECTION_TITLES = {
     19: "Man-Hours & Labor Tracking Manual",
     20: "Auditor (View-Only) Manual",
     21: "2026-08 Feature Update",
+    22: "Quality, Safety, Employees & Procurement (QSEP)",
 }
 
 
@@ -169,6 +183,7 @@ _ROLE_LABEL = {
     "hod": "Head of Department",
     "logistics": "Logistics Coordinator",
     "warehouse_user": "Warehouse Operator",
+    "qc": "Quality Control Inspector",
     "admin": "Administrator",
     "auditor": "Auditor (view-only)",
 }
@@ -180,6 +195,7 @@ _ROLE_REFUSAL = {
     "hod": "That's in the Admin chapter — please ask your Admin.",
     "logistics": "That's outside the Logistics Portal — please ask your Admin.",
     "warehouse_user": "That's outside the Warehouse Portal — please ask your Admin.",
+    "qc": "That's outside the Quality section — please ask your HOD.",
     "admin": "I can't find that in the manual. Check the source markdown in USER_MANUAL.md.",
     "auditor": "That's outside the read-only Auditor view — please ask your Admin.",
 }

@@ -1,7 +1,8 @@
 # SESSION HANDOVER — read this first, then `PROJECT_HANDOVER.md`
 
-> **Updated 2026-08-06**, closing the security-audit session.
-> Branch **`main`**, clean, at **`7e89674`** (PR #33 merged).
+> **Updated 2026-08-09**, closing the **QSEP** programme (Quality · Safety ·
+> Employees · Procurement) and the documentation pass that followed it.
+> Branch **`main`**, at **`6723329`** (PR #38 merged).
 > The project is **feature-complete, stable and security-audited**.
 > Every live gate is green. **Nothing is mid-flight — there is no half-finished
 > work to pick up.**
@@ -11,6 +12,11 @@
 > `frontend/src-tauri/Cargo.toml`. They had drifted to `0.1.0 / 0.0.0 / 0.1.0`,
 > which is why the v1.2.0 release published installers named `0.1.0`.
 > `release-desktop.yml` now **fails the build** on drift or on a tag mismatch.
+>
+> **Read [`MANUAL_TESTING_GUIDE.md`](MANUAL_TESTING_GUIDE.md) before you change a
+> feature.** Since 2026-08-09 keeping it current is rule 13 — part of the
+> Definition of Done, not a nicety. It is also the fastest way to learn what the
+> system actually promises, because it states the WHY for every behaviour.
 >
 > **Your first decision next session is a CHOICE, not a queue** — Tier 1 security
 > hardening or the Hetzner deployment. Both are spelled out in §8 below.
@@ -88,16 +94,88 @@ written.
 * **SME ⇄ ERP decoupling (rule 1a)** — every SME number comes from
   `sme_inventory_seed`. A warehouse receipt must not move an SME figure.
 
+### The QSEP two-gate rule (2026-08-09)
+**The certificate binds at DISPATCH; quality approval binds at ISSUE.** They are
+different gates at different moments and confusing them produces confident
+wrong "fixes".
+
+| Gate | Where it fires | Refuses whom |
+|---|---|---|
+| Material Test Certificate | Delivery Note creation | the warehouse clerk |
+| QC approval | Store Keeper's issue, and again at HOD approval | the store keeper |
+
+**Material MAY travel to site uninspected** — that is the operator's ruling
+(R3). What it may not do is reach a worker. And the QC block **does not overturn
+FEFO**: `assert_qc_cleared` is about QUALITY STATUS on 36 SAPs, while FEFO and
+over-issue stay allow-and-log on everything. Never implement one by promoting
+the other's warning to an error.
+
 ### And the standing one
 **Both SME engines change together.** `backend/api/sme_engine.py` and
 `frontend/src/sme/engine.ts` are line-for-line mirrors proven equal by
 `npm run parity:sme`. Any numeric change = change BOTH + regenerate the golden,
 **in one commit**.
 
+### And the newest one — rule 13
+**`MANUAL_TESTING_GUIDE.md` is part of the Definition of Done.** Change a
+feature, update the guide, same PR. And a role added to `auth.ROLE_META` must be
+added in the same commit to `ai/manual_qa._ROLE_ALLOWED` and to
+`build_manual_pdf.ROLE_MANUAL_RECIPES` — QSEP added `qc` and did neither, so a
+Quality inspector was answered from the Store Keeper chapter and had no printed
+booklet. The role map **falls back to `store_keeper`** for an unknown role,
+which fails safe and is precisely why nobody noticed.
+
 ---
 
 ## 3. What was added most recently
 
+> **2026-08-09 — QSEP (Quality · Safety · Employees · Procurement),** three
+> merged PRs (#36 `9f8be2e`, #37 `d481a37`, #38 `6447ddb`), then a documentation
+> and stabilisation pass. Plan: [`PROPOSED_PHASE_6_PLAN.md`](PROPOSED_PHASE_6_PLAN.md).
+> User-facing account: `USER_MANUAL.md` chapter 22. Test coverage:
+> [`MANUAL_TESTING_GUIDE.md`](MANUAL_TESTING_GUIDE.md).
+>
+> * **A `qc` role at level 1 with DUAL scoping** — a site **or** a warehouse,
+>   never both. `auth.qc_scope()` fails closed: neither binding, or both, yields
+>   `{"site": "", "warehouse": ""}` and the inspector sees **nothing**, not
+>   everything. ⚠️ `warehouse_scope` needed the matching fix: a site-bound QC
+>   gets `''` (matches nothing), not `None` (matches everything).
+> * **The hard issuance block** — `services/quality.assert_qc_cleared` at
+>   **both** `stage_consumption` and `approve_smr`, enforcing
+>   `Σ approved − Σ already issued or staged`. Clearance pools at
+>   `(Site_ID, SAP_Code)`, not per-lot: the lot is unknown at stage time and
+>   FEFO resolves it at commit. ⚠️ **It counts only from the earliest
+>   inspection's date onward** — counting all 1,133 historical consumption rows
+>   would block controlled material forever.
+> * **PPE rides the ORDINARY issue form (Option A).** No PPE page, no PPE stock
+>   ledger. Quantity still leaves via `pending_issues` → `consumption`, which is
+>   why stock, FEFO, burn rate, reports and the QC gate need no PPE-shaped
+>   exception. Suite BO checks that negative property first.
+> * **The PPE distribution is written at STAGE, not at approval** — the boots are
+>   on the worker's feet when the SK hands them over. So the duplicate guard is
+>   true during the approval gap, and a rejection **voids the new row AND
+>   restores its predecessor**; without the restore the worker holds nothing on
+>   record while visibly wearing the old gear.
+> * **`ppe_rules` is empty in production today.** Consequence, and the most
+>   likely false bug report: every PPE issue demands a safety document, nothing
+>   gets an expiry, and **the 15-day forecast is permanently empty** until rules
+>   are configured.
+> * **OCR routes on whether text came out, never on MIME type.** The reference
+>   `PO#4710003121_PR681.pdf` is a real signed-and-scanned PO with **0 text
+>   characters and 5 full-page images**; the old endpoint answered **HTTP 200
+>   with an empty item list**, which is worse than an error because nothing
+>   distinguished "no items" from "I could not read it". Uploads are stored
+>   **before** parsing — the document that defeats the parser is the one somebody
+>   will need to look at.
+> * **One hammer, one row.** Asset identity narrowed to `(SAP_Code, Serial_No)`
+>   **globally**, with transfers approved by the **source** site's HOD.
+> * **Password policy 12 → 8 with complexity, in ONE place.** It had five copies,
+>   and self-registration sat on a literal 6 while everything else used `MIN_PW`.
+>
+> **2026-08-09 (later) — the documentation and PDF pass.** See §4a: the manual
+> table renderer had been printing rows on top of each other, and two
+> documentation surfaces had never been told the `qc` role exists.
+>
 > **2026-08-06 — the security audit.** A full-codebase review (`SECURITY_REVIEW_2026-08-05.md`),
 > then two fix branches: PR #32 `fix/formula-injection-and-csp` and PR #33
 > `fix/sme-export-and-nginx-headers`. Forward roadmap in
@@ -201,13 +279,14 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1245 / 0** (suites A…BK) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1401 / 0** (suites A…BR) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Frontend | `tsc -b` + build + `oxlint` clean | `npm run build --prefix frontend` |
-| Alembic | single head **`a71e93b4c2f8`** | `cd backend && alembic heads` |
+| Alembic | single head **`a3c17e9b25d4`** | `cd backend && alembic heads` |
+| **Manual PDFs** | **0 overlapping text pairs** × 8 booklets | `.venv/bin/python build_manual_pdf.py --role all` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 
 > ⚠️ **`tools/parity_check.py` can no longer pass and is NOT a gate.** It
@@ -218,7 +297,40 @@ A change that lowers any of these is a regression, not a new normal.
 > **do not spend a session "fixing" it.** Retiring or re-baselining it is an
 > operator decision that has not been made.
 
-### 4a. `build_manual_pdf.py` — three defects fixed 2026-08-05
+### 4a. `build_manual_pdf.py` — the table overlap, fixed 2026-08-09
+
+**The symptom:** in a table, a cell holding several lines of wrapped text
+printed the next row *on top of itself*. The master manual carried **104
+overlapping word pairs**, which is how the interleaved nonsense —
+`rSutnonrein`, `cRounbfbiremrs` — got onto the page.
+
+**The cause is worth internalising, because the project already knew it.**
+`_wrap_cell` measured each trial line with `get_string_width` against the FULL
+cell width. But a cell's usable text width is that width **minus `c_margin` on
+each side** — 2 mm at fpdf2's default. Lines that measured as fitting re-wrapped
+when they were actually drawn, so a row measured five lines tall rendered six,
+and the sixth landed in the row below. **Rule 7 in `PROJECT_HANDOVER.md` has
+documented this exact trap for `pdf_tables.py` since 2026-08-03**; the manual
+builder simply never got the memo.
+
+**The fix, and why it cannot drift again:** measurement is now performed by the
+engine that draws — `multi_cell(dry_run=True, output="LINES")`. The measurement
+*is* the split, so the two cannot disagree. Every line is then drawn at explicit
+coordinates with auto page-break switched off for the table, because relying on
+`multi_cell` to advance the Y cursor was the other half of the problem. Three
+further cases now survive: a header cell wraps instead of being truncated at 60
+characters, a **row taller than a whole page** splits across pages with the
+header repeated, and a code line wider than its box wraps instead of running
+through the border.
+
+**A geometry audit now runs on the builder's own output** and prints a per-file
+line, so this cannot silently return: the build reopens each PDF and counts
+pairs of words whose boxes intersect. `--no-verify` skips it.
+
+Also new here: the QSEP `qc` role had **no booklet recipe at all**, and chapter
+22 has been added to every role's recipe.
+
+### 4b. `build_manual_pdf.py` — three defects fixed 2026-08-05
 
 Worth knowing because each one silently degraded every PDF:
 
@@ -287,10 +399,20 @@ again — pushing an existing tag is a no-op.
 > login throttle is now **cross-worker**, backed by the `login_attempts` table
 > rather than per-process memory.
 
-1. **Nothing has been registered in the new tables yet.** `storage_locations`,
-   `material_locations` and `asset_units` are all empty, and stay empty until
-   either the workbook columns are filled or somebody registers a tool in the
-   app. The features are live; the data is not there.
+0. **The QSEP tables are live but EMPTY, and one of them has a visible
+   consequence.** `ppe_rules`, `ppe_distributions`, `qc_inspections` and
+   `employee_movements` all hold 0 rows; `employees` holds 2. That is the
+   expected state, not a defect — but ⚠️ **with no `ppe_rules` row, every PPE
+   issue demands a safety document, nothing is given an expiry date, and the
+   15-day PPE Forecast is permanently empty.** Configure a usable-time rule
+   before concluding the forecast is broken. `inventory."Category"` does carry
+   **9 PPE** items and **36 Surface Shields**, so both pipelines have something
+   to act on.
+1. **Nothing has been registered in the location tables yet.**
+   `storage_locations` and `material_locations` are empty, and `asset_units`
+   holds only **3 real operator rows** (`created_by` = `excel-sync` / `Akilan`)
+   — ⛔ **not test residue; do not clear them.** They stay sparse until either
+   the workbook columns are filled or somebody registers a tool in the app.
 2. **Two workbook data-quality items** the sync reports on every run:
    Consumption Log row 9 (SAP 1169, `"At site"`) has a Location but **no serial**,
    so no asset can be keyed from it; and `Tank No.` `J092` matches no equipment.
@@ -314,7 +436,9 @@ again — pushing an existing tag is a no-op.
 
 | File | What it holds |
 |---|---|
-| [`PROJECT_HANDOVER.md`](PROJECT_HANDOVER.md) | **The authority.** All 14 locked rules with their evidence, the baselines, developer utilities, caveats |
+| [`PROJECT_HANDOVER.md`](PROJECT_HANDOVER.md) | **The authority.** All locked rules with their evidence, the baselines, developer utilities, caveats |
+| [`MANUAL_TESTING_GUIDE.md`](MANUAL_TESTING_GUIDE.md) | **Every manual test, ordered by business workflow**, with the 5 W's + 1 H for each feature and Given/When/Then per case. Also the fastest way to learn what the system PROMISES. Keeping it current is rule 13 |
+| [`PROPOSED_PHASE_6_PLAN.md`](PROPOSED_PHASE_6_PLAN.md) | The QSEP plan as approved, with the operator's rulings inline |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The system brain — backend/frontend/DB/testing/security map |
 | [`REPO_MAP.md`](REPO_MAP.md) | The `legacy/` ⇄ `tools/` ⇄ `data-archive/` segregation contract |
 | [`OVERNIGHT_OPTIMIZATION_RUNLOG.md`](OVERNIGHT_OPTIMIZATION_RUNLOG.md) | Chatbot retrieval, idle logout, throttle, indexes, ⌘K |
@@ -323,7 +447,7 @@ again — pushing an existing tag is a no-op.
 | [`docs/SME_TIER_SEGREGATION_RUNLOG.md`](docs/SME_TIER_SEGREGATION_RUNLOG.md) | Tier segregation, per tab |
 | [`EXCEL_LOCATION_SYNC_RUNLOG.md`](EXCEL_LOCATION_SYNC_RUNLOG.md) | Rack + asset seeding, "app wins", and what to type in the spreadsheet |
 | [`OVERNIGHT_ASSET_TRACKING_RUNLOG.md`](OVERNIGHT_ASSET_TRACKING_RUNLOG.md) | Asset schema, the GPS scanner, tank aliases |
-| [`USER_MANUAL.md`](USER_MANUAL.md) | 21 chapters, user-facing. **Also the chatbot's corpus, so edit carefully.** Written for non-technical readers: no ASCII art, no shell commands, no source identifiers — keep it that way |
+| [`USER_MANUAL.md`](USER_MANUAL.md) | 22 chapters, user-facing (ch. 22 = QSEP). **Also the chatbot's corpus and the source of the printed booklets, so a new chapter must be registered in `manual_qa._ROLE_ALLOWED` AND `build_manual_pdf.ROLE_MANUAL_RECIPES` or it reaches nobody.** Written for non-technical readers: no ASCII art, no shell commands, no source identifiers — keep it that way |
 | [`SECURITY_REVIEW_2026-08-05.md`](SECURITY_REVIEW_2026-08-05.md) | The audit itself — the one Medium finding, and an eleven-category "verified clean" list so the next audit does not re-tread it |
 | [`SECURITY_SUGGESTIONS.md`](SECURITY_SUGGESTIONS.md) | Forward hardening roadmap in three tiers, sequenced, with a "deliberately NOT recommended" section |
 | [`docs/GI_Hub_Executive_Presentation.html`](docs/GI_Hub_Executive_Presentation.html) | 18-slide management deck. Open in a browser; ← → to navigate, `F` for fullscreen |
@@ -371,3 +495,10 @@ add the Cloudflare Access bypass for the native apps.
 ---
 
 **Status: stable, fully documented, security-audited, all gates green. Safe to restart.**
+
+> **Before you change anything, read [`MANUAL_TESTING_GUIDE.md`](MANUAL_TESTING_GUIDE.md)
+> §15 "Do's and Don'ts".** It lists the behaviours that look like bugs and are
+> rulings — uninspected material reaching site, FEFO warning instead of
+> blocking, rejected stock not auto-returning to the vendor, expired PPE not
+> alerting anyone, an empty PPE forecast. Roughly a third of reported defects in
+> this system have been one of those.

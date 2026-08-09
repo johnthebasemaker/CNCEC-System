@@ -92,6 +92,7 @@ ROLE_MANUAL_RECIPES = {
             "16. Cross-Role Procurement Walk-through",
             "20. Auditor (View-Only) Manual",
             "21. 2026-08 Feature Update — What Changed",
+            "22. Quality, Safety, Employees & Procurement (QSEP)",
         ],
     },
     "store_keeper": {
@@ -111,6 +112,25 @@ ROLE_MANUAL_RECIPES = {
             # minLevel 0 and a Store Keeper uses them daily, so leaving 21 out
             # shipped a booklet that never mentioned two of their own menu items.
             "21. 2026-08 Feature Update — What Changed",
+            # 22 is not optional for this role: the QC block and the PPE fields
+            # both fire on the Store Keeper's OWN issue form. A booklet that
+            # omitted it would leave the one person who meets those refusals
+            # with no written explanation of them.
+            "22. Quality, Safety, Employees & Procurement (QSEP)",
+        ],
+    },
+    "qc": {
+        "title":    "Quality Control Manual",
+        "icon":     "🧪",
+        "audience": "Inspect controlled material, approve or reject, release it for issue.",
+        "chapters": [
+            "1. Introduction & System Overview",
+            "2. Roles, Permissions & Page Access",
+            "3. Login, Sidebar & Common Elements",
+            "11. Status Codes, Reason Codes & Glossary",
+            "12. FAQ — Master Index by Role",
+            "15. Warehouse Portal Manual",
+            "22. Quality, Safety, Employees & Procurement (QSEP)",
         ],
     },
     "supervisor": {
@@ -123,6 +143,7 @@ ROLE_MANUAL_RECIPES = {
             "5. Supervisor Manual",
             "11. Status Codes, Reason Codes & Glossary",
             "12. FAQ — Master Index by Role",
+            "22. Quality, Safety, Employees & Procurement (QSEP)",
         ],
     },
     "hod": {
@@ -138,6 +159,7 @@ ROLE_MANUAL_RECIPES = {
             "10. Data Model & Concept Reference",
             "11. Status Codes, Reason Codes & Glossary",
             "12. FAQ — Master Index by Role",
+            "22. Quality, Safety, Employees & Procurement (QSEP)",
         ],
     },
     "logistics": {
@@ -150,6 +172,7 @@ ROLE_MANUAL_RECIPES = {
             "14. Logistics Portal Manual",
             "16. Cross-Role Procurement Walk-through",
             "11. Status Codes, Reason Codes & Glossary",
+            "22. Quality, Safety, Employees & Procurement (QSEP)",
         ],
     },
     "warehouse_user": {
@@ -166,6 +189,7 @@ ROLE_MANUAL_RECIPES = {
             # count checklist, and the serialised asset register, are warehouse
             # work described only in chapter 21.
             "21. 2026-08 Feature Update — What Changed",
+            "22. Quality, Safety, Employees & Procurement (QSEP)",
         ],
     },
     "admin": {
@@ -722,58 +746,152 @@ class ManualPDF(FPDF):
         self.ln(3)
 
     def render_list(self, items: list):
-        self.set_text_color(*TEXT_BODY)
+        """Bullet list, drawn one line at a time at explicit coordinates.
+
+        ⚠️ THE PAGE BREAK MUST HAPPEN BETWEEN LINES, NOT INSIDE ONE. The bullet
+        used to be written with `cell()` and the body with `multi_cell()` after
+        a `set_xy(..., y_start)` that re-pinned Y to the value captured before
+        the bullet. When the bullet sat near the bottom, `cell()` tripped
+        fpdf2's own auto page-break: the cursor moved to the top of a NEW page,
+        and the `set_xy` then dragged the body back down to the old Y — on the
+        new page — printing it across whatever was already there. Y is now
+        advanced explicitly and every break is decided here, before anything is
+        drawn, so no writer can move the cursor behind this method's back.
+        """
         usable_w = PAGE_W_MM - 2 * MARGIN_MM
         bullet_w = 6
         body_w   = usable_w - bullet_w
-        for bullet, body in items:
-            # Always re-anchor to the left margin before drawing the bullet
-            self.set_x(MARGIN_MM)
-            # Capture y BEFORE the bullet so the body can align even if it wraps.
-            y_start = self.get_y()
-            # Bullet (navy, bold)
-            self.set_font("helvetica", "B", 10.5)
-            self.set_text_color(*BRAND_NAVY)
-            self.cell(bullet_w, 5.5, _ascii(bullet), align="L")
-            # Body (regular)
-            self.set_font("helvetica", "", 10.5)
-            self.set_text_color(*TEXT_BODY)
-            self.set_xy(MARGIN_MM + bullet_w, y_start)
-            self.multi_cell(body_w, 5.5, _ascii(_strip_md_punct(body)))
-            # No manual ln — multi_cell already advanced. Just nudge spacing.
-            self.ln(0.5)
+        line_h   = 5.5
+        prev_auto, prev_bmargin = self.auto_page_break, self.b_margin
+        self.set_auto_page_break(False)
+        try:
+            for bullet, body in items:
+                self.set_font("helvetica", "", 10.5)
+                lines = self._wrap_cell(_ascii(_strip_md_punct(body)), body_w)
+                first = True
+                for ln_ in lines:
+                    if self.get_y() + line_h > self._content_bottom():
+                        self.add_page()
+                    y = self.get_y()
+                    if first:
+                        self.set_font("helvetica", "B", 10.5)
+                        self.set_text_color(*BRAND_NAVY)
+                        self.set_xy(MARGIN_MM, y)
+                        self.cell(bullet_w, line_h, _ascii(bullet), align="L")
+                        first = False
+                    self.set_font("helvetica", "", 10.5)
+                    self.set_text_color(*TEXT_BODY)
+                    self.set_xy(MARGIN_MM + bullet_w, y)
+                    self.cell(body_w, line_h, ln_, align="L")
+                    self.set_xy(MARGIN_MM, y + line_h)
+                self.ln(0.5)
+        finally:
+            self.set_auto_page_break(prev_auto, margin=prev_bmargin)
         self.ln(2)
 
     def render_code(self, text: str):
+        """Fenced code block: monospace, wrapped, and split across pages.
+
+        Two failures are handled here that the previous version did not survive.
+        A line wider than the box used to run straight through the right border
+        and off the paper, because `cell()` does not wrap. And a block taller
+        than the page was drawn as one over-long rectangle whose text carried on
+        past the bottom margin, over the footer and into nothing. Both are now
+        bounded: long lines wrap on the courier metrics, and the block is
+        emitted in page-sized slices, each with its own box.
+        """
         self.ln(1)
-        # Compute height needed
-        lines = text.splitlines() or [""]
         line_h = 5
-        pad = 3
-        h = line_h * len(lines) + pad * 2
-        # Page-break if needed
-        if self.get_y() + h > PAGE_H_MM - 25:
-            self.add_page()
-        x = MARGIN_MM
-        y = self.get_y()
-        w = PAGE_W_MM - 2 * MARGIN_MM
-        # Box background + border
-        self.set_fill_color(*CODE_BG)
-        self.set_draw_color(*CODE_BORDER)
-        self.set_line_width(0.2)
-        self.rect(x, y, w, h, "DF")
-        # Left accent
-        self.set_fill_color(*BRAND_GOLD)
-        self.rect(x, y, 1.2, h, "F")
-        # Text
-        self.set_xy(x + 5, y + pad)
+        pad    = 3
+        x      = MARGIN_MM
+        w      = PAGE_W_MM - 2 * MARGIN_MM
+        text_w = w - 10          # 5 mm of padding either side of the text
+
         self.set_font("courier", "", 9)
-        self.set_text_color(*TEXT_DARK)
-        for ln_ in lines:
-            self.set_x(x + 5)
-            self.cell(w - 6, line_h, _ascii(ln_), align="L")
-            self.ln(line_h)
+        # Courier is monospace, so one measurement gives the character budget.
+        # Wrapping by hand (rather than via _wrap_cell) keeps leading
+        # indentation, which in a code sample carries meaning.
+        char_w    = self.get_string_width("M") or 1.0
+        max_chars = max(8, int(text_w / char_w))
+        lines: list[str] = []
+        for raw in (text.splitlines() or [""]):
+            s = _ascii(raw)
+            if not s.strip():
+                lines.append("")
+                continue
+            hang = " " * min(len(s) - len(s.lstrip()), 4)
+            while self.get_string_width(s) > text_w:
+                lines.append(s[:max_chars])
+                s = hang + s[max_chars:]
+            lines.append(s)
+
+        prev_auto, prev_bmargin = self.auto_page_break, self.b_margin
+        self.set_auto_page_break(False)
+        try:
+            i = 0
+            while i < len(lines):
+                cap = int((self._content_bottom() - self.get_y() - 2 * pad) // line_h)
+                if cap < 1:
+                    self.add_page()
+                    cap = int((self._content_bottom() - self.get_y() - 2 * pad) // line_h)
+                    if cap < 1:
+                        break          # page too short for a single line
+                chunk = lines[i:i + cap]
+                i += len(chunk)
+                h = line_h * len(chunk) + pad * 2
+                y = self.get_y()
+                # Box background + border, then the gold left accent.
+                self.set_fill_color(*CODE_BG)
+                self.set_draw_color(*CODE_BORDER)
+                self.set_line_width(0.2)
+                self.rect(x, y, w, h, "DF")
+                self.set_fill_color(*BRAND_GOLD)
+                self.rect(x, y, 1.2, h, "F")
+                # Text
+                self.set_font("courier", "", 9)
+                self.set_text_color(*TEXT_DARK)
+                ty = y + pad
+                for ln_ in chunk:
+                    self.set_xy(x + 5, ty)
+                    self.cell(text_w, line_h, ln_, align="L")
+                    ty += line_h
+                self.set_xy(MARGIN_MM, y + h)
+        finally:
+            self.set_auto_page_break(prev_auto, margin=prev_bmargin)
         self.ln(2)
+
+    # ── Table rendering ───────────────────────────────────────────────────
+    #
+    # Every row is measured with fpdf2's OWN line splitter and then drawn line
+    # by line at explicit coordinates. Nothing below relies on `multi_cell` to
+    # advance the Y cursor, because that is exactly what used to go wrong: the
+    # cursor ended up somewhere the measured row height had not accounted for,
+    # and the following row printed on top of the previous one.
+    TABLE_LINE_H = 5.5
+    TABLE_PAD_Y  = 0.9
+    TABLE_PAD_X  = 1.5
+
+    def _content_bottom(self) -> float:
+        """Lowest Y that content may occupy before the footer band."""
+        return PAGE_H_MM - 25
+
+    def _draw_row_segment(self, cols: list[list[str]], x0: float, y: float,
+                          col_w: float, row_h: float, fill: bool) -> None:
+        """Paint one row — or one page-slice of a tall row — boxes then text.
+
+        Boxes for every column go down first so that no cell's background can
+        later paint over a neighbour's text. Colours and font are the caller's
+        responsibility; this method only places geometry.
+        """
+        inner_w = col_w - 2 * self.TABLE_PAD_X
+        for i in range(len(cols)):
+            self.rect(x0 + i * col_w, y, col_w, row_h, "DF" if fill else "D")
+        for i, lines in enumerate(cols):
+            ty = y + self.TABLE_PAD_Y
+            for ln_ in lines:
+                self.set_xy(x0 + i * col_w + self.TABLE_PAD_X, ty)
+                self.cell(inner_w, self.TABLE_LINE_H, ln_, align="L")
+                ty += self.TABLE_LINE_H
 
     def render_table(self, rows: list[list[str]]):
         if not rows:
@@ -782,110 +900,106 @@ class ManualPDF(FPDF):
         n_cols = len(header)
         if n_cols == 0:
             return
-        usable = PAGE_W_MM - 2 * MARGIN_MM
-        col_w = usable / n_cols
-        line_h = 5.5
+        usable  = PAGE_W_MM - 2 * MARGIN_MM
+        col_w   = usable / n_cols
+        inner_w = col_w - 2 * self.TABLE_PAD_X
+        line_h  = self.TABLE_LINE_H
+        pad_y   = self.TABLE_PAD_Y
+        x0      = MARGIN_MM
 
-        # Page break if header doesn't fit
-        if self.get_y() + line_h * 3 > PAGE_H_MM - 25:
-            self.add_page()
+        # Auto page-break is OFF for the duration of the table. Every break is
+        # decided here, where the row height is known. Left on, fpdf2 could
+        # break inside a cell whose enclosing box had already been drawn.
+        prev_auto, prev_bmargin = self.auto_page_break, self.b_margin
+        self.set_auto_page_break(False)
+        try:
+            def header_cols() -> list[list[str]]:
+                self.set_font("helvetica", "B", 9.5)
+                return [self._wrap_cell(_ascii(_strip_md_punct(c)), inner_w)
+                        for c in header]
 
-        # Header row
-        self.set_fill_color(*TABLE_HEADER_BG)
-        self.set_text_color(255, 255, 255)
-        self.set_font("helvetica", "B", 9.5)
-        self.set_draw_color(*TABLE_BORDER)
-        self.set_line_width(0.2)
-        for cell in header:
-            self.cell(col_w, 7, _ascii(_strip_md_punct(cell))[:60],
-                      border=1, align="L", fill=True)
-        self.ln(7)
+            def draw_header(y: float) -> float:
+                """Draw the header band at `y`; return the Y below it.
 
-        # Body rows
-        self.set_font("helvetica", "", 9)
-        self.set_text_color(*TEXT_BODY)
-        for ri, row in enumerate(body):
-            if self.get_y() + line_h > PAGE_H_MM - 25:
-                self.add_page()
-                # Re-draw header on new page for readability
+                Header cells wrap like any other cell now. They used to be
+                hard-truncated at 60 characters and drawn in a fixed 7 mm band,
+                so a long column title lost its ending and a two-line title
+                spilled over the first body row.
+                """
+                cols = header_cols()
+                h = max(len(c) for c in cols) * line_h + 2 * pad_y
                 self.set_fill_color(*TABLE_HEADER_BG)
                 self.set_text_color(255, 255, 255)
+                self.set_draw_color(*TABLE_BORDER)
+                self.set_line_width(0.2)
                 self.set_font("helvetica", "B", 9.5)
-                for cell in header:
-                    self.cell(col_w, 7, _ascii(_strip_md_punct(cell))[:60],
-                              border=1, align="L", fill=True)
-                self.ln(7)
-                self.set_font("helvetica", "", 9)
-                self.set_text_color(*TEXT_BODY)
-            fill = (ri % 2 == 0)
-            if fill:
-                self.set_fill_color(*TABLE_ROW_ALT_BG)
-            cells = (row + [""] * n_cols)[:n_cols]
-            # Always anchor table x to the left margin to avoid drift
-            x_start = MARGIN_MM
-            y_start = self.get_y()
+                self._draw_row_segment(cols, x0, y, col_w, h, True)
+                return y + h
 
-            # Measure each cell with the REAL font metrics, not a fixed
-            # millimetres-per-character guess.
-            #
-            # ⚠️ This used to estimate 1.7 mm per character and then cap every
-            # row at four lines, hard-truncating the overflow with "...". Any
-            # explanatory cell longer than that lost its ending mid-word — and a
-            # manual whose tables stop mid-sentence is worse than one with no
-            # tables. Nothing is truncated now; the row grows instead, and a row
-            # taller than the page breaks onto the next one.
-            texts = [_ascii(_strip_md_punct(c)) for c in cells]
-            inner_w = col_w - 3
-            wrapped = [self._wrap_cell(t, inner_w) for t in texts]
-            row_h = max(line_h * max(1, len(w)) for w in wrapped)
-
-            # A row taller than the remaining space breaks first, so a tall row
-            # can never be drawn off the bottom of the page.
-            if y_start + row_h > PAGE_H_MM - 25:
+            # The header plus at least one body line must fit, or the table
+            # starts on a fresh page rather than stranding its header.
+            head_h = max(len(c) for c in header_cols()) * line_h + 2 * pad_y
+            if self.get_y() + head_h + line_h + 2 * pad_y > self._content_bottom():
                 self.add_page()
-                y_start = self.get_y()
+            y = draw_header(self.get_y())
 
-            # Background + borders first, content next, so wrapping never
-            # paints over neighbouring columns.
-            for i in range(n_cols):
-                self.rect(x_start + i * col_w, y_start, col_w, row_h, "DF" if fill else "D")
-            for i, lines_ in enumerate(wrapped):
-                self.set_xy(x_start + i * col_w + 1.5, y_start + 0.8)
-                self.multi_cell(inner_w, line_h, "\n".join(lines_), align="L")
-            self.set_xy(MARGIN_MM, y_start + row_h)
+            for ri, row in enumerate(body):
+                cells = (list(row) + [""] * n_cols)[:n_cols]
+                self.set_font("helvetica", "", 9)
+                pending = [self._wrap_cell(_ascii(_strip_md_punct(c)), inner_w)
+                           for c in cells]
+                fill = (ri % 2 == 0)
+                # A single row can be taller than a whole page — a cell holding
+                # a paragraph of explanation will do it. Emit it in slices, each
+                # of which fits the page it is drawn on, repeating the header
+                # after every break so a continued row is still readable.
+                while max((len(c) for c in pending), default=0) > 0:
+                    cap = int((self._content_bottom() - y - 2 * pad_y) // line_h)
+                    if cap < 1:
+                        self.add_page()
+                        y = draw_header(self.get_y())
+                        cap = int((self._content_bottom() - y - 2 * pad_y) // line_h)
+                        if cap < 1:
+                            break      # page too short for even one line
+                    take = min(max(len(c) for c in pending), cap)
+                    seg     = [c[:take] for c in pending]
+                    pending = [c[take:] for c in pending]
+                    h = take * line_h + 2 * pad_y
+                    self.set_fill_color(*TABLE_ROW_ALT_BG)
+                    self.set_text_color(*TEXT_BODY)
+                    self.set_draw_color(*TABLE_BORDER)
+                    self.set_line_width(0.2)
+                    self.set_font("helvetica", "", 9)
+                    self._draw_row_segment(seg, x0, y, col_w, h, fill)
+                    y += h
+            self.set_xy(MARGIN_MM, y)
+        finally:
+            self.set_auto_page_break(prev_auto, margin=prev_bmargin)
         self.ln(2)
 
     def _wrap_cell(self, text: str, width_mm: float) -> list[str]:
-        """Break one table cell into lines that genuinely fit `width_mm`.
+        """The exact lines fpdf2 will draw for `text` in a cell `width_mm` wide.
 
-        Uses fpdf2's own `get_string_width`, so the answer matches what the
-        renderer will actually draw. A single word longer than the column (a
-        long code, a URL) is split by character rather than allowed to run into
-        the next column.
+        ⚠️ MEASURE WITH THE ENGINE THAT DRAWS. This used to wrap by hand with
+        `get_string_width`, comparing each trial line against the FULL cell
+        width — but a cell's usable text width is that width minus `c_margin`
+        on each side, 2 mm at fpdf2's default. Lines that measured as fitting
+        therefore re-wrapped when they were actually drawn: a row measured five
+        lines tall rendered six, the sixth landed in the row below, and the two
+        rows' words interleaved into unreadable mush. Asking
+        `multi_cell(dry_run=True, output="LINES")` removes the possibility of
+        the two ever disagreeing, because the measurement IS the split.
+
+        WORD mode still breaks a token too long for the column — a URL, a long
+        material code — at the character level, so nothing runs into the next
+        column. The caller must have selected the font it intends to draw with:
+        the answer depends on it.
         """
         if not text:
             return [""]
-        lines: list[str] = []
-        for word in text.split():
-            if not lines:
-                lines.append(word)
-                continue
-            trial = f"{lines[-1]} {word}"
-            if self.get_string_width(trial) <= width_mm:
-                lines[-1] = trial
-                continue
-            lines.append(word)
-        # Any line still too wide is a single unbreakable token — split it.
-        out: list[str] = []
-        for ln in lines:
-            while self.get_string_width(ln) > width_mm and len(ln) > 1:
-                cut = len(ln)
-                while cut > 1 and self.get_string_width(ln[:cut]) > width_mm:
-                    cut -= 1
-                out.append(ln[:cut])
-                ln = ln[cut:]
-            out.append(ln)
-        return out or [""]
+        lines = self.multi_cell(width_mm, self.TABLE_LINE_H, text,
+                                dry_run=True, output="LINES", wrapmode="WORD")
+        return list(lines) or [""]
 
     def render_hr(self):
         self.ln(2)
@@ -1095,6 +1209,41 @@ def _ascii(text: str) -> str:
         return text.encode("latin-1", "replace").decode("latin-1")
 
 
+def audit_pdf_overlaps(path: str | Path) -> Optional[int]:
+    """Count pairs of words whose boxes intersect — i.e. text printed on text.
+
+    Rendered text never legitimately overlaps, so any hit is a row-height or
+    Y-cursor defect. This exists because the table renderer shipped such a
+    defect for months: it was obvious on the page but nothing in the build said
+    a word, so every regenerated PDF quietly carried it. A geometry check the
+    build runs on its own output is the only kind that cannot be forgotten.
+
+    Returns the pair count, or None if pdfplumber is unavailable (it is a
+    backend OCR dependency, not a build one — its absence must not fail a build
+    that is otherwise fine).
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        return None
+
+    eps = 0.6       # points — ignore kerning-level touching
+    hits = 0
+    with pdfplumber.open(str(path)) as pdf:
+        for page in pdf.pages:
+            words = sorted(page.extract_words(use_text_flow=False),
+                           key=lambda w: (w["top"], w["x0"]))
+            for i, a in enumerate(words):
+                for b in words[i + 1:]:
+                    if b["top"] >= a["bottom"] - eps:
+                        break        # sorted by top: nothing later can overlap
+                    if (min(a["x1"], b["x1"]) - max(a["x0"], b["x0"]) > eps
+                            and min(a["bottom"], b["bottom"])
+                                - max(a["top"], b["top"]) > eps):
+                        hits += 1
+    return hits
+
+
 def report_unmapped() -> None:
     """Print any character the PDF could not represent. Called after a build."""
     if not _UNMAPPED:
@@ -1251,6 +1400,8 @@ def main(argv: list[str] | None = None) -> int:
                         choices=list(ROLE_MANUAL_RECIPES.keys()) + ["all"],
                         help="Role-segregated booklet. 'all' regenerates "
                              "every role PDF + master in one run.")
+    parser.add_argument("--no-verify", dest="verify", action="store_false",
+                        help="Skip the overlapping-text audit of the output.")
     args = parser.parse_args(argv)
 
     src = Path(args.src)
@@ -1263,12 +1414,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Parsing  {len(md.splitlines()):,} lines …")
 
     today = datetime.date.today().isoformat()
+    written: list[Path] = []
 
     if args.role == "all":
         # Master + every role booklet in one run.
         master_path = Path(args.dst)
         master_bytes = build_manual_pdf(md)
         master_path.write_bytes(master_bytes)
+        written.append(master_path)
         print(f"Written  {master_path} ({len(master_bytes):,} bytes)")
         for rk in ROLE_MANUAL_RECIPES:
             short = {
@@ -1279,20 +1432,40 @@ def main(argv: list[str] | None = None) -> int:
                 "warehouse_user": "Warehouse",
                 "admin":          "Admin",
                 "auditor":        "Auditor",
+                "qc":             "QC",
             }.get(rk, rk)
             out = Path(f"GI_{short}_Manual_{today}.pdf")
             pdf = build_role_manual_pdf(rk, md)
             out.write_bytes(pdf)
+            written.append(out)
             print(f"Written  {out} ({len(pdf):,} bytes)")
+    else:
+        if args.role:
+            pdf_bytes = build_role_manual_pdf(args.role, md)
+        else:
+            pdf_bytes = build_manual_pdf(md)
+        out = Path(args.dst)
+        out.write_bytes(pdf_bytes)
+        written.append(out)
+        print(f"Written  {out} ({len(pdf_bytes):,} bytes)")
+
+    if not args.verify:
         return 0
 
-    if args.role:
-        pdf_bytes = build_role_manual_pdf(args.role, md)
-    else:
-        pdf_bytes = build_manual_pdf(md)
-    out = Path(args.dst)
-    out.write_bytes(pdf_bytes)
-    print(f"Written  {out} ({len(pdf_bytes):,} bytes)")
+    print("\nVerifying rendered geometry (overlapping text) …")
+    failed = 0
+    for p in written:
+        hits = audit_pdf_overlaps(p)
+        if hits is None:
+            print("  SKIPPED  pdfplumber not installed - geometry unverified")
+            break
+        print(f"  {'FAIL' if hits else 'OK  '}     {p.name:44s} "
+              f"{hits} overlapping text pairs")
+        failed += bool(hits)
+    if failed:
+        print(f"\n  ERROR  {failed} PDF(s) contain overlapping text. "
+              f"See ManualPDF.render_table / _wrap_cell.", file=sys.stderr)
+        return 1
     return 0
 
 
