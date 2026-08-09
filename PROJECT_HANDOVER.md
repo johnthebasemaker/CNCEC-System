@@ -1,8 +1,13 @@
 # PROJECT HANDOVER — the authority on what is locked
 
-> **Updated 2026-08-06.** This file holds the LOCKED architecture rules, the
-> baselines, and the developer utilities. It is the authority; when anything
-> else disagrees with it, it wins.
+> **Updated 2026-08-09**, closing the QSEP programme (Quality · Safety ·
+> Employees · Procurement) and the documentation pass that followed it.
+> This file holds the LOCKED architecture rules, the baselines, and the
+> developer utilities. It is the authority; when anything else disagrees with
+> it, it wins.
+>
+> **New in this revision: rule 13 — `MANUAL_TESTING_GUIDE.md` is part of the
+> Definition of Done.** A feature change that does not update it is not done.
 >
 > **Starting a fresh session? Read [`SESSION_HANDOVER.md`](SESSION_HANDOVER.md)
 > first** — it is the five-minute orientation, and it points back here for the
@@ -34,8 +39,21 @@ whose symptom appeared far from its cause:
 | **1** | **COMPONENT IDENTITY** | The key is `(Material_Code, SAP_Code)`. Pooling by code alone summed four unlike drums and *inverted* the shortfall. |
 | **7** | **RBAC — AUDITOR** | View-only is enforced by **method-level ASGI middleware** (`backend/api/readonly.py`), never per-endpoint. Every `POST/PUT/PATCH/DELETE` is refused unless it is on the small documented allowlist — so a route added next year is closed by default instead of failing open. |
 
-Rules 2-6 and 8-11 below are equally binding; those five are simply the ones a
+Rules 2-6 and 8-13 below are equally binding; those five are simply the ones a
 newcomer is most likely to undo by accident.
+
+**Two more that the QSEP programme added (2026-08-09), both stated in full
+later in this file:**
+
+* **Rule 13 — `MANUAL_TESTING_GUIDE.md` is part of the Definition of Done.** A
+  feature change that does not update it is not finished, and a role added to
+  `ROLE_META` must be added to the assistant's chapter map and the printed
+  booklet recipes in the same commit.
+* **The QC block is the FIRST hard block on the issue path, and it does not
+  overturn FEFO.** `services/quality.assert_qc_cleared` refuses to issue
+  controlled material beyond what QC has released. That is about QUALITY STATUS
+  and covers 36 SAPs. **FEFO and over-issue remain allow-and-log** — never
+  implement this by promoting the existing FEFO warning to an error.
 
 ### 1. SME allocation is keyed on `(Material_Code, SAP_Code)` — never pool by code alone
 
@@ -438,6 +456,53 @@ library with its own type dispatch — `ws.write()` hands a leading `=` to
 Suite BK pins all of it, including a real `single_table_xlsx` round trip
 asserting `10.5 + -2.5` still totals `8.0`.
 
+### 13. `MANUAL_TESTING_GUIDE.md` IS PART OF THE DEFINITION OF DONE
+
+*Locked 2026-08-09.*
+
+**Whenever a feature is added or altered, `MANUAL_TESTING_GUIDE.md` MUST be
+updated in the SAME pull request.** A change is not done when the code merges
+and the automated gates pass. It is done when somebody who has never seen the
+feature can verify it.
+
+This is a rule rather than a convention because the failure mode is silent and
+compounding. The automated suites answer "does the system still do what it did";
+they cannot answer "does it do what the business asked for", because the person
+who wrote both the code and the test had the same misunderstanding. That second
+question is only ever answered by a human following written steps — and steps
+that describe last quarter's product are worse than none, because they are
+followed with confidence.
+
+What the update must contain:
+
+* **A test case per behaviour**, with a stable `TC-AREA-NN` id. **Never renumber
+  one** — bug reports cite them. Retire as `(withdrawn)` instead.
+* **The 5 W's and 1 H** for the feature: who, what, where, when, why, which,
+  how. **If you cannot state the WHY, you are documenting an implementation
+  detail** that is free to change, and the case will produce false failures.
+* **The refusals, with their messages.** Roughly a third of the guide expects the
+  system to say no. A gate whose refusal is undocumented gets "fixed" by the next
+  developer who trips over it.
+* **The limitations, named as limitations.** §9.1 lists what the returnables
+  model does NOT contain — partial return, damage capture, stock impact. Writing
+  them down converts a recurring false bug report into a documented fact.
+* **A Don't entry** for any behaviour that will otherwise be reported as a bug:
+  every operator ruling that contradicts an intuition belongs in §15.
+
+⚠️ **The negative-property cases are the ones that decay first and matter most.**
+TC-PPE-01 (PPE moves stock through the ORDINARY ledger), TC-QC-02 (the quality
+gate touches 36 SAPs and not the other 430), TC-PPE-08 (a non-PPE item shows no
+extra fields). Each proves a feature did NOT leak into everything else, and
+nothing in the automated suites will catch that leak once it happens.
+
+**The same rule binds the documentation surfaces a new role touches.** A role
+added to `auth.ROLE_META` must be added, in the same commit, to
+`ai/manual_qa._ROLE_ALLOWED` and to `build_manual_pdf.ROLE_MANUAL_RECIPES` — the
+QSEP release added `qc` and did neither, so a Quality inspector was answered out
+of the Store Keeper chapter and had no printed booklet at all. `_ROLE_ALLOWED`
+falls back to `store_keeper` for an unknown role, which fails in the safe
+direction and is exactly why nobody noticed.
+
 ## Developer utilities — the three scripts in `bin/`
 
 Three separate jobs, deliberately not one script. `dev.sh` owns the DEV stack it
@@ -572,17 +637,60 @@ of them is a regression, not a new normal.
 > `location /assets/` block repeats the three security headers verbatim because
 > nginx REPLACES rather than merges an inherited `add_header` set.
 
+> **Updated 2026-08-09** by the **QSEP programme** (PRs #36, #37, #38) and the
+> documentation pass that closed it. Operator rulings that constrain every one
+> of those features, and that a fresh session will otherwise re-litigate:
+>
+> * **R1 — `employees.ID_Number` is the PERSON.** Unique company-wide, not per
+>   site. PPE history follows it, which is why history survives a transfer
+>   without any code that "moves" it.
+> * **R2 (adjusted) — `inventory."Category" = 'PPE'` is valid for UI filtering,
+>   but `ppe_rules` still governs per-item usable days.** With no rule, an item
+>   has NO expiry and always demands a safety document.
+> * **R3 (adjusted) — material MAY travel to site uninspected.** Do **not**
+>   block DN creation for want of an inspection. The **MTC is** mandatory at DN
+>   creation; the **QC hard block applies only at SK issuance**. Two gates, two
+>   moments — this is the most-misread part of the system.
+> * **R4/R5 — the PPE forecast is deterministic, and the window is 15 days.**
+>   `suggested = expiring − on_hand − on_order`, floored at 0, with employee
+>   NAMES attached. No statistical model: 22 roster workers and no history is
+>   not a thing to fit a model to.
+> * **Q1 — QC is a dedicated person**, separate from `warehouse_user`.
+> * **Q4 — rejected material is NOT auto-routed to Vendor Returns.** It stays in
+>   stock, pending/unusable, blocked from issue. An automatic return removes the
+>   evidence before anyone has looked at it.
+> * **Q5 — no WhatsApp for expired PPE.** Expiry is a **suggested replacement
+>   date**, not a restriction; the in-app 15-day table is the whole mechanism.
+>
+> Two structural notes worth carrying forward. `entry_attachments.Site_ID` is
+> now **nullable** (alembic `e6a91c37b208`) because a PO scan is uploaded by
+> Logistics, who are unscoped by design — a NULL reads correctly under the
+> Document Library's existing scoping, since a scoped caller filters on a site
+> and a NULL never matches. And **narrowing the asset key broke `bulk_import` in
+> two places** the rename surfaced: an `ON CONFLICT ON CONSTRAINT` naming the
+> old constraint (a hard failure on every Excel asset sync) and a planner that
+> only looked for existing serials at the importing site.
+
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1245 / 0** (suites A…BK) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1401 / 0** (suites A…BR) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **57 / 57** (~24 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | ~~Derived-view parity~~ | ❌ **RETIRED as a gate 2026-08-05** — see below | `tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
-| Alembic | single head **`a71e93b4c2f8`** (`users_email`) | see ARCHITECTURE §8 |
+| Alembic | single head **`a3c17e9b25d4`** (asset global identity + transfers) | see ARCHITECTURE §8 |
+| **Manual PDFs** | **0 overlapping text pairs**, all 8 booklets | `.venv/bin/python build_manual_pdf.py --role all` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
+
+> The manual-PDF gate is new on 2026-08-09 and is a **geometry** check, not a
+> smoke test: the builder reopens what it just wrote and counts pairs of words
+> whose bounding boxes intersect. Rendered text never legitimately overlaps, so
+> any hit is a row-height or Y-cursor defect. The table renderer shipped exactly
+> such a defect for months — **104 overlapping pairs in the master manual** — and
+> nothing in the build said a word, because a PDF that is visibly wrong is still
+> a PDF that was produced without error.
 
 > ⚠️ **`tools/parity_check.py` can no longer pass, and its failure means nothing.**
 > It compares the frozen legacy SQLite against PostgreSQL. They have diverged
@@ -618,6 +726,9 @@ recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/RE
 
 | PR | Commit | What |
 |---|---|---|
+| #36 | `9f8be2e` | **QSEP slices 1-3 — Quality Control.** The `qc` role at level 1 with **dual scoping** (a site OR a warehouse, never both, and neither means it sees NOTHING); `/qc/accounts` creation by HOD/Warehouse/Logistics inside their own scope; QC site transfers as a REQUEST an **Admin** decides. MTC logic extracted to `services/quality.py`, mandatory at **DN creation**. The `qc_inspections` ledger, and the hard issuance block at **both** `stage_consumption` and `approve_smr` |
+| #37 | `d481a37` | **QSEP slices 4-5 — PPE and Employees.** PPE via **Option A (Integrated)**: the *standard* Issue form grows `employee_id_number` + `safety_doc_id` when a PPE item is picked, and one transaction does the stock consumption AND the distribution. Mandatory `early_reason` when replacing unexpired gear. `employee_movements`, HOD immediate transfers, and PPE history keyed on the globally-unique `ID_Number` so it **carries over on transfer**. 15-day forecast netting stock and open POs, with employee names |
+| #38 | `6447ddb` | **QSEP slice 6 — Procurement, OCR and asset polish.** `warehouse.auto_draft_dns` reusing `create_dn()` grouped by `rl_bl_family`; urgent reschedules bypassing the digest; OCR persisting uploads to `entry_attachments` **before** parsing, with the lane chosen by whether text was extractable rather than by MIME type; global `(SAP_Code, Serial_No)` asset identity + source-HOD-approved transfers; password policy 12→8 **with complexity**, in one place |
 | #25 | `2877888` | **Overnight polish** — the assistant was reading the WRONG MANUAL (fenced `# 1.` shell comments parsed as chapters 1-4 and overwrote Introduction/Roles/Login/Store-Keeper for every role); BM25 retrieval replaced prompt-stuffing (**admin 178 KB → 4 KB**); idle sign-out; per-ACCOUNT login throttle; 7 benchmarked indexes (alembic `e7c3b95a41d2`); ⌘K material search; manual §20 Auditor + §21 feature update. Suite **BE** (40) + 4 E2E |
 | #24 | `8284c37` | **Exports, roles and sysadmin** — overflow-proof PDFs (measured **4.1 mm** of column overlap and 28 destroyed characters); the premium branded xlsx layout applied to EVERY export (**header moved to row 6**); the view-only **Auditor** role (126 of 143 mutating routes blocked); `bin/power.sh` + `bin/backup_db.sh`. Suite **BD** (36) |
 | — | `fix/sme-ordered-subset-rule` | **The subset rule** (rule 1c) — `Ordered_Qty` is the TOTAL procured and `Available_Qty` a subset of it, so tier 2 is `max(ordered − available, 0)`; the additive reading understated the buy list by 22,951 units and hid a 9,685-unit shortage on GI-8005763. Suite **BC** (16) + `test:ui-math` §E (7) |

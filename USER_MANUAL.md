@@ -127,10 +127,18 @@ side at the same level and differ only in what they are scoped to.
 | 0 | Store Keeper | One site |
 | 1 | Warehouse User | One warehouse |
 | 1 | Supervisor | One site |
+| 1 | Quality Control (QC) | One site **or** one warehouse — never both |
 | 2 | Head of Department | One site |
 | 3 | Logistics | All sites |
 | 3 | Auditor | All sites, read-only |
 | 4 | Admin | Everything |
+
+**The QC role is scoped on one of two axes, and exactly one.** Material is
+inspected either where it arrives (a warehouse) or where it lands (a site), and
+which one depends on how your operation is organised. A QC account is therefore
+created against a site or against a warehouse, and an account carrying neither —
+or both — sees nothing at all rather than everything. That is deliberate: an
+inspector with an unclear remit is a bigger problem than an inspector with none.
 
 **A higher rank does not open a lower role's workspace.** The Logistics Portal,
 Warehouse Portal, Entry Log, HOD Portal, Supervisor Portal, Material Estimator
@@ -140,20 +148,25 @@ exception and reaches every workspace deliberately, for support.
 
 ## 2.2 Page access matrix
 
-| Page | Store Keeper | Warehouse User | Supervisor | HOD | Logistics | Auditor | Admin |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 📦 Live Dashboard | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 📝 Entry Log | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| 📋 HOD Portal | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ (hidden — uses Admin Portal) |
-| 🚚 Logistics Portal (NEW) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ (admin shadow) |
-| 🏭 Warehouse Portal (NEW) | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ (admin shadow, picks WH in sidebar) |
-| 🛡️ Admin Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| 📊 Reports | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ (read + download only) | ✅ |
-| 🗂️ Records (Inventory, ledgers, POs, PRs) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 🛡️ Supervisor Portal | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ (admin shadow) |
-| 🧪 Material Estimator | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| 🕒 Man-Hours (NEW) | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| 🔍 Auditor view (NEW) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Page | Store Keeper | Warehouse User | Supervisor | QC | HOD | Logistics | Auditor | Admin |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 🧪 Quality → Inspections | ✅ (read) | ✅ (read) | ❌ | ✅ (decides) | ✅ (read) | ✅ (read) | ✅ (read) | ✅ |
+| 👥 Quality → QC Accounts | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ |
+| ⏳ Safety & People → PPE Forecast | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🛡️ Safety & People → PPE Usable Time | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 👤 Safety & People → Employees | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 📦 Live Dashboard | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 📝 Entry Log | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| 📋 HOD Portal | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ (hidden — uses Admin Portal) |
+| 🚚 Logistics Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ (admin shadow) |
+| 🏭 Warehouse Portal | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (admin shadow, picks WH in sidebar) |
+| 🛡️ Admin Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| 📊 Reports | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ (read + download only) | ✅ |
+| 🗂️ Records (Inventory, ledgers, POs, PRs) | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| 🛡️ Supervisor Portal | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ (admin shadow) |
+| 🧪 Material Estimator | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 🕒 Man-Hours | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 🔍 Auditor view | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 
 > **Exact-role locks:** Entry Log, HOD Portal, Supervisor Portal, Logistics Portal, Warehouse Portal, Material Estimator and Man-Hours are locked to their own role — a higher-ranked role does **not** inherit access. Admin reaches them for support purposes.
 
@@ -164,6 +177,7 @@ exception and reaches every workspace deliberately, for support.
 | Store Keeper | Their own site only — they cannot view another site's stock. |
 | Warehouse User (NEW) | Their own warehouse only — POs assigned to them, DNs they've prepared, items received from vendors. Tied to `users.Warehouse_ID`. |
 | Supervisor | Their own site only — Reports, Live Dashboard, Burn Rate all site-locked. |
+| Quality Control (QC) | Whichever single place they were created against: one site, or one warehouse. A site QC sees inspections raised at that site and has no warehouse business at all; a warehouse QC is pinned to its warehouse exactly as a Warehouse User is. An account with no binding, or with both, sees an empty list — it never falls back to seeing everything. Moving a QC to another site is a request, decided by an Admin, not something the QC or their HOD can do alone. |
 | HOD | Their own site only — but they can REQUEST material from other sites (Cross-Site tab) and submit PRs to Logistics. |
 | Logistics (NEW) | All sites globally for PRs and POs they manage. No site lock — they sit above the site boundary. |
 | Auditor (NEW) | All sites globally, **read-only**. Sits at level 3 so it is not site-locked — an auditor pinned to one site could not audit. It can open the Dashboard, Stock, Records, Reports and Lining Coverage and change nothing anywhere. See §20. |
@@ -4002,6 +4016,266 @@ reports, master-data exports and the Material Estimator workbooks alike.
 
 ---
 
+# 22. Quality, Safety, Employees & Procurement (QSEP)
+
+Everything in this chapter went live in August 2026. It adds four things that
+used to live on paper or in somebody's memory: **who checked the material**,
+**who is wearing the safety gear**, **where a person works**, and **what the
+scanned purchase paperwork actually said**.
+
+Read section 22.1 first even if only one of the four concerns you — the QC
+approval rule changes what happens when a Store Keeper tries to issue certain
+materials, and that affects the whole site.
+
+## 22.1 Quality Control — the new role and the issue block
+
+### What a QC does
+
+A Quality Control inspector checks material that carries risk if it is wrong.
+Today that means the **Surface Shields** category — 36 materials out of the 466
+in the master list. Nothing else in the catalogue is affected by any rule in this
+section.
+
+There are two separate gates, at two different moments, and they are commonly
+confused:
+
+| Gate | When it applies | What it demands | Who is stopped |
+|---|---|---|---|
+| **Material Test Certificate** | When a Delivery Note is created to send material out | A certificate must already be on file for that material | The warehouse clerk cutting the DN |
+| **QC approval** | When a Store Keeper issues material to the field | A QC must have inspected and approved that quantity at that site | The Store Keeper at the issue form |
+
+**Material may travel to site without having been inspected.** That is
+deliberate and was decided by the operator: holding a truck at the gate for an
+inspection that can happen on arrival costs more than it saves. What material
+may *not* do is reach a worker's hands uninspected. So the certificate binds at
+dispatch, and the approval binds at issue.
+
+### Raising an inspection
+
+An inspection is opened automatically when controlled material is received. The
+QC does not create it by hand. It appears in **Quality → Inspections** with a
+status of *pending*.
+
+### Deciding an inspection
+
+Open the inspection and enter the quantity you approve. The status follows from
+the number, not from a separate choice:
+
+| You approve | Status becomes |
+|---|---|
+| Nothing (zero) | Rejected |
+| Less than the submitted quantity | Partially approved |
+| The whole submitted quantity | Approved |
+
+**Rejected material stays in stock.** It is not automatically sent back to the
+vendor and it does not disappear. It sits where it is, unusable, and is blocked
+from issue until somebody decides what happens to it. That was an explicit
+instruction: an automatic vendor return removes the evidence before anyone has
+looked at it.
+
+### What the Store Keeper sees when the block fires
+
+The issue form refuses with a message that names the actual numbers, so nobody
+has to guess which of three situations they are in:
+
+- **No inspection at all** — "no quality inspection exists for it at this site.
+  It cannot be issued to the field until a QC has checked the material and its
+  certificate."
+- **Inspected but nothing approved yet** — names how many inspections are still
+  pending.
+- **Partly approved and used up** — "QC has approved 40 and 40 is already issued
+  or staged, leaving 0 — not enough for 10. Ask the QC to inspect the remaining
+  stock."
+
+The clearance is pooled per material per site, not per individual pallet. What
+is counted against it is everything already issued *or staged awaiting HOD
+approval*, from the date of the first inspection onward — issues that predate
+quality control entirely are not counted, or the site would be frozen forever by
+its own history.
+
+> **This does not change the FEFO or over-issue behaviour.** Those remain
+> warn-and-record, as they always have. The quality block is about whether the
+> material is *fit to use*, which is a different question from whether the shelf
+> count agrees.
+
+### Creating a QC account
+
+**Quality → QC Accounts**, available to an HOD, a Warehouse User or Logistics.
+You create a QC inside your own scope: an HOD creates one for their site, a
+Warehouse User for their warehouse. Set a site **or** a warehouse, never both.
+
+Moving a QC to another site is a **request**, not an action — the HOD raises it
+and an Admin decides. A QC whose remit could be changed by the person whose work
+they inspect is not an independent check.
+
+## 22.2 PPE — issued through the ordinary form
+
+**There is no separate "Issue PPE" page, and this is deliberate.** Safety boots
+leave the store the same way a drum of resin does: through **Entry Log → Issue**.
+The form recognises that the item is PPE and asks for the extra details on the
+spot.
+
+Select a PPE item and three fields appear:
+
+| Field | When it is required | Why |
+|---|---|---|
+| **Employee ID number** | Always | PPE is tracked against a person, not a site |
+| **Safety Approval document** | Unless a usable-time rule says otherwise | Somebody signed for this issue |
+| **Reason for early replacement** | Only if the worker's current item has not expired yet | A boot replaced after three weeks is either a defect or a leak |
+
+The stock movement and the PPE record are written together. There is no second
+ledger and no separate PPE stock — the quantity leaves through the normal issue
+path, so stock levels, burn rate, reports and every other number stay correct
+without knowing anything about PPE.
+
+### The messages you will see
+
+- *"…is PPE — name the employee receiving it (their ID number), so it can be
+  tracked against them."*
+- *"worker 30816 is not in the employee master"* — the person must exist on the
+  roster first.
+- *"worker 30816 is at site RIYADH, not CNCEC — transfer them first if they have
+  moved"* — see 22.3.
+- *"Ahmed already holds this item, issued 2026-07-02 and good until 2026-10-02 —
+  give a reason for replacing it early."*
+
+### Usable time
+
+**Safety & People → PPE Usable Time** (Store Keeper or HOD) is where you say how
+long an item lasts: 90 days for gloves, 365 for a helmet, and so on. A rule can
+be global or set for one site, and the site's rule wins where both exist.
+
+> ⚠️ **Until a rule exists for an item, two things follow.** The issue will
+> always demand a Safety Approval document, and the item gets **no expiry date**
+> — which means it will never appear in the forecast below. If the PPE Forecast
+> looks empty, this is almost always why.
+
+An expiry is a **suggested replacement date, not a restriction**. Nothing stops a
+worker using gear past it, no alert is sent to anybody's phone, and the worker is
+not blocked from anything.
+
+### The 15-day forecast
+
+**Safety & People → PPE Forecast** lists PPE expiring in the next fifteen days
+and tells you what to order:
+
+> **suggested = expiring − what is on the shelf − what is already on order**
+
+If the answer is zero because thirty units are already on an open purchase
+order, that is the correct answer and not a broken screen. The list shows **the
+names of the people** whose gear is expiring, because a column of quantities
+cannot be sanity-checked by a human and a column of names can. A 90-day issue
+rate is shown *beside* the suggestion as a cross-check, never folded into it.
+
+## 22.3 Employees — one person, one number
+
+**The employee ID number is the person.** It is unique across the whole company,
+not per site, and everything else hangs off it.
+
+**Safety & People → Employees** shows the roster. An HOD can transfer someone to
+another site, and the transfer takes effect immediately — no approval step,
+because a person who has physically moved has already moved.
+
+**PPE history follows the person, not the site.** Transfer a worker from one
+site to another and the boots they are wearing are still on their record. This
+falls out of keying on the ID number rather than being a feature bolted on top,
+which is why it cannot quietly stop working.
+
+Admins get a **timeline** for any employee: every site they have worked at, with
+dates, and everything they currently hold. Use it when somebody asks "who had
+this, and when".
+
+**Employees → Data Quality** lists records that cannot be used and says why —
+a missing ID number, a duplicate, an inactive worker still holding gear. Check it
+before a PPE rollout rather than discovering the gaps one refused issue at a
+time.
+
+## 22.4 Procurement — drafted delivery notes, urgency, and scanned paperwork
+
+### Delivery Notes draft themselves
+
+When a warehouse receives goods against a purchase order, the system now
+prepares the Delivery Notes the sites are waiting for, grouped so that R/L and
+B/L material never share a note.
+
+They are created as **drafts**. A person still adds the vehicle and driver and
+submits them, because the system cannot know that a truck exists. A notification
+tells the warehouse the drafts are waiting.
+
+If a draft cannot be created — an over-shipment, a missing certificate — **the
+goods receipt still stands**. The stock genuinely arrived; losing that record
+because a convenience failed would be far worse. The reason is written to the
+audit log and the clerk cuts the note by hand.
+
+Auto-drafting can be switched off in Settings.
+
+### Marking a reschedule urgent
+
+A delivery reschedule can be marked **urgent**. An urgent one goes out
+immediately instead of waiting for the 4 p.m. evening digest. Use it sparingly —
+a channel where everything is urgent is a channel nobody reads.
+
+### Reading a scanned PR or PO
+
+Upload the supplier's paperwork and the system reads the lines off it, so nobody
+retypes forty rows.
+
+**The file is stored before it is read**, and this matters more than it sounds:
+the document that defeats the reader is precisely the one somebody will need to
+look at later. A failed read still leaves you the document.
+
+There are two ways a document gets read, and the system chooses by **whether the
+file actually contains text** — not by whether it is a PDF:
+
+| The file | What happens |
+|---|---|
+| A PDF exported from a system | Text is read directly. Fast, exact. |
+| A PDF that is a **photograph or a scan** of a signed page | Read by the vision model. Takes longer; you poll for the result. |
+
+A printed-signed-and-scanned purchase order contains **no text at all**, only
+pictures of text. Before this change such a file was reported as read
+successfully with zero lines found — which is worse than an error, because
+nothing on screen distinguished "this order has no items" from "I could not read
+a word of it".
+
+Once read, confirming the document links it to the purchase request or order you
+created, so the original scan is one click from the record. Offering a purchase
+order scan to a purchase request is refused by name — the two are not
+interchangeable.
+
+> **A quantity the reader could not make out is left blank, not zero.** A zero on
+> a purchase order looks like an answer and would be ordered as one.
+
+## 22.5 Assets — one hammer, one row, anywhere in the company
+
+A serialised asset is now unique by **its part number and serial number across
+the entire company**, not per site. The same hammer cannot be registered twice
+by two sites who both think they have it.
+
+Moving an asset between sites is a **request approved by the HOD of the site it
+is leaving** — the site giving something up is the one that needs to agree. On
+approval the asset's site changes and its old rack assignment is cleared, since a
+shelf in one yard means nothing in another. The move is recorded as a movement,
+so "where has this been" still answers correctly for the leg between the two
+sites.
+
+Trying to re-register a serial that exists elsewhere is refused with a message
+that says **where it actually is** and what to do about it.
+
+## 22.6 Passwords
+
+The minimum password length is **8 characters**, and a password must now also
+contain an uppercase letter, a number and a special character. This replaced a
+flat 12-character minimum with no composition requirement.
+
+The rule is applied identically everywhere a password is set — admin creation,
+password reset and self-registration. Self-registration previously enforced a
+much weaker rule than the admin screens did.
+
+The **Request Access** page now offers **Quality Control** in its role list.
+
+---
+
 ## Document end
 
 This manual covers every page, tab, button, table and field in the General
@@ -4009,8 +4283,9 @@ Industries Hub: the site workspaces (sections 4 to 7), the Reports module
 (section 8), the Logistics and Warehouse portals and the procurement chain
 (sections 14 to 16), hosting and operations (section 17), the Material Estimator
 (section 18), Man-Hours and Labor Tracking (section 19), the Auditor role
-(section 20), and the asset-tracking and warehouse-locator features added in
-2026-08 (section 21).
+(section 20), the asset-tracking and warehouse-locator features added in
+2026-08 (section 21), and Quality, Safety, Employees and Procurement
+(section 22).
 
 **For day-to-day operating procedure across all roles**, see the Standard
 Operating Procedure document, which is shorter and organised by task rather than
