@@ -203,6 +203,29 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
+    // QSEP — Quality Control. The GROUP is open to everyone who has a stake in
+    // an inspection, not only to the inspector: an HOD and a warehouse user
+    // manage the accounts, and a Store Keeper needs to see WHY the issue form
+    // just refused them. Only the two write pages carry `writes`.
+    id: 'quality',
+    label: 'Quality',
+    access: { anyRole: ['qc', 'hod', 'logistics', 'warehouse_user', 'store_keeper', 'auditor'] },
+    children: [
+      // Not marked `writes`, deliberately: reading the inspection queue is a
+      // read, and the Approve/Reject controls inside are gated separately
+      // (require_roles("qc") server-side, useReadOnly in the page). Marking it
+      // would hide the queue from the Auditor, who should be able to audit it.
+      {
+        key: '/qc/inspections', label: 'Inspections', icon: <ExperimentOutlined />,
+        access: { anyRole: ['qc', 'hod', 'logistics', 'warehouse_user', 'store_keeper', 'auditor'] },
+      },
+      {
+        key: '/qc/accounts', label: 'QC Accounts', icon: <TeamOutlined />,
+        access: w({ anyRole: ['hod', 'logistics', 'warehouse_user'] }),
+      },
+    ],
+  },
+  {
     id: 'master',
     label: 'Master Data',
     access: w({ minLevel: 3 }),
@@ -257,6 +280,7 @@ export const PRIMARY_GROUP: Record<string, string> = {
   supervisor: 'supervisor',
   hod: 'hod',
   logistics: 'logistics',
+  qc: 'quality',
   admin: 'admin',
 }
 
@@ -270,6 +294,8 @@ export const ROLE_HOME: Record<string, string> = {
   supervisor: '/supervisor',
   hod: '/hod/approvals',
   logistics: '/logistics',
+  // A quality inspector's whole job is the queue, so that is the landing page.
+  qc: '/qc/inspections',
   admin: '/admin/console',
 }
 

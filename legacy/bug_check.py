@@ -1454,7 +1454,20 @@ def check_models_schema_parity() -> None:
                # 2026-08-05 per-recipient address for the weekly Executive
                # Summary (alembic a71e93b4c2f8). New-stack only — the frozen
                # legacy portal sends every email to one configured inbox.
-               ("users", "email")}
+               ("users", "email"),
+               # 2026-08-09 QSEP (alembic b4d17c8e93a2): the MTC gate moved
+               # upstream from "a site keeper attaches a certificate to their
+               # own receipt" to warehouse goods-in and DN creation, so the
+               # document now has to answer "does THIS warehouse hold a
+               # certificate for THIS PO line, and which note did it travel
+               # on". Material_Code_Ref exists because dn_items carry a
+               # Material_Code and no SAP at all. New-stack only — the frozen
+               # legacy portal's MTC screen is site-side and stays that way.
+               ("mtc_documents", "Warehouse_ID"),
+               ("mtc_documents", "Material_Code_Ref"),
+               ("mtc_documents", "po_item_id"),
+               ("mtc_documents", "DN_Number"),
+               ("mtc_documents", "qc_inspection_id")}
     extra = model_only - allowed
     assert not extra, f"unexpected model-only columns (update models.py or DB): {extra}"
 

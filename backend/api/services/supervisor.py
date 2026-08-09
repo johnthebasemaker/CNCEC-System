@@ -19,6 +19,7 @@ import json as _json
 from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import quality
 from .ledger import _MD, write_audit
 from .notifications import dispatch, notify
 
@@ -200,6 +201,15 @@ async def approve_smr(session: AsyncSession, *, sk_username: str, request_id: in
         qty = overrides.get(str(it["id"]), requested)
         if qty <= 0:
             continue
+        # QSEP — the SECOND mouth of the issue path. This function writes
+        # pending_issues DIRECTLY rather than going through
+        # ledger.stage_consumption, so a quality gate placed only there would
+        # be bypassed by every supervisor request. The check runs per line,
+        # before anything is written, so a blocked line fails the whole
+        # approval rather than half-posting a batch.
+        await quality.assert_qc_cleared(
+            session, sap_code=it["SAP_Code"], site_id=site_id, qty=qty,
+            actor=sk_username)
         adjusted = abs(qty - requested) > 1e-9
         remarks = (f"SMR {request_no} · {job_tank} · PPE returned: {ppe_flag}"
                    + (f" · Reason: {ppe_reason}" if ppe_flag == "N" and ppe_reason else "")
