@@ -41,7 +41,16 @@ attachments_t = _MD.tables["entry_attachments"]
 wbs_t = _MD.tables["wbs_master"]
 settings_t = _MD.tables["app_settings"]
 
-_DOC_TYPES = ("consumption", "receipt", "return")
+# `safety_approval` (QSEP slice 4) is the PPE distribution's mandatory
+# document. It reuses this store rather than getting its own: the BLOB
+# handling, the 15 MB cap, the MIME allowlist, the site scoping, the
+# uploader-only delete and the audit row are all already correct here, and a
+# second document table would have to re-earn every one of them.
+#
+# It is deliberately NOT in the `assert_entry_docs` batch gate below — that
+# gate is per-BATCH ("one note covers this shift's entries"), while a safety
+# approval is per-PERSON-per-item. services/ppe.py validates it per line.
+_DOC_TYPES = ("consumption", "receipt", "return", "safety_approval")
 _MAX_FILE_MB = 15
 _ALLOWED_MIME_PREFIXES = ("image/", "application/pdf",
                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

@@ -71,6 +71,8 @@ from .stock import router as stock_router  # noqa: E402
 from .warehouse import router as warehouse_router  # noqa: E402
 from .dashboard import router as dashboard_router  # noqa: E402
 from .qc import router as qc_router  # noqa: E402
+from .ppe import router as ppe_router  # noqa: E402
+from .employees import router as employees_router  # noqa: E402
 
 _MD = models.Base.metadata
 
@@ -243,6 +245,15 @@ app.include_router(receiving_router)
 # QSEP — Quality Control: accounts, site transfers, and the inspection ledger
 # whose approvals gate what a Store Keeper may issue (self-guarded per route).
 app.include_router(qc_router)
+
+# QSEP — PPE usable-time rules, per-person history and the 15-day order
+# forecast. There is deliberately NO issue endpoint here: PPE goes out
+# through the ordinary /entry/consumption form (Option A), so it gets no
+# parallel stock path.
+app.include_router(ppe_router)
+
+# QSEP — employee identity: site transfers, movement history, admin tracking.
+app.include_router(employees_router)
 
 # Supervisor material requests — create → SK approve → pending_issues (self-guarded).
 app.include_router(requests_router)

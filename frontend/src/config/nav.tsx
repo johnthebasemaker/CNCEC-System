@@ -22,7 +22,7 @@ import {
   DashboardOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, FallOutlined,
   FieldTimeOutlined, FileExcelOutlined, FileProtectOutlined, FileSearchOutlined, FireOutlined,
   FormOutlined, FundProjectionScreenOutlined, InboxOutlined, MessageOutlined, ProfileOutlined,
-  SafetyCertificateOutlined, SolutionOutlined, StockOutlined, TeamOutlined,
+  SafetyCertificateOutlined, SafetyOutlined, SolutionOutlined, StockOutlined, TeamOutlined,
   ToolOutlined, ControlOutlined, UserAddOutlined,
 } from '@ant-design/icons'
 import type { User } from '../auth/AuthContext'
@@ -222,6 +222,36 @@ export const NAV: NavGroup[] = [
       {
         key: '/qc/accounts', label: 'QC Accounts', icon: <TeamOutlined />,
         access: w({ anyRole: ['hod', 'logistics', 'warehouse_user'] }),
+      },
+    ],
+  },
+  {
+    // QSEP slices 4-5. "Safety & People" rather than two groups: the PPE
+    // forecast and the employee roster are read by the same person doing the
+    // same job (who has what, and who is where), and splitting them buries
+    // one of them behind an extra click.
+    //
+    // Note the absence of an "Issue PPE" entry. PPE goes out through the
+    // ordinary Issue form (Option A) — a link here would imply a second path
+    // and there deliberately is not one.
+    id: 'safety',
+    label: 'Safety & People',
+    access: { minLevel: 0 },
+    children: [
+      {
+        key: '/ppe/forecast', label: 'PPE Forecast', icon: <FieldTimeOutlined />,
+        access: { minLevel: 0 },
+      },
+      {
+        key: '/ppe/rules', label: 'PPE Usable Time', icon: <SafetyOutlined />,
+        access: w({ anyRole: ['store_keeper', 'hod'] }),
+      },
+      {
+        // NOT marked `writes`: an auditor should be able to read the roster
+        // and somebody's PPE history. The Transfer button inside is gated on
+        // the HOD role and on useReadOnly() separately.
+        key: '/hr/employees', label: 'Employees', icon: <TeamOutlined />,
+        access: { minLevel: 1 },
       },
     ],
   },

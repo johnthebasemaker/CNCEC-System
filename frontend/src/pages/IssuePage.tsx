@@ -10,8 +10,11 @@ import type { ColumnsType } from 'antd/es/table'
 import { BarcodeOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
-import { useBins, useBulkEntry, useCategories, useDocsRequired, useInventoryMaster, useSites, useWbsOptions } from '../api/hooks'
+import { useBins, useBulkEntry, useCategories, useDocsRequired, useInventoryMaster, usePpeEligible, useSites, useWbsOptions } from '../api/hooks'
 import type { Row as ApiRow } from '../api/client'
+import PpeIssueFields from '../components/PpeIssueFields'
+import { emptyPpe, findPpeRule } from '../lib/ppe'
+import type { PpeState } from '../lib/ppe'
 import DeliveryPrefRadio from '../components/DeliveryPrefRadio'
 import DraftBanner from '../components/DraftBanner'
 import EntryDocsUpload from '../components/EntryDocsUpload'
@@ -70,6 +73,17 @@ export default function IssuePage() {
   const { data: bins } = useBins(watchSap, watchSite)
   const { data: wbsOptions } = useWbsOptions(watchSite)
   const { data: docsRequired } = useDocsRequired()
+
+  // ── PPE (QSEP slice 4, Option A) ─────────────────────────────────────────
+  // There is no separate PPE form. When the picked material is PPE this form
+  // grows an employee + safety-approval panel and the backend writes a
+  // ppe_distributions row beside the ordinary stock movement. `ppeRule` is
+  // null for the ~450 materials that are not PPE, and the panel renders
+  // nothing at all for them.
+  const { data: ppeEligible } = usePpeEligible(watchSite)
+  const ppeRule = useMemo(() => findPpeRule(ppeEligible, watchSap),
+                          [ppeEligible, watchSap])
+  const [ppe, setPpe] = useState<PpeState>(emptyPpe())
 
   // Category narrows the material picker (search stays available inside it).
   const { data: categories } = useCategories()
@@ -170,6 +184,19 @@ export default function IssuePage() {
         + 'System Code first (the picker filters to that recipe).')
       return
     }
+    // PPE gate, mirrored from services/ppe.py. The API is the boundary — this
+    // is here so the SK is told at the point of adding the line rather than
+    // after submitting a batch of six.
+    if (ppeRule) {
+      if (!ppe.employeeId.trim()) {
+        message.error('This is PPE — enter the ID number of the employee receiving it.')
+        return
+      }
+      if (ppeRule.requires_safety_doc && !ppe.doc.length) {
+        message.error('This is PPE — attach the signed Safety Approval before adding the line.')
+        return
+      }
+    }
     // Smart defaults: remember the routine fields for the next session.
     saveDefaults('issue', { Site_ID: v.Site_ID, Work_Type: v.Work_Type ?? '', Issued_By: v.Issued_By ?? '' })
     const lsNote = liningCode && shieldSapOf.has(String(v.SAP_Code))
@@ -194,6 +221,14 @@ export default function IssuePage() {
       // Parity B1 — a manual lot pick is a FEFO override; the reason travels
       // to the HOD (allow-and-log ruling: never blocks).
       FEFO_Override: v.Lot_Number ? (v.FEFO_Override || 'manual lot (no reason given)') : null,
+      // QSEP — carried per LINE, not per batch. Two workers can be issued
+      // different PPE in the same batch, so a batch-level field would
+      // attribute the second person's gear to the first.
+      ...(ppeRule ? {
+        employee_id_number: ppe.employeeId.trim(),
+        safety_doc_id: ppe.doc[0]?.id ?? null,
+        early_reason: ppe.earlyReason.trim() || null,
+      } : {}),
     }
     setStaged((prev) => editingUid
       ? prev.map((r) => (r._uid === editingUid ? payload : r))
@@ -201,6 +236,10 @@ export default function IssuePage() {
     setEditingUid(null)
     // Keep Site + Date for the next line; clear the item-specific fields.
     form.resetFields(['SAP_Code', 'Quantity', 'Issued_To', 'PR_Number', 'Tank_No', 'Serial_No', 'Lot_Number', 'Remarks'])
+    // The PPE panel clears with them: the next line is very likely a
+    // different person, and a sticky employee ID is how somebody else's
+    // boots end up on the wrong record.
+    setPpe(emptyPpe())
   }
 
   const editLine = (r: StagedRow) => {
@@ -339,6 +378,12 @@ export default function IssuePage() {
 
           {/* Current stock + 30-day trend for the picked material (advisory). */}
           <ItemSnapshot sap={watchSap} site={watchSite} />
+
+          {/* QSEP — appears ONLY when the picked material is PPE. Sits above
+              Quantity so the SK reads "who is this for" before they type a
+              number, which is the order the paper form has always used. */}
+          <PpeIssueFields rule={ppeRule} siteId={watchSite}
+            value={ppe} onChange={setPpe} />
 
           {!!bins?.length && (
             <div style={{ marginTop: -4, marginBottom: 12 }}>

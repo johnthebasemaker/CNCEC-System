@@ -122,6 +122,15 @@ class DnItems(Base):
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
 class Employees(Base):
+    """THE PERSON (QSEP ruling R1, 2026-08-09).
+
+    `ID_Number` is globally unique, so one row is one human being no matter
+    how many sites they have worked at. `mh_employees` is the per-site
+    EMPLOYMENT RECORD — it is keyed on (Site_ID, Employee_Code), so a
+    transfer necessarily creates a second row there, and anything hung off
+    it forks on transfer. PPE, movements and badges therefore all key on
+    `ID_Number` and nothing keys on `mh_employees.id`.
+    """
     __tablename__ = "employees"
     id = Column(Integer, primary_key=True, autoincrement=True)
     ID_Number = Column(Text, nullable=False, unique=True)
@@ -133,6 +142,11 @@ class Employees(Base):
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     Site_ID = Column(Text)
+    # alembic d2f84b19e57c — what the attendance workbook already supplies, so
+    # the two registries stop disagreeing about the same person.
+    Designation = Column(Text)
+    Worker_Type = Column(Text)
+    Company = Column(Text)
 
 class EntryAttachments(Base):
     __tablename__ = "entry_attachments"
@@ -1569,6 +1583,100 @@ class GeneratedReport(Base):
 # entry.py, notifications.py and warehouse.py for the 2026-07-10 UAT work,
 # and two meanings for one label is how a comment stops being readable.
 # ==========================================================================
+
+class PpeRules(Base):
+    """How long an item of PPE is deemed to last (alembic c9e35a71d4b6).
+
+    Separate from `inventory."Category" = 'PPE'` on purpose, and the two do
+    different jobs:
+
+      Category  → which items OFFER the PPE flow (what the UI filters on)
+      a rule    → which items have a usable time (what the maths needs)
+
+    A PPE-category item with no rule is still distributed and recorded; it
+    simply has no expiry and the forecast cannot see it. That is a
+    data-entry gap the rules page surfaces, not an error.
+
+    `Site_ID` NULL = the global default; a site row overrides it. The unique
+    index is on COALESCE(Site_ID,'') — see the migration for why a plain
+    UNIQUE would silently permit duplicate global rules.
+    """
+    __tablename__ = "ppe_rules"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    SAP_Code = Column(Text, nullable=False)
+    Site_ID = Column(Text)
+    usable_days = Column(Integer, nullable=False)
+    requires_safety_doc = Column(Integer, nullable=False, server_default=text('1'))
+    notes = Column(Text)
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        Index("ux_ppe_rules_sap_site", "SAP_Code",
+              text('COALESCE("Site_ID", \'\')'), unique=True),
+    )
+
+
+class PpeDistributions(Base):
+    """One handover of PPE to one person (alembic c9e35a71d4b6).
+
+    Keyed on `employee_id_number` — the PERSON — never on a per-site
+    employment record, which is what makes the history follow a transfer
+    (ruling R1). Each row keeps its own issuing `Site_ID` for site reporting.
+
+    `usable_days_applied` and `expires_on` are both STORED rather than
+    derived, so shortening a rule later cannot retroactively rewrite when
+    the boots already on someone's feet were deemed to expire.
+
+    Lifecycle mirrors the ledger's stage→approve shape: the row is written
+    when the issue is STAGED (the SK has physically handed the gear over,
+    and that is what stops a second pair being issued while the HOD
+    approval is pending), gains `consumption_id` on approval, and flips to
+    `void` if the HOD rejects.
+    """
+    __tablename__ = "ppe_distributions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    employee_id_number = Column(Text, nullable=False)
+    employee_name = Column(Text)
+    SAP_Code = Column(Text, nullable=False)
+    Material_Code = Column(Text)
+    Description = Column(Text)
+    Lot_Number = Column(Text)
+    Qty = Column(Float, nullable=False)
+    issued_on = Column(Text, nullable=False)
+    usable_days_applied = Column(Integer)
+    expires_on = Column(Text)
+    safety_doc_id = Column(Integer)
+    replaces_distribution_id = Column(Integer)
+    early_replacement = Column(Integer, nullable=False, server_default=text('0'))
+    early_reason = Column(Text)
+    pending_issue_id = Column(Integer)
+    consumption_id = Column(Integer)
+    # active | replaced | expired | returned | void
+    status = Column(Text, nullable=False, server_default=text("'active'"))
+    issued_by = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+
+class EmployeeMovements(Base):
+    """Every site change a person has made (alembic d2f84b19e57c).
+
+    HOD-initiated and immediate (ruling R4) — only the QC *user* transfer
+    needs an admin's second signature, because that one rewrites an
+    authentication row and has to revoke sessions.
+    """
+    __tablename__ = "employee_movements"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    employee_id_number = Column(Text, nullable=False)
+    from_site = Column(Text)
+    to_site = Column(Text, nullable=False)
+    effective_date = Column(Text, nullable=False)
+    reason = Column(Text)
+    moved_by = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'applied'"))
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
 
 class QcInspections(Base):
     """One quality decision about one lot of one material at one place.

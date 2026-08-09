@@ -35,6 +35,9 @@ const SupervisorPage = lazy(() => import('./pages/SupervisorPage'))
 const SkRequestsPage = lazy(() => import('./pages/SkRequestsPage'))
 const QcInspectionsPage = lazy(() => import('./pages/QcInspectionsPage'))
 const QcAccountsPage = lazy(() => import('./pages/QcAccountsPage'))
+const PpeRulesPage = lazy(() => import('./pages/PpeRulesPage'))
+const PpeForecastPage = lazy(() => import('./pages/PpeForecastPage'))
+const EmployeesPage = lazy(() => import('./pages/EmployeesPage'))
 const SmePage = lazy(() => import('./pages/SmePage'))
 const UsersPage = lazy(() => import('./pages/UsersPage'))
 const PendingUsersPage = lazy(() => import('./pages/PendingUsersPage'))
@@ -75,6 +78,9 @@ export default function App() {
         <Route path="sk/requests" element={<SkRequestsPage />} />
         <Route path="qc/inspections" element={<QcInspectionsPage />} />
         <Route path="qc/accounts" element={<QcAccountsPage />} />
+        <Route path="ppe/rules" element={<PpeRulesPage />} />
+        <Route path="ppe/forecast" element={<PpeForecastPage />} />
+        <Route path="hr/employees" element={<EmployeesPage />} />
         <Route path="sme" element={<SmePage />} />
         <Route path="bulk-import" element={<BulkImportPage />} />
         <Route path="hod/approvals" element={<ApprovalsPage />} />

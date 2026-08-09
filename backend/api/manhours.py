@@ -36,6 +36,11 @@ from .db import get_session
 from .services.ledger import _MD, write_audit
 
 employees_t = _MD.tables["mh_employees"]
+# QSEP — the PERSON registry, mirrored into by the attendance import so the
+# roster and the SMR worker list finally agree. `employees_t` above is the
+# per-site EMPLOYMENT record; these are different tables and the names are
+# spelled out here because confusing them is the bug this fixed.
+employees_t_master = _MD.tables["employees"]
 timesheets_t = _MD.tables["mh_timesheets"]
 estimates_t = _MD.tables["mh_manhour_estimates"]
 production_t = _MD.tables["mh_production"]
@@ -1094,6 +1099,51 @@ def parse_attendance_workbook(data: bytes) -> dict:
             "dates": dates}
 
 
+async def _sync_employee_master(session: AsyncSession, site_id: str,
+                                rows: list[dict]) -> int:
+    """QSEP — mirror the roster into `employees`, the PERSON registry.
+
+    This import is the only bulk employee upload in the product, and before
+    QSEP it wrote `mh_employees` ONLY. So a worker imported from the
+    attendance workbook could not be named on a supervisor material request:
+    `create_smr` looks them up in `employees` and answers "worker not in
+    employee master". Two registries, no join, and the join column
+    (`linked_id_number`) had never been written by anything.
+
+    ⚠️ `employees.ID_Number` is UNIQUE **globally**, not per site. The same
+    person working at two sites is ONE row, so this must UPDATE the site
+    rather than insert a second — a naive insert 409s on the second site's
+    import and the whole transaction fails.
+
+    Name/designation/company are refreshed from the workbook; `Site_ID` is
+    moved to the importing site, because importing somebody's attendance at
+    a site IS the statement that they work there. Deliberately NOT touched:
+    `status` (an employee deactivated in the app stays deactivated — the
+    workbook has no status column and would silently revive them) and
+    `Phone_Number` (entered in the app, absent from the workbook).
+    """
+    n = 0
+    for e in rows:
+        code = str(e["code"]).strip()
+        if not code:
+            continue
+        stmt = pg_insert(employees_t_master).values(
+            ID_Number=code, Name=e["name"], Site_ID=site_id,
+            Designation=e.get("designation") or None,
+            Worker_Type=e.get("worker_type") or None,
+            Company=e.get("company") or None,
+            status="active", created_by="mh-import")
+        await session.execute(stmt.on_conflict_do_update(
+            index_elements=["ID_Number"],
+            set_={"Name": stmt.excluded.Name, "Site_ID": stmt.excluded.Site_ID,
+                  "Designation": stmt.excluded.Designation,
+                  "Worker_Type": stmt.excluded.Worker_Type,
+                  "Company": stmt.excluded.Company,
+                  "updated_at": _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)}))
+        n += 1
+    return n
+
+
 @router.post("/import", summary="Import an attendance .xlsx (replace-by-date or append)")
 async def import_attendance(file: UploadFile = File(...), replace: bool = True,
                             dry_run: bool = False, site_id: Optional[str] = None,
@@ -1133,15 +1183,22 @@ async def import_attendance(file: UploadFile = File(...), replace: bool = True,
         stmt = pg_insert(employees_t).values(
             Site_ID=sid, Employee_Code=e["code"], Name=e["name"],
             Designation=e["designation"], Worker_Type=e["worker_type"],
-            Company=e["company"], status="active", created_by="import")
+            Company=e["company"], status="active", created_by="import",
+            # QSEP: the join key back to the PERSON. This column has existed
+            # since the baseline migration and was never written by anything
+            # — which is exactly why a worker imported from the roster could
+            # not be named on a supervisor material request.
+            linked_id_number=e["code"])
         stmt = stmt.on_conflict_do_update(
             index_elements=["Site_ID", "Employee_Code"],
             set_={"Name": stmt.excluded.Name, "Designation": stmt.excluded.Designation,
                   "Worker_Type": stmt.excluded.Worker_Type,
                   "Company": stmt.excluded.Company,
+                  "linked_id_number": stmt.excluded.linked_id_number,
                   "updated_at": _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)})
         await session.execute(stmt)
         emp_n += 1
+    master_n = await _sync_employee_master(session, sid, parsed["employees"])
     ts_n = 0
     for t in parsed["timesheets"]:
         await _upsert_timesheet(session, sid, t["code"], t["work_date"],
@@ -1151,11 +1208,12 @@ async def import_attendance(file: UploadFile = File(...), replace: bool = True,
                                 created_by="import")
         ts_n += 1
     await write_audit(session, user["username"], "MH_IMPORT", "mh_timesheets",
-                      f"{sid} employees={emp_n} timesheets={ts_n} "
+                      f"{sid} employees={emp_n} master={master_n} timesheets={ts_n} "
                       f"replace={replace} dates={len(parsed['dates'])} "
                       f"overlap={len(overlap)}")
     await session.commit()
-    return {"imported": True, "employees": emp_n, "timesheets": ts_n,
+    return {"imported": True, "employees": emp_n, "employee_master": master_n,
+            "timesheets": ts_n,
             "dates": parsed["dates"], "replace": replace,
             "overlap_dates": [] if replace else overlap}
 
