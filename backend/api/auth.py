@@ -701,6 +701,28 @@ async def register_sites(session: AsyncSession = Depends(get_session)):
     return {"sites": await _admin_site_names(session)}
 
 
+@router.get("/register/warehouses",
+            summary="Public warehouse list for the Request Access form "
+                    "(a warehouse-bound QC must pick from these)",
+            dependencies=[rate_limit(30, 60)])
+async def register_warehouses(session: AsyncSession = Depends(get_session)):
+    """Sibling of /register/sites, added with the QC role (QSEP).
+
+    `qc` is the first role that may bind to a WAREHOUSE from the public
+    Request Access form, and a free-text warehouse would land an
+    unmatchable string in `pending_users.Warehouse_ID` for an admin to
+    puzzle over at approval time. IDs and names only — no contacts, no
+    counts: this endpoint is unauthenticated, and a warehouse list is
+    already the minimum an applicant must see to choose one.
+    """
+    wh = _MD.tables["warehouses"]
+    rows = (await session.execute(
+        select(wh.c["Warehouse_ID"], wh.c["Name"])
+        .where(func.coalesce(wh.c["status"], "active") == "active")
+        .order_by(wh.c["Warehouse_ID"]))).all()
+    return {"warehouses": [{"id": r[0], "name": r[1]} for r in rows]}
+
+
 @router.post("/register", status_code=201,
              summary="Request access → a pending_users row for an admin to approve",
              dependencies=[rate_limit(5, 60)])
@@ -712,9 +734,8 @@ async def register(body: RegisterIn, session: AsyncSession = Depends(get_session
     # used to carry its own literal 6 while admin create/reset used MIN_PW, so
     # the weakest door set the real floor. Existing passwords keep working —
     # login has no length check; the policy binds new and reset credentials.
-    from .admin import MIN_PW
-    if len(body.password or "") < MIN_PW:
-        raise HTTPException(422, f"password must be at least {MIN_PW} characters")
+    from .admin import assert_password_ok
+    assert_password_ok(body.password)
     if body.role not in _REGISTERABLE_ROLES:
         raise HTTPException(422, f"role must be one of {sorted(_REGISTERABLE_ROLES)}")
 

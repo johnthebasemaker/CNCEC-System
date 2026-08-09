@@ -158,10 +158,61 @@ Rules:
 - Use empty strings for missing header values; use 0 for missing quantities.
 """
 
+# QSEP slice 6 — the SCANNED purchase document (PR or PO).
+#
+# Calibrated against a real file: `PO#4710003121_PR681.pdf` is a General
+# Industries purchase order that was printed, signed and scanned back in. It
+# has ZERO extractable text, so pdfplumber's three layout regexes match
+# nothing and the old endpoint answered 200 with an empty item list. This is
+# the lane that file needs.
+#
+# ONE prompt for both PR and PO on purpose. The two documents share a
+# header/table shape, a scan does not reliably say which it is, and asking
+# the model to TELL US which it read is more robust than making the caller
+# guess before upload — a PR filed under "PO" would otherwise be parsed
+# against the wrong prompt and quietly mangled.
+PURCHASE_DOC_PROMPT = """\
+You are reading a scanned purchase document from General Industries. It is
+either a PURCHASE REQUISITION (PR) or a PURCHASE ORDER (PO).
+
+Output STRICT JSON with this exact shape:
+{
+  "doc_type": "PR" or "PO"   (whichever this document is),
+  "header": {
+    "PR_Number":  "the Purch. Req. No. if shown, else ''",
+    "PO_Number":  "the Purch. Order No. if shown, else ''",
+    "Date":       "ISO YYYY-MM-DD if convertible, else the literal string",
+    "Vendor_Name":"supplier/vendor name if shown",
+    "Vendor_Code":"vendor number if shown",
+    "Total_Amount":"grand total as written, else ''"
+  },
+  "items": [
+    {
+      "material_code": "the GI-NNNNNNN code EXACTLY as printed, or ''",
+      "material_text": "the description as printed",
+      "uom":           "unit of measure if shown",
+      "quantity":      <number, or null if unreadable>,
+      "unit_price":    <number, or null>
+    }
+  ]
+}
+
+Rules:
+- Output JSON only. No markdown fences, no prose.
+- Material codes look like GI-7000009. Transcribe the digits EXACTLY; do not
+  correct a code that looks wrong.
+- A quantity you cannot read is null. NEVER invent 0 or 1 — a wrong quantity
+  on a purchase order is an ordering error, and a null is a question.
+- Skip page headers, footers, signature blocks and totals rows.
+- Use empty strings for header fields the document does not show.
+"""
+
 USER_PROMPTS = {"ocr_consumption": "Extract the rows.",
-                "ocr_delivery_note": "Extract the header and items."}
+                "ocr_delivery_note": "Extract the header and items.",
+                "ocr_purchase_doc": "Extract the header and the line items."}
 SYSTEM_PROMPTS = {"ocr_consumption": CONSUMPTION_PROMPT,
-                  "ocr_delivery_note": DN_PROMPT}
+                  "ocr_delivery_note": DN_PROMPT,
+                  "ocr_purchase_doc": PURCHASE_DOC_PROMPT}
 
 
 # --- model-reply parsing --------------------------------------------------------
@@ -189,6 +240,27 @@ def _to_float(s: Any) -> float:
         return float(re.sub(r"[^\d.\-]", "", str(s)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _to_float_or_none(s: Any) -> Optional[float]:
+    """Like `_to_float`, but an unreadable value stays None.
+
+    ⚠️ The 0.0 default above is right for the consumption and DN lanes —
+    their prompts say "use 0 for missing quantities" and a missing DN line
+    quantity is a transcription gap on a document that already happened.
+
+    It is WRONG for a purchase document, and that distinction is the reason
+    this exists. A quantity the model could not read becoming 0 on a PURCHASE
+    ORDER is an ordering error wearing the clothes of a real number: it looks
+    answered, so nobody asks. None is a question the reviewer has to close.
+    """
+    if s is None or (isinstance(s, str) and not s.strip()):
+        return None
+    try:
+        cleaned = re.sub(r"[^\d.\-]", "", str(s))
+        return float(cleaned) if cleaned not in ("", "-", ".", "-.") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def clean_consumption_row(r: dict) -> dict:
@@ -221,6 +293,41 @@ def clean_dn_header(h: dict) -> dict:
     return {k: str(h.get(k) or "").strip() for k in _DN_HEADER_KEYS}
 
 
+# --- scanned purchase document (QSEP slice 6) ---------------------------------
+_PURCHASE_HEADER_KEYS = ("PR_Number", "PO_Number", "Date", "Vendor_Name",
+                         "Vendor_Code", "Total_Amount")
+_GI_CODE = re.compile(r"(GI-\d{6,8})", re.IGNORECASE)
+
+
+def clean_purchase_row(r: dict) -> dict:
+    """One scanned line item, normalised to the shape the review grid uses.
+
+    The material code is re-extracted with the same `GI-\\d{6,8}` pattern the
+    pdfplumber lane uses, from EITHER field: a vision model routinely returns
+    "GI-7000009 ELECTRIC INSULATION" in `material_text` and leaves
+    `material_code` empty, and dropping the code because it arrived in the
+    wrong key would send a perfectly matchable line to the "unmatched" pile.
+
+    `quantity` stays None when unreadable and is NEVER defaulted. A wrong
+    quantity on a purchase order is an ordering error; a null is a question
+    the reviewer answers.
+    """
+    code = str(r.get("material_code") or "").strip().upper()
+    text = str(r.get("material_text") or "").strip()
+    if not _GI_CODE.fullmatch(code):
+        m = _GI_CODE.search(code) or _GI_CODE.search(text)
+        code = m.group(1).upper() if m else ""
+    return {"material_code": code, "material_text": text,
+            "uom": str(r.get("uom") or "").strip(),
+            # None-preserving on purpose — see _to_float_or_none.
+            "quantity": _to_float_or_none(r.get("quantity")),
+            "unit_price": _to_float_or_none(r.get("unit_price"))}
+
+
+def clean_purchase_header(h: dict) -> dict:
+    return {k: str(h.get(k) or "").strip() for k in _PURCHASE_HEADER_KEYS}
+
+
 def parse_vision_reply(kind: str, raw: str) -> dict:
     """Model reply → the lane-agnostic result shape. Raises ValueError with a
     friendly message on unparseable output (the job worker records it)."""
@@ -236,6 +343,15 @@ def parse_vision_reply(kind: str, raw: str) -> dict:
     if not obj or "items" not in obj:
         raise ValueError("Vision model returned an unparseable response. "
                          "Try the Paste tab.")
+    if kind == "ocr_purchase_doc":
+        items = [clean_purchase_row(r) for r in obj["items"] if isinstance(r, dict)]
+        doc_type = str(obj.get("doc_type") or "").strip().upper()
+        return {"doc_type": doc_type if doc_type in ("PR", "PO") else "",
+                "header": clean_purchase_header(obj.get("header") or {}),
+                # A row with neither a code nor a description is a table
+                # artefact, not a line item.
+                "items": [r for r in items
+                          if r["material_code"] or r["material_text"]]}
     items = [clean_item_row(r) for r in obj["items"] if isinstance(r, dict)]
     return {"header": clean_dn_header(obj.get("header") or {}),
             "items": [r for r in items if r["material_text"] or r["quantity"]]}

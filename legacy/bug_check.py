@@ -1475,7 +1475,20 @@ def check_models_schema_parity() -> None:
                # portal has one employee screen and it predates the roster.
                ("employees", "Designation"),
                ("employees", "Worker_Type"),
-               ("employees", "Company")}
+               ("employees", "Company"),
+               # 2026-08-11 QSEP slice 6 (alembic e6a91c37b208): procurement
+               # automation. `urgency` turns a reschedule into an URGENT
+               # delivery request (severity critical → bypasses the evening
+               # digest); `auto_generated`/`source_assignment_id` mark a DN
+               # the system drafted after goods-in rather than a human;
+               # `source_attachment_id` is the stored scan a PR/PO was read
+               # from. New-stack only — the frozen legacy portal has no
+               # auto-drafting and threw its uploads away.
+               ("po_reschedule_requests", "urgency"),
+               ("delivery_notes", "auto_generated"),
+               ("delivery_notes", "source_assignment_id"),
+               ("pr_master", "source_attachment_id"),
+               ("purchase_orders", "source_attachment_id")}
     extra = model_only - allowed
     assert not extra, f"unexpected model-only columns (update models.py or DB): {extra}"
 

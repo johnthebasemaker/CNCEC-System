@@ -39,7 +39,11 @@ logger = logging.getLogger("gi.ai.jobs")
 ai_jobs_t = _MD.tables["ai_jobs"]
 inventory_t = _MD.tables["inventory"]
 
-JOB_KINDS = ("ocr_consumption", "ocr_delivery_note", "tool_identify")
+JOB_KINDS = ("ocr_consumption", "ocr_delivery_note", "tool_identify",
+             # QSEP slice 6 — a SCANNED PR/PO. Needed because a real
+             # purchase order in this project (PO#4710003121) is a scan with
+             # zero extractable text, which pdfplumber can never read.
+             "ocr_purchase_doc")
 
 
 def _now() -> _dt.datetime:
@@ -79,6 +83,30 @@ async def _resolve(kind: str, parsed: dict, session) -> dict:
     inventory = [dict(r) for r in inv_rows]
     if kind == "ocr_consumption":
         return {"rows": fuzzy.resolve_rows(parsed["rows"], inventory)}
+    if kind == "ocr_purchase_doc":
+        # A scanned purchase document carries the EXACT material code, so it
+        # is matched on the code first and only falls back to fuzzy text.
+        # That ordering matters: fuzzy-matching a description when a code was
+        # printed on the page throws away the one unambiguous key the
+        # document had, and "ELECTRIC INSULATION" resembles several rows in
+        # the master while GI-7000009 resembles exactly one.
+        by_code = {str(r["Material_Code"] or "").strip().upper(): r
+                   for r in inventory if r["Material_Code"]}
+        exact, needs_fuzzy = [], []
+        for it in parsed["items"]:
+            hit = by_code.get(it.get("material_code", ""))
+            if hit:
+                exact.append({**it, "SAP_Code": hit["SAP_Code"],
+                              "Equipment_Description": hit["Equipment_Description"],
+                              "uom": it.get("uom") or hit["UOM"] or "",
+                              "match_state": "auto", "match_source": "code"})
+            else:
+                needs_fuzzy.append(it)
+        resolved = fuzzy.resolve_rows(needs_fuzzy, inventory) if needs_fuzzy else []
+        for r in resolved:
+            r.setdefault("match_source", "text")
+        return {"doc_type": parsed.get("doc_type", ""),
+                "header": parsed["header"], "items": exact + resolved}
     return {"header": parsed["header"],
             "items": fuzzy.resolve_rows(parsed["items"], inventory)}
 

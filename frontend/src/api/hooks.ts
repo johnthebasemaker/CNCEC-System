@@ -977,6 +977,16 @@ export function useRegisterSites(enabled: boolean) {
   })
 }
 
+/** Public warehouse list — a warehouse-bound QC picks one at Request Access. */
+export function useRegisterWarehouses(enabled: boolean) {
+  return useQuery({
+    queryKey: ['/auth/register/warehouses'],
+    enabled,
+    queryFn: async () => (await api.get<{ warehouses: { id: string; name: string }[] }>(
+      '/auth/register/warehouses')).data.warehouses,
+  })
+}
+
 // --- T2: admin SLA tracker (Overdue Actions >24h + clear / notify nudges) ------
 export interface OverdueItem {
   kind: string

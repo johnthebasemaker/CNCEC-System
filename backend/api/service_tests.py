@@ -261,11 +261,11 @@ async def test_auth_guards():
 
         # Registration + access requests (non-persisting: only failing paths + reads).
         r = await ac.post("/auth/register", json={"username": "svc_admin_wannabe",
-                          "password": "svc-secret-123456", "role": "admin"})
+                          "password": "Svc-Secret-123456!", "role": "admin"})
         check("register requesting admin role → 422 (no self-elevation)",
               r.status_code == 422, f"got {r.status_code}")
         r = await ac.post("/auth/register", json={"username": "admin",
-                          "password": "svc-secret-123456", "role": "store_keeper"})
+                          "password": "Svc-Secret-123456!", "role": "store_keeper"})
         check("register an existing username → 409", r.status_code == 409, f"got {r.status_code}")
         r = await ac.post("/auth/register", json={"username": "svc_x", "password": "no",
                           "role": "store_keeper"})
@@ -294,24 +294,24 @@ async def test_auth_guards():
         # pattern as the login rate-limit test below).
         _t4a, _t4b = {"X-Real-IP": "203.0.113.41"}, {"X-Real-IP": "203.0.113.42"}
         r = await ac.post("/auth/register", headers=_t4a, json={"username": "svc_t4_hod",
-                          "password": "svc-secret-123456", "role": "hod"})
+                          "password": "Svc-Secret-123456!", "role": "hod"})
         check("scoped role without a site → 422", r.status_code == 422, f"got {r.status_code}")
         r = await ac.post("/auth/register", headers=_t4a, json={"username": "svc_t4_hod",
-                          "password": "svc-secret-123456", "role": "hod", "site_id": "NOT-A-SITE"})
+                          "password": "Svc-Secret-123456!", "role": "hod", "site_id": "NOT-A-SITE"})
         check("scoped role with an unknown site → 422", r.status_code == 422, f"got {r.status_code}")
         r = await ac.post("/auth/register", headers=_t4a, json={"username": "svc_t4_log",
-                          "password": "svc-secret-123456", "role": "logistics", "site_id": _site})
+                          "password": "Svc-Secret-123456!", "role": "logistics", "site_id": _site})
         check("unscoped role WITH a site → 422 (global roles carry no site)",
               r.status_code == 422, f"got {r.status_code}")
 
         # Happy paths — register, verify surfaced fields, then reject (cleanup;
         # re-runs revive the rejected row instead of colliding).
         r = await ac.post("/auth/register", headers=_t4b, json={"username": "svc_t4_hod",
-                          "password": "svc-secret-123456", "role": "hod", "site_id": _site})
+                          "password": "Svc-Secret-123456!", "role": "hod", "site_id": _site})
         check("scoped role with an admin-created site → 201",
               r.status_code == 201, f"got {r.status_code}")
         r = await ac.post("/auth/register", headers=_t4b, json={"username": "svc_t4_log",
-                          "password": "svc-secret-123456", "role": "logistics",
+                          "password": "Svc-Secret-123456!", "role": "logistics",
                           "location": "Central Warehouse, Dammam"})
         check("unscoped role with a free-text location → 201",
               r.status_code == 201, f"got {r.status_code}")
@@ -11848,38 +11848,38 @@ async def test_qc_role_and_scoping():
               "qc login failed")
 
         r = await ac.post("/auth/register", json={
-            "username": "SVCQ-reg-both", "password": "qsep-register-pw",
+            "username": "SVCQ-reg-both", "password": "Qsep-Register-Pw1!",
             "role": "qc", "site_id": "CNCEC", "warehouse_id": "WH-01"})
         check("bl: registering a qc with BOTH a site and a warehouse is a 422 "
               "— that is how the state qc_scope has to fail closed on never "
               "gets created in the first place",
               r.status_code == 422, f"{r.status_code} {r.text[:160]}")
         r = await ac.post("/auth/register", json={
-            "username": "SVCQ-reg-none", "password": "qsep-register-pw", "role": "qc"})
+            "username": "SVCQ-reg-none", "password": "Qsep-Register-Pw1!", "role": "qc"})
         check("bl: registering a qc with NEITHER is a 422 too",
               r.status_code == 422, f"{r.status_code} {r.text[:160]}")
 
         # creation, scoped to the creator
         r = await ac.post("/qc/accounts", headers=H_hod, json={
-            "username": "SVCQ-new-siteqc", "password": "qsep-created-pw-01"})
+            "username": "SVCQ-new-siteqc", "password": "Qsep-Created-Pw-01!"})
         ok = r.status_code == 201 and r.json().get("site_id") == "CNCEC"
         check("bl: an HOD creates a SITE inspector, and the site comes from the "
               "ACTOR — never from the request body, or a level-1 caller could "
               "bind an account to a site they have no authority over",
               ok, f"{r.status_code} {r.text[:200]}")
         r = await ac.post("/qc/accounts", headers=H_wh, json={
-            "username": "SVCQ-new-whqc", "password": "qsep-created-pw-02"})
+            "username": "SVCQ-new-whqc", "password": "Qsep-Created-Pw-02!"})
         ok = r.status_code == 201 and r.json().get("warehouse_id") == "WH-01"
         check("bl: a warehouse user creates a WAREHOUSE inspector bound to its "
               "own warehouse", ok, f"{r.status_code} {r.text[:200]}")
         r = await ac.post("/qc/accounts", headers=H_sk, json={
-            "username": "SVCQ-nope", "password": "qsep-created-pw-03"})
+            "username": "SVCQ-nope", "password": "Qsep-Created-Pw-03!"})
         check("bl: a store keeper cannot create a QC account (403) — the route "
               "is opened to the three roles that manage inspectors, not to "
               "everyone below admin", r.status_code == 403,
               f"{r.status_code} {r.text[:160]}")
         r = await ac.post("/qc/accounts", headers=H_hod, json={
-            "username": "SVCQ-elev", "password": "qsep-created-pw-04",
+            "username": "SVCQ-elev", "password": "Qsep-Created-Pw-04!",
             "role": "admin"})
         created_role = None
         if r.status_code == 201:
@@ -12918,6 +12918,429 @@ async def test_employee_identity_and_transfers():
     await _qsep_cleanup()
 
 
+# --- Suite BQ: procurement automation, scanned documents, notifications ------
+async def test_procurement_automation_and_scans():
+    """Suite BQ — the chain drafts its own paperwork, and a scan is stored.
+
+    THE FILE THAT SHAPED THIS SUITE. `PO#4710003121_PR681.pdf` is a real
+    General Industries purchase order that was printed, signed and scanned
+    back in. It carries **zero text characters** and five full-page images.
+    pdfplumber returns empty pages, the three layout regexes match nothing,
+    and the OLD endpoint answered 200 with an empty item list — a parser that
+    "succeeds" with nothing in it, which is worse than one that fails,
+    because the user cannot tell which happened.
+
+    So the lane is chosen by whether text CAME OUT (`looks_scanned`), never
+    by the content type. That is the trap the checks below pin: a `.pdf` is
+    not evidence of text, and routing on the extension sends that file down
+    the dead path forever.
+
+    The other half is that the document is now KEPT. These endpoints used to
+    read the upload, parse it and drop the bytes — a PR created from a scan
+    had no scan. It is stored BEFORE parsing, so the file that defeats the
+    parser is the one still on record, and the confirm step links it after
+    verifying it is the right type and the caller's own.
+
+    Plus: auto-drafted DNs (which must reuse create_dn, not reimplement its
+    guards), urgent delivery (which must bypass the evening digest), and the
+    last two notification gaps.
+    """
+    import pathlib
+
+    from fastapi import HTTPException as _HX
+    from sqlalchemy import text as _sqt
+
+    from .ai import ocr as _ocr
+    from .ai import pdf_extract as _px
+    from .services import procurement as _proc
+    from .services import warehouse as _wh
+
+    await _qsep_seed_users()
+
+    # ── 1. the scan detector, on REAL files ──────────────────────────────────
+    root = pathlib.Path(__file__).resolve().parents[2]
+    scanned = root / "PO#4710003121_PR681.pdf"
+    textual = root / "GI_Hub_SOP.pdf"
+    if scanned.exists():
+        check("bq: THE REAL SCAN — a genuine GI purchase order that was "
+              "printed, signed and scanned back in has NO extractable text, "
+              "and looks_scanned() says so. This is the file the old "
+              "endpoint answered 200-with-zero-items for",
+              _px.looks_scanned(scanned.read_bytes()), str(scanned.name))
+    else:
+        check("bq: (the reference scan is not in the working tree — it is "
+              "deliberately untracked commercial data, so this check is "
+              "informational)", True, "skipped")
+    if textual.exists():
+        check("bq: a real TEXT pdf is not mistaken for a scan — the detector "
+              "must not send readable documents to the vision model",
+              not _px.looks_scanned(textual.read_bytes()), str(textual.name))
+    check("bq: an unopenable file raises rather than being called a scan — "
+          "'send it to the vision model' is not the answer to 'this is not a "
+          "PDF'",
+          _raises(lambda: _px.looks_scanned(b"not a pdf at all"),
+                  _px.PdfExtractError),
+          "looks_scanned swallowed a broken file")
+
+    # ── 2. the scanned-document reply parser ─────────────────────────────────
+    reply = ('{"doc_type":"PO","header":{"PO_Number":"4710003121",'
+             '"Vendor_Name":"ACME"},"items":['
+             '{"material_code":"GI-7000009","material_text":"ELECTRIC INSULATION",'
+             '"uom":"EA","quantity":30},'
+             '{"material_code":"","material_text":"GI-7000011 ROLLER HANDLE",'
+             '"quantity":null},'
+             '{"material_code":"","material_text":"","quantity":5}]}')
+    parsed = _ocr.parse_vision_reply("ocr_purchase_doc", reply)
+    check("bq: the vision reply parses, and the model TELLS US which document "
+          "it read — a scan does not reliably say PR or PO, and making the "
+          "uploader guess before upload gets one parsed as the other",
+          parsed["doc_type"] == "PO"
+          and parsed["header"]["PO_Number"] == "4710003121", str(parsed)[:200])
+    check("bq: a code the model put in the DESCRIPTION is still extracted. "
+          "Vision models routinely return 'GI-7000011 ROLLER HANDLE' as the "
+          "text and leave the code field empty; dropping it would send a "
+          "perfectly matchable line to the unmatched pile",
+          parsed["items"][1]["material_code"] == "GI-7000011",
+          str(parsed["items"][1]))
+    check("bq: an unreadable quantity stays None and is NEVER defaulted to 0 "
+          "or 1 — a wrong quantity on a purchase order is an ordering error, "
+          "and a null is a question the reviewer answers",
+          parsed["items"][1]["quantity"] is None, str(parsed["items"][1]))
+    check("bq: a row with neither a code nor a description is dropped as a "
+          "table artefact", len(parsed["items"]) == 2, str(parsed["items"]))
+    check("bq: the new job kind is registered, or the worker refuses it",
+          "ocr_purchase_doc" in _ai_job_kinds(), str(_ai_job_kinds()))
+
+    # ── 3. auto-drafted DNs REUSE create_dn ──────────────────────────────────
+    src = _code_only(_read_src("backend/api/services/warehouse.py"))
+    body = src[src.index("async def auto_draft_dns ("):src.index("async def _generate_dn_number (")]
+    check("bq: auto_draft_dns calls create_dn rather than writing its own "
+          "INSERTs. create_dn already enforces RL/BL strict separation, the "
+          "over-shipment guard and the MTC gate — a second implementation "
+          "would give the AUTOMATED path different rules from the manual one, "
+          "and the automated path is the one nobody watches",
+          "create_dn (" in body and "insert ( delivery_notes_t" not in body,
+          "auto_draft_dns is not delegating to create_dn")
+    check("bq: it groups by rl_bl_family — create_dn REFUSES a mixed DN, so "
+          "one call per family is the only shape that passes, not an "
+          "optimisation", "rl_bl_family" in body, "no family grouping")
+    check("bq: and it never raises. A failure drafting a convenience DN must "
+          "not roll back the goods receipt — the stock genuinely arrived",
+          "except Exception" in body, "auto_draft_dns can propagate")
+
+    async def _one(sql, **p):
+        async with SessionLocal() as s:
+            return (await s.execute(_sqt(sql), p)).first()
+
+    # ── 4. the setting actually gates it ─────────────────────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt("UPDATE app_settings SET value='0' "
+                             "WHERE key='auto_draft_dn'"))
+        off = await _wh.auto_draft_dns(
+            s, username="SVCQ-wh", po_number="SVCQ-PO", assignment_id=1,
+            site_id="CNCEC",
+            received=[{"po_item_id": 1, "qty": 1, "rl_bl_family": None,
+                       "warehouse_id": "WH-01"}])
+        check("bq: with auto_draft_dn off, nothing is drafted — a warehouse "
+              "that batches its shipments turns this off and must then be "
+              "left alone", off == [], str(off))
+        await s.rollback()
+    async with SessionLocal() as s:
+        none_for_no_site = await _wh.auto_draft_dns(
+            s, username="SVCQ-wh", po_number="SVCQ-PO", assignment_id=1,
+            site_id=None, received=[{"po_item_id": 1, "qty": 1,
+                                     "rl_bl_family": None, "warehouse_id": "WH-01"}])
+        check("bq: a PO with no destination site drafts nothing — a warehouse "
+              "restock has nowhere to send anything",
+              none_for_no_site == [], str(none_for_no_site))
+        await s.rollback()
+
+    # ── 5. urgent delivery bypasses the evening digest ───────────────────────
+    psrc = _code_only(_read_src("backend/api/services/procurement.py"))
+    rbody = psrc[psrc.index("async def raise_reschedule ("):
+                 psrc.index("async def list_reschedules (")]
+    check("bq: an URGENT reschedule dispatches at severity 'critical'. That "
+          "is not cosmetic — dispatch() forces a critical event out "
+          "IMMEDIATELY even under X-Delivery-Preference: evening, and a "
+          "request to bring a delivery forward that arrives after the working "
+          "day it meant to change is worthless",
+          '"critical"' in rbody, "urgent reschedule is not critical")
+    from .services.notifications import _VALID_DELIVERY  # noqa: F401
+    nsrc = _code_only(_read_src("backend/api/services/notifications.py"))
+    check("bq: …and dispatch() really does force critical events out of the "
+          "digest queue, which is the mechanism the line above relies on",
+          'mode == "evening" and ( severity == "critical"' in nsrc
+          or "severity == \"critical\"" in nsrc,
+          "dispatch no longer special-cases critical")
+    async with SessionLocal() as s:
+        bad = await _proc.raise_reschedule(
+            s, username="SVCQ-hod", role="hod", po_number="X",
+            requested_date="2026-09-01", reason="x", urgency="VERY")
+        check("bq: an unknown urgency is refused rather than silently treated "
+              "as normal", bad.get("error") is not None, str(bad))
+        await s.rollback()
+
+    # ── 6. the last two notification gaps ────────────────────────────────────
+    for fn, event, where in (
+        ("create_po_from_pr", "po_created_for_pr",
+         "the site that raised the PR never learned its material was ordered"),
+        ("close_vendor_return", "vendor_return_closed",
+         "the person chasing the vendor never learned the resupply landed"),
+    ):
+        fbody = psrc[psrc.index(f"async def {fn} ("):]
+        fbody = fbody[:fbody.index("async def ", 10)] if "async def " in fbody[10:] else fbody
+        check(f"bq: {fn} now dispatches {event} — before this, {where}",
+              event in fbody, f"{fn} is still silent")
+    # The other two were closed in slice 2; assert they are still there, since
+    # "the four gaps" is only true while all four stay closed.
+    wsrc = _code_only(_read_src("backend/api/services/warehouse.py"))
+    check("bq: the two gaps closed in slice 2 are still closed — "
+          "po_goods_received and dn_receipt_staged",
+          "po_goods_received" in wsrc and "dn_receipt_staged" in wsrc,
+          "a previously-closed notification gap reopened")
+
+    # ── 7. a stored scan is verified before it is linked ─────────────────────
+    async with SessionLocal() as s:
+        good = (await s.execute(_sqt(
+            'INSERT INTO entry_attachments ("Site_ID", doc_type, doc_number, '
+            "file_name, uploaded_by) VALUES ('CNCEC','pr_scan','X','a.pdf',"
+            "'SVCQ-hod') RETURNING id"))).scalar()
+        wrong_type = (await s.execute(_sqt(
+            'INSERT INTO entry_attachments ("Site_ID", doc_type, doc_number, '
+            "file_name, uploaded_by) VALUES ('CNCEC','consumption','X','b.pdf',"
+            "'SVCQ-hod') RETURNING id"))).scalar()
+        someone_else = (await s.execute(_sqt(
+            'INSERT INTO entry_attachments ("Site_ID", doc_type, doc_number, '
+            "file_name, uploaded_by) VALUES ('CNCEC','pr_scan','X','c.pdf',"
+            "'SVCQ-sk') RETURNING id"))).scalar()
+        async def _refused(aid: int) -> bool:
+            try:
+                await _proc._verify_scan(s, aid, expect="pr_scan",
+                                         username="SVCQ-hod")
+                return False
+            except ValueError:
+                return True
+
+        ok = await _proc._verify_scan(s, good, expect="pr_scan", username="SVCQ-hod")
+        check("bq: a scan the caller uploaded, of the right type, links",
+              ok == good, f"{ok} vs {good}")
+        check("bq: an attachment of the WRONG TYPE is refused — a consumption "
+              "note is not a PR scan, and the Document Library would serve it "
+              "under that PR's name to everyone who can read it",
+              await _refused(wrong_type), "wrong doc_type was accepted")
+        check("bq: somebody ELSE'S attachment is refused. The id arrives from "
+              "the client on the confirm step, so an unvalidated integer here "
+              "would staple any document in the system to your PR",
+              await _refused(someone_else), "another user's attachment was accepted")
+        check("bq: None is fine — a PR typed by hand has no scan and must not "
+              "be forced to invent one",
+              (await _proc._verify_scan(s, None, expect="pr_scan",
+                                        username="SVCQ-hod")) is None,
+              "None was rejected")
+        await s.rollback()
+
+    # ── 8. the password policy, at every door ────────────────────────────────
+    from .admin import MIN_PW, password_problems
+    check("bq: the minimum is 8, down from 12 (operator, 2026-08-11)",
+          MIN_PW == 8, str(MIN_PW))
+    check("bq: …and the complexity rule is what keeps that meaningful — the "
+          "length came DOWN, so a long lowercase phrase must now fail",
+          password_problems("thisisaverylongpassword") != [], "plain long password passed")
+    check("bq: every requirement is reported AT ONCE, so somebody fixing a "
+          "password learns the whole rule instead of discovering it one "
+          "rejection at a time", len(password_problems("short")) == 4,
+          str(password_problems("short")))
+    check("bq: a compliant password passes",
+          password_problems("Abcdef1!") == [], str(password_problems("Abcdef1!")))
+    for path, mod in (("admin create/reset", "backend/api/admin.py"),
+                      ("self-registration", "backend/api/auth.py"),
+                      ("QC account creation", "backend/api/qc.py")):
+        body = _code_only(_read_src(mod))
+        check(f"bq: {path} calls assert_password_ok. Five inline copies of the "
+              "length check is how a rule gets updated four times, and the "
+              "weakest remaining door then sets the real policy — which is "
+              "exactly how registration sat on a literal 6 (audit A03-F11)",
+              "assert_password_ok" in body, f"{mod} has its own check")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM entry_attachments WHERE doc_number='X'"))
+        await s.commit()
+    await _qsep_cleanup()
+
+
+# --- Suite BR: asset identity and approved transfers --------------------------
+async def test_asset_identity_and_transfers():
+    """Suite BR — one hammer is one row, and it moves only by agreement.
+
+    THE KEY WAS TOO WIDE. `asset_units` was UNIQUE on
+    (Site_ID, SAP_Code, serial_no), which means hammer #A-1042 could exist at
+    CNCEC **and** at another site at the same moment: two rows, two custody
+    chains, two GPS fixes, one physical object. A serial number is stamped on
+    the thing, not issued per yard. The key is now (SAP_Code, serial_no),
+    globally; `Site_ID` stays on the row because it is WHERE THE THING IS —
+    data, not identity.
+
+    That distinction is what the transfer workflow protects. `Site_ID` moves
+    only when the SOURCE site's HOD approves, because the site losing the
+    asset is the one with something at stake and the only one that can
+    confirm it physically left. A destination that could pull an asset across
+    on its own say-so would make "where is it" a question of who edited last.
+    """
+    from sqlalchemy import text as _sqt
+
+    await _qsep_seed_users()
+    unit_t = _MD.tables["asset_units"]
+    xfer_t = _MD.tables["asset_transfers"]
+    A, B = "CNCEC", "SVCQ-SITE-B"
+    SAP = "1001"
+    SER = "SVCQ-SERIAL-1"
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM asset_transfers WHERE serial_no LIKE 'SVCQ-%'"))
+        await s.execute(_sqt("DELETE FROM asset_movements WHERE asset_unit_id IN "
+                             "(SELECT id FROM asset_units WHERE serial_no LIKE 'SVCQ-%')"))
+        await s.execute(_sqt("DELETE FROM asset_units WHERE serial_no LIKE 'SVCQ-%'"))
+        uid = (await s.execute(_sqt(
+            'INSERT INTO asset_units ("Site_ID", "SAP_Code", serial_no, status, '
+            "created_by) VALUES (:a, :sap, :ser, 'in_stock', 'svc') RETURNING id"),
+            {"a": A, "sap": SAP, "ser": SER})).scalar()
+        await s.commit()
+
+    # ── 1. the same serial cannot exist twice, ANYWHERE ──────────────────────
+    dup_err = None
+    async with SessionLocal() as s:
+        try:
+            await s.execute(_sqt(
+                'INSERT INTO asset_units ("Site_ID", "SAP_Code", serial_no, '
+                "created_by) VALUES (:b, :sap, :ser, 'svc')"),
+                {"b": B, "sap": SAP, "ser": SER})
+            await s.commit()
+        except Exception as e:  # noqa: BLE001
+            dup_err = type(e).__name__
+            await s.rollback()
+    check("bq/br: the SAME (SAP, serial) cannot be registered at a SECOND "
+          "site. Site used to be in the key, so one physical hammer could "
+          "exist as two rows with two custody chains and two GPS fixes — the "
+          "database now refuses it rather than trusting every caller to check",
+          dup_err is not None, "a duplicate serial was accepted at another site")
+
+    # ── 2. the transfer workflow ─────────────────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H_sk = await _qsep_login(ac, "SVCQ-sk")        # level 0
+        H_wh = await _qsep_login(ac, "SVCQ-wh")        # level 1 — may move assets
+        H_hodA = await _qsep_login(ac, "SVCQ-hod")     # source site (CNCEC)
+        H_hodB = await _qsep_login(ac, "SVCQ-hod2")    # destination (SITE-B)
+
+        r = await ac.post(f"/assets/{uid}/transfer", headers=H_sk,
+                          json={"to_site": B, "reason": "no"})
+        check("br: a level-0 store keeper cannot raise a transfer, matching "
+              "the rest of this module — they cannot register or move a unit "
+              "either", r.status_code == 403, f"{r.status_code} {r.text[:160]}")
+
+        r = await ac.post(f"/assets/{uid}/transfer", headers=H_wh,
+                          json={"to_site": B, "reason": "needed for the shutdown"})
+        tid = r.json().get("id") if r.status_code == 201 else None
+        check("br: whoever may MOVE an asset (level 1) may ask to transfer it "
+              "— requesting sits deliberately BELOW approving, so raising it "
+              "and releasing it are two different people",
+              r.status_code == 201 and r.json().get("status") == "pending_source_hod",
+              f"{r.status_code} {r.text[:200]}")
+        async with SessionLocal() as s:
+            still = (await s.execute(_sqt(
+                'SELECT "Site_ID" FROM asset_units WHERE id = :i'), {"i": uid})).scalar()
+        check("br: …and the asset has NOT moved. Requesting is not moving — "
+              "that is the entire point of the workflow",
+              still == A, f"Site_ID is already {still!r}")
+
+        r2 = await ac.post(f"/assets/{uid}/transfer", headers=H_wh,
+                           json={"to_site": B, "reason": "again"})
+        check("br: a SECOND open request for the same asset is refused (409), "
+              "in the DATABASE via a partial unique index — two sites both "
+              "holding a claim would let whichever HOD clicks second silently "
+              "overwrite the first", r2.status_code == 409,
+              f"{r2.status_code} {r2.text[:160]}")
+
+        r = await ac.post(f"/assets/transfers/{tid}/decide", headers=H_hodB,
+                          json={"action": "approve"})
+        check("br: the DESTINATION site's HOD cannot approve their own "
+              "incoming transfer (403). Self-service is the failure this "
+              "prevents — the site giving the asset away decides",
+              r.status_code == 403, f"{r.status_code} {r.text[:200]}")
+
+        r = await ac.get("/assets/transfers", headers=H_hodA)
+        check("br: GET /assets/transfers resolves to the transfer list, not to "
+              "get_asset(unit_id='transfers'). FastAPI matches in declaration "
+              "order, so a literal path after a parameterised sibling is "
+              "unreachable and answers 422",
+              r.status_code == 200 and isinstance(r.json().get("items"), list),
+              f"{r.status_code} {r.text[:160]}")
+
+        r = await ac.post(f"/assets/transfers/{tid}/decide", headers=H_hodA,
+                          json={"action": "approve", "notes": "released"})
+        ok = r.status_code == 200 and r.json().get("status") == "approved"
+        async with SessionLocal() as s:
+            row = (await s.execute(_sqt(
+                'SELECT "Site_ID", current_location_id, location_note '
+                "FROM asset_units WHERE id = :i"), {"i": uid})).first()
+            moves = (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM asset_movements WHERE asset_unit_id = :i "
+                "AND source = 'site_transfer'"), {"i": uid})).scalar()
+        check("br: the SOURCE HOD approves, and only then does Site_ID move",
+              ok and row[0] == B, f"{r.status_code} site={row[0]!r}")
+        check("br: the move is logged as a movement, so 'where has this been' "
+              "can still answer for the leg between the two sites",
+              moves == 1, f"{moves} site_transfer movement(s)")
+        check("br: the old site's RACK is cleared. Carrying it over would "
+              "leave the asset pointing at a shelf in a different yard",
+              row[1] is None and "in transit" in (row[2] or ""),
+              f"location_id={row[1]} note={row[2]!r}")
+
+        r = await ac.post(f"/assets/transfers/{tid}/decide", headers=H_hodA,
+                          json={"action": "reject"})
+        check("br: a decided transfer cannot be decided again (409)",
+              r.status_code == 409, f"{r.status_code} {r.text[:160]}")
+
+        # Registering the serial afresh at the ORIGINAL site must now fail,
+        # and the message must say where the thing actually is.
+        # The source site's HOD, not the warehouse user: a warehouse account
+        # carries no Site_ID, so resolve_site_write refuses it a site write
+        # before the uniqueness check is ever reached.
+        r = await ac.post("/assets", headers=H_hodA, json={
+            "SAP_Code": SAP, "serial_no": SER, "site_id": A})
+        detail = str(r.json().get("detail", "")) if r.status_code == 409 else ""
+        check("br: re-registering the serial at the old site is refused, and "
+              "the message NAMES where it actually is plus what to do — the "
+              "old text said 'already exists at <your site>', which is a lie "
+              "once the thing is somewhere else",
+              r.status_code == 409 and B in detail and "transfer" in detail,
+              f"{r.status_code} {detail[:200]}")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM asset_transfers WHERE serial_no LIKE 'SVCQ-%'"))
+        await s.execute(_sqt("DELETE FROM asset_movements WHERE asset_unit_id = :i"),
+                        {"i": uid})
+        await s.execute(_sqt("DELETE FROM asset_units WHERE serial_no LIKE 'SVCQ-%'"))
+        await s.commit()
+    await _qsep_cleanup()
+
+
+def _ai_job_kinds():
+    from .ai.jobs import JOB_KINDS
+    return JOB_KINDS
+
+
+def _raises(fn, exc_type) -> bool:
+    """True when the synchronous `fn()` raises `exc_type`."""
+    try:
+        fn()
+        return False
+    except exc_type:
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _count_notif_for(site: str) -> int:
     async with SessionLocal() as s:
         return await _count(s, notif_t,
@@ -13075,6 +13498,12 @@ async def main() -> int:
     print("\n BP. QSEP — one person, one ID: transfers move the worker, not "
           "their timesheets, and the PPE history follows them for free")
     await test_employee_identity_and_transfers()
+    print("\n BQ. QSEP — auto-drafted DNs, urgent delivery, and a scanned "
+          "purchase order that pdfplumber can never read")
+    await test_procurement_automation_and_scans()
+    print("\n BR. QSEP — one hammer is one row globally, and it changes site "
+          "only when the site losing it agrees")
+    await test_asset_identity_and_transfers()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

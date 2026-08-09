@@ -36,9 +36,22 @@ export interface GpsFix {
   accuracy_m?: number
 }
 
+/**
+ * Why a fix was not obtained. The CALLER decides what that means for its own
+ * operation, which is why these are categories and not sentences.
+ *
+ *   insecure  — not an HTTPS/localhost page; capture is impossible here
+ *   denied    — the user refused the permission
+ *   no_signal — permission held, no position resolved (the indoor case)
+ *   timeout   — gave up waiting
+ *   unsupported — no geolocation API at all
+ */
+export type GpsFailure =
+  | 'insecure' | 'denied' | 'no_signal' | 'timeout' | 'unsupported'
+
 export type GpsResult =
   | { ok: true; fix: GpsFix }
-  | { ok: false; reason: string }
+  | { ok: false; kind: GpsFailure; reason: string; normal: boolean }
 
 /** Milliseconds before we stop waiting for a fix. Long enough for a cold GPS
  *  start outdoors, short enough that a warehouse with no signal does not make
@@ -73,7 +86,14 @@ export function geolocationBlockedReason(): string | null {
  */
 export function getPosition(): Promise<GpsResult> {
   const blocked = geolocationBlockedReason()
-  if (blocked) return Promise.resolve({ ok: false, reason: blocked })
+  if (blocked) {
+    return Promise.resolve({
+      ok: false,
+      kind: (typeof navigator === 'undefined' || !('geolocation' in navigator))
+        ? 'unsupported' : 'insecure',
+      reason: blocked, normal: false,
+    })
+  }
 
   return new Promise<GpsResult>((resolve) => {
     let settled = false
@@ -89,18 +109,35 @@ export function getPosition(): Promise<GpsResult> {
               ? pos.coords.accuracy : undefined,
           },
         }),
-        (err) => done({
-          ok: false,
-          reason: err.code === err.PERMISSION_DENIED
-            ? 'Location permission was declined — the move was still recorded.'
-            : err.code === err.POSITION_UNAVAILABLE
-              ? 'No position available here (common indoors) — the move was still recorded.'
-              : 'Location timed out — the move was still recorded.',
-        }),
+        (err) => {
+          // ⚠️ These sentences no longer claim "the move was still recorded".
+          // They used to, and that was a promise this module is in no
+          // position to keep: it runs BEFORE the save is sent, so a failed
+          // save left the user having been told the opposite of the truth.
+          // The outcome is the caller's to state; this only says why there
+          // is no coordinate.
+          //
+          // `normal: true` marks the two that are ordinary warehouse life
+          // rather than something wrong — a steel shed has no sky, and that
+          // is not an error to apologise for.
+          if (err.code === err.PERMISSION_DENIED) {
+            done({ ok: false, kind: 'denied', normal: false,
+                   reason: 'Location permission is switched off for this site.' })
+          } else if (err.code === err.POSITION_UNAVAILABLE) {
+            done({ ok: false, kind: 'no_signal', normal: true,
+                   reason: 'No GPS signal here — normal indoors and inside '
+                           + 'steel buildings.' })
+          } else {
+            done({ ok: false, kind: 'timeout', normal: true,
+                   reason: `No GPS fix within ${Math.round(TIMEOUT_MS / 1000)} `
+                           + 'seconds — normal indoors.' })
+          }
+        },
         { enableHighAccuracy: true, timeout: TIMEOUT_MS, maximumAge: 0 },
       )
     } catch {
-      done({ ok: false, reason: 'Location could not be read on this device.' })
+      done({ ok: false, kind: 'unsupported', normal: false,
+             reason: 'Location could not be read on this device.' })
     }
   })
 }

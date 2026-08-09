@@ -142,9 +142,40 @@ async def po_items(session: AsyncSession, po_number: str):
 
 
 # --- mutations ---------------------------------------------------------------
+async def _verify_scan(session: AsyncSession, attachment_id: int | None,
+                       *, expect: str, username: str) -> int | None:
+    """Validate a `source_attachment_id` before it is stored on a PR/PO.
+
+    QSEP slice 6. The id arrives from the client on the confirm step, so it
+    is checked rather than trusted — an unvalidated integer here would let a
+    caller staple any attachment in the system to their PR, including one
+    from another site, and the Document Library would then serve it under
+    that PR's name to anyone who can read it.
+
+    Two conditions: the row must be the RIGHT DOCUMENT TYPE (a consumption
+    note is not a PR scan), and it must have been uploaded by THIS user. The
+    uploader check is what makes it a link to your own extract call rather
+    than a pointer at somebody else's document.
+    """
+    if attachment_id is None:
+        return None
+    att = _MD.tables["entry_attachments"]
+    row = (await session.execute(select(att.c["doc_type"], att.c["uploaded_by"])
+           .where(att.c["id"] == int(attachment_id)))).first()
+    if row is None:
+        raise ValueError(f"unknown attachment {attachment_id}")
+    if row[0] != expect:
+        raise ValueError(f"attachment {attachment_id} is a {row[0]} document, "
+                         f"not a {expect}")
+    if row[1] != username:
+        raise ValueError(f"attachment {attachment_id} was uploaded by someone else")
+    return int(attachment_id)
+
+
 async def create_pr(session: AsyncSession, *, username: str, site_id: str,
                     lines: list[dict], supplier: str | None = None,
-                    notes: str | None = None, delivery_date: str | None = None) -> dict:
+                    notes: str | None = None, delivery_date: str | None = None,
+                    source_attachment_id: int | None = None) -> dict:
     """Create one site PR (draft) from a set of lines — ports insert_manual_pr().
 
     Each line is validated + enriched against the ERP inventory master (SAP_Code
@@ -189,6 +220,12 @@ async def create_pr(session: AsyncSession, *, username: str, site_id: str,
             "Notes": (str(ln.get("Notes") or "").strip() or (notes or "")),
         })
 
+    try:
+        scan_id = await _verify_scan(session, source_attachment_id,
+                                     expect="pr_scan", username=username)
+    except ValueError as e:
+        return {"error": str(e)}
+
     pr_number = await _next_pr_number(session)
     for ln in prepared:
         await session.execute(insert(pr_master_t).values(
@@ -197,12 +234,20 @@ async def create_pr(session: AsyncSession, *, username: str, site_id: str,
             Requested_Qty=ln["Requested_Qty"], UOM=ln["UOM"],
             Est_Cost_SAR=ln["Est_Cost_SAR"], Supplier=(supplier or None),
             Notes=(ln["Notes"] or None), Delivery_Date=(delivery_date or None),
-            status="open", workflow_state="draft", logistics_status="site_draft"))
+            status="open", workflow_state="draft", logistics_status="site_draft",
+            source_attachment_id=scan_id))
+    if scan_id:
+        # Bind the stored scan to the rows it produced, so the Document
+        # Library can answer "which PR came from this document".
+        att = _MD.tables["entry_attachments"]
+        await session.execute(update(att).where(att.c["id"] == scan_id)
+                              .values(entry_table="pr_master", doc_number=pr_number))
 
     await write_audit(session, username, "CREATE_PR", "pr_master",
-                      f"PR={pr_number} site={site_id} lines={len(prepared)}")
+                      f"PR={pr_number} site={site_id} lines={len(prepared)}"
+                      + (f" scan={scan_id}" if scan_id else ""))
     return {"created": True, "pr_number": pr_number, "site_id": site_id,
-            "lines": len(prepared)}
+            "lines": len(prepared), "source_attachment_id": scan_id}
 
 
 async def submit_pr(session: AsyncSession, *, username: str, pr_number: str, site_id: str) -> dict:
@@ -227,7 +272,8 @@ async def submit_pr(session: AsyncSession, *, username: str, pr_number: str, sit
 async def create_po_from_pr(session: AsyncSession, *, username: str, pr_number: str,
                             site_id: str, po_number: str, vendor_code: str | None = None,
                             vendor_name: str | None = None,
-                            expected_delivery: str | None = None) -> dict:
+                            expected_delivery: str | None = None,
+                            source_attachment_id: int | None = None) -> dict:
     lines = (await session.execute(select(pr_master_t).where(
         (pr_master_t.c["PR_Number"] == pr_number)
         & (func.coalesce(pr_master_t.c["Site_ID"], "HQ") == site_id)
@@ -242,10 +288,21 @@ async def create_po_from_pr(session: AsyncSession, *, username: str, pr_number: 
         return {"error": f"PO {po_number} already exists"}
 
     today = _dt.date.today().isoformat()
+    try:
+        scan_id = await _verify_scan(session, source_attachment_id,
+                                     expect="po_scan", username=username)
+    except ValueError as e:
+        return {"error": str(e)}
     await session.execute(insert(purchase_orders_t).values(
         PO_Number=po_number, PR_Number=pr_number, Site_ID=site_id,
         Vendor_Code=vendor_code, Vendor_Name=vendor_name, PO_Date=today,
-        Expected_Delivery=expected_delivery, source="api", created_by=username, status="open"))
+        Expected_Delivery=expected_delivery, source="api", created_by=username,
+        status="open", source_attachment_id=scan_id))
+    if scan_id:
+        att = _MD.tables["entry_attachments"]
+        await session.execute(update(att).where(att.c["id"] == scan_id)
+                              .values(entry_table="purchase_orders",
+                                      doc_number=po_number))
 
     for idx, ln in enumerate(lines, start=1):
         mat = (ln.get("Material_Code") or "").strip()
@@ -266,6 +323,18 @@ async def create_po_from_pr(session: AsyncSession, *, username: str, pr_number: 
 
     await write_audit(session, username, "CREATE_PO", "purchase_orders",
                       f"PO={po_number} PR={pr_number} site={site_id} lines={len(lines)}")
+    # QSEP notification gap #1. Raising the PO was audited and otherwise
+    # silent, so the site that submitted the PR learned nothing: they had
+    # asked for material and had no way to know whether anybody had ordered
+    # it short of opening the Logistics portal, which their role cannot.
+    await dispatch(session, event_key="po_created_for_pr", severity="success",
+                   recipient_role="hod", recipient_site=site_id,
+                   wa_template="status_update",
+                   title=f"Your PR is on order — PO {po_number}",
+                   body=(f"{username} raised PO {po_number} against PR {pr_number} "
+                         f"({len(lines)} line(s))."),
+                   link_page="/hod/prs", related_table="purchase_orders",
+                   related_ref=po_number, created_by=username)
     return {"created": True, "po_number": po_number, "lines": len(lines)}
 
 
@@ -456,8 +525,11 @@ async def list_vendor_returns(session: AsyncSession, status: str | None):
 
 async def close_vendor_return(session: AsyncSession, *, username: str, return_id: int,
                               notes: str | None = None) -> dict:
-    row = (await session.execute(select(po_returns_t.c["status"])
-           .where(po_returns_t.c["id"] == return_id))).first()
+    row = (await session.execute(select(
+        po_returns_t.c["status"], po_returns_t.c["PO_Number"],
+        po_returns_t.c["Material_Code"], po_returns_t.c["Qty"],
+        po_returns_t.c["raised_by"], po_returns_t.c["Reason"])
+        .where(po_returns_t.c["id"] == return_id))).first()
     if row is None:
         return {"error": f"vendor return {return_id} not found"}
     if row[0] == "closed":
@@ -466,7 +538,26 @@ async def close_vendor_return(session: AsyncSession, *, username: str, return_id
         status="closed", closed_at=func.now(), closed_by=username,
         notes=notes if notes is not None else po_returns_t.c["notes"]))
     await write_audit(session, username, "VENDOR_RETURN_CLOSE", "po_returns", f"id={return_id}")
-    return {"closed": True, "id": return_id}
+    # QSEP notification gap #4. Raising a vendor return notifies logistics;
+    # CLOSING it — the resupply has landed and the reopened PO line is
+    # covered — told nobody, least of all the person who raised it and had
+    # been chasing the vendor.
+    for who in {row[4], username} - {username}:
+        await dispatch(session, event_key="vendor_return_closed", severity="success",
+                       recipient_user=who, wa_template="status_update",
+                       title=f"Vendor return closed — PO {row[1]}",
+                       body=(f"{username} closed the return of {float(row[3] or 0):g} × "
+                             f"{row[2] or '—'}." + (f" {notes.strip()}" if notes else "")),
+                       link_page="/logistics", related_table="po_returns",
+                       related_ref=str(return_id), created_by=username)
+    await dispatch(session, event_key="vendor_return_closed", severity="success",
+                   recipient_role="logistics", wa_template="status_update",
+                   title=f"Vendor return closed — PO {row[1]}",
+                   body=(f"{username} closed return #{return_id} "
+                         f"({float(row[3] or 0):g} × {row[2] or '—'})."),
+                   link_page="/logistics", related_table="po_returns",
+                   related_ref=str(return_id), created_by=username)
+    return {"closed": True, "id": return_id, "po_number": row[1]}
 
 
 # --- reschedule workflow (H7) ------------------------------------------------
@@ -475,11 +566,30 @@ async def close_vendor_return(session: AsyncSession, *, username: str, return_id
 # (WhatsApp/email stay parked).
 async def raise_reschedule(session: AsyncSession, *, username: str, role: str,
                            po_number: str, requested_date: str, reason: str,
-                           dn_number: str | None = None) -> dict:
+                           dn_number: str | None = None,
+                           urgency: str = "normal") -> dict:
+    """Ask Logistics to move a PO's delivery date.
+
+    QSEP slice 6 — "Urgent Delivery" is this, with `urgency="urgent"`, and it
+    is the same table on purpose: a request to bring a delivery FORWARD is a
+    reschedule to an earlier date, and it needs the identical mandatory
+    reason, the identical one-open-request rule and the identical approve
+    step that pushes the new date onto the PO. A parallel table would have
+    duplicated all of that to change one word.
+
+    What `urgent` actually buys is `severity="critical"`, and that is not
+    cosmetic: `notifications.dispatch()` forces a critical event out
+    IMMEDIATELY even when the request carries X-Delivery-Preference:
+    evening. An urgent request that waits for the 16:00 digest arrives after
+    the working day it was meant to change.
+    """
     if not (requested_date or "").strip():
         return {"error": "a requested delivery date is required"}
     if not (reason or "").strip():
         return {"error": "a reason is required"}
+    urgency = (urgency or "normal").strip().lower()
+    if urgency not in ("normal", "urgent"):
+        return {"error": "urgency must be 'normal' or 'urgent'"}
     po = (await session.execute(select(
         purchase_orders_t.c["Expected_Delivery"], purchase_orders_t.c["status"]
     ).where(purchase_orders_t.c["PO_Number"] == po_number))).first()
@@ -496,16 +606,26 @@ async def raise_reschedule(session: AsyncSession, *, username: str, role: str,
     rid = (await session.execute(insert(po_reschedule_t).values(
         PO_Number=po_number, DN_Number=dn_number, current_date=po[0],
         requested_date=requested_date, reason=reason, requested_by_role=role,
-        requested_by=username, status="pending"
+        requested_by=username, status="pending", urgency=urgency
     ).returning(po_reschedule_t.c["id"]))).scalar_one()
+    urgent = urgency == "urgent"
     await write_audit(session, username, "RAISE_RESCHEDULE", "po_reschedule_requests",
-                      f"id={rid} PO={po_number} → {requested_date}")
-    await dispatch(session, event_key="reschedule_raised", recipient_role="logistics",
-                   wa_template="action_required", title=f"Reschedule requested — PO {po_number}",
-                   body=f"{role} {username} requests {requested_date}. Reason: {reason}",
-                   link_page="/logistics", related_table="po_reschedule_requests",
-                   related_ref=str(rid), created_by=username)
-    return {"raised": True, "id": rid, "po_number": po_number}
+                      f"id={rid} PO={po_number} → {requested_date}"
+                      + (" URGENT" if urgent else ""))
+    await dispatch(
+        session, event_key="reschedule_raised", recipient_role="logistics",
+        # critical → dispatch() sends NOW, bypassing the evening digest.
+        severity="critical" if urgent else "info",
+        wa_template="critical_alert" if urgent else "action_required",
+        title=("URGENT delivery requested — PO " if urgent
+               else "Reschedule requested — PO ") + po_number,
+        body=(f"{role} {username} asks to bring PO {po_number} forward to "
+              f"{requested_date} (currently {po[0] or 'unscheduled'}). "
+              f"Reason: {reason}" if urgent else
+              f"{role} {username} requests {requested_date}. Reason: {reason}"),
+        link_page="/logistics", related_table="po_reschedule_requests",
+        related_ref=str(rid), created_by=username)
+    return {"raised": True, "id": rid, "po_number": po_number, "urgency": urgency}
 
 
 async def list_reschedules(session: AsyncSession, status: str | None):

@@ -148,6 +148,7 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
 
     affected = 0
     inspections: list[int] = []
+    received_lines: list[dict] = []
     for raw_id, raw_qty in received_map.items():
         try:
             item_id, qty = int(raw_id), float(raw_qty)
@@ -157,7 +158,8 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
             continue
         line = (await session.execute(select(
             po_items_t.c["Qty"], po_items_t.c["Delivered_Qty"], po_items_t.c["Returned_Qty"],
-            po_items_t.c["Material_Code"], po_items_t.c["Description"])
+            po_items_t.c["Material_Code"], po_items_t.c["Description"],
+            po_items_t.c["rl_bl_family"])
             .where((po_items_t.c["id"] == item_id) & (po_items_t.c["PO_Number"] == po_number)))).first()
         if line is None:
             continue
@@ -184,6 +186,9 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
                 warehouse_id=warehouse_id, mtc_document_id=mtc_id, created_by=username)
             if iid:
                 inspections.append(iid)
+        received_lines.append({"po_item_id": item_id, "qty": qty,
+                               "rl_bl_family": line[5],
+                               "warehouse_id": warehouse_id})
         affected += 1
 
     if affected == 0:
@@ -204,6 +209,15 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
     await write_audit(session, username, "WAREHOUSE_RECEIVE", "po_items",
                       f"PO={po_number} assignment={assignment_id} lines={affected}"
                       + (f" qc_inspections={len(inspections)}" if inspections else ""))
+
+    # QSEP slice 6 — draft the DNs the destination site is waiting for. The
+    # PO's own Site_ID is the destination; a PO with no site is a warehouse
+    # restock and has nowhere to send anything, so nothing is drafted.
+    dest = (await session.execute(select(purchase_orders_t.c["Site_ID"])
+            .where(purchase_orders_t.c["PO_Number"] == po_number))).scalar()
+    auto_dns = await auto_draft_dns(
+        session, username=username, po_number=po_number,
+        assignment_id=assignment_id, site_id=dest, received=received_lines)
     # QSEP notification gap #2: goods physically arriving was audited and
     # otherwise silent, so nobody downstream learned the PO had landed.
     await dispatch(session, event_key="po_goods_received", severity="success",
@@ -215,7 +229,90 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
                    link_page="/logistics", related_table="po_items",
                    related_ref=po_number, created_by=username)
     return {"received": True, "po_number": po_number, "lines": affected,
-            "qc_inspections": inspections}
+            "qc_inspections": inspections, "auto_drafted_dns": auto_dns}
+
+
+async def _setting_on(session: AsyncSession, key: str, default: str = "1") -> bool:
+    v = (await session.execute(text(
+        "SELECT value FROM app_settings WHERE key = :k"), {"k": key})).scalar()
+    return (v if v is not None else default).strip() != "0"
+
+
+async def auto_draft_dns(session: AsyncSession, *, username: str, po_number: str,
+                         assignment_id: int, site_id: str | None,
+                         received: list[dict]) -> list[str]:
+    """After goods-in, draft the Delivery Notes the site is waiting for.
+
+    QSEP slice 6. It calls the EXISTING `create_dn()` once per group rather
+    than writing its own INSERTs, and that is the whole design: create_dn
+    already enforces RL/BL strict separation, the over-shipment guard
+    (delivered − returned − already on live DNs), the MTC gate for
+    Surface Shields and the DN numbering. Reimplementing any of those here
+    would give the automated path different rules from the manual one, and
+    the automated path is the one nobody watches.
+
+    Grouped by `rl_bl_family` because create_dn REFUSES a mixed DN — one
+    call per family is not an optimisation, it is the only shape that passes.
+
+    Output is `status='draft'`. A human still submits it: the warehouse has
+    to physically load a vehicle and name a driver, and a system that
+    submitted on their behalf would be asserting a truck exists.
+
+    ⚠️ Never raises. A failure here must not roll back the goods receipt —
+    the stock genuinely arrived, and losing that because a downstream
+    convenience failed would be a far worse outcome than a missing draft.
+    The reason is recorded in the audit log and the clerk cuts the DN by hand.
+    """
+    if not site_id or not received:
+        return []
+    if not await _setting_on(session, "auto_draft_dn"):
+        return []
+
+    by_family: dict[str | None, list[dict]] = {}
+    for line in received:
+        by_family.setdefault(line.get("rl_bl_family"), []).append(line)
+
+    created: list[str] = []
+    for family, lines in by_family.items():
+        try:
+            res = await create_dn(
+                session, username=username, po_number=po_number,
+                warehouse_id=lines[0]["warehouse_id"], site_id=site_id,
+                line_items=[{"po_item_id": ln["po_item_id"], "Qty": ln["qty"]}
+                            for ln in lines],
+                header={"Remarks": f"Auto-drafted from goods receipt "
+                                   f"(assignment {assignment_id})"})
+            if res.get("error"):
+                await write_audit(
+                    session, username, "AUTO_DN_SKIPPED", "delivery_notes",
+                    f"PO={po_number} family={family or '-'} reason={res['error']}")
+                continue
+            dn = res["dn_number"]
+            await session.execute(update(delivery_notes_t)
+                                  .where(delivery_notes_t.c["DN_Number"] == dn)
+                                  .values(auto_generated=1,
+                                          source_assignment_id=assignment_id))
+            created.append(dn)
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            await write_audit(
+                session, username, "AUTO_DN_FAILED", "delivery_notes",
+                f"PO={po_number} family={family or '-'} "
+                f"{type(e).__name__}: {str(e)[:200]}")
+
+    if created:
+        await write_audit(session, username, "AUTO_DN_CREATED", "delivery_notes",
+                          f"PO={po_number} assignment={assignment_id} "
+                          f"site={site_id} dns={','.join(created)}")
+        await dispatch(
+            session, event_key="dn_auto_drafted", recipient_role="warehouse_user",
+            recipient_warehouse=received[0]["warehouse_id"],
+            wa_template="action_required",
+            title=f"{len(created)} Delivery Note(s) drafted for {site_id}",
+            body=(f"Prepared from the goods receipt on PO {po_number}: "
+                  f"{', '.join(created)}. Add the vehicle and driver, then submit."),
+            link_page="/warehouse", related_table="delivery_notes",
+            related_ref=created[0], created_by=username)
+    return created
 
 
 async def _generate_dn_number(session: AsyncSession, warehouse_id: str) -> str:

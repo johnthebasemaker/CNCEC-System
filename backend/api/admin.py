@@ -36,7 +36,47 @@ _SAP_REFS = [_MD.tables[t] for t in (
     "receipts", "consumption", "returns", "lots",
     "pending_receipts", "pending_issues", "pending_returns", "pr_master")]
 
-MIN_PW = 12  # minimum password length for create / reset / self-registration
+# --- the password policy, in ONE place -----------------------------------------
+# Operator ruling 2026-08-11: 8 characters with complexity, down from 12 plain.
+#
+# Every credential-setting path calls `assert_password_ok`. It replaced five
+# copies of `if len(pw) < MIN_PW: raise ...` scattered across admin create,
+# admin reset, /auth/register and /qc/accounts — and that shape is the point.
+# A rule expressed five times is a rule that gets updated four times; the
+# weakest remaining door then sets the real policy, which is exactly how
+# registration sat on a literal 6 while everything else used MIN_PW
+# (audit A03-F11).
+MIN_PW = 8  # minimum password length for create / reset / self-registration
+
+_PW_SPECIALS = "!@#$%^&*()-_=+[]{};:'\",.<>/?\\|`~"
+
+
+def password_problems(pw: str) -> list[str]:
+    """Everything wrong with this password, as human sentences. Empty = fine.
+
+    Returns ALL failures rather than the first, so somebody fixing a password
+    is told the whole requirement once instead of discovering it one rejection
+    at a time.
+    """
+    pw = pw or ""
+    problems: list[str] = []
+    if len(pw) < MIN_PW:
+        problems.append(f"be at least {MIN_PW} characters (yours is {len(pw)})")
+    if not any(c.isupper() for c in pw):
+        problems.append("contain an uppercase letter")
+    if not any(c.isdigit() for c in pw):
+        problems.append("contain a number")
+    if not any(c in _PW_SPECIALS for c in pw):
+        problems.append("contain a special character, e.g. ! @ # $ % &")
+    return problems
+
+
+def assert_password_ok(pw: str) -> None:
+    """422 unless the password meets the policy, naming every failure."""
+    problems = password_problems(pw)
+    if problems:
+        raise HTTPException(
+            422, "Password must " + "; ".join(problems) + ".")
 
 router = APIRouter(prefix="/admin", tags=["admin"],
                    dependencies=[Depends(require_level(4))])
@@ -155,8 +195,7 @@ async def create_user(body: CreateUserIn,
         raise HTTPException(422, "username is required")
     if body.role not in ROLE_META:
         raise HTTPException(422, f"unknown role {body.role!r}")
-    if len(body.password or "") < MIN_PW:
-        raise HTTPException(422, f"password must be at least {MIN_PW} characters")
+    assert_password_ok(body.password)
     try:
         async with session.begin():
             if (await _get_user(session, uname)) is not None:
@@ -230,8 +269,7 @@ async def update_user(username: str, body: UpdateUserIn,
 async def reset_password(username: str, body: PasswordIn,
                          actor: dict = Depends(require_level(4)),
                          session: AsyncSession = Depends(get_session)):
-    if len(body.password or "") < MIN_PW:
-        raise HTTPException(422, f"password must be at least {MIN_PW} characters")
+    assert_password_ok(body.password)
     async with session.begin():
         if (await _get_user(session, username)) is None:
             raise HTTPException(404, f"user {username!r} not found")

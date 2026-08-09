@@ -144,13 +144,13 @@ async def create_qc_account(
     warehouse; logistics and admin may name any warehouse (they are the
     oversight roles that already read across all of them).
     """
-    from .admin import MIN_PW    # one password policy for every credential path
+    # One password policy for every credential path — see admin.MIN_PW.
+    from .admin import assert_password_ok
 
     uname = (body.username or "").strip()
     if not uname:
         raise HTTPException(422, "username is required")
-    if len(body.password or "") < MIN_PW:
-        raise HTTPException(422, f"password must be at least {MIN_PW} characters")
+    assert_password_ok(body.password)
 
     role = actor["role"]
     site = wh = None

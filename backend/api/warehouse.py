@@ -6,7 +6,7 @@ returned to this role.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -358,6 +358,11 @@ class RescheduleRaiseIn(BaseModel):
     requested_date: str
     reason: str
     dn_number: Optional[str] = None
+    # QSEP slice 6 — "Urgent Delivery" is this request with urgency="urgent".
+    # It is the same workflow because it IS one: bringing a delivery forward
+    # is a reschedule to an earlier date. What the flag buys is severity
+    # "critical" on the dispatch, which bypasses the 16:00 evening digest.
+    urgency: Literal["normal", "urgent"] = "normal"
 
 
 @router.post("/reschedule", summary="Request a delivery-date reschedule (→ Logistics)")
@@ -369,7 +374,8 @@ async def raise_reschedule(body: RescheduleRaiseIn = Body(...),
             res = await procurement.raise_reschedule(
                 session, username=user["username"], role=user["role"],
                 po_number=body.po_number, requested_date=body.requested_date,
-                reason=body.reason, dn_number=body.dn_number)
+                reason=body.reason, dn_number=body.dn_number,
+                urgency=body.urgency)
         if res.get("error"):
             raise HTTPException(409, res["error"])
         return res
