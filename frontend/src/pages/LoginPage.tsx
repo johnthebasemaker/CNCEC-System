@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { App, Button, ConfigProvider, Form, Input, Select, Tooltip, Typography } from 'antd'
+import { App, Button, ConfigProvider, Form, Input, Segmented, Select, Tooltip, Typography } from 'antd'
 import { EnvironmentOutlined, LockOutlined, SafetyOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
 import { useAuth } from '../auth/AuthContext'
-import { useRegister, useRegisterSites } from '../api/hooks'
+import { useRegister, useRegisterSites, useRegisterWarehouses } from '../api/hooks'
+import { passwordProblems } from '../lib/password'
 import { darkTheme } from '../theme/themes'
 import ServerConfigModal from '../components/ServerConfigModal'
 import { apiBase, isApiOverridden } from '../api/client'
@@ -12,19 +13,32 @@ function errMsg(e: unknown): string {
   return x?.response?.data?.detail ?? x?.message ?? 'Something went wrong'
 }
 
-// Self-registrants may request any role except admin.
+// Self-registrants may request any role except admin. This list is
+// hand-maintained rather than fetched, because /auth/register is
+// unauthenticated and the role catalogue is not something to publish to
+// anyone who loads the login page — but that means ADDING A ROLE TO
+// ROLE_META REQUIRES EDITING HERE TOO. `qc` shipped without this line and
+// was simply unrequestable: the backend accepted it, the form never offered
+// it.
 const REGISTER_ROLES = [
   { value: 'store_keeper', label: 'Store Keeper' },
   { value: 'supervisor', label: 'Supervisor' },
   { value: 'hod', label: 'Head of Department' },
   { value: 'warehouse_user', label: 'Warehouse' },
   { value: 'logistics', label: 'Logistics' },
+  { value: 'qc', label: 'Quality Control' },
   { value: 'auditor', label: 'Auditor (view-only)' },
 ]
 
 // T4 — scoped roles MUST pick an admin-created site; unscoped (global) roles
 // carry no site and may give a free-text location instead. Mirrors auth.py.
 const SCOPED_ROLES = new Set(['store_keeper', 'supervisor', 'hod'])
+// QSEP — `qc` is the first DUAL-scope role: a quality inspector belongs to a
+// site OR to a warehouse, exactly one. The form therefore cannot be a binary
+// scoped/unscoped switch for it; it asks which, then shows that one field.
+// auth.py rejects both-or-neither with a 422, so this is the UI agreeing
+// with the boundary rather than being it.
+const DUAL_SCOPE_ROLES = new Set(['qc'])
 
 export default function LoginPage() {
   const { message } = App.useApp()
@@ -35,8 +49,14 @@ export default function LoginPage() {
   const register = useRegister()
   const [regForm] = Form.useForm()
   const regRole: string = Form.useWatch('role', regForm) ?? 'store_keeper'
-  const isScoped = SCOPED_ROLES.has(regRole)
+  const isDual = DUAL_SCOPE_ROLES.has(regRole)
+  // A dual-scope role picks its own axis; everything else is decided by role.
+  const bindTo: 'site' | 'warehouse' = Form.useWatch('bind_to', regForm) ?? 'site'
+  const isScoped = SCOPED_ROLES.has(regRole) || (isDual && bindTo === 'site')
+  const needsWarehouse = isDual && bindTo === 'warehouse'
   const { data: regSites, isLoading: sitesLoading } = useRegisterSites(mode === 'register')
+  const { data: regWarehouses, isLoading: whLoading } =
+    useRegisterWarehouses(mode === 'register' && isDual)
   const [serverOpen, setServerOpen] = useState(false)
 
   const onLogin = async (v: { username: string; password: string }) => {
@@ -66,8 +86,17 @@ export default function LoginPage() {
   }
 
   const onRegister = async (v: Record<string, unknown>) => {
+    // `bind_to` is a UI-only radio for the dual-scope role — the API takes
+    // the binding itself, and sending both site_id and warehouse_id is a 422
+    // by design, so the unused one is stripped rather than sent empty.
+    const { bind_to: _bindTo, ...payload } = v
+    void _bindTo
+    if (isDual) {
+      if (bindTo === 'site') delete payload.warehouse_id
+      else delete payload.site_id
+    }
     try {
-      await register.mutateAsync(v)
+      await register.mutateAsync(payload)
       message.success('Request submitted — an admin will review it before you can sign in.')
       setMode('login')
     } catch (e) {
@@ -102,17 +131,56 @@ export default function LoginPage() {
               <Form.Item name="username" rules={[{ required: true, message: 'Username' }]}>
                 <Input prefix={<UserOutlined />} placeholder="Username" autoFocus />
               </Form.Item>
-              {/* No length rule on SIGN-IN: the 12-char policy binds new and
-                  reset credentials, and existing shorter passwords must still
-                  authenticate. Enforcing it here would lock those users out. */}
-              <Form.Item name="password" rules={[{ required: true, message: 'Password is required' }]}>
-                <Input.Password prefix={<LockOutlined />} placeholder="Password (min 6)" />
+              {/* The policy IS enforced here — this form SETS a credential.
+                  (The sign-in form deliberately does not: existing shorter
+                  passwords must still authenticate, and a rule there would
+                  lock those users out rather than protect anyone.) The
+                  message names the whole requirement at once; the server
+                  repeats every failure in its 422 if this is bypassed. */}
+              <Form.Item name="password" rules={[
+                { required: true, message: 'Password is required' },
+                {
+                  validator: (_, value: string) => {
+                    const problems = passwordProblems(value ?? '')
+                    return problems.length
+                      ? Promise.reject(new Error('Password must ' + problems.join('; ') + '.'))
+                      : Promise.resolve()
+                  },
+                },
+              ]}>
+                <Input.Password prefix={<LockOutlined />}
+                  placeholder="Password (8+, with A-Z, 0-9 and a symbol)" />
               </Form.Item>
               <Form.Item name="role" label="Requested role" rules={[{ required: true }]}>
                 <Select options={REGISTER_ROLES}
-                  onChange={() => regForm.setFieldsValue({ site_id: undefined, location: undefined })} />
+                  onChange={() => regForm.setFieldsValue({
+                    site_id: undefined, location: undefined,
+                    warehouse_id: undefined, bind_to: 'site',
+                  })} />
               </Form.Item>
-              {isScoped ? (
+              {isDual && (
+                // A quality inspector belongs to a site OR a warehouse —
+                // exactly one, and which one decides everything they can see.
+                <Form.Item name="bind_to" label="Where do you work?"
+                  initialValue="site" tooltip="A quality inspector is based at one site or at one warehouse — not both.">
+                  <Segmented block options={[
+                    { label: 'At a site', value: 'site' },
+                    { label: 'At a warehouse', value: 'warehouse' },
+                  ]} />
+                </Form.Item>
+              )}
+              {needsWarehouse ? (
+                <Form.Item name="warehouse_id" label="Warehouse"
+                  rules={[{ required: true, message: 'Pick the warehouse you work at' }]}>
+                  <Select
+                    placeholder={whLoading ? 'Loading warehouses…' : 'Select your warehouse'}
+                    loading={whLoading}
+                    options={(regWarehouses ?? []).map((w) => ({
+                      value: w.id, label: w.name ? `${w.id} — ${w.name}` : w.id }))}
+                    notFoundContent="No warehouses yet — ask an admin to create one"
+                  />
+                </Form.Item>
+              ) : isScoped ? (
                 // Scoped roles work AT a site — mandatory, admin-created list only.
                 <Form.Item name="site_id" label="Site"
                   rules={[{ required: true, message: 'Site is required for this role' }]}>

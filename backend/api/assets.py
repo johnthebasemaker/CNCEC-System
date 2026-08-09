@@ -8,12 +8,28 @@ backend/api/assets.py — serialised asset tracking, and where things are.
     PATCH  /assets/{id}/location       move it (rack, free text, and/or GPS)
     PATCH  /assets/{id}                edit status / holder / notes
     DELETE /assets/{id}                retire a unit                  (write)
+    POST   /assets/{id}/transfer       ask to move it to another site
+    GET    /assets/transfers           the transfer queue
+    POST   /assets/transfers/{id}/decide   source HOD approves / rejects
 
 THE PROBLEM THIS SOLVES. Two hammers share one SAP code, so scanning either
 label resolves to the same inventory row. `asset_units` is one row per physical
-thing, keyed `(Site_ID, SAP_Code, serial_no)`, and `/assets/resolve` is what
+thing, keyed **`(SAP_Code, serial_no)` GLOBALLY**, and `/assets/resolve` is what
 turns a scan into "this exact hammer" — or, when the sticker only carries the
 SAP, into "which of these three?".
+
+⚠️ THE KEY USED TO INCLUDE `Site_ID`, and that was wrong. Site in the key
+means hammer #A-1042 can exist at CNCEC *and* somewhere else at the same
+time: two rows, two custody chains, two GPS fixes, one physical hammer. A
+serial is stamped on the object, not issued per yard. `Site_ID` remains on
+the row because it is WHERE THE THING IS — data, not identity — and it moves
+only through an APPROVED TRANSFER, never a silent update (alembic
+a3c17e9b25d4).
+
+WHY THE SOURCE SITE APPROVES. The site LOSING the asset is the one with
+something at stake and the only one that can confirm it physically left. A
+receiving site that could pull an asset across on its own say-so would make
+"where is it" a question of who edited last.
 
 GPS IS BEST-EFFORT, ALWAYS.
 `lat`/`lng` arrive from the browser's `navigator.geolocation` and are optional
@@ -46,6 +62,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .auth import get_current_user, require_level, resolve_site_param, site_scope
 from .db import get_session
 from .services.ledger import _MD, write_audit
+from .services.notifications import dispatch
 
 router = APIRouter(prefix="/assets", tags=["asset tracking"])
 
@@ -53,6 +70,8 @@ unit_t = _MD.tables["asset_units"]
 move_t = _MD.tables["asset_movements"]
 loc_t = _MD.tables["storage_locations"]
 inventory_t = _MD.tables["inventory"]
+transfer_t = _MD.tables["asset_transfers"]
+sysset_t = _MD.tables["system_settings"]
 
 # Coordinates outside these are not a place on Earth; a bad sensor reading
 # should be rejected at the door rather than stored and plotted later.
@@ -198,7 +217,21 @@ async def create_asset(body: UnitCreate,
             insert(unit_t).values(**vals).returning(unit_t.c["id"]))).scalar_one()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(409, f"{sap} serial {body.serial_no!r} already exists at {site}")
+        # The uniqueness is GLOBAL now (alembic a3c17e9b25d4), so name where
+        # the existing one actually is — "already exists at your site" was
+        # the old message and would now be a lie whenever it is elsewhere.
+        where = (await session.execute(
+            select(unit_t.c["Site_ID"], unit_t.c["status"], unit_t.c["holder"])
+            .where(func.trim(unit_t.c["SAP_Code"]) == sap,
+                   func.trim(unit_t.c["serial_no"]) == body.serial_no.strip()))).first()
+        if where is None:
+            raise HTTPException(409, f"{sap} serial {body.serial_no!r} already exists")
+        raise HTTPException(
+            409, f"{sap} serial {body.serial_no!r} is already registered at "
+                 f"{where[0]} ({where[1]}{', held by ' + where[2] if where[2] else ''}). "
+                 "A serial number identifies ONE physical item — if it has moved "
+                 "here, request a transfer from that site rather than registering "
+                 "it again.")
     # The registration IS the first movement — otherwise the history starts
     # with a gap and "where has this been" cannot answer for the first leg.
     await session.execute(insert(move_t).values(
@@ -258,6 +291,29 @@ async def resolve(scan: str = Query(min_length=1, max_length=200),
         return {"kind": "choice", "reason": "several_units", "SAP_Code": s,
                 "units": units}
     return {"kind": "material", "SAP_Code": s}
+
+
+# ⚠️ DECLARED BEFORE `/{unit_id}`. FastAPI matches in declaration order, so a
+# literal path that sits after a parameterised sibling is unreachable —
+# GET /assets/transfers would resolve to get_asset(unit_id="transfers") and
+# answer 422 "not a valid integer". `/resolve` above is here for the same
+# reason; keep any new literal route in this block.
+@router.get("/transfers", summary="Asset transfer requests")
+async def list_transfers(status: Optional[str] = None,
+                         user: dict = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session)):
+    stmt = select(transfer_t)
+    if status:
+        stmt = stmt.where(transfer_t.c["status"] == status)
+    scope = site_scope(user)
+    if scope is not None:
+        # Both ends see it: the site losing the asset has to decide, and the
+        # site expecting it needs to know whether it is coming.
+        stmt = stmt.where((transfer_t.c["from_site"] == scope)
+                          | (transfer_t.c["to_site"] == scope))
+    rows = (await session.execute(
+        stmt.order_by(transfer_t.c["id"].desc()).limit(300))).mappings().all()
+    return {"items": [dict(r) for r in rows]}
 
 
 @router.get("/{unit_id}", summary="One unit + its recent movements")
@@ -339,6 +395,166 @@ async def move_asset(unit_id: int, body: MoveBody,
     out = await _enrich(session, _rows(await session.execute(
         select(unit_t).where(unit_t.c["id"] == unit_id))))
     return {"updated": True, "unit": out[0], "gps_recorded": bool(gps)}
+
+
+# ─── site transfers (approved by the site giving the asset away) ──────────────
+class TransferIn(BaseModel):
+    to_site: str
+    reason: str = Field(..., min_length=3)
+
+
+class TransferDecideIn(BaseModel):
+    action: str = Field(..., pattern="^(approve|reject)$")
+    notes: Optional[str] = None
+
+
+async def _site_names(session: AsyncSession) -> list[str]:
+    rows = (await session.execute(
+        select(sysset_t.c["value"]).where(sysset_t.c["category"] == "Site")
+        .order_by(sysset_t.c["id"]))).all()
+    return [r[0] for r in rows]
+
+
+@router.post("/{unit_id}/transfer", status_code=201,
+             summary="Request that this asset move to another site")
+async def request_transfer(unit_id: int, body: TransferIn,
+                           user: dict = Depends(require_level(1)),
+                           session: AsyncSession = Depends(get_session)):
+    """Anyone who can MOVE an asset may ask to transfer it; the source HOD agrees.
+
+    `require_level(1)` matches the rest of this module — registering, moving
+    and retiring are all level 1 — and asking for a transfer is the same
+    class of act. It sits deliberately BELOW the approval so that requesting
+    and releasing are two different people: a supervisor or warehouse user
+    raises it, and only the source site's HOD (level 2) can complete it.
+
+    (Store keepers are level 0 here and cannot raise one, consistent with not
+    being able to register or move a unit either — see the module docstring.)
+    """
+    to_site = (body.to_site or "").strip()
+    cur = (await session.execute(
+        select(unit_t).where(unit_t.c["id"] == unit_id))).mappings().first()
+    if cur is None:
+        raise HTTPException(404, "asset unit not found")
+    if to_site == cur["Site_ID"]:
+        raise HTTPException(422, f"this asset is already at {to_site}")
+    if to_site not in await _site_names(session):
+        raise HTTPException(422, f"unknown site {to_site!r} — pick an admin-created site")
+    try:
+        tid = (await session.execute(insert(transfer_t).values(
+            asset_unit_id=unit_id, SAP_Code=cur["SAP_Code"],
+            serial_no=cur["serial_no"], from_site=cur["Site_ID"], to_site=to_site,
+            reason=body.reason.strip(), requested_by=user["username"],
+        ).returning(transfer_t.c["id"]))).scalar_one()
+    except IntegrityError:
+        # ux_asset_transfer_open — one open request per asset, enforced in the
+        # database so two sites cannot both hold a claim on the same hammer.
+        await session.rollback()
+        raise HTTPException(
+            409, "this asset already has a transfer awaiting the source site's HOD")
+    await write_audit(session, user["username"], "ASSET_TRANSFER_REQUEST",
+                      "asset_transfers",
+                      f"id={tid} {cur['SAP_Code']}/{cur['serial_no']} "
+                      f"{cur['Site_ID']}→{to_site}")
+    await dispatch(
+        session, event_key="asset_transfer_requested",
+        recipient_role="hod", recipient_site=cur["Site_ID"],
+        wa_template="action_required",
+        title=f"Asset transfer needs your approval — {cur['SAP_Code']}",
+        body=(f"{user['username']} asks to move serial {cur['serial_no']} from "
+              f"{cur['Site_ID']} to {to_site}. Reason: {body.reason.strip()}. "
+              "It stays on your books until you approve."),
+        link_page="/assets", related_table="asset_transfers",
+        related_ref=tid, created_by=user["username"])
+    await session.commit()
+    return {"requested": True, "id": tid, "from_site": cur["Site_ID"],
+            "to_site": to_site, "status": "pending_source_hod"}
+
+
+@router.post("/transfers/{tid}/decide",
+             summary="Source site's HOD approves or rejects an asset transfer")
+async def decide_transfer(tid: int, body: TransferDecideIn,
+                          user: dict = Depends(require_level(2)),
+                          session: AsyncSession = Depends(get_session)):
+    """Approval is the ONLY thing that moves `asset_units.Site_ID`.
+
+    The whole point of the workflow: an asset does not change hands because
+    somebody typed a different site into a form. It changes hands because the
+    site that had it said so, and the movement log records who.
+    """
+    row = (await session.execute(select(transfer_t)
+           .where(transfer_t.c["id"] == tid))).mappings().first()
+    if row is None:
+        raise HTTPException(404, f"transfer {tid} not found")
+    if row["status"] != "pending_source_hod":
+        raise HTTPException(409, f"transfer {tid} is already {row['status']}")
+    scope = site_scope(user)
+    # The SOURCE site decides. A destination HOD approving their own incoming
+    # transfer would be exactly the self-service move this prevents.
+    if scope is not None and row["from_site"] != scope:
+        raise HTTPException(
+            403, f"only {row['from_site']}'s HOD can release this asset")
+
+    if body.action == "reject":
+        await session.execute(update(transfer_t).where(transfer_t.c["id"] == tid)
+                              .values(status="rejected", decided_by=user["username"],
+                                      decided_at=func.now(),
+                                      decision_notes=(body.notes or "").strip() or None))
+        await write_audit(session, user["username"], "ASSET_TRANSFER_REJECT",
+                          "asset_transfers", f"id={tid}")
+        await dispatch(session, event_key="asset_transfer_decided",
+                       recipient_user=row["requested_by"], wa_template="status_update",
+                       title=f"Asset transfer rejected — {row['SAP_Code']}",
+                       body=(f"{user['username']} kept serial {row['serial_no']} at "
+                             f"{row['from_site']}."
+                             + (f" {body.notes.strip()}" if body.notes else "")),
+                       link_page="/assets", related_table="asset_transfers",
+                       related_ref=tid, created_by=user["username"])
+        await session.commit()
+        return {"decided": True, "id": tid, "status": "rejected"}
+
+    cur = (await session.execute(select(unit_t)
+           .where(unit_t.c["id"] == row["asset_unit_id"]))).mappings().first()
+    if cur is None:
+        raise HTTPException(409, "the asset no longer exists")
+    # The move is logged BEFORE the row is updated, and both in one
+    # transaction, so the cached position can never disagree with its history
+    # — the same discipline move_asset() uses.
+    mid = (await session.execute(insert(move_t).values(
+        asset_unit_id=cur["id"], moved_by=user["username"],
+        from_location_id=cur["current_location_id"], to_location_id=None,
+        from_note=cur["location_note"],
+        to_note=f"transferred to {row['to_site']}",
+        source="site_transfer", status=cur["status"],
+        note=f"approved by {user['username']}: {row['reason']}",
+    ).returning(move_t.c["id"]))).scalar_one()
+    await session.execute(update(unit_t).where(unit_t.c["id"] == cur["id"]).values(
+        Site_ID=row["to_site"],
+        # The rack belonged to the OLD site, so it cannot survive the move —
+        # leaving it would point at a shelf in another yard.
+        current_location_id=None, location_note=f"in transit from {row['from_site']}",
+        last_seen_at=func.now(), last_seen_by=user["username"]))
+    await session.execute(update(transfer_t).where(transfer_t.c["id"] == tid).values(
+        status="approved", decided_by=user["username"], decided_at=func.now(),
+        decision_notes=(body.notes or "").strip() or None, movement_id=mid))
+    await write_audit(session, user["username"], "ASSET_TRANSFER_APPROVE",
+                      "asset_transfers",
+                      f"id={tid} {cur['SAP_Code']}/{cur['serial_no']} "
+                      f"{row['from_site']}→{row['to_site']} movement={mid}")
+    for site, title in ((row["to_site"], "Asset arriving"),
+                        (row["from_site"], "Asset released")):
+        await dispatch(session, event_key="asset_transfer_decided", severity="success",
+                       recipient_role="store_keeper", recipient_site=site,
+                       wa_template="status_update",
+                       title=f"{title} — {cur['SAP_Code']} #{cur['serial_no']}",
+                       body=(f"{user['username']} approved the move "
+                             f"{row['from_site']} → {row['to_site']}. "
+                             "Scan it in on arrival to set its rack."),
+                       link_page="/assets", related_table="asset_transfers",
+                       related_ref=tid, created_by=user["username"])
+    await session.commit()
+    return {"decided": True, "id": tid, "status": "approved",
+            "to_site": row["to_site"], "movement_id": mid}
 
 
 class UnitPatch(BaseModel):

@@ -30,6 +30,10 @@ class CreatePOIn(BaseModel):
     vendor_code: Optional[str] = None
     vendor_name: Optional[str] = None
     expected_delivery: Optional[str] = None
+    # QSEP slice 6 — the entry_attachments id returned by /ai/extract/po, so
+    # the PO keeps the scan its figures were read from. Validated in the
+    # service (right doc_type, uploaded by this caller), never trusted.
+    source_attachment_id: Optional[int] = None
 
 
 class AssignIn(BaseModel):
@@ -85,7 +89,8 @@ async def create_po(body: CreatePOIn = Body(...),
                 session, username=user["username"], pr_number=body.pr_number,
                 site_id=body.site_id, po_number=body.po_number,
                 vendor_code=body.vendor_code, vendor_name=body.vendor_name,
-                expected_delivery=body.expected_delivery)
+                expected_delivery=body.expected_delivery,
+                source_attachment_id=body.source_attachment_id)
         if res.get("error"):
             raise HTTPException(409, res["error"])
         return res

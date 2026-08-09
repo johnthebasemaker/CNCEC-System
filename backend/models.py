@@ -151,7 +151,14 @@ class Employees(Base):
 class EntryAttachments(Base):
     __tablename__ = "entry_attachments"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    Site_ID = Column(Text, nullable=False)
+    # NULLABLE since alembic e6a91c37b208. Every uploader used to be a site
+    # Store Keeper; a PO scan is uploaded by LOGISTICS, who are unscoped by
+    # design and raise POs across every site, so NOT NULL made storing one
+    # impossible. NULL already reads correctly under the Document Library's
+    # scoping — a scoped caller filters `Site_ID == <site>`, which a NULL
+    # never matches (invisible, fail-closed), while the unscoped uploader
+    # gets no filter and sees it.
+    Site_ID = Column(Text)
     doc_type = Column(Text, nullable=False)
     doc_number = Column(Text, nullable=False)
     entry_table = Column(Text)
@@ -369,6 +376,12 @@ class PoRescheduleRequests(Base):
     decided_by = Column(Text)
     decided_at = Column(DateTime)
     decision_notes = Column(Text)
+    # normal | urgent (alembic e6a91c37b208). "Urgent delivery" is a
+    # reschedule to an EARLIER date; the flag is what makes the dispatch
+    # severity="critical", which bypasses the 16:00 evening digest. A request
+    # to bring a delivery forward that lands after the working day it meant
+    # to change is worthless.
+    urgency = Column(Text, nullable=False, server_default=text("'normal'"))
 
 class PoReturns(Base):
     __tablename__ = "po_returns"
@@ -1085,6 +1098,11 @@ class DeliveryNotes(Base):
     rejection_reason = Column(Text)
     created_by = Column(Text, nullable=False)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    # alembic e6a91c37b208 — drafted by auto_draft_dns after warehouse
+    # goods-in. Still a DRAFT needing a human to submit it; the flag is so a
+    # clerk can tell which rows in their queue they did not create.
+    auto_generated = Column(Integer, nullable=False, server_default=text('0'))
+    source_assignment_id = Column(Integer)
 
 class PoAssignments(Base):
     __tablename__ = "po_assignments"
@@ -1161,6 +1179,10 @@ class PrMaster(Base):
     submitted_to_logistics_at = Column(DateTime)
     submitted_to_logistics_by = Column(Text)
     logistics_status = Column(Text, server_default=text("'site_draft'"))
+    # entry_attachments.id of the scan these figures were read from (alembic
+    # e6a91c37b208). /ai/extract/pr used to read the upload, parse it and
+    # throw the bytes away — a PR created from a scan had no scan.
+    source_attachment_id = Column(Integer)
 
 class PurchaseOrders(Base):
     __tablename__ = "purchase_orders"
@@ -1189,9 +1211,14 @@ class PurchaseOrders(Base):
     Total_Amount = Column(Float, server_default=text('0'))
     Amount_In_Words = Column(Text)
     source = Column(Text, server_default=text("'manual'"))
+    # ⚠️ Legacy import columns. They keep the rows they already hold and
+    # NOTHING new is written to them — `entry_attachments` is the one
+    # document store from alembic e6a91c37b208 onward. Two blob columns for
+    # the same document is how the two disagree about which is current.
     attachment_blob = Column(LargeBinary)
     attachment_name = Column(Text)
     attachment_mime = Column(Text)
+    source_attachment_id = Column(Integer)   # entry_attachments.id of the scan
     status = Column(Text, server_default=text("'open'"))
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
@@ -1272,9 +1299,17 @@ class AssetUnits(Base):
     """One row per PHYSICAL THING (alembic e9f2a4c68b71).
 
     Two hammers share one SAP code, so a scan cannot say which one you are
-    holding. Identity is `(Site_ID, SAP_Code, serial_no)` — deliberately
+    holding. Identity is **`(SAP_Code, serial_no)`, GLOBALLY** — deliberately
     mirroring rule 1's lesson that what distinguishes two physical objects
     belongs IN THE KEY.
+
+    ⚠️ It used to include `Site_ID` (alembic e9f2a4c68b71), which let one
+    physical hammer exist as two rows at two sites with two custody chains
+    and two GPS fixes. A serial number is stamped on the object, not issued
+    per yard. `Site_ID` stays on the row because it is WHERE THE THING IS —
+    data, not identity — and it changes only through an approved transfer
+    (`asset_transfers`), never by a silent update. Widened key retired by
+    alembic a3c17e9b25d4.
 
     ASSETS ONLY: a row exists only where an operator creates one, so
     consumables simply have none. The workbook cannot seed this — its
@@ -1303,10 +1338,12 @@ class AssetUnits(Base):
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     __table_args__ = (
-        UniqueConstraint("Site_ID", "SAP_Code", "serial_no",
-                         name="uq_asset_units_site_sap_serial"),
+        UniqueConstraint("SAP_Code", "serial_no", name="uq_asset_units_sap_serial"),
         Index("ix_asset_units_sap_site", "SAP_Code", "Site_ID"),
         Index("ix_asset_units_serial", "serial_no"),
+        # Was the unique constraint; kept as an index because it is also the
+        # shape of every by-site asset lookup.
+        Index("ix_asset_units_site_sap_serial", "Site_ID", "SAP_Code", "serial_no"),
     )
 
 
@@ -1721,6 +1758,37 @@ class QcInspections(Base):
         # surface-shield issue. NOT indexed yet — rule 11 says an index is
         # benchmarked before it is added, and this table has zero rows.
     )
+
+
+class AssetTransfers(Base):
+    """Moving a physical asset between sites, approved by the site LOSING it.
+
+    Silently updating `asset_units.Site_ID` is how a tool leaves a yard
+    without anybody agreeing to it. The SOURCE site's HOD decides, because
+    that is the site with something at stake and the only one that can
+    confirm the thing physically left.
+
+    A partial unique index (`ux_asset_transfer_open`) allows exactly one
+    request per asset in `pending_source_hod`, so two sites cannot both hold
+    a claim on the same hammer with the second approval silently winning.
+    """
+    __tablename__ = "asset_transfers"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    asset_unit_id = Column(Integer, nullable=False)
+    SAP_Code = Column(Text, nullable=False)
+    serial_no = Column(Text, nullable=False)
+    from_site = Column(Text, nullable=False)
+    to_site = Column(Text, nullable=False)
+    reason = Column(Text, nullable=False)
+    requested_by = Column(Text, nullable=False)
+    requested_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    # pending_source_hod | approved | rejected | cancelled
+    status = Column(Text, nullable=False,
+                    server_default=text("'pending_source_hod'"))
+    decided_by = Column(Text)
+    decided_at = Column(DateTime)
+    decision_notes = Column(Text)
+    movement_id = Column(Integer)
 
 
 class QcTransferRequests(Base):

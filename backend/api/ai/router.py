@@ -16,6 +16,7 @@ philosophy as legacy AI_ENABLED=True.
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 from typing import Optional
 
@@ -23,7 +24,7 @@ from fastapi import (APIRouter, Body, Depends, File, HTTPException,
                      UploadFile)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,7 +48,11 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 _FLAG_DEFAULTS = {"ai_enabled": "1", "ai_assistant_enabled": "1",
                   "ai_doc_intel_enabled": "1", "ai_ocr_enabled": "1",
                   "ai_nl_search_enabled": "1", "ai_insights_enabled": "1",
-                  "ai_submission_intel_enabled": "1"}  # T1 reviewer summaries
+                  "ai_submission_intel_enabled": "1",  # T1 reviewer summaries
+                  # QSEP slice 6 — the scanned PR/PO vision lane. Separate
+                  # from ai_ocr_enabled so a site can keep handwriting OCR
+                  # while turning off the heavier purchase-document lane.
+                  "ocr_purchase_scans": "1"}
 
 
 async def _flags(session: AsyncSession) -> dict[str, bool]:
@@ -121,11 +126,30 @@ async def assistant(body: AskIn = Body(...),
 
 
 # --- Phase AI-2: document intelligence (PR/PO PDF extraction) -------------------
-# Preview-confirm workflow: these endpoints ONLY parse and return a preview —
-# nothing is written. The React side lets the user review/edit, then confirms
-# through the EXISTING audited services (POST /hod/prs → procurement.create_pr,
-# POST /logistics/pos → create_po_from_pr), which fixes the legacy
-# silent-insert flaw (PR/PO PDF uploads never wrote an audit row).
+# Preview-confirm workflow: these endpoints parse and return a preview — no
+# PR or PO row is written. The React side lets the user review/edit, then
+# confirms through the EXISTING audited services (POST /hod/prs →
+# procurement.create_pr, POST /logistics/pos → create_po_from_pr), which
+# fixes the legacy silent-insert flaw (PR/PO PDF uploads never wrote an audit
+# row).
+#
+# QSEP slice 6 changed two things about them.
+#
+# **THE DOCUMENT IS NOW STORED.** These endpoints used to `await file.read()`,
+# parse the bytes and drop them: a PR created from a scan had no scan, and
+# "all documents must be securely stored" was simply unmet. The upload is
+# persisted to `entry_attachments` FIRST — before parsing, so a file that
+# defeats the parser is still on file — and the returned `attachment_id` is
+# what the confirm step links.
+#
+# **A SCAN GOES TO THE VISION LANE.** Calibrated on a real file:
+# `PO#4710003121_PR681.pdf` is a genuine GI purchase order that was printed,
+# signed and scanned back in. It carries ZERO text characters, so pdfplumber
+# returns empty pages, the layout regexes match nothing, and the old
+# behaviour was a cheerful 200 with an empty item list. The lane is chosen by
+# `pdf_extract.looks_scanned()` — whether text CAME OUT — never by the
+# content type, because a .pdf is not evidence of text and routing on the
+# extension sends that file down the dead path forever.
 
 async def _require_doc_intel(session: AsyncSession) -> None:
     flags = await _flags(session)
@@ -133,11 +157,97 @@ async def _require_doc_intel(session: AsyncSession) -> None:
         raise HTTPException(503, "Document intelligence is switched off in Settings.")
 
 
+_MAX_DOC_MB = 15
+_DOC_MIMES = ("application/pdf", "image/")
+
+
 async def _read_pdf_upload(file: UploadFile) -> bytes:
     data = await file.read()
-    if len(data) > 15 * 1024 * 1024:
-        raise HTTPException(422, "PDF too large (15 MB max)")
+    if len(data) > _MAX_DOC_MB * 1024 * 1024:
+        raise HTTPException(422, f"file too large ({_MAX_DOC_MB} MB max)")
+    if not data:
+        raise HTTPException(422, "empty file")
+    mime = (file.content_type or "").lower()
+    if mime and not any(mime.startswith(p) for p in _DOC_MIMES):
+        raise HTTPException(422, "upload a PDF or a photo of the document")
     return data
+
+
+async def _store_scan(session: AsyncSession, *, file: UploadFile, data: bytes,
+                      doc_type: str, user: dict) -> int:
+    """Persist the upload and return its entry_attachments id.
+
+    Stored BEFORE parsing, deliberately. A document that defeats the parser
+    is exactly the one somebody will need to look at, and storing only on
+    success would lose precisely those.
+
+    `Site_ID` comes from the caller's own binding and is left NULL for the
+    unscoped roles (logistics, admin) who raise POs across every site —
+    `entry_attachments.Site_ID` is nullable and the Document Library filters
+    on it, so a NULL is "not site-specific" rather than a lie about which
+    site it belongs to.
+    """
+    from ..services.ledger import write_audit
+    attachments_t = _MD.tables["entry_attachments"]
+    aid = (await session.execute(insert(attachments_t).values(
+        Site_ID=(user.get("site_id") or None), doc_type=doc_type,
+        doc_number=_dt.date.today().strftime("%d%m%y"),
+        file_name=file.filename or f"{doc_type}.pdf",
+        mime_type=(file.content_type or None), file_size=len(data),
+        file_blob=data, uploaded_by=user["username"],
+    ).returning(attachments_t.c["id"]))).scalar_one()
+    await write_audit(session, user["username"], "SCAN_UPLOAD", "entry_attachments",
+                      f"id={aid} type={doc_type} name={file.filename!r} "
+                      f"bytes={len(data)}")
+    return aid
+
+
+async def _queue_vision(session: AsyncSession, *, data: bytes, user: dict,
+                        attachment_id: int, doc_hint: str) -> dict:
+    """Hand a scanned purchase document to the vision worker."""
+    flags = await _flags(session)
+    if not flags.get("ocr_purchase_scans", True):
+        raise HTTPException(
+            503, "This document has no readable text (it is a scan), and the "
+                 "scanned-document reader is switched off in Settings. The "
+                 "file has been stored — enter the lines manually.")
+    try:
+        prepped = ocr.prep_image_for_vision(_pdf_first_page_png(data)
+                                            if data[:4] == b"%PDF" else data)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            422, f"The document was stored (id {attachment_id}) but could not be "
+                 f"prepared for reading: {e}")
+    job_id = await ai_jobs.create_job(session, kind="ocr_purchase_doc",
+                                   actor=user["username"],
+                                   site_id=user.get("site_id") or None,
+                                   image_b64=ai_jobs.to_b64(prepped))
+    await session.commit()
+    ai_jobs.spawn(job_id)
+    return {"mode": "vision", "job_id": job_id, "attachment_id": attachment_id,
+            "doc_hint": doc_hint,
+            "message": ("This document is a scan with no readable text, so it is "
+                        "being read by the vision model. Poll /ai/jobs/{job_id}.")}
+
+
+def _pdf_first_page_png(data: bytes) -> bytes:
+    """Render page 1 of a scanned PDF to PNG bytes for the vision model.
+
+    pdfplumber's page renderer is used rather than adding a dependency; it is
+    already installed for the text lane. A scanned PO is one page in every
+    sample we have, and rendering the whole document would multiply the
+    vision cost for pages that are signature blocks.
+    """
+    import io as _io
+
+    import pdfplumber
+    with pdfplumber.open(_io.BytesIO(data)) as pdf:
+        if not pdf.pages:
+            raise ValueError("the PDF has no pages")
+        img = pdf.pages[0].to_image(resolution=170)
+        buf = _io.BytesIO()
+        img.original.save(buf, format="PNG")
+        return buf.getvalue()
 
 
 @router.post("/extract/pr", summary="Extract a Purchase Request PDF (preview only)")
@@ -152,10 +262,20 @@ async def extract_pr(file: UploadFile = File(...),
     import asyncio as _aio
     await _require_doc_intel(session)
     data = await _read_pdf_upload(file)
+    # Stored FIRST — a file that defeats the parser is the one somebody will
+    # need to look at, and storing only on success loses exactly those.
+    attachment_id = await _store_scan(session, file=file, data=data,
+                                      doc_type="pr_scan", user=user)
+    is_pdf = data[:4] == b"%PDF"
+    if not is_pdf or pdf_extract.looks_scanned(data):
+        return await _queue_vision(session, data=data, user=user,
+                                   attachment_id=attachment_id, doc_hint="PR")
     try:
         parsed = await _aio.to_thread(pdf_extract.parse_pr_pdf, data)
     except pdf_extract.PdfExtractError as e:
-        raise HTTPException(422, str(e))
+        await session.commit()   # keep the stored document; the parse failed
+        raise HTTPException(422, f"{e} (the file was stored as attachment "
+                                 f"{attachment_id})")
 
     codes = [it["material_code"] for it in parsed["items"]]
     inv = {}
@@ -178,10 +298,13 @@ async def extract_pr(file: UploadFile = File(...),
                             "Requested_Qty": it["qty"]})
         else:
             unmatched.append(it)
-    return {"pr_number": parsed["pr_number"], "matched": matched,
+    await session.commit()
+    return {"mode": "text", "attachment_id": attachment_id,
+            "pr_number": parsed["pr_number"], "matched": matched,
             "unmatched": unmatched,
-            "hint": ("confirm via POST /hod/prs with the matched lines — "
-                     "unmatched codes must be added to the Master DB first")}
+            "hint": ("confirm via POST /hod/prs with the matched lines and "
+                     f"source_attachment_id={attachment_id} — unmatched codes "
+                     "must be added to the Master DB first")}
 
 
 @router.post("/extract/po", summary="Extract a Purchase Order PDF (preview only)")
@@ -196,12 +319,23 @@ async def extract_po(file: UploadFile = File(...),
     import asyncio as _aio
     await _require_doc_intel(session)
     data = await _read_pdf_upload(file)
+    attachment_id = await _store_scan(session, file=file, data=data,
+                                      doc_type="po_scan", user=user)
+    is_pdf = data[:4] == b"%PDF"
+    if not is_pdf or pdf_extract.looks_scanned(data):
+        # This is the branch a real GI purchase order takes:
+        # PO#4710003121_PR681.pdf has zero text and five page images.
+        return await _queue_vision(session, data=data, user=user,
+                                   attachment_id=attachment_id, doc_hint="PO")
     try:
         parsed = await _aio.to_thread(pdf_extract.parse_po_pdf, data,
                                       classify_rl_bl_family)
     except pdf_extract.PdfExtractError as e:
-        raise HTTPException(422, str(e))
-    return parsed
+        await session.commit()
+        raise HTTPException(422, f"{e} (the file was stored as attachment "
+                                 f"{attachment_id})")
+    await session.commit()
+    return {"mode": "text", "attachment_id": attachment_id, **parsed}
 
 
 # --- Phase AI-3: handwriting OCR (async jobs + offline paste lane) ----------------

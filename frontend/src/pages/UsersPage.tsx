@@ -11,6 +11,7 @@ import {
   useResetPassword, useResetUser2fa, useSites, useUpdateUser,
 } from '../api/hooks'
 import type { Row } from '../api/client'
+import { passwordProblems } from '../lib/password'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -162,8 +163,16 @@ export default function UsersPage() {
               <Form.Item name="username" label="Username" rules={[{ required: true }]}>
                 <Input autoComplete="off" placeholder="e.g. jdoe" />
               </Form.Item>
-              <Form.Item name="password" label="Password" rules={[{ required: true, min: 12, message: 'At least 12 characters' }]}>
-                <Input.Password autoComplete="new-password" placeholder="min 12 characters" />
+              <Form.Item name="password" label="Password" rules={[
+              { required: true, message: 'Password is required' },
+              { validator: (_, v: string) => {
+                  const p = passwordProblems(v ?? '')
+                  return p.length
+                    ? Promise.reject(new Error('Password must ' + p.join('; ') + '.'))
+                    : Promise.resolve()
+                } },
+            ]}>
+                <Input.Password autoComplete="new-password" placeholder="8+, with A-Z, 0-9 and a symbol" />
               </Form.Item>
             </>
           )}
@@ -186,8 +195,16 @@ export default function UsersPage() {
             </>
           )}
           {mode === 'password' && (
-            <Form.Item name="password" label="New password" rules={[{ required: true, min: 12, message: 'At least 12 characters' }]}>
-              <Input.Password autoComplete="new-password" placeholder="min 12 characters" />
+            <Form.Item name="password" label="New password" rules={[
+              { required: true, message: 'Password is required' },
+              { validator: (_, v: string) => {
+                  const p = passwordProblems(v ?? '')
+                  return p.length
+                    ? Promise.reject(new Error('Password must ' + p.join('; ') + '.'))
+                    : Promise.resolve()
+                } },
+            ]}>
+              <Input.Password autoComplete="new-password" placeholder="8+, with A-Z, 0-9 and a symbol" />
             </Form.Item>
           )}
         </Form>

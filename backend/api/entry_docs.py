@@ -50,7 +50,14 @@ settings_t = _MD.tables["app_settings"]
 # It is deliberately NOT in the `assert_entry_docs` batch gate below — that
 # gate is per-BATCH ("one note covers this shift's entries"), while a safety
 # approval is per-PERSON-per-item. services/ppe.py validates it per line.
-_DOC_TYPES = ("consumption", "receipt", "return", "safety_approval")
+# `pr_scan` / `po_scan` (QSEP slice 6) are written by /ai/extract/{pr,po},
+# not uploaded through this endpoint — they are listed so the Document
+# Library filter and the download route recognise them. They are NOT in the
+# `_UPLOADABLE` set below: a purchase-document scan enters through the
+# extract endpoint so it is parsed and linked, never as a loose attachment.
+_DOC_TYPES = ("consumption", "receipt", "return", "safety_approval",
+              "pr_scan", "po_scan")
+_UPLOADABLE = ("consumption", "receipt", "return", "safety_approval")
 _MAX_FILE_MB = 15
 _ALLOWED_MIME_PREFIXES = ("image/", "application/pdf",
                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -130,8 +137,8 @@ async def upload_attachment(file: UploadFile = File(...),
                             entry_date: Optional[str] = Form(None),
                             user: dict = Depends(require_roles("store_keeper")),
                             session: AsyncSession = Depends(get_session)):
-    if doc_type not in _DOC_TYPES:
-        raise HTTPException(422, f"doc_type must be one of {_DOC_TYPES}")
+    if doc_type not in _UPLOADABLE:
+        raise HTTPException(422, f"doc_type must be one of {_UPLOADABLE}")
     mime = (file.content_type or "").lower()
     if mime and not any(mime.startswith(p) for p in _ALLOWED_MIME_PREFIXES):
         raise HTTPException(422, "only images, PDFs and XLSX files are accepted")

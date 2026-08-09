@@ -87,6 +87,44 @@ def _open_pdf(pdf_bytes: bytes):
         raise PdfExtractError(f"could not open the PDF ({type(e).__name__})")
 
 
+def looks_scanned(pdf_bytes: bytes, *, min_chars: int = 40) -> bool:
+    """True when this PDF carries no extractable text — a SCAN, not a document.
+
+    ⚠️ This is the routing signal for QSEP slice 6, and it exists because of a
+    real file. `PO#4710003121_PR681.pdf`, a genuine General Industries
+    purchase order, contains **zero text characters** and five full-page
+    images: it was printed, signed, and scanned back in. pdfplumber returns
+    an empty string for every page, and the layout regexes below then match
+    nothing — so the old behaviour was a 200 response carrying an empty item
+    list. A parser that "succeeds" with nothing in it is worse than one that
+    fails, because the user has no idea which happened.
+
+    So the lane is chosen by whether text CAME OUT, never by the MIME type or
+    the extension. A `.pdf` is not evidence of text, and that is the whole
+    trap: routing on content-type sends this file down the pdfplumber path
+    forever.
+
+    `min_chars` is a floor rather than a zero-check because a scanned page
+    often carries a few stray characters from an OCR layer the scanner added,
+    or a text watermark stamped over the image — a handful of characters is
+    not a readable purchase order.
+    """
+    try:
+        with _open_pdf(pdf_bytes) as pdf:
+            total = 0
+            for page in pdf.pages[:5]:      # 5 pages is plenty to decide
+                total += len((page.extract_text() or "").strip())
+                if total >= min_chars:
+                    return False
+            return True
+    except PdfExtractError:
+        raise
+    except Exception:
+        # Unreadable in a way _open_pdf did not catch — let the vision lane
+        # try rather than failing outright. It renders pixels, not structure.
+        return True
+
+
 def _f(s: Optional[str]) -> float:
     try:
         return float((s or "0").replace(",", ""))

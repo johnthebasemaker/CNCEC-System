@@ -1009,9 +1009,14 @@ async def plan_asset_units(session: AsyncSession, data: bytes, site_id: str,
     known_saps = {r[0].strip() for r in (await session.execute(
         select(inventory_t.c["SAP_Code"]))).all() if r[0]}
     known_saps |= extra_saps or set()   # dry-run: inventory was never written
+    # Deliberately NOT filtered by site (alembic a3c17e9b25d4). Identity is
+    # (SAP_Code, serial_no) globally, so a serial already registered at
+    # ANOTHER site is an existing unit, not a new one — proposing it would
+    # have the workbook conjure a second row for a hammer that already
+    # exists elsewhere, and the insert would then hit the unique constraint
+    # anyway. The site filter was correct only while site was part of the key.
     have = {(r[0], r[1]) for r in (await session.execute(
-        select(asset_unit_t.c["SAP_Code"], asset_unit_t.c["serial_no"])
-        .where(asset_unit_t.c["Site_ID"] == site_id))).all()}
+        select(asset_unit_t.c["SAP_Code"], asset_unit_t.c["serial_no"]))).all()}
 
     unknown_status = Counter()
     seen: set[tuple[str, str]] = set()
@@ -1100,7 +1105,15 @@ async def apply_asset_units(session: AsyncSession, plan: dict,
     for unit in plan.get("inserts", []):
         new_id = (await session.execute(
             pg_insert(asset_unit_t).values(**unit, last_seen_at=func.now())
-            .on_conflict_do_nothing(constraint="uq_asset_units_site_sap_serial")
+            # (SAP_Code, serial_no) — GLOBAL since alembic a3c17e9b25d4. The
+            # constraint used to include Site_ID; naming the old one here is
+            # what broke when the key was narrowed, because ON CONFLICT ON
+            # CONSTRAINT fails hard on a name that no longer exists rather
+            # than degrading. Worth knowing for the SEMANTICS too: a serial
+            # already registered at ANOTHER site now conflicts and is skipped,
+            # which is right — the workbook must not conjure a second row for
+            # a hammer that already exists somewhere else.
+            .on_conflict_do_nothing(constraint="uq_asset_units_sap_serial")
             .returning(asset_unit_t.c["id"]))).scalar()
         if new_id is None:
             continue                # already there — see the docstring

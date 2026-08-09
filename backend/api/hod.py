@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import io
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -83,6 +83,10 @@ class CreatePRIn(BaseModel):
     supplier: Optional[str] = None
     notes: Optional[str] = None
     delivery_date: Optional[str] = None
+    # QSEP slice 6 — the entry_attachments id returned by /ai/extract/pr, so
+    # the PR keeps the scan its lines were read from. Validated in the
+    # service (right doc_type, uploaded by this caller), never trusted.
+    source_attachment_id: Optional[int] = None
 
 
 def _rows(res):
@@ -500,7 +504,8 @@ async def hod_pr_create(body: CreatePRIn = Body(...),
                 session, username=user["username"], site_id=body.site_id,
                 lines=[ln.model_dump() for ln in body.lines],
                 supplier=body.supplier, notes=body.notes,
-                delivery_date=body.delivery_date)
+                delivery_date=body.delivery_date,
+                source_attachment_id=body.source_attachment_id)
         if res.get("error"):
             raise HTTPException(409, res["error"])
         return res
@@ -606,6 +611,11 @@ class RescheduleRaiseIn(BaseModel):
     requested_date: str
     reason: str
     dn_number: Optional[str] = None
+    # QSEP slice 6 — "Urgent Delivery" is this request with urgency="urgent".
+    # It is the same workflow because it IS one: bringing a delivery forward
+    # is a reschedule to an earlier date. What the flag buys is severity
+    # "critical" on the dispatch, which bypasses the 16:00 evening digest.
+    urgency: Literal["normal", "urgent"] = "normal"
 
 
 @router.post("/reschedule", summary="Request a delivery-date reschedule (→ Logistics)")
@@ -616,7 +626,8 @@ async def hod_raise_reschedule(body: RescheduleRaiseIn = Body(...),
         res = await procurement.raise_reschedule(
             session, username=user["username"], role=user["role"],
             po_number=body.po_number, requested_date=body.requested_date,
-            reason=body.reason, dn_number=body.dn_number)
+            reason=body.reason, dn_number=body.dn_number,
+                urgency=body.urgency)
     if res.get("error"):
         raise HTTPException(409, res["error"])
     return res

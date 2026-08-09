@@ -80,3 +80,11 @@ reports_archive/
 /videos/*/.hyperframes/
 /videos/*/snapshots/
 /videos/*/assets/vendor/
+
+# Real PR/PO paperwork dropped in the repo root for OCR calibration
+# (QSEP slice 6). These are genuine commercial documents — vendor names,
+# prices, contacts — and are read locally to tune the parser, never
+# committed. The manuals and SOP PDFs the API serves stay tracked, so the
+# pattern is deliberately narrow rather than a blanket *.pdf.
+/PO#*.pdf
+/PR No *.pdf

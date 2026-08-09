@@ -15,7 +15,7 @@
  * without HTTPS all still record the move — the coordinate is simply absent,
  * and the UI says which happened instead of failing. See lib/geolocation.ts.
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   Alert, App, Button, Card, Col, Descriptions, Empty, Form, Input, List, Modal,
   Row, Select, Space, Switch, Tag, Timeline, Tooltip, Typography,
@@ -106,17 +106,40 @@ export default function AssetsPage() {
     onError: (e: { response?: { data?: { detail?: string } } }) =>
       message.error(e?.response?.data?.detail ?? 'Could not register that unit'),
   })
+  // Why the last attempt produced no coordinate, if it produced none. Held
+  // rather than announced at capture time: the old code toasted the reason
+  // BEFORE the save was sent, and its wording promised "the move was still
+  // recorded" — which was a lie whenever the save then failed, and a second,
+  // duplicate toast whenever it succeeded. One message, after the outcome is
+  // actually known.
+  const gpsMiss = useRef<{ reason: string; normal: boolean } | null>(null)
+
   const move = useMutation({
     mutationFn: ({ id, body }: { id: number; body: ARow }) =>
       api.patch(`/assets/${id}/location`, body).then((r) => r.data),
     onSuccess: (d) => {
-      message.success(d.gps_recorded
-        ? 'Location saved, with coordinates'
-        : 'Location saved (no coordinates)')
+      const miss = gpsMiss.current
+      if (d.gps_recorded) {
+        message.success('Move recorded, with GPS coordinates')
+      } else if (miss) {
+        // The SAVE is the headline and comes first; the missing coordinate is
+        // the footnote. `normal` failures are info, not warnings — being
+        // indoors is not a problem the user needs to solve.
+        message.open({
+          type: miss.normal ? 'info' : 'warning',
+          content: `Move recorded — saved without GPS. ${miss.reason}`,
+          duration: 6,
+        })
+      } else {
+        message.success('Move recorded')
+      }
+      gpsMiss.current = null
       invalidate()
     },
-    onError: (e: { response?: { data?: { detail?: string } } }) =>
-      message.error(e?.response?.data?.detail ?? 'Could not save that location'),
+    onError: (e: { response?: { data?: { detail?: string } } }) => {
+      gpsMiss.current = null
+      message.error(e?.response?.data?.detail ?? 'Could not save that location')
+    },
   })
 
   // A scan resolves to a unit, a choice, or an unregistered material — the
@@ -153,10 +176,11 @@ export default function AssetsPage() {
     }
     // Captured alongside the move, never in front of it: a declined permission
     // or a warehouse with no signal must not stop the update from landing.
+    gpsMiss.current = null
     if (useGps && !gpsBlocked) {
       const pos = await getPosition()
       if (pos.ok) body.gps = pos.fix
-      else message.info(pos.reason)
+      else gpsMiss.current = { reason: pos.reason, normal: pos.normal }
     }
     move.mutate({ id: Number(moveFor.id), body }, { onSuccess: () => setMoveFor(null) })
   }
@@ -166,7 +190,24 @@ export default function AssetsPage() {
       render: (v: string) => <b style={mono}>{v}</b> },
     { title: 'Serial', dataIndex: 'serial_no', width: 150,
       render: (v: string) => <span style={mono}>{v}</span> },
-    { title: 'Description', dataIndex: 'Equipment_Description', ellipsis: true },
+    // ⚠️ Was `ellipsis: true` with NO width, next to six fixed-width columns
+    // totalling 970 px. With no horizontal scroll the table squeezed this one
+    // to whatever was left, so on a laptop the equipment name collapsed into
+    // its neighbours and became unreadable — the reported overlap.
+    //
+    // Two changes, and both are needed: a real minimum width so it can never
+    // be squeezed to nothing, and WRAPPING instead of ellipsing. The names
+    // here are exactly the ones truncation ruins — "CUMIBON 105 -
+    // 240X115X30MM" and "…X63MM" differ in one character near the end. Same
+    // lesson as sme/materialCols.tsx.
+    { title: 'Description', dataIndex: 'Equipment_Description',
+      width: 260, minWidth: 200,
+      render: (v: string) => (
+        <span style={{ whiteSpace: 'normal', wordBreak: 'break-word',
+                       lineHeight: 1.35 }}>
+          {v || <span style={{ opacity: 0.4 }}>—</span>}
+        </span>
+      ) },
     { title: 'Status', dataIndex: 'status', width: 110,
       render: (v: string) => <Tag color={STATUS_COLOR[v] ?? 'default'}>{v}</Tag> },
     { title: 'Where', dataIndex: 'where', width: 190,
@@ -225,9 +266,14 @@ export default function AssetsPage() {
         </Space.Compact>
       </Card>
 
+      {/* scroll.x stops antd compressing the fixed-width columns to fit a
+          narrow viewport — which is what pushed the description into its
+          neighbours. The columns keep their widths and the table scrolls
+          sideways instead, inside its own container. */}
       <Table rowKey="id" size="small" columns={cols}
         dataSource={(units.data?.items ?? []) as ARow[]}
         loading={units.isFetching}
+        scroll={{ x: 'max-content' }}
         pagination={{ pageSize: 20, showSizeChanger: true }}
         locale={{ emptyText: (
           <Empty description="No serialised units yet — register one to start tracking it" />) }} />
