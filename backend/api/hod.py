@@ -113,16 +113,31 @@ async def pending_counts(site_id: Optional[str] = None,
                          user: dict = Depends(require_level(2)),
                          session: AsyncSession = Depends(get_session)):
     site_id = resolve_site_param(user, site_id)
-    out = {}
-    for k, t in _TABLES.items():
-        if site_id == "":
-            out[k] = 0
-            continue
-        stmt = select(func.count()).select_from(t).where(t.c["status"] == ledger.PENDING)
+    # A scoped user with no site of their own matches nothing — answer without
+    # touching the database at all, and keep the shape identical so the caller
+    # never has to special-case it.
+    if site_id == "":
+        return {k: 0 for k in _TABLES}
+
+    # ONE round trip for all four counts, not one per table. The four SELECTs
+    # were independent and awaited in sequence, so the endpoint cost four
+    # round trips to return four integers — and it is re-fetched after every
+    # approval the HOD makes, which is the moment they are watching the screen.
+    # UNION ALL rather than four scalar subqueries so each branch keeps its own
+    # index-only count plan.
+    parts, params = [], {}
+    for i, (k, t) in enumerate(_TABLES.items()):
+        where = f'status = :st{i}'
+        params[f"st{i}"] = ledger.PENDING
         if site_id:
-            stmt = stmt.where(t.c["Site_ID"] == site_id)
-        out[k] = (await session.execute(stmt)).scalar_one()
-    return out
+            where += f' AND "Site_ID" = :site'
+            params["site"] = site_id
+        parts.append(f'SELECT :k{i} AS kind, COUNT(*) AS n '
+                     f'FROM {t.name} WHERE {where}')
+        params[f"k{i}"] = k
+    rows = (await session.execute(text(" UNION ALL ".join(parts)), params)).all()
+    counts = {r.kind: int(r.n) for r in rows}
+    return {k: counts.get(k, 0) for k in _TABLES}
 
 
 @router.get("/pending/{kind}", summary="List pending items of a type")

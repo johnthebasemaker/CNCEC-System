@@ -27,14 +27,28 @@ export const ASYNC_DB_URL = `postgresql+asyncpg://${PG_USER}@${PG_HOST}:${PG_POR
 // bcrypt hashes are overwritten INSIDE the throwaway DB only).
 export const E2E_PASSWORD = 'E2ePlaywright!2026'
 
-export type Role = 'admin' | 'hod' | 'sk' | 'supervisor' | 'logistics'
+export type Role =
+  | 'admin' | 'hod' | 'sk' | 'supervisor' | 'logistics'
+  | 'qc' | 'qcwh' | 'qcnone'
 export const USERS: Record<Role, string> = {
   admin: 'admin', // global admin
   hod: 'hod', // head_of_department @ CNCEC
   sk: 'worker', // store_keeper @ CNCEC
   supervisor: 'supervisor', // supervisor @ CNCEC
   logistics: 'Logistics', // logistics, global
+  // QSEP. The legacy data has no QC accounts, so global-setup CREATES these
+  // three inside the throwaway DB (step 1d) before the password reset runs.
+  // All three exist because QC is the system's only DUAL-SCOPE role and each
+  // axis is a different code path:
+  qc: 'e2e_qc', // site-bound   @ CNCEC
+  qcwh: 'e2e_qc_wh', // warehouse-bound @ WH-01
+  qcnone: 'e2e_qc_none', // NEITHER — must see nothing, never everything
 }
+
+// Site and warehouse the QC fixtures are pinned to. Specs assert against these
+// rather than re-deriving them, so a change here cannot half-land.
+export const QC_SITE = 'CNCEC'
+export const QC_WAREHOUSE = 'WH-01'
 
 export const RUNTIME_DIR = path.resolve(__dirname, '..', '.runtime')
 export const AUTH_DIR = path.resolve(__dirname, '..', '.auth')

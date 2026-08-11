@@ -1,0 +1,578 @@
+"""
+backend/api/health_monitor.py — the Morning Briefing agent.
+
+Every morning at GI_BRIEFING_HOUR (default 07:00 server-local, same wall-clock
+convention as the 16:00 evening digest and the Friday 17:00 executive report)
+this scans the operational tables for things that have gone quiet in a bad way
+— work that is waiting on somebody, stock that cannot move, gear that is about
+to expire — and dispatches one digest per recipient scope:
+
+  · one ALL-SITES briefing to every admin, and
+  · one site-scoped briefing per distinct HOD site.
+
+WHY A SEPARATE AGENT RATHER THAN MORE EVENT TRIGGERS. The existing
+notifications all fire on a state CHANGE: a DN was submitted, goods were
+received, a tool was lent. Every problem this agent finds is the ABSENCE of a
+change — a draft nobody submitted, an inspection nobody performed, a tool
+nobody brought back. Nothing happens, so no trigger fires, and the longer it
+stays broken the quieter it gets. That class of fault needs something that
+looks on a timer.
+
+THREE DESIGN RULES, each of which is load-bearing:
+
+1. **A probe may not break the briefing.** Every probe runs inside its own
+   guard and a failure becomes a line in the digest naming the probe, not a
+   lost run. A monitor that dies when one query breaks is worse than no
+   monitor, because its silence reads as "all clear".
+
+2. **Silence when there is nothing wrong.** A daily "all systems normal" is
+   read for a week and ignored forever after, and the one morning it matters
+   it looks like all the others. Nothing is dispatched on a clean run — but
+   EVERY run, clean or not, writes an audit row, so "did the agent run?" is
+   answerable without spending a recipient's attention to answer it.
+
+3. **The body is ONE LINE.** Meta rejects template parameters containing
+   newlines (#132000), and `dispatch()` sends the same title/body to the bell
+   and to WhatsApp. The digest is •-separated on a single line for exactly the
+   reason `notifications._compile_digest` is.
+
+Manual trigger for ops and testing:
+    GET  /health/briefing        preview (admin sees all sites, HOD their own)
+    POST /admin/health/run       build AND dispatch now (admin)
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import logging
+import os
+from typing import Awaitable, Callable, Optional
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .auth import require_level, require_roles, resolve_site_param
+from .db import get_session
+from .services.ledger import _MD, write_audit
+from .services.notifications import dispatch
+
+log = logging.getLogger("gi.health")
+router = APIRouter(tags=["health"])
+
+users_t = _MD.tables["users"]
+
+# ── tunables ─────────────────────────────────────────────────────────────────
+# Defaults live here; each is overridable per deployment through app_settings
+# so an operator can retune the noise floor without a release. They are
+# thresholds on ATTENTION, not on correctness — a DN in draft for two days is
+# fine, one sitting there for a week is a forgotten truck.
+_DEFAULTS = {
+    "health_dn_draft_days":        3,    # drafts nobody submitted
+    "health_ppe_hours":            48,   # PPE about to expire
+    "health_pending_approval_days": 2,   # staged entries awaiting an HOD
+    "health_pr_stale_days":        5,    # PRs submitted, no PO raised
+    "health_outbox_hours":         24,   # failed messages worth chasing
+    "health_max_examples":         5,    # named examples per finding
+}
+
+
+async def _setting_int(session: AsyncSession, key: str) -> int:
+    """An app_settings integer, falling back to the built-in default.
+
+    A malformed value falls back rather than raising: this is a monitoring
+    agent, and a typo in a settings row must not be the reason nobody hears
+    about a week-old draft.
+    """
+    default = _DEFAULTS[key]
+    raw = (await session.execute(
+        text("SELECT value FROM app_settings WHERE key = :k"), {"k": key})).scalar()
+    try:
+        return int(str(raw).strip()) if raw is not None else default
+    except (TypeError, ValueError):
+        log.warning("health: app_settings[%s]=%r is not an integer — using %d",
+                    key, raw, default)
+        return default
+
+
+async def _enabled(session: AsyncSession) -> bool:
+    raw = (await session.execute(text(
+        "SELECT value FROM app_settings WHERE key = 'health_briefing_enabled'"))).scalar()
+    return (raw if raw is not None else "1").strip() != "0"
+
+
+# ── findings ─────────────────────────────────────────────────────────────────
+def _finding(key: str, title: str, severity: str, items: list[str],
+             link_page: str, detail: str | None = None) -> dict | None:
+    """Build a finding, or None when the probe found nothing.
+
+    Returning None for "nothing wrong" is what lets the caller stay silent on a
+    clean run without every probe repeating the same emptiness check.
+    """
+    if not items:
+        return None
+    return {"key": key, "title": title, "severity": severity,
+            "count": len(items), "items": items, "link_page": link_page,
+            "detail": detail or "; ".join(items[:3])}
+
+
+def _site_clause(site: Optional[str], col: str = '"Site_ID"') -> tuple[str, dict]:
+    """SQL fragment + params narrowing a probe to one site.
+
+    ⚠️ `site is None` means UNRESTRICTED (admin), while `site == ''` means a
+    scoped caller with no site of their own and must match NOTHING. Collapsing
+    the two with `if site:` is precisely how a site-less account ends up
+    reading every site — the same fail-closed rule the read scoping follows.
+    """
+    if site is None:
+        return "", {}
+    return f" AND COALESCE({col}, '') = :site ", {"site": site}
+
+
+async def probe_dn_draft_stale(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """Delivery Notes left in draft — a truck nobody loaded.
+
+    Auto-drafted DNs land in `draft` deliberately (the system cannot know a
+    vehicle exists), which makes this the one queue that grows quietly by
+    design. It is the reason the probe exists.
+    """
+    days = await _setting_int(session, "health_dn_draft_days")
+    cap = await _setting_int(session, "health_max_examples")
+    clause, params = _site_clause(site)
+    rows = (await session.execute(text(f"""
+        SELECT "DN_Number", "Site_ID", "created_at", auto_generated
+          FROM delivery_notes
+         WHERE COALESCE(status, 'draft') = 'draft'
+           AND created_at < CURRENT_TIMESTAMP - make_interval(days => :days)
+           {clause}
+         ORDER BY created_at
+    """), {"days": days, **params})).all()
+    items = [f"{r.DN_Number} ({r.Site_ID}, "
+             f"{'auto-drafted' if r.auto_generated else 'manual'}, "
+             f"{(_dt.datetime.now() - r.created_at).days}d)" for r in rows]
+    return _finding(
+        "dn_draft_stale", f"{len(items)} Delivery Note(s) stuck in draft >{days}d",
+        "warning", items[:cap], "/warehouse",
+        detail=(f"Add vehicle and driver, then submit: "
+                f"{', '.join(i.split(' ')[0] for i in items[:cap])}"
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
+async def probe_ppe_expiring(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """PPE whose usable time runs out within the window.
+
+    ⚠️ Expiry is a SUGGESTED REPLACEMENT DATE, never a restriction (operator
+    ruling Q5) — this is a procurement prompt for the store, not an alert about
+    a worker, and it must never read as one. The names are here because the
+    operator asked to see whose gear it is: a list of quantities cannot be
+    checked by a human and a list of names can.
+    """
+    hours = await _setting_int(session, "health_ppe_hours")
+    cap = await _setting_int(session, "health_max_examples")
+    clause, params = _site_clause(site)
+    horizon = (_dt.date.today() + _dt.timedelta(days=max(1, hours // 24))).isoformat()
+    rows = (await session.execute(text(f"""
+        SELECT "SAP_Code", "Description", employee_name, employee_id_number,
+               expires_on, "Site_ID"
+          FROM ppe_distributions
+         WHERE status = 'active' AND expires_on IS NOT NULL
+           AND expires_on <= :horizon
+           {clause}
+         ORDER BY expires_on
+    """), {"horizon": horizon, **params})).all()
+    items = [f"{r.employee_name or r.employee_id_number}: "
+             f"{r.Description or r.SAP_Code} (expires {r.expires_on})" for r in rows]
+    return _finding(
+        "ppe_expiring", f"{len(items)} PPE item(s) reaching their replacement date",
+        "info", items[:cap], "/ppe/forecast",
+        detail=("Suggested replacements, not a restriction — "
+                + "; ".join(items[:cap])
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
+async def probe_qc_blocked_stock(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """Controlled material sitting at a site that CANNOT be issued.
+
+    This is the expensive-to-notice one. The Store Keeper only discovers it at
+    the moment they try to issue and are refused; until then the stock looks
+    perfectly available on every screen. The probe reuses
+    `quality._cleared_totals` rather than reimplementing the arithmetic — if
+    the gate's definition of "cleared" ever changes, this moves with it instead
+    of quietly disagreeing.
+    """
+    from .services import quality
+    cap = await _setting_int(session, "health_max_examples")
+    category = await quality.controlled_category(session)
+    clause, params = _site_clause(site, 'a."Site_ID"')
+    # On-hand per (site, SAP) for the controlled category only — the same
+    # receipts − consumption − returns arithmetic the stock views use.
+    rows = (await session.execute(text(f"""
+        WITH activity AS (
+            SELECT TRIM("SAP_Code") AS sap, COALESCE("Site_ID",'HQ') AS "Site_ID",
+                   SUM("Quantity") AS rec, 0 AS con, 0 AS ret
+              FROM receipts    GROUP BY 1, 2
+            UNION ALL
+            SELECT TRIM("SAP_Code"), COALESCE("Site_ID",'HQ'), 0, SUM("Quantity"), 0
+              FROM consumption GROUP BY 1, 2
+            UNION ALL
+            SELECT TRIM("SAP_Code"), COALESCE("Site_ID",'HQ'), 0, 0, SUM("Quantity")
+              FROM returns     GROUP BY 1, 2
+        )
+        SELECT a.sap, a."Site_ID" AS site,
+               SUM(a.rec) - SUM(a.con) - SUM(a.ret) AS on_hand
+          FROM activity a
+          JOIN inventory i ON TRIM(i."SAP_Code") = a.sap
+         WHERE i."Category" = :cat {clause}
+         GROUP BY a.sap, a."Site_ID"
+        HAVING SUM(a.rec) - SUM(a.con) - SUM(a.ret) > 0
+    """), {"cat": category, **params})).all()
+
+    items: list[str] = []
+    for r in rows:
+        t = await quality._cleared_totals(session, sap=r.sap, site=r.site)
+        blocked = float(r.on_hand) - float(t["available_for_issue"])
+        if blocked > 1e-9:
+            why = ("never inspected" if t["inspections"] == 0
+                   else f"{t['pending_inspections']} inspection(s) pending"
+                   if t["approved_qty"] <= 1e-9 else "approved quantity exhausted")
+            items.append(f"{r.sap} at {r.site}: {blocked:g} blocked ({why})")
+    return _finding(
+        "qc_blocked_stock", f"{len(items)} controlled material(s) cannot be issued",
+        "critical", items[:cap], "/qc/inspections",
+        detail=("Surface Shields on the shelf that QC has not released — "
+                + "; ".join(items[:cap])
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
+async def probe_returnables_overdue(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """Tools past their expected return time.
+
+    ⚠️ The per-loan overdue alert fires when somebody OPENS the Returnables
+    list, not on a timer — so on a site where nobody opens that page, no alert
+    has ever been sent. This probe is the only thing that surfaces those.
+    """
+    cap = await _setting_int(session, "health_max_examples")
+    clause, params = _site_clause(site)
+    rows = (await session.execute(text(f"""
+        SELECT id, material_name, borrower_name, expected_return_time, "Site_ID"
+          FROM returnable_items
+         WHERE status = 'borrowed'
+           AND expected_return_time < CURRENT_TIMESTAMP
+           {clause}
+         ORDER BY expected_return_time
+    """), params)).all()
+    now = _dt.datetime.now()
+    items = [f"{r.material_name} with {r.borrower_name or 'unnamed borrower'} "
+             f"({max(0, (now - r.expected_return_time).days)}d overdue)" for r in rows]
+    return _finding(
+        "returnables_overdue", f"{len(items)} tool loan(s) overdue",
+        "warning", items[:cap], "/entry/returnables",
+        detail=("; ".join(items[:cap])
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
+async def probe_pending_approvals(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """Entries staged for an HOD and still waiting.
+
+    Stock has not moved for any of these. A site that stops approving looks
+    exactly like a site that stopped working.
+    """
+    days = await _setting_int(session, "health_pending_approval_days")
+    cap = await _setting_int(session, "health_max_examples")
+    clause, params = _site_clause(site)
+    rows = (await session.execute(text(f"""
+        SELECT "SAP_Code", "Site_ID", "Timestamp", "Issued_By"
+          FROM pending_issues
+         WHERE COALESCE(status, 'draft') <> 'rejected'
+           AND "Timestamp" < CURRENT_TIMESTAMP - make_interval(days => :days)
+           {clause}
+         ORDER BY "Timestamp"
+    """), {"days": days, **params})).all()
+    items = [f"{r.SAP_Code} at {r.Site_ID} from {r.Issued_By or 'unknown'} "
+             f"({(_dt.datetime.now() - r.Timestamp).days}d)" for r in rows]
+    return _finding(
+        "pending_approvals", f"{len(items)} staged entr(y/ies) awaiting approval >{days}d",
+        "warning", items[:cap], "/approvals",
+        detail=("Stock has not moved for these — "
+                + "; ".join(items[:cap])
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
+async def probe_negative_stock(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """Stock below zero — an impossible state, so a real data fault.
+
+    More was issued than ever arrived. It is never self-correcting and it
+    silently poisons every downstream number: reorder suggestions, valuations,
+    the PPE forecast's netting. Reported as critical because it means one of
+    the ledgers is wrong, not merely low.
+    """
+    cap = await _setting_int(session, "health_max_examples")
+    clause, params = _site_clause(site, 'a."Site_ID"')
+    rows = (await session.execute(text(f"""
+        WITH activity AS (
+            SELECT TRIM("SAP_Code") AS sap, COALESCE("Site_ID",'HQ') AS "Site_ID",
+                   SUM("Quantity") AS rec, 0 AS con, 0 AS ret
+              FROM receipts    GROUP BY 1, 2
+            UNION ALL
+            SELECT TRIM("SAP_Code"), COALESCE("Site_ID",'HQ'), 0, SUM("Quantity"), 0
+              FROM consumption GROUP BY 1, 2
+            UNION ALL
+            SELECT TRIM("SAP_Code"), COALESCE("Site_ID",'HQ'), 0, 0, SUM("Quantity")
+              FROM returns     GROUP BY 1, 2
+        )
+        SELECT a.sap, a."Site_ID" AS site,
+               SUM(a.rec) - SUM(a.con) - SUM(a.ret) AS on_hand
+          FROM activity a
+         WHERE 1=1 {clause}
+         GROUP BY a.sap, a."Site_ID"
+        HAVING SUM(a.rec) - SUM(a.con) - SUM(a.ret) < 0
+         ORDER BY 3
+    """), params)).all()
+    items = [f"{r.sap} at {r.site}: {float(r.on_hand):g}" for r in rows]
+    return _finding(
+        "negative_stock", f"{len(items)} material(s) at NEGATIVE stock",
+        "critical", items[:cap], "/stock",
+        detail=("More issued than ever received — a ledger is wrong: "
+                + "; ".join(items[:cap])
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
+async def probe_outbox_failures(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """Messages that failed to leave the building.
+
+    Notifications are best-effort everywhere by design, which is right — a
+    messaging outage must never roll back a goods receipt. The cost of that
+    choice is that failures are invisible unless something counts them, and a
+    silently dead WhatsApp channel looks identical to a quiet week.
+
+    Not site-filtered: the outbox is infrastructure, and a broken channel is
+    everybody's problem. A site-scoped HOD sees it too, deliberately — they are
+    the ones who will otherwise conclude the system stopped notifying them.
+    """
+    hours = await _setting_int(session, "health_outbox_hours")
+    items: list[str] = []
+    for table, label in (("whatsapp_outbox", "WhatsApp"), ("email_outbox", "email")):
+        try:
+            n = (await session.execute(text(f"""
+                SELECT COUNT(*) FROM {table}
+                 WHERE status = 'failed'
+                   AND created_at > CURRENT_TIMESTAMP - make_interval(hours => :h)
+            """), {"h": hours})).scalar_one()
+        except Exception:  # noqa: BLE001 — an absent table is not a finding
+            continue
+        if n:
+            items.append(f"{n} {label} message(s) failed in the last {hours}h")
+    return _finding(
+        "outbox_failures", "Outbound messages are failing", "warning",
+        items, "/admin/console", detail="; ".join(items))
+
+
+async def probe_pr_stale(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """Purchase Requests submitted to Logistics with no PO raised."""
+    days = await _setting_int(session, "health_pr_stale_days")
+    cap = await _setting_int(session, "health_max_examples")
+    clause, params = _site_clause(site, 'p."Site_ID"')
+    rows = (await session.execute(text(f"""
+        SELECT DISTINCT p."PR_Number", p."Site_ID",
+               MIN(p.submitted_to_logistics_at) AS since
+          FROM pr_master p
+         WHERE p.submitted_to_logistics_at IS NOT NULL
+           AND p.submitted_to_logistics_at
+               < CURRENT_TIMESTAMP - make_interval(days => :days)
+           AND NOT EXISTS (SELECT 1 FROM po_items pi
+                            WHERE pi."PR_Number" = p."PR_Number")
+           {clause}
+         GROUP BY p."PR_Number", p."Site_ID"
+         ORDER BY 3
+    """), {"days": days, **params})).all()
+    items = [f"{r.PR_Number} ({r.Site_ID}, "
+             f"{(_dt.datetime.now() - r.since).days}d)" for r in rows]
+    return _finding(
+        "pr_stale", f"{len(items)} Purchase Request(s) with no PO after {days}d",
+        "warning", items[:cap], "/purchase-requests",
+        detail=("; ".join(items[:cap])
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
+Probe = Callable[[AsyncSession, Optional[str]], Awaitable[Optional[dict]]]
+
+PROBES: list[tuple[str, Probe]] = [
+    ("qc_blocked_stock",    probe_qc_blocked_stock),
+    ("negative_stock",      probe_negative_stock),
+    ("dn_draft_stale",      probe_dn_draft_stale),
+    ("returnables_overdue", probe_returnables_overdue),
+    ("pending_approvals",   probe_pending_approvals),
+    ("pr_stale",            probe_pr_stale),
+    ("ppe_expiring",        probe_ppe_expiring),
+    ("outbox_failures",     probe_outbox_failures),
+]
+
+_SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
+
+
+async def build_briefing(session: AsyncSession, *, site: Optional[str]) -> dict:
+    """Run every probe and assemble the briefing for one scope.
+
+    ⚠️ EVERY PROBE IS INDIVIDUALLY GUARDED. A probe that raises becomes a
+    `probe_failed` finding naming itself, and the rest of the briefing is
+    delivered. The alternative — one bad query killing the run — produces
+    silence, and silence from a monitor is indistinguishable from good news.
+    """
+    findings: list[dict] = []
+    failed: list[str] = []
+    for key, probe in PROBES:
+        try:
+            f = await probe(session, site)
+            if f:
+                findings.append(f)
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            log.exception("health probe %s failed", key)
+            failed.append(f"{key} ({type(e).__name__})")
+    if failed:
+        findings.append({
+            "key": "probe_failed", "title": f"{len(failed)} health probe(s) errored",
+            "severity": "warning", "count": len(failed), "items": failed,
+            "link_page": "/admin/console",
+            "detail": "This briefing is incomplete: " + ", ".join(failed),
+        })
+    findings.sort(key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 3), f["key"]))
+    return {
+        "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "site": site, "findings": findings,
+        "total": sum(f["count"] for f in findings),
+        "worst": findings[0]["severity"] if findings else "none",
+        "probes_run": len(PROBES), "probes_failed": len(failed),
+    }
+
+
+def compile_body(briefing: dict, max_chars: int = 950) -> str:
+    """Findings → ONE line, •-separated, inside the template parameter cap.
+
+    Single-line for the same reason as the evening digest: Meta rejects a
+    template parameter containing a newline (#132000), and `dispatch()` hands
+    the same body to WhatsApp and to the bell. Truncation is explicit — a
+    "(+N more)" tail rather than a sentence that stops mid-word.
+    """
+    parts = [f"• {f['title']} — {f['detail']}" if f.get("detail") else f"• {f['title']}"
+             for f in briefing["findings"]]
+    out = ""
+    for i, p in enumerate(parts):
+        p = " ".join(p.split())
+        nxt = p if not out else f"{out}  {p}"
+        if len(nxt) > max_chars:
+            return f"{out}  …(+{len(parts) - i} more)" if out else p[:max_chars]
+        out = nxt
+    return out or "No issues found."
+
+
+async def _recipient_scopes(session: AsyncSession) -> dict[Optional[str], list[str]]:
+    """admin → the all-sites briefing; each HOD → their own site's.
+
+    Same shape as the weekly executive report, deliberately: one place to learn
+    how "who gets the scheduled thing" works in this system.
+    """
+    rows = (await session.execute(select(
+        users_t.c["username"], users_t.c["role"], users_t.c["Site_ID"]
+    ).where(users_t.c["role"].in_(("admin", "hod"))))).all()
+    scopes: dict[Optional[str], list[str]] = {}
+    for r in rows:
+        scope = None if r.role == "admin" else ((r.Site_ID or "").strip() or None)
+        scopes.setdefault(scope, []).append(r.username)
+    return scopes
+
+
+async def run_and_dispatch(session: AsyncSession, *, force: bool = False) -> dict:
+    """One briefing run: build per scope, dispatch only what has findings.
+
+    `force=True` sends even a clean briefing — for an operator proving the
+    channel works end to end, which is the one time "all clear" is the message
+    somebody actually wants.
+    """
+    if not await _enabled(session):
+        return {"skipped": "health_briefing_enabled=0"}
+
+    scopes = await _recipient_scopes(session)
+    sent = 0
+    summary: dict[str, dict] = {}
+    for scope, usernames in scopes.items():
+        b = await build_briefing(session, site=scope)
+        summary[scope or "ALL"] = {"findings": len(b["findings"]),
+                                   "total": b["total"], "worst": b["worst"]}
+        if not b["findings"] and not force:
+            continue
+        # Severity carries to the channel: a critical briefing must not sit in
+        # the evening digest queue until 16:00 (dispatch enforces that), and a
+        # routine one should not use the critical template.
+        critical = b["worst"] == "critical"
+        title = (f"Daily System Health — {scope or 'all sites'} — "
+                 f"{b['total']} item(s) need attention" if b["findings"]
+                 else f"Daily System Health — {scope or 'all sites'} — all clear")
+        for username in usernames:
+            await dispatch(
+                session, recipient_user=username, event_key="health_briefing",
+                severity=b["worst"] if b["findings"] else "success",
+                wa_template="critical_alert" if critical else "status_update",
+                title=title, body=compile_body(b),
+                link_page="/dashboard", related_table="app_notifications",
+                related_ref=f"health:{scope or 'ALL'}",
+                created_by="health-monitor", delivery="urgent")
+            sent += 1
+
+    # Audited on EVERY run, including a clean one that dispatched nothing —
+    # this is how "is the agent alive?" gets answered without a daily
+    # all-clear message that trains people to ignore the channel.
+    await write_audit(session, "health-monitor", "HEALTH_BRIEFING", "app_notifications",
+                      f"scopes={len(scopes)} dispatched={sent} " +
+                      " ".join(f"{k}:{v['total']}/{v['worst']}"
+                               for k, v in sorted(summary.items())))
+    await session.commit()
+    log.info("health briefing: %d scope(s), %d dispatch(es) — %s",
+             len(scopes), sent, summary)
+    return {"scopes": len(scopes), "dispatched": sent, "summary": summary}
+
+
+async def briefing_loop() -> None:
+    """Daemon: fire the morning briefing once per day at GI_BRIEFING_HOUR.
+
+    Started from the FastAPI lifespan beside the digest and weekly-report
+    loops; disabled by GI_SCHEDULER=0 like both of them. One bad run logs and
+    waits for tomorrow rather than killing the loop — a monitor that dies on
+    its first bad night is the one shape of monitor worse than none.
+    """
+    import asyncio
+
+    from .db import SessionLocal
+
+    hour = int(os.environ.get("GI_BRIEFING_HOUR", "7"))
+    minute = int(os.environ.get("GI_BRIEFING_MINUTE", "0"))
+    log.info("morning-briefing scheduler started (daily %02d:%02d local)", hour, minute)
+    while True:
+        now = _dt.datetime.now()
+        nxt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if nxt <= now:
+            nxt += _dt.timedelta(days=1)
+        await asyncio.sleep((nxt - now).total_seconds())
+        try:
+            async with SessionLocal() as s:
+                res = await run_and_dispatch(s)
+            log.info("morning briefing run: %s", res)
+        except Exception:  # noqa: BLE001 — one bad run must not kill the loop
+            log.exception("morning briefing run failed")
+
+
+# ── endpoints ────────────────────────────────────────────────────────────────
+@router.get("/health/briefing", summary="Preview the daily system-health briefing")
+async def preview_briefing(site_id: Optional[str] = Query(None),
+                           user: dict = Depends(require_level(2)),
+                           session: AsyncSession = Depends(get_session)):
+    """Read-only preview. Level 2 so an HOD can see their own site's briefing;
+    `resolve_site_param` refuses a scoped caller asking for another site rather
+    than silently rewriting it, and a scoped caller with no site of their own
+    resolves to '' — which every probe treats as matching nothing."""
+    return await build_briefing(session, site=resolve_site_param(user, site_id))
+
+
+@router.post("/admin/health/run", summary="Run and dispatch the health briefing now (admin)")
+async def run_briefing_now(force: bool = Query(False),
+                           user: dict = Depends(require_roles()),
+                           session: AsyncSession = Depends(get_session)):
+    return await run_and_dispatch(session, force=force)

@@ -281,20 +281,23 @@ async def open_inspection(session: AsyncSession, *, sap_code: str,
 
 async def _cleared_totals(session: AsyncSession, *, sap: str, site: str) -> dict:
     insp = inspections_t.c
-    approved, since = (await session.execute(
+    # ONE pass over qc_inspections for all four numbers. This used to be three
+    # separate SELECTs with the SAME predicate — sum+min, then count, then a
+    # filtered count — so the table was scanned three times to answer three
+    # questions about one row set. It runs on the hot path (every issue of a
+    # controlled material, at BOTH the staging and the approval gate) and once
+    # per material inside the health probe, so it is worth the aggregate form.
+    #
+    # `COUNT(*) FILTER (WHERE …)` is Postgres' conditional aggregate, which is
+    # exactly the third query folded in. The semantics are identical, and the
+    # test below the fold compares the two forms rather than trusting that.
+    approved, since, total_inspections, pending_inspections = (await session.execute(
         select(func.coalesce(func.sum(insp["approved_qty"]), 0.0),
-               func.min(insp["created_at"]))
+               func.min(insp["created_at"]),
+               func.count(),
+               func.count().filter(insp["status"] == "pending"))
         .where(func.trim(insp["SAP_Code"]) == sap,
                func.coalesce(insp["Site_ID"], "") == site))).first()
-    total_inspections = (await session.execute(
-        select(func.count()).select_from(inspections_t)
-        .where(func.trim(insp["SAP_Code"]) == sap,
-               func.coalesce(insp["Site_ID"], "") == site))).scalar_one()
-    pending_inspections = (await session.execute(
-        select(func.count()).select_from(inspections_t)
-        .where(func.trim(insp["SAP_Code"]) == sap,
-               func.coalesce(insp["Site_ID"], "") == site,
-               insp["status"] == "pending"))).scalar_one()
 
     boundary = (since.date().isoformat() if isinstance(since, _dt.datetime)
                 else (str(since)[:10] if since else None))

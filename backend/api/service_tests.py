@@ -13348,6 +13348,424 @@ async def _count_notif_for(site: str) -> int:
                             notif_t.c["recipient_site"] == site)
 
 
+# --- Suite BS: the Morning Briefing agent -------------------------------------
+async def test_health_monitor():
+    """Suite BS — the monitor that has to survive its own failures.
+
+    A scheduled health agent has an unusual property: **its silence is a
+    message**, and the message is "nothing is wrong". That makes every way it
+    can go quiet a correctness bug rather than an availability one. Three of
+    them are pinned here.
+
+    1. **A probe that raises must not take the run with it.** Eight probes
+       query eight different corners of the schema; a migration that renames
+       one column would otherwise turn the whole briefing off, and the
+       resulting quiet reads exactly like a healthy morning. A failing probe
+       becomes a `probe_failed` finding that names itself, and the other seven
+       still deliver.
+
+    2. **A clean run dispatches nothing but still records that it ran.** The
+       alternative — a daily "all clear" — is read for a week and ignored
+       forever, and the one morning it matters it looks like all the others.
+       The audit row is what keeps "is the agent alive?" answerable without
+       spending anybody's attention to answer it.
+
+    3. **The scope rules are the same fail-closed rules as everywhere else.**
+       `site=None` is unrestricted, `site=''` matches NOTHING. A monitoring
+       agent is exactly the sort of internal tool where `if site:` gets
+       written, and it would mail one site's problems to another site's HOD.
+    """
+    from sqlalchemy import text as _sqt
+
+    from . import health_monitor as hm
+
+    await _qsep_seed_users()
+    SITE = "CNCEC"
+
+    # ── 1. a broken probe degrades the briefing, it does not cancel it ───────
+    async def _exploding_probe(session, site):
+        raise RuntimeError("simulated schema drift")
+
+    original = list(hm.PROBES)
+    try:
+        hm.PROBES = [("svc_boom", _exploding_probe)] + original
+        async with SessionLocal() as s:
+            b = await hm.build_briefing(s, site=SITE)
+    finally:
+        hm.PROBES = original
+    keys = {f["key"] for f in b["findings"]}
+    check("bs: one probe raising does NOT abort the briefing — the other "
+          "probes still report. A monitor that dies on a single bad query "
+          "goes quiet, and quiet is indistinguishable from healthy",
+          b["probes_failed"] == 1 and "probe_failed" in keys,
+          f"probes_failed={b['probes_failed']} keys={sorted(keys)}")
+    failed_finding = next((f for f in b["findings"] if f["key"] == "probe_failed"), None)
+    check("bs: the failure NAMES the probe that broke, so the briefing says "
+          "'I am incomplete' rather than quietly under-reporting",
+          failed_finding is not None and "svc_boom" in " ".join(failed_finding["items"]),
+          f"{failed_finding['items'] if failed_finding else 'no finding'}")
+
+    # ── 2. fail-closed scoping ───────────────────────────────────────────────
+    async with SessionLocal() as s:
+        empty = await hm.build_briefing(s, site="")
+    leaked = [f["key"] for f in empty["findings"] if f["key"] != "outbox_failures"]
+    check("bs: a scoped caller with NO site of their own ('' — never None) "
+          "gets no site data at all. '' must match nothing; the `if site:` "
+          "spelling would collapse it to 'unrestricted' and mail one site's "
+          "problems to another site's HOD",
+          leaked == [], f"site-scoped findings leaked to an empty scope: {leaked}")
+    check("bs: the outbox probe is the ONE deliberate exception — it reports "
+          "infrastructure counts with no row data, because a dead WhatsApp "
+          "channel is everybody's problem and looks like a quiet week",
+          all(f["key"] == "outbox_failures" for f in empty["findings"]),
+          f"{[f['key'] for f in empty['findings']]}")
+
+    # ── 3. thresholds are honoured, and come from app_settings ───────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM delivery_notes WHERE \"DN_Number\" LIKE 'SVCH-%'"))
+        for dn, age in (("SVCH-FRESH", 1), ("SVCH-STALE", 30)):
+            await s.execute(_sqt(
+                'INSERT INTO delivery_notes ("DN_Number", "PO_Number", '
+                '"Warehouse_ID", "Site_ID", status, created_by, created_at) '
+                "VALUES (:d, 'SVCH-PO', 'WH-01', :s, 'draft', 'svc', "
+                "CURRENT_TIMESTAMP - make_interval(days => :a))"),
+                {"d": dn, "s": SITE, "a": age})
+        await s.commit()
+    try:
+        async with SessionLocal() as s:
+            f = await hm.probe_dn_draft_stale(s, SITE)
+        named = " ".join(f["items"]) if f else ""
+        check("bs: a draft older than the threshold is reported and a fresh "
+              "one is not — the probe is a filter on ATTENTION, and a monitor "
+              "that reports every draft is one nobody reads",
+              "SVCH-STALE" in named and "SVCH-FRESH" not in named,
+              f"items={f['items'] if f else None}")
+
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                "INSERT INTO app_settings (key, value) VALUES "
+                "('health_dn_draft_days', '99') ON CONFLICT (key) DO UPDATE "
+                "SET value = '99'"))
+            await s.commit()
+        async with SessionLocal() as s:
+            f99 = await hm.probe_dn_draft_stale(s, SITE)
+        check("bs: the threshold is read from app_settings, so an operator "
+              "retunes the noise floor without a release",
+              f99 is None or "SVCH-STALE" not in " ".join(f99["items"]),
+              f"30-day draft still reported at a 99-day threshold: "
+              f"{f99['items'] if f99 else None}")
+
+        async with SessionLocal() as s:
+            await s.execute(_sqt("UPDATE app_settings SET value = 'not-a-number' "
+                                 "WHERE key = 'health_dn_draft_days'"))
+            await s.commit()
+            got = await hm._setting_int(s, "health_dn_draft_days")
+        check("bs: a MALFORMED setting falls back to the default instead of "
+              "raising. A typo in one settings row must not be the reason "
+              "nobody hears about a week-old draft",
+              got == hm._DEFAULTS["health_dn_draft_days"], f"got {got!r}")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM app_settings WHERE key = 'health_dn_draft_days'"))
+            await s.execute(_sqt("DELETE FROM delivery_notes WHERE \"DN_Number\" LIKE 'SVCH-%'"))
+            await s.commit()
+
+    # ── 4. ordering + the single-line body contract ──────────────────────────
+    fake = {"findings": [
+        {"key": "a", "title": "T1", "severity": "info", "count": 1, "detail": "d1"},
+        {"key": "b", "title": "T2", "severity": "critical", "count": 1, "detail": "d2"},
+        {"key": "c", "title": "T3", "severity": "warning", "count": 1, "detail": "d3"},
+    ]}
+    body = hm.compile_body(fake)
+    check("bs: the digest body is ONE LINE. Meta rejects a template parameter "
+          "containing a newline (#132000) and dispatch() hands the same body "
+          "to WhatsApp and to the bell, so a multi-line body silently fails "
+          "to deliver on one of the two channels",
+          "\n" not in body and "\r" not in body, repr(body[:120]))
+    long_body = hm.compile_body({"findings": [
+        {"key": str(i), "title": "T" * 80, "severity": "info", "count": 1,
+         "detail": "D" * 80} for i in range(40)]})
+    check("bs: an over-long digest is truncated EXPLICITLY with a '(+N more)' "
+          "tail rather than stopping mid-sentence at the parameter cap",
+          len(long_body) <= 1000 and "more)" in long_body,
+          f"len={len(long_body)} tail={long_body[-40:]!r}")
+
+    async with SessionLocal() as s:
+        ordered = await hm.build_briefing(s, site=None)
+    sevs = [f["severity"] for f in ordered["findings"]]
+    rank = [hm._SEVERITY_ORDER.get(x, 3) for x in sevs]
+    check("bs: findings are ordered worst-first, so the top of a digest read "
+          "on a phone is the part that matters",
+          rank == sorted(rank), f"{sevs}")
+
+    # ── 5. a clean run is SILENT but AUDITED ─────────────────────────────────
+    audit_t = _MD.tables["system_audit_log"]
+    async with SessionLocal() as s:
+        before_audit = await _count(s, audit_t, audit_t.c["action_type"] == "HEALTH_BRIEFING")
+        before_notif = await _count(s, notif_t, notif_t.c["event_key"] == "health_briefing")
+
+    async def _no_findings(session, site):
+        return None
+
+    saved = list(hm.PROBES)
+    try:
+        hm.PROBES = [("svc_quiet", _no_findings)]
+        async with SessionLocal() as s:
+            res = await hm.run_and_dispatch(s)
+        async with SessionLocal() as s:
+            mid_audit = await _count(s, audit_t, audit_t.c["action_type"] == "HEALTH_BRIEFING")
+            mid_notif = await _count(s, notif_t, notif_t.c["event_key"] == "health_briefing")
+        check("bs: a CLEAN run dispatches nothing. A daily 'all systems "
+              "normal' is read for a week and ignored forever, and the one "
+              "morning it matters it looks like all the others",
+              res.get("dispatched") == 0 and mid_notif == before_notif,
+              f"{res} notif {before_notif}→{mid_notif}")
+        check("bs: …but the clean run STILL writes an audit row, so 'did the "
+              "agent run last night?' is answerable without spending a "
+              "recipient's attention on an all-clear message",
+              mid_audit == before_audit + 1, f"audit {before_audit}→{mid_audit}")
+
+        async with SessionLocal() as s:
+            res_f = await hm.run_and_dispatch(s, force=True)
+        async with SessionLocal() as s:
+            post_notif = await _count(s, notif_t, notif_t.c["event_key"] == "health_briefing")
+        check("bs: force=True sends even a clean briefing — the one case where "
+              "'all clear' is the message somebody actually wants, because "
+              "they are proving the channel works end to end",
+              res_f.get("dispatched", 0) > 0 and post_notif > mid_notif,
+              f"{res_f} notif {mid_notif}→{post_notif}")
+
+        # The feature flag must be able to turn the whole thing off.
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                "INSERT INTO app_settings (key, value) VALUES "
+                "('health_briefing_enabled', '0') ON CONFLICT (key) DO UPDATE "
+                "SET value = '0'"))
+            await s.commit()
+        async with SessionLocal() as s:
+            off = await hm.run_and_dispatch(s, force=True)
+        check("bs: health_briefing_enabled=0 stops the agent entirely, "
+              "force included — an operator drowning in a known incident can "
+              "silence it without stopping the API",
+              "skipped" in off, f"{off}")
+    finally:
+        hm.PROBES = saved
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM app_settings WHERE key = 'health_briefing_enabled'"))
+            await s.execute(_sqt("DELETE FROM app_notifications WHERE event_key = 'health_briefing'"))
+            await s.commit()
+
+    # ── 6. the endpoints ─────────────────────────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H_sk = await _qsep_login(ac, "SVCQ-sk")
+        H_hod = await _qsep_login(ac, "SVCQ-hod")
+        H_admin = await _qsep_login(ac, "SVCQ-admin")
+
+        r = await ac.get("/health/briefing", headers=H_sk)
+        check("bs: a level-0 store keeper cannot read the briefing — it "
+              "aggregates every site's operational state",
+              r.status_code == 403, f"{r.status_code} {r.text[:120]}")
+
+        r = await ac.get("/health/briefing", headers=H_hod)
+        check("bs: an HOD CAN read the briefing, scoped to their own site "
+              "without asking for it", r.status_code == 200
+              and r.json().get("site") == SITE,
+              f"{r.status_code} {r.text[:160]}")
+
+        r = await ac.get("/health/briefing?site_id=SVCQ-SITE-B", headers=H_hod)
+        check("bs: an HOD asking for ANOTHER site is refused rather than "
+              "silently rewritten to their own — the boundary is visible",
+              r.status_code == 403, f"{r.status_code} {r.text[:120]}")
+
+        r = await ac.get("/health/briefing", headers=H_admin)
+        check("bs: an admin gets the unrestricted briefing (site=None)",
+              r.status_code == 200 and r.json().get("site") is None,
+              f"{r.status_code} {r.text[:160]}")
+
+        r = await ac.post("/admin/health/run", headers=H_hod)
+        check("bs: only an admin may TRIGGER a dispatch — a preview reads, a "
+              "run writes to everybody's phone",
+              r.status_code == 403, f"{r.status_code} {r.text[:120]}")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM app_notifications WHERE event_key = 'health_briefing'"))
+        await s.commit()
+
+
+# --- Suite BT: optimisations that must not change any answer -----------------
+async def test_optimisations_preserve_answers():
+    """Suite BT — the rewrites from the 2026-08-10 optimisation pass.
+
+    Every check here compares a REWRITTEN query against the shape it replaced,
+    or pins a scoping fix. That is the only useful way to test an optimisation:
+    "it is faster" is not a property a test can hold, but "it returns exactly
+    what the slow version returned" is, and it is the one that breaks.
+
+    The scoping check is not an optimisation at all — it is a fail-open leak
+    found while reading the same file, kept here because it was fixed in the
+    same pass.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import ppe as _ppe
+    from .services import quality as _q
+
+    await _qsep_seed_users()
+
+    # ── 1. THE LEAK: entry/snapshot mixed fail-closed and fail-open ─────────
+    # `item_snapshot` gated its stock query on `site_filter_applies(site_id)`
+    # and the consumption sparkline beside it on `if site_id:` — the same scope
+    # value, two different rules, six lines apart. For a store keeper with no
+    # site of their own, resolve_site_param yields '', the stock figure
+    # correctly showed 0, and the trend silently summed EVERY site.
+    import bcrypt as _bc
+    h = _bc.hashpw(_QSEP_PW.encode(), _bc.gensalt(rounds=4)).decode()
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM users WHERE username = 'SVCT-sk-nosite'"))
+        await s.execute(_sqt(
+            'INSERT INTO users (username, password_hash, role, "Site_ID") '
+            "VALUES ('SVCT-sk-nosite', :h, 'store_keeper', NULL)"), {"h": h})
+        # A consumption row at a real site, so a leak has something to leak.
+        await s.execute(_sqt(
+            'INSERT INTO consumption ("Date", "SAP_Code", "Quantity", "Site_ID") '
+            "VALUES (CURRENT_DATE::text, 'SVCT-9', 42, 'CNCEC')"))
+        await s.commit()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            H = await _qsep_login(ac, "SVCT-sk-nosite")
+            r = await ac.get("/entry/snapshot/SVCT-9", headers=H)
+            body = r.json() if r.status_code == 200 else {}
+            leaked = sum(float(d.get("consumed") or 0) for d in body.get("trend", []))
+            check("bt: a store keeper with NO site of their own sees ZERO in the "
+                  "consumption sparkline, not every site's. The stock figure "
+                  "beside it was already fail-closed; the trend used `if "
+                  "site_id:` and dropped the predicate entirely — '' is a "
+                  "SCOPED caller that must match nothing, never a wildcard",
+                  r.status_code == 200 and leaked == 0.0,
+                  f"{r.status_code} leaked={leaked}")
+
+            H_sk = await _qsep_login(ac, "SVCQ-sk")     # a properly scoped SK
+            r2 = await ac.get("/entry/snapshot/SVCT-9", headers=H_sk)
+            seen = sum(float(d.get("consumed") or 0)
+                       for d in (r2.json().get("trend", []) if r2.status_code == 200 else []))
+            check("bt: …while a store keeper who DOES have that site still sees "
+                  "the row. Fixing a leak by returning nothing to everybody is "
+                  "not a fix",
+                  r2.status_code == 200 and seen == 42.0, f"{r2.status_code} seen={seen}")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM users WHERE username = 'SVCT-sk-nosite'"))
+            await s.execute(_sqt("DELETE FROM consumption WHERE \"SAP_Code\" = 'SVCT-9'"))
+            await s.commit()
+
+    # ── 2. rules_for_many must agree with rule_for, row for row ─────────────
+    async with SessionLocal() as s:
+        saps = [r[0] for r in (await s.execute(_sqt(
+            'SELECT "SAP_Code" FROM inventory WHERE "Category" = :c LIMIT 40'),
+            {"c": _ppe.PPE_CATEGORY})).all()]
+        mismatches = []
+        for site in (None, "CNCEC"):
+            many = await _ppe.rules_for_many(s, sap_codes=saps, site_id=site)
+            for sap in saps:
+                one = await _ppe.rule_for(s, sap_code=sap, site_id=site)
+                if (one or {}).get("id") != (many.get(sap.strip()) or {}).get("id"):
+                    mismatches.append((site, sap))
+    check("bt: rules_for_many returns EXACTLY what rule_for returns for every "
+          "material, on both the global and the site axis. The N+1 it replaced "
+          "expressed 'a site rule beats a global one' as ORDER BY in SQL; the "
+          "bulk form re-expresses it in Python, and two spellings of one rule "
+          "is how the picker and the issue form come to disagree about how "
+          "long a boot lasts", not mismatches, f"{mismatches[:5]}")
+
+    # ── 3. the collapsed clearance aggregate ────────────────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt("""
+            INSERT INTO qc_inspections ("Site_ID","SAP_Code",source_type,source_ref,
+                submitted_qty,approved_qty,status,created_by)
+            VALUES ('SVCT-A','SVCT-Q','receipt','a',100,40,'approved','t'),
+                   ('SVCT-A','SVCT-Q','receipt','b',50,0,'pending','t'),
+                   ('SVCT-A','SVCT-Q','receipt','c',10,10,'approved','t'),
+                   ('SVCT-B','SVCT-Q','receipt','d',77,77,'approved','t')"""))
+        await s.commit()
+    try:
+        async with SessionLocal() as s:
+            a = await _q._cleared_totals(s, sap="SVCT-Q", site="SVCT-A")
+            b = await _q._cleared_totals(s, sap="SVCT-Q", site="SVCT-B")
+        check("bt: three SELECTs over qc_inspections with the same predicate "
+              "became ONE conditional aggregate, and the four numbers are "
+              "unchanged. This runs on every issue of a controlled material, "
+              "at both gates",
+              (a["approved_qty"], a["inspections"], a["pending_inspections"]) == (50.0, 3, 1),
+              f"{a}")
+        check("bt: …and the site predicate still isolates. Folding counts into "
+              "one pass is exactly the edit that accidentally widens a WHERE",
+              b["approved_qty"] == 77.0 and b["inspections"] == 1, f"{b}")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM qc_inspections WHERE \"SAP_Code\" = 'SVCT-Q'"))
+            await s.commit()
+
+    # ── 4. /hod/pending: one UNION ALL, same four numbers ───────────────────
+    from . import hod as _hod
+    async with SessionLocal() as s:
+        expected = {}
+        for k, t in _hod._TABLES.items():
+            q = f'SELECT COUNT(*) FROM {t.name} WHERE status = :st'
+            p = {"st": ledger.PENDING}
+            expected[k] = (await s.execute(_sqt(q), p)).scalar_one()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H_admin = await _qsep_login(ac, "SVCQ-admin")
+        got = (await ac.get("/hod/pending", headers=H_admin)).json()
+    check("bt: the four pending counts collapsed from four sequential round "
+          "trips into one UNION ALL and return the same four numbers. The "
+          "endpoint is re-fetched after every approval, which is the moment "
+          "the HOD is watching the screen",
+          got == expected, f"got={got} expected={expected}")
+
+    async with SessionLocal() as s:
+        zero = await _hod.pending_counts(
+            site_id=None, session=s,
+            user={"role": "store_keeper", "level": 0, "site_id": "", "username": "x"})
+    check("bt: a scoped caller with no site of their own gets four zeros "
+          "WITHOUT a query, and keeps the same response shape so no caller "
+          "has to special-case them",
+          zero == {k: 0 for k in _hod._TABLES}, f"{zero}")
+
+    # ── 5. the forecast's all-sites on-hand ─────────────────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM ppe_distributions WHERE \"SAP_Code\" = 'SVCT-P'"))
+        await s.execute(_sqt("DELETE FROM receipts WHERE \"SAP_Code\" = 'SVCT-P'"))
+        await s.execute(_sqt(
+            'INSERT INTO receipts ("Date","SAP_Code","Quantity","Site_ID") '
+            "VALUES (CURRENT_DATE::text,'SVCT-P',500,'CNCEC')"))
+        await s.execute(_sqt(
+            'INSERT INTO ppe_distributions ("Site_ID", employee_id_number, '
+            '"SAP_Code", "Qty", issued_on, expires_on, status, issued_by) '
+            "VALUES ('CNCEC','SVCT-E','SVCT-P',3,CURRENT_DATE::text,"
+            "(CURRENT_DATE + 2)::text,'active','t')"))
+        await s.commit()
+    try:
+        async with SessionLocal() as s:
+            glob = await _ppe.forecast(s, site_id=None)
+        row = next((i for i in glob["items"] if i["SAP_Code"] == "SVCT-P"), None)
+        check("bt: the ALL-SITES forecast counts on-hand across every site. It "
+              "used to pass `site_id or ''`, so an unscoped forecast summed "
+              "expiring gear from everywhere against stock from almost "
+              "nowhere and suggested re-ordering PPE already on the shelf. "
+              "Site-scoped forecasts were always right, which is why nobody "
+              "had reported it",
+              row is not None and row["on_hand"] >= 500 and row["suggested_order_qty"] == 0,
+              f"{row}")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM ppe_distributions WHERE \"SAP_Code\" = 'SVCT-P'"))
+            await s.execute(_sqt("DELETE FROM receipts WHERE \"SAP_Code\" = 'SVCT-P'"))
+            await s.commit()
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -13504,6 +13922,12 @@ async def main() -> int:
     print("\n BR. QSEP — one hammer is one row globally, and it changes site "
           "only when the site losing it agrees")
     await test_asset_identity_and_transfers()
+    print("\n BS. The Morning Briefing agent — a monitor whose silence must "
+          "mean 'nothing wrong', never 'I died'")
+    await test_health_monitor()
+    print("\n BT. Optimisations that must not change a single answer, plus the "
+          "fail-open scope leak found while rewriting them")
+    await test_optimisations_preserve_answers()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

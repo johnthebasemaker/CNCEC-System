@@ -607,7 +607,16 @@ async def item_snapshot(sap_code: str, site_id: Optional[str] = None,
     base = _dt.date.today() - _dt.timedelta(days=29)
     cwhere = '"SAP_Code" = :sap AND "Date" >= :cut'
     cparams = {"sap": sap, "cut": base.isoformat()}
-    if site_id:
+    # ⚠️ `site_filter_applies`, NOT `if site_id:`. This is the one query in the
+    # function that used the truthiness form, while the stock query six lines
+    # above already used the helper — the same scope value, two different
+    # rules, in one endpoint. `''` is a SCOPED caller with no site of their own
+    # and must match nothing; under `if site_id:` the predicate was dropped
+    # entirely and the sparkline summed EVERY site's consumption for the
+    # material while the stock figure beside it correctly showed zero. A
+    # store keeper is only ever site-less through misconfiguration, which is
+    # exactly the case scoping has to survive.
+    if site_filter_applies(site_id):
         cwhere += ' AND "Site_ID" = :site'
         cparams["site"] = site_id
     crows = (await session.execute(text(
