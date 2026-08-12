@@ -13918,6 +13918,171 @@ async def test_optimisations_preserve_answers():
             await s.commit()
 
 
+# --- Suite BU: the strict-RBAC pass -------------------------------------------
+async def test_strict_rbac_api_gates():
+    """Suite BU — the API gates narrowed on 2026-08-12, pinned per role.
+
+    WHY THIS SUITE EXISTS AT ALL. The navigation manifest and the API had
+    drifted apart, and the drift was invisible in both directions: the sidebar
+    hid the staff roster from the store keeper while `GET /hr/employees` was
+    `get_current_user` and served it to literally anybody; the sidebar showed
+    Logistics no SME page while `/sme/*` was `require_level(2)` and served
+    them every Estimator endpoint. A menu is not a control. Nothing in this
+    file noticed, because nothing asserted who should be REFUSED.
+
+    So this suite is almost entirely negative checks, and that is deliberate:
+    the positive ones ("an HOD can read the roster") were already true before
+    the change and would stay true if it were reverted. Only the refusals
+    would go quiet.
+
+    `minLevel` is the shape being removed. It is a ladder — SK 0, warehouse /
+    supervisor / qc 1, hod 2, logistics / auditor 3, admin 4 — and the roles
+    are not a ladder; they are four different jobs plus two oversight roles.
+    `require_level(1)` admits SIX of the eight, which is how the roster ended
+    up readable by everyone merely senior to a store keeper.
+    """
+    import bcrypt as _bc
+    from sqlalchemy import text as _sqt
+
+    await _qsep_seed_users()
+
+    # The seed has no supervisor and no auditor; both matter here. The auditor
+    # is the role that must KEEP its reads, and the supervisor is the only role
+    # below HOD that keeps the roster.
+    h = _bc.hashpw(_QSEP_PW.encode(), _bc.gensalt(rounds=4)).decode()
+    async with SessionLocal() as s:
+        for uname, role, site in (("SVCQ-sup", "supervisor", "CNCEC"),
+                                  ("SVCQ-aud", "auditor", None)):
+            await s.execute(_sqt("DELETE FROM users WHERE username = :u"), {"u": uname})
+            await s.execute(_sqt(
+                'INSERT INTO users (username, password_hash, role, "Site_ID") '
+                "VALUES (:u, :h, :r, :s)"),
+                {"u": uname, "h": h, "r": role, "s": site})
+        await s.commit()
+
+    ROLES = {"sk": "SVCQ-sk", "wh": "SVCQ-wh", "sup": "SVCQ-sup", "qc": "SVCQ-qc",
+             "hod": "SVCQ-hod", "log": "SVCQ-log", "aud": "SVCQ-aud",
+             "admin": "SVCQ-admin"}
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            H = {}
+            for key, uname in ROLES.items():
+                H[key] = await _qsep_login(ac, uname)
+            check("bu-setup: all eight roles signed in — a 403 check against a "
+                  "role that could not log in at all proves nothing",
+                  all(H[k] for k in ROLES),
+                  str({k: bool(v) for k, v in H.items()}))
+
+            async def sweep(label: str, path: str, allowed: set, *,
+                            note: str = "") -> None:
+                """Exactly `allowed` get through; everyone else is refused."""
+                wrong = []
+                for key in ROLES:
+                    st = (await ac.get(path, headers=H[key])).status_code
+                    if (st != 403) != (key in allowed):
+                        wrong.append(f"{key}={st}")
+                check(f"bu: {label}" + (f" — {note}" if note else ""),
+                      not wrong, f"wrong verdicts: {wrong}")
+
+            # ── 1. the roster is PII ─────────────────────────────────────────
+            # Names, phone numbers, departments, employer. It was
+            # `get_current_user`: every signed-in account in the company.
+            await sweep(
+                "GET /hr/employees admits ONLY the four roles that manage, move "
+                "or equip people",
+                "/hr/employees", {"sk", "sup", "hod", "aud", "admin"},
+                note="warehouse, QC and Logistics are refused; the store keeper "
+                     "is admitted because PPE cannot be issued without an "
+                     "employee ID and they are the one typing it")
+            await sweep(
+                "…and the per-person timeline agrees with the list it is opened "
+                "from", "/hr/employees/SVCQ-NOBODY/timeline",
+                {"sk", "sup", "hod", "aud", "admin"},
+                note="a 404 for the unknown id is fine — this asks WHO may ask")
+
+            # ── 2. the PPE forecast carries names ────────────────────────────
+            await sweep(
+                "GET /ppe/forecast admits the store that issues the gear, the "
+                "HOD who owns the site, and the Logistics that orders it",
+                "/ppe/forecast", {"sk", "hod", "log", "admin"},
+                note="it was require_level(0) — literally everyone")
+
+            # ── 3. the Estimator ─────────────────────────────────────────────
+            # THE reported leak. `require_level(2)` admits logistics (3), so a
+            # Logistics account could call every SME endpoint while its sidebar
+            # showed no SME page — the manifest hid a door that was open.
+            await sweep(
+                "GET /sme/summary admits the planners and the auditor, and "
+                "REFUSES Logistics", "/sme/summary", {"hod", "aud", "admin"},
+                note="closing this in the menu alone would have left the "
+                     "capability and merely hidden the door")
+
+            # ── 4. what must NOT have moved ──────────────────────────────────
+            # A tightening pass fails in the other direction too, and silently:
+            # break the auditor and nobody notices until an audit.
+            r = await ac.get("/sme/summary", headers=H["aud"])
+            check("bu: the AUDITOR still reads the Estimator. It is the "
+                  "oversight role, and over-narrowing it is the failure mode "
+                  "of a tightening pass — one that stays quiet until an audit",
+                  r.status_code == 200, f"got {r.status_code}")
+            r = await ac.get("/warehouse/assignments", headers=H["log"])
+            check("bu: Logistics still runs the WAREHOUSE. /warehouse/* has "
+                  "always been roles(warehouse_user, logistics), and the "
+                  "operator ruled the menu should follow the API rather than "
+                  "the API narrow — covering an unstaffed shed is real work",
+                  r.status_code != 403, f"got {r.status_code}")
+            r = await ac.get("/qc/inspections", headers=H["sk"])
+            check("bu: a store keeper still READS the inspection queue — it is "
+                  "how they see why the issue form refused them. Deciding "
+                  "stays roles('qc')",
+                  r.status_code == 200, f"got {r.status_code}")
+
+            # ── 5. the ladder is gone from the pages that matter ─────────────
+            # Read out of the manifest rather than restated here, so this
+            # cannot pass while the shipped rule says something else.
+            nav = _read_src("frontend/src/config/nav.tsx")
+            for page, roles_named in (("'/hr/employees'", "SK, SUP, HOD, AUD"),
+                                      ("'/ppe/forecast'", "SK, HOD, LOG"),
+                                      ("'/locator'", "FLOOR")):
+                idx = nav.find(f"key: {page}")
+                # Window on THIS node's `access:` clause and nothing else. A
+                # fixed byte window overruns into the next group, and the very
+                # next group is `master`, whose rule is `w({ minLevel: 3 })` —
+                # so the check failed on a neighbour's text.
+                acc = nav.find("access:", idx) if idx >= 0 else -1
+                seg = nav[acc:acc + 80] if acc >= 0 else ""
+                check(f"bu: {page} names ROLES, not a minLevel ({roles_named})",
+                      acc >= 0 and "anyRole" in seg and "minLevel" not in seg,
+                      seg[:120] or "page not found in the manifest")
+
+            # ── 6. the route guard fails CLOSED ──────────────────────────────
+            # The single most dangerous line in the manifest was
+            # `return true` on an unrecognised path. Asserted here as SOURCE
+            # rather than behaviour because the browser half lives in
+            # tests/e2e/specs/rbac-matrix.spec.ts — this is the check that
+            # fails fast, in the suite everyone runs.
+            guard = nav[nav.find("export function canAccessPath"):]
+            guard = guard[:guard.find("\n}\n") + 3]
+            check("bu: canAccessPath ends by REFUSING an unrecognised path. It "
+                  "used to `return true`, so the next page added without a "
+                  "manifest entry would have been open to every signed-in user "
+                  "in the company, silently",
+                  "return false" in guard and "return true // " not in guard,
+                  guard[-200:] or "canAccessPath not found")
+            check("bu: …and it checks the GROUP rule as well as the node's. "
+                  "buildMenu always did; this did not, so a group-level gate "
+                  "could be walked around by typing the URL",
+                  "g.access" in guard, guard[:200])
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM users WHERE username IN "
+                                 "('SVCQ-sup','SVCQ-aud')"))
+            await s.commit()
+        await _qsep_cleanup()
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -14080,6 +14245,9 @@ async def main() -> int:
     print("\n BT. Optimisations that must not change a single answer, plus the "
           "fail-open scope leak found while rewriting them")
     await test_optimisations_preserve_answers()
+    print("\n BU. Strict RBAC — the API gates narrowed on 2026-08-12, and the "
+          "refusals that would otherwise go quiet")
+    await test_strict_rbac_api_gates()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

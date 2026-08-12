@@ -153,3 +153,8 @@ jobs:
         run: npm ci --prefix frontend
       - name: Typecheck + build (tsc -b && vite build)
         run: npm run build --prefix frontend
+      # Every routable page must declare who may open it. canAccessPath()
+      # fails closed, so a route with no manifest entry is unreachable rather
+      # than universal — this is what makes that loud instead of silent.
+      - name: Navigation route coverage
+        run: npm run test:nav --prefix frontend

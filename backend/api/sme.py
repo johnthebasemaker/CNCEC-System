@@ -38,12 +38,28 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import sme_engine
-from .auth import require_level, resolve_site_param
+# `require_level` is still imported: the per-endpoint `require_level(2)` gates
+# below are now subordinate to the router gate (both must pass) and redundant
+# rather than wrong — HOD is 2 and Auditor is 3. Left in place because
+# rewriting fourteen call sites to say the same thing twice is churn, and
+# because a per-endpoint gate is the right place to NARROW one of them later.
+from .auth import require_level, require_roles, resolve_site_param
 from .db import get_session
 from .services.ledger import _MD
 
+# ⚠️ ROLES, NOT A LEVEL (2026-08-12). This was `require_level(2)`, which
+# admits HOD (2), Logistics (3), Auditor (3) and admin — so a Logistics
+# account could call every Estimator endpoint while the sidebar showed it no
+# SME page at all. That gap is the likeliest source of the "Logistics is
+# seeing SME" report, and closing it in the manifest alone would have left the
+# capability in place and merely hidden the door.
+#
+# The Estimator belongs to the people who PLAN work (HOD) and to the role that
+# reads everything and writes nothing (Auditor). Its two write surfaces —
+# /sme/actuals and /sme/master — are separately `require_roles("hod")` and stay
+# that way, so the auditor reaches the analysis and none of the editing.
 router = APIRouter(prefix="/sme", tags=["SME estimator"],
-                   dependencies=[Depends(require_level(2))])
+                   dependencies=[Depends(require_roles("hod", "auditor"))])
 
 sme_equipment_t = _MD.tables["sme_equipment"]
 sme_recipe_t = _MD.tables["sme_recipe"]

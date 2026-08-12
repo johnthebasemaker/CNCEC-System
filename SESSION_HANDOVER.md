@@ -144,6 +144,36 @@ which fails safe and is precisely why nobody noticed.
 
 ## 3. What was added most recently
 
+> **2026-08-12 (b) — the strict-RBAC pass.** Branch
+> `fix/strict-rbac-navigation`, executing the approved
+> [`PROPOSED_NAV_FIX.md`](PROPOSED_NAV_FIX.md) in five steps.
+>
+> * **`canAccessPath` now fails CLOSED.** It used to `return true` for any path
+>   it did not recognise, and it ignored group-level access entirely — so the
+>   sidebar and the route guard enforced two different policies. Nothing
+>   exploited either; the failure mode was simply "let them in".
+> * **`npm run test:nav`** (a TypeScript-AST parse of `App.tsx` vs the
+>   manifest) fails the build when a route has no access rule. Failing closed
+>   turns a silent LEAK into a silent LOCKOUT — this is the part that makes it
+>   loud. Wired into CI.
+> * **`minLevel` is gone from the nine contested pages.** It is a ladder and
+>   the roles are not one: `minLevel: 1` admitted six of eight roles, which is
+>   how seven roles held the staff roster and how the store keeper — the person
+>   who physically holds the stock — was the one role locked out of the Stock
+>   page. Pages now name the jobs that need them.
+> * **API gates narrowed to match**: `/hr/employees` (was `get_current_user`,
+>   i.e. anybody), `/ppe/forecast` (was level 0), `/sme/*` (was level 2, which
+>   is why Logistics could call every Estimator endpoint while seeing no SME
+>   page). Suite **BU** pins all of it, and is deliberately almost all NEGATIVE
+>   checks — the positives were already true and would survive a revert.
+> * **`tests/e2e/specs/rbac-matrix.spec.ts`** asserts all 8 roles × 44 pages
+>   through the SHIPPED access functions (`window.__giNav`), both for the menu
+>   and for the route guard. A matrix that re-implemented the rules would agree
+>   with itself forever while the guard did something else.
+> * ⚠️ **Two E2E assertions were INVERTED on purpose** (SK reaching `/stock`;
+>   the MTC receipt block). Both are commented in place. If either flips back,
+>   read the comment before "fixing" it.
+>
 > **2026-08-12 — the MTC gate moved, and an RBAC plan written.** One branch,
 > `fix/mtc-issuance-gate-and-nav-audit`. This is the first change to a locked
 > QSEP ruling since the programme shipped, and it was made on the operator's
@@ -360,8 +390,8 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1440 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **81 / 81** | `cd tests/e2e && npm test` |
+| Backend service tests | **1453 / 0** (suites A…BU) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
@@ -520,7 +550,7 @@ again — pushing an existing tag is a no-op.
 | [`PROJECT_HANDOVER.md`](PROJECT_HANDOVER.md) | **The authority.** All locked rules with their evidence, the baselines, developer utilities, caveats |
 | [`MANUAL_TESTING_GUIDE.md`](MANUAL_TESTING_GUIDE.md) | **Every manual test, ordered by business workflow**, with the 5 W's + 1 H for each feature and Given/When/Then per case. Also the fastest way to learn what the system PROMISES. Keeping it current is rule 13 |
 | [`PROPOSED_PHASE_6_PLAN.md`](PROPOSED_PHASE_6_PLAN.md) | The QSEP plan as approved, with the operator's rulings inline |
-| [`PROPOSED_NAV_FIX.md`](PROPOSED_NAV_FIX.md) | **AWAITING REVIEW — no code written.** The RBAC/navigation isolation plan: the computed per-role page matrix as it stands today, the fail-open route guard, the seven UI↔API disagreements, and a proposed target matrix with every grant and revocation reasoned. Four open questions for the operator at the end |
+| [`PROPOSED_NAV_FIX.md`](PROPOSED_NAV_FIX.md) | **APPROVED AND EXECUTED 2026-08-12.** The reasoning behind every grant and revocation in the role matrix — why `minLevel` was the wrong tool, why the route guard failed open, and the seven UI↔API disagreements. The *rule* is `PROJECT_HANDOVER.md` rule 14; the *enforced matrix* is `tests/e2e/specs/rbac-matrix.spec.ts`. Read this when you want the WHY. ⚠️ Its header records one finding deliberately left open: `crud.py`'s read routers are still `get_current_user` |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The system brain — backend/frontend/DB/testing/security map |
 | [`REPO_MAP.md`](REPO_MAP.md) | The `legacy/` ⇄ `tools/` ⇄ `data-archive/` segregation contract |
 | [`OVERNIGHT_OPTIMIZATION_RUNLOG.md`](OVERNIGHT_OPTIMIZATION_RUNLOG.md) | Chatbot retrieval, idle logout, throttle, indexes, ⌘K |

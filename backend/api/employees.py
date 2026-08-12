@@ -186,9 +186,30 @@ async def transfer_employee(id_number: str, body: TransferIn = Body(...),
             "ppe_carried_over": len(held)}
 
 
+# ⚠️ THE ROSTER IS PII. Names, phone numbers, departments, employer.
+#
+# This was `get_current_user` — ANY signed-in account could list every worker
+# they shared a site with, including roles with no business in the staff list
+# at all. The nav manifest hid the page from the store keeper and showed it to
+# warehouse users, QC inspectors and Logistics; the API showed it to everyone
+# regardless, so the manifest was never the control it looked like.
+#
+# Four roles, each for a stated reason (operator ruling, 2026-08-12):
+#   store_keeper  issues PPE against an employee ID and must be able to find one
+#   supervisor    raises material requests naming workers
+#   hod           owns the site's people and is the only role that may transfer
+#   auditor       reads everything, writes nothing
+# Warehouse, QC and Logistics are deliberately absent: none of them manages,
+# moves or equips a person.
+#
+# Site scoping below is unchanged and still does the real narrowing — a scoped
+# caller sees their own site, and '' (no site of their own) matches nothing.
+_ROSTER_ROLES = require_roles("store_keeper", "supervisor", "hod", "auditor")
+
+
 @router.get("/employees", summary="Employees you may see")
 async def list_employees(site_id: Optional[str] = None, q: Optional[str] = None,
-                         user: dict = Depends(get_current_user),
+                         user: dict = Depends(_ROSTER_ROLES),
                          session: AsyncSession = Depends(get_session)):
     site = resolve_site_param(user, site_id)
     if site == "":
@@ -209,13 +230,17 @@ async def list_employees(site_id: Optional[str] = None, q: Optional[str] = None,
 @router.get("/employees/{id_number}/timeline",
             summary="Where this person has worked, and what they hold (admin tracking)")
 async def timeline(id_number: str,
-                   user: dict = Depends(require_level(2)),
+                   user: dict = Depends(_ROSTER_ROLES),
                    session: AsyncSession = Depends(get_session)):
     """Current site + every recorded move + PPE + man-hour presence.
 
-    Level 2 (HOD and up) rather than admin-only: an HOD chasing a worker who
-    "used to be at CNCEC" needs the same answer an admin does, and the row
-    itself is site-scoped below for anyone under logistics.
+    ⚠️ Gated on `_ROSTER_ROLES`, NOT on a level, and the change is in both
+    directions. It was `require_level(2)`, which admitted Logistics — now
+    excluded with the rest of the roster — and excluded the store keeper, who
+    opens this panel from the roster page to see what PPE somebody already
+    holds before issuing more. An HOD chasing a worker who "used to be at
+    CNCEC" still gets the same answer an admin does, and the row itself is
+    site-scoped below for anyone under logistics.
 
     The movement series is SYNTHESISED with an opening segment when the
     person predates the movements table — otherwise a worker hired before

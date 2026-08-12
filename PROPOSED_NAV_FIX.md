@@ -1,6 +1,42 @@
 # PROPOSED_NAV_FIX.md — navigation & RBAC isolation plan
 
-**Status: PROPOSAL. No navigation code has been changed.**
+> ## ✅ APPROVED AND EXECUTED — 2026-08-12, branch `fix/strict-rbac-navigation`
+>
+> All five steps are shipped. The four questions in §6 were answered by the
+> operator as follows, and the plan below was implemented as written except
+> where noted:
+>
+> 1. **Warehouse/SME screenshot** — not pursued; proceed with the strict matrix.
+> 2. **QC Dashboard** — **hidden.** §4.1 † is resolved: an inspector's job is a
+>    queue. They keep Stock, Inventory records and Inspections.
+> 3. **`/warehouse` for Logistics** — **granted in the UI**, matching the API.
+> 4. **`/hr/employees` for Logistics** — **revoked**, for worker privacy.
+>
+> **Two corrections found while implementing**, both cases where this document
+> was wrong and the code was right:
+>
+> * §2.1 listed `/qc/inspections` as visible to the supervisor. It is not, and
+>   should not be — a supervisor requests material, they do not receive,
+>   inspect or issue it. The matrix spec carries the corrected row.
+> * §4.4 proposed narrowing `/hr/employees/{id}/timeline` from `require_level(2)`.
+>   That is a narrowing **and** a widening: level 2 excluded the store keeper,
+>   who opens the timeline from the roster to see what PPE somebody already
+>   holds. It now carries the same four roles as the roster itself.
+>
+> **A new finding, NOT fixed here** (it is outside the five approved steps and
+> needs its own decision): `crud.py`'s generated read routers are all
+> `get_current_user`, so the API behind `/records/*` — receipts, consumption,
+> returns, lots, POs — is open to any signed-in user, gated only by this
+> manifest. Site scoping still applies, so a store keeper hitting `/receipts`
+> directly sees their own site's rows and no one else's, which is why this is
+> a lower severity than the roster was. It affects eight entities and would
+> need each page re-audited. **Recommend a follow-up pass.**
+>
+> Left in place as the record of WHY each rule is what it is. The rule itself
+> now lives in `PROJECT_HANDOVER.md` rule 14; the enforced matrix lives in
+> `tests/e2e/specs/rbac-matrix.spec.ts`.
+
+**Original status: PROPOSAL. No navigation code has been changed.**
 Written 2026-08-12 against `main` @ `ca88779`. Awaiting your review.
 
 Scope: `frontend/src/config/nav.tsx`, `frontend/src/config/entities.ts`,

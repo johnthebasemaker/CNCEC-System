@@ -62,6 +62,44 @@ export interface NavGroup {
 const w = <T extends object>(rule: T): T & { writes: true } =>
   ({ ...rule, writes: true })
 
+// ── role sets (2026-08-12 strict-RBAC pass) ─────────────────────────────────
+//
+// WHY THESE EXIST, and why `minLevel` is gone from the contested pages.
+//
+// `minLevel` is a ladder: SK 0 · warehouse/supervisor/qc 1 · hod 2 ·
+// logistics/auditor 3 · admin 4. It was the right tool for the legacy portal,
+// where seniority really was one line. It is the wrong tool now, because the
+// roles are not a line — they are four different JOBS plus two oversight
+// roles. A store keeper is not "less senior" than a warehouse user; they do a
+// different job in a different place.
+//
+// Encoding that as `0 < 1` meant every rule aimed at one role leaked to five
+// others. `minLevel: 1` admits SIX of the eight roles — which is how seven
+// roles ended up holding the staff roster with phone numbers, and how the
+// store keeper ended up as the ONE role locked out of the Stock page.
+//
+// `minLevel` survives only where it still means seniority: /reports,
+// /master/*, /admin/* and the oversight ledgers in entities.ts. Everywhere
+// else a page now NAMES the jobs that need it.
+const SK = 'store_keeper'
+const WH = 'warehouse_user'
+const SUP = 'supervisor'
+const QC = 'qc'
+const HOD = 'hod'
+const LOG = 'logistics'
+const AUD = 'auditor'
+
+// Everyone who works a shift somewhere and needs the site's operational view.
+// QC is deliberately absent: an inspector's job is a queue, and the dashboard
+// was reaching them only because the role was created at level 1 (operator
+// ruling, 2026-08-12).
+const OPERATIONAL = [SK, WH, SUP, HOD, LOG, AUD]
+// …plus QC. Stock is the one overview an inspector genuinely needs: it is how
+// they see what is waiting for them and what their decision released.
+const OPERATIONAL_AND_QC = [SK, WH, SUP, QC, HOD, LOG, AUD]
+// People who physically walk to a shelf, plus the role that owns the racking.
+const FLOOR = [SK, WH, LOG]
+
 // ── the manifest ────────────────────────────────────────────────────────────
 // Access rules chosen to reproduce legacy exactly (see config.py PAGE_ACCESS /
 // main.py _EXACT_ROLE_PAGES). Levels: SK 0 · warehouse/supervisor 1 · hod 2 ·
@@ -70,36 +108,49 @@ export const NAV: NavGroup[] = [
   {
     id: 'overview',
     children: [
-      // Legacy Live Dashboard = supervisor+ (SK never saw it). SK lands on its
-      // role-home instead (see ROLE_HOME + the index redirect in AppLayout).
-      { key: '/', label: 'Dashboard', icon: <DashboardOutlined />, access: { minLevel: 1 } },
-      { key: '/stock', label: 'Stock', icon: <StockOutlined />, access: { minLevel: 1 } },
-      // The rack locator sits at the TOP LEVEL and at minLevel 0 on purpose:
-      // the store keeper is level 0 and is the person who has to walk to the
-      // shelf. Burying it inside a supervisor group would hide it from its
-      // only real user. It is NOT marked `writes` — finding a material is a
-      // read, and the create/assign controls inside are guarded separately
+      // ⚠️ The legacy Live Dashboard was supervisor+ and the SK "landed on its
+      // role-home instead". That was a legacy-portal accident carried forward:
+      // it left the person who physically holds the stock as the only role
+      // that could not open the Dashboard OR the Stock page. Both endpoints
+      // (`/dashboard`, `/stock/*`) have always accepted them — this is the
+      // manifest catching up to the API, not a widening.
+      { key: '/', label: 'Dashboard', icon: <DashboardOutlined />, access: { anyRole: OPERATIONAL } },
+      { key: '/stock', label: 'Stock', icon: <StockOutlined />, access: { anyRole: OPERATIONAL_AND_QC } },
+      // The rack locator sits at the TOP LEVEL on purpose: the store keeper is
+      // the person who has to walk to the shelf, and burying it inside a
+      // supervisor group would hide it from its only real user. Narrowed
+      // 2026-08-12 from "everyone" to the roles that walk to shelves — a
+      // supervisor, an HOD, an inspector and an auditor never do.
+      // NOT marked `writes` — finding a material is a read, and the
+      // create/assign controls inside are guarded separately
       // (require_level(1) server-side, useReadOnly in the page).
-      { key: '/locator', label: 'Locator', icon: <EnvironmentOutlined />, access: { minLevel: 0 } },
-      // Serialised assets. Same reasoning as the Locator: level 0, top level —
-      // the person scanning a hammer in a yard is a store keeper.
-      { key: '/assets', label: 'Assets', icon: <AimOutlined />, access: { minLevel: 0 } },
+      { key: '/locator', label: 'Locator', icon: <EnvironmentOutlined />, access: { anyRole: FLOOR } },
+      // Serialised assets — hand tools, gauges, the things that get carried
+      // off. Everyone who might sign one out, minus the inspector: a QC
+      // inspects MATERIAL, not the hammer inventory.
+      { key: '/assets', label: 'Assets', icon: <AimOutlined />, access: { anyRole: OPERATIONAL } },
     ],
   },
   {
     id: 'entry',
     label: 'Data Entry',
-    access: w({ anyRole: ['store_keeper'] }),   // Entry Log exact-locked to SK
+    access: w({ anyRole: [SK] }),   // Entry Log exact-locked to SK
+    // Every node here is `w()` too, and not just for tidiness: the group rule
+    // and the node rule are enforced by DIFFERENT functions, and until
+    // 2026-08-12 the route guard checked only the node. A group that carries
+    // `writes` over nodes that do not is a page reachable by URL that the
+    // sidebar says is closed. Marked at both levels so the two agree whichever
+    // one is consulted.
     children: [
-      { key: '/entry/receive', label: 'Receive Stock', icon: <FormOutlined />, access: { anyRole: ['store_keeper'] } },
-      { key: '/entry/issue', label: 'Issue Stock', icon: <FormOutlined />, access: { anyRole: ['store_keeper'] } },
-      { key: '/entry/return', label: 'Return Stock', icon: <FormOutlined />, access: { anyRole: ['store_keeper'] } },
-      { key: '/entry/adjust', label: 'Stock Adjustment', icon: <FormOutlined />, access: { anyRole: ['store_keeper'] } },
-      { key: '/entry/count', label: 'Stock Count', icon: <FormOutlined />, access: { anyRole: ['store_keeper'] } },
-      { key: '/entry/returnables', label: 'Returnable Items', icon: <ToolOutlined />, access: { anyRole: ['store_keeper'] }, badge: 'returnables_overdue' },
-      { key: '/entry/ocr', label: 'OCR Import', icon: <CameraOutlined />, access: { anyRole: ['store_keeper'] } },
-      { key: '/site/incoming', label: 'Incoming Deliveries', icon: <InboxOutlined />, access: { anyRole: ['store_keeper'] }, badge: 'incoming_dns' },
-      { key: '/sk/requests', label: 'Supervisor Requests', icon: <SolutionOutlined />, access: { anyRole: ['store_keeper'] }, badge: 'sk_requests' },
+      { key: '/entry/receive', label: 'Receive Stock', icon: <FormOutlined />, access: w({ anyRole: [SK] }) },
+      { key: '/entry/issue', label: 'Issue Stock', icon: <FormOutlined />, access: w({ anyRole: [SK] }) },
+      { key: '/entry/return', label: 'Return Stock', icon: <FormOutlined />, access: w({ anyRole: [SK] }) },
+      { key: '/entry/adjust', label: 'Stock Adjustment', icon: <FormOutlined />, access: w({ anyRole: [SK] }) },
+      { key: '/entry/count', label: 'Stock Count', icon: <FormOutlined />, access: w({ anyRole: [SK] }) },
+      { key: '/entry/returnables', label: 'Returnable Items', icon: <ToolOutlined />, access: w({ anyRole: [SK] }), badge: 'returnables_overdue' },
+      { key: '/entry/ocr', label: 'OCR Import', icon: <CameraOutlined />, access: w({ anyRole: [SK] }) },
+      { key: '/site/incoming', label: 'Incoming Deliveries', icon: <InboxOutlined />, access: w({ anyRole: [SK] }), badge: 'incoming_dns' },
+      { key: '/sk/requests', label: 'Supervisor Requests', icon: <SolutionOutlined />, access: w({ anyRole: [SK] }), badge: 'sk_requests' },
     ],
   },
   {
@@ -181,9 +232,14 @@ export const NAV: NavGroup[] = [
     access: { minLevel: 3 },   // {logistics, admin} (hod level 2 < 3)
     children: [
       { key: '/logistics', label: 'Procurement', icon: <CarOutlined />, access: w({ minLevel: 3 }) },
-      // same page as /hod/lining-coverage — distinct route key so the two nav
-      // groups never share an antd menu key (admin "All areas" shows both)
-      { key: '/logistics/lining-coverage', label: 'Lining Coverage', icon: <ExperimentOutlined />, access: { minLevel: 3 } },
+      // Same PAGE as /hod/lining-coverage — a distinct route key so the two
+      // nav groups never share an antd menu key (admin "All areas" shows
+      // both). Narrowed from `minLevel: 3` to Logistics alone: an auditor is
+      // also level 3 and was being offered this entry AND the identical
+      // /hod/lining-coverage one, while its data endpoint
+      // (`/analytics/lining`, roles hod+logistics) 403s them. A second menu
+      // entry for one screen that then errors is worse than no entry.
+      { key: '/logistics/lining-coverage', label: 'Lining Coverage', icon: <ExperimentOutlined />, access: { anyRole: [LOG] } },
     ],
   },
   {
@@ -195,11 +251,18 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
+    // GRANTED TO LOGISTICS 2026-08-12 (operator ruling). `/warehouse/*` has
+    // always been `require_roles("warehouse_user", "logistics")` on the
+    // server, so Logistics could already receive goods and cut delivery notes
+    // by API while the sidebar told them the area was not theirs. Covering an
+    // unstaffed shed is a real operational need; the honest fix was to make
+    // the menu admit what the system already does, rather than narrow an API
+    // that people depend on.
     id: 'warehouse',
     label: 'Warehouse',
-    access: w({ anyRole: ['warehouse_user'] }),   // exact {warehouse_user, admin}
+    access: w({ anyRole: [WH, LOG] }),
     children: [
-      { key: '/warehouse', label: 'Receiving & DN', icon: <InboxOutlined />, access: w({ anyRole: ['warehouse_user'] }), badge: 'warehouse' },
+      { key: '/warehouse', label: 'Receiving & DN', icon: <InboxOutlined />, access: w({ anyRole: [WH, LOG] }), badge: 'warehouse' },
     ],
   },
   {
@@ -236,22 +299,39 @@ export const NAV: NavGroup[] = [
     // and there deliberately is not one.
     id: 'safety',
     label: 'Safety & People',
-    access: { minLevel: 0 },
+    access: { anyRole: [SK, SUP, HOD, LOG, AUD] },
     children: [
       {
+        // A re-ordering worksheet that lists, BY NAME, who holds which piece
+        // of safety gear. It was `minLevel: 0`, i.e. everybody. Narrowed to
+        // the store that issues the gear, the HOD who owns the site, and
+        // Logistics — who do the actual ordering and are the one role outside
+        // the store with a use for it.
         key: '/ppe/forecast', label: 'PPE Forecast', icon: <FieldTimeOutlined />,
-        access: { minLevel: 0 },
+        access: { anyRole: [SK, HOD, LOG] },
       },
       {
         key: '/ppe/rules', label: 'PPE Usable Time', icon: <SafetyOutlined />,
-        access: w({ anyRole: ['store_keeper', 'hod'] }),
+        access: w({ anyRole: [SK, HOD] }),
       },
       {
+        // ⚠️ THE BIGGEST PII NARROWING IN THIS PASS. The full staff roster —
+        // names, phone numbers, departments — was `minLevel: 1`, which handed
+        // it to warehouse users, QC inspectors and Logistics, none of whom
+        // manage, move or equip people. Revoked from all three (operator
+        // ruling, 2026-08-12).
+        //
+        // GRANTED to the Store Keeper in the same breath, and the inversion is
+        // the point: since QSEP, PPE cannot be issued without a valid
+        // employee ID, so the SK is the person typing one — and was the only
+        // role denied the list to type it from. The read is site-scoped
+        // server-side (`resolve_site_param`).
+        //
         // NOT marked `writes`: an auditor should be able to read the roster
         // and somebody's PPE history. The Transfer button inside is gated on
         // the HOD role and on useReadOnly() separately.
         key: '/hr/employees', label: 'Employees', icon: <TeamOutlined />,
-        access: { minLevel: 1 },
+        access: { anyRole: [SK, SUP, HOD, AUD] },
       },
     ],
   },
@@ -372,25 +452,53 @@ export function accessibleNodes(user: User | null): FlatNav[] {
   return out
 }
 
+// Paths that are deliberately open to every signed-in user and carry no menu
+// entry of their own. EXHAUSTIVE and exported, because `canAccessPath` below
+// now refuses everything it does not recognise — this list is the entire set
+// of exceptions, and `npm run test:nav` asserts that App.tsx declares nothing
+// outside it that the manifest has not claimed.
+export const PUBLIC_PATH_PREFIXES = [
+  // The QR-scan Material Intelligence page. Store keepers (level 0) are the
+  // ones holding the scanner, and its endpoint is get_current_user +
+  // site_scope — not the level-1 gate the /stock LIST carries. Inheriting
+  // /stock's rule would bounce an SK off their own scan.
+  '/stock/material/',
+]
+
 // Resolve the access rule for an arbitrary pathname (handles dynamic
-// /records/:key and /master/:key). Unknown paths default to allowed.
+// /records/:key and /master/:key).
+//
+// ⚠️ THIS FUNCTION FAILS CLOSED, and both halves of that are deliberate.
+//
+// It used to `return true` for any path it did not recognise. Nothing
+// exploited it — every route declared in App.tsx happened to have a manifest
+// entry — but the failure mode was "let them in": the next <Route> added
+// without a NAV node would have been reachable by every signed-in user in the
+// company, silently, with nothing to notice it. A guard whose default is
+// ALLOW is not a guard, it is a lookup table with optimistic edges.
+//
+// It also used to check only the NODE's rule while `buildMenu` checked the
+// GROUP's rule as well, so the sidebar and the route guard enforced two
+// different policies and a group-level gate could be walked around by typing
+// the URL. Both are checked here now, group first, in the same order the menu
+// checks them.
 export function canAccessPath(user: User | null, pathname: string): boolean {
   if (!user) return false
   const path = pathname.replace(/\/+$/, '') || '/'
   if (path.startsWith('/records/')) {
     const key = path.slice('/records/'.length)
     const ent = READ_ENTITIES.find((e: ReadEntity) => e.key === key)
-    return ent ? canAccess(user, ent.access) : canAccess(user, { minLevel: 2 })
+    // An UNKNOWN entity key is refused rather than handed the generic hod+
+    // rule. `/records/anything-at-all` used to resolve to `minLevel: 2`.
+    return ent ? canAccess(user, ent.access) : false
   }
   if (path.startsWith('/master/')) return canAccess(user, w({ minLevel: 3 }))
-  // The QR-scan Material Intelligence page is open to ANY signed-in user:
-  // store keepers (level 0) are the ones holding the scanner, and its endpoint
-  // is get_current_user + site_scope — not the level-1 gate the /stock LIST
-  // carries. Inheriting /stock's rule would bounce an SK off their own scan.
-  if (path.startsWith('/stock/material/')) return true
+  if (PUBLIC_PATH_PREFIXES.some((p) => path.startsWith(p))) return true
   for (const g of NAV) {
     const node = g.children.find((n) => n.key === path)
-    if (node) return canAccess(user, node.access)
+    if (!node) continue
+    if (g.access && !canAccess(user, g.access)) return false
+    return canAccess(user, node.access)
   }
-  return true // documents/security/feedback and anything unlisted
+  return false // unlisted → refused, and `test:nav` stops that being a surprise
 }

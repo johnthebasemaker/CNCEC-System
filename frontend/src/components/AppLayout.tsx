@@ -9,7 +9,7 @@ import { useAuth } from '../auth/AuthContext'
 import { READ_ONLY_REASON } from '../auth/useReadOnly'
 import { useIdleLogout } from '../auth/useIdleLogout'
 import type { User } from '../auth/AuthContext'
-import { NAV, ADMIN_DEFAULT_GROUPS, PRIMARY_GROUP, canAccess, canAccessPath, groupOfPath, roleHome } from '../config/nav'
+import { NAV, ADMIN_DEFAULT_GROUPS, PRIMARY_GROUP, accessibleNodes, canAccess, canAccessPath, groupOfPath, roleHome } from '../config/nav'
 import type { NavGroup, NavNode } from '../config/nav'
 import { useThemeMode } from '../theme/ThemeContext'
 import { siderTheme } from '../theme/themes'
@@ -141,6 +141,22 @@ export default function AppLayout() {
     const g = groupOfPath(location.pathname)
     if (g) setOpenKeys((prev) => (prev.includes(g) ? prev : [...prev, g]))
   }, [location.pathname])
+
+  // Exposed for the Playwright RBAC-matrix spec + console debugging, the same
+  // way the offline queue exposes `__giOffline`.
+  //
+  // ⚠️ It hands out the REAL functions, not a copy of the rules. A matrix test
+  // that re-implemented `canAccess` would pass happily while the shipped guard
+  // did something else — which is the exact failure this whole pass exists to
+  // stop. Read-only, and it exposes nothing a signed-in user cannot already
+  // determine by clicking around their own sidebar.
+  useEffect(() => {
+    ;(window as unknown as Record<string, unknown>).__giNav = {
+      role: user?.role ?? null,
+      pages: () => accessibleNodes(user).map((n) => n.key),
+      can: (path: string) => canAccessPath(user, path),
+    }
+  }, [user])
 
   // Route guard: if the current path isn't allowed for this role, bounce to the
   // role's home. Keeps the UI honest with the API's per-endpoint role gates.

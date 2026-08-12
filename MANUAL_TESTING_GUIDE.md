@@ -918,6 +918,31 @@ are the ones that matter.
 | TC-SEC-08 | **Given** an Admin, **When** they open any workspace, **Then** allowed — the single deliberate exception. ✅ |
 | TC-SEC-09 | **Given** any user, **When** they request another site's record by id directly, **Then** refused — not merely hidden from the list. ⛔ |
 
+### 13.1 The strict role matrix (2026-08-12)
+
+Pages used to be gated by a **seniority level**, and the roles are not a
+ladder — they are four different jobs plus two oversight roles. `minLevel: 1`
+admitted six of the eight roles, which is how seven roles ended up holding the
+staff roster and how the store keeper ended up as the one role locked out of
+the Stock page. Pages now **name the jobs** that need them.
+
+⚠️ **The matrix is asserted automatically** — `tests/e2e/specs/rbac-matrix.spec.ts`
+drives all eight roles against every page, through the shipped access functions.
+Manual testing here is for judgement ("should a QC see this?"), not for coverage.
+
+| ID | Given / When / Then |
+|---|---|
+| TC-SEC-10 | **Given** a **store keeper**, **Then** they can open **Dashboard** and **Stock**. ✅ ⚠️ **Inverted 2026-08-12** — they used to be bounced to their Issue page. The person holding the stock was the one role that could not open the screen named after it. |
+| TC-SEC-11 | **Given** a **store keeper**, **Then** they can open the **Employees** roster. ✅ *They type an employee ID on every PPE issue and were the only role denied the list to type it from.* |
+| TC-SEC-12 | **Given** a **warehouse user**, **a QC** or **Logistics**, **Then** the Employees roster is **refused**, in the menu and by the API. ⛔ **The privacy row.** Names and phone numbers; none of these three manages, moves or equips people. |
+| TC-SEC-13 | **Given** a **QC inspector**, **Then** they see Stock, Inventory records, Inspections, Documents and their account — and **not** the Dashboard, Locator, Assets, PPE or Employees. ⛔ *An inspector's job is a queue.* |
+| TC-SEC-14 | **Given** **Logistics**, **When** they open the **Warehouse** portal, **Then** allowed. ✅ *`/warehouse/*` has always accepted them server-side; the menu now agrees. Covering an unstaffed shed is real work.* |
+| TC-SEC-15 | **Given** **Logistics**, **When** they call any **SME/Estimator** endpoint, **Then** refused. ⛔ *This was the reported leak: the sidebar showed them no SME page while the API served them every one.* |
+| TC-SEC-16 | **Given** a **warehouse user**, **Then** they can browse **Purchase Orders**. ✅ *They receive goods against a PO and were phoning Logistics to have line quantities read out.* |
+| TC-SEC-17 | **Given** **any** role, **When** they type a URL the system does not recognise, **Then** refused. ⛔ ⚠️ **Inverted 2026-08-12** — an unknown path used to be **allowed**. |
+| TC-SEC-18 | 🤖 **Given** a new page is added with no entry in the navigation manifest, **Then** the build fails (`npm run test:nav`). *Failing closed turns a silent leak into a silent lockout; this is what makes it loud.* |
+| TC-SEC-19 | **Given** an **auditor**, **Then** they still read the Estimator, the HOD pages and every record. ✅ **Run this.** Over-narrowing the oversight role is the failure mode of a tightening pass, and it stays quiet until an audit. |
+
 ---
 
 ## 14. Edge cases, and how to drain any model
@@ -1103,11 +1128,12 @@ regression, not a new normal.**
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1440 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1453 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
-| Playwright E2E | **81 / 81** | `cd tests/e2e && npm test` |
+| Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
+| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | Frontend build | clean | `npm run build --prefix frontend` |
 | Manual PDFs | **0 overlapping text pairs** | `.venv/bin/python build_manual_pdf.py --role all` |
 

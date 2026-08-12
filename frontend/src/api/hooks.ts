@@ -1772,8 +1772,15 @@ export function useEmployeeMovements(site?: string) {
   })
 }
 
-export function useHrDataQuality() {
+/**
+ * The site-less-employee hygiene panel. `enabled` because the endpoint is
+ * `require_level(2)` while the roster PAGE is now open to the store keeper and
+ * the supervisor (2026-08-12) — firing it for them would mean a guaranteed 403
+ * and an error toast on every visit, for a panel they are not shown anyway.
+ */
+export function useHrDataQuality(enabled = true) {
   return useQuery({
+    enabled,
     queryKey: ['/hr/data-quality'],
     queryFn: async () => (await api.get<Row>('/hr/data-quality')).data,
   })
