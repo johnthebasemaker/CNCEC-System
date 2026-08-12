@@ -647,10 +647,29 @@ of them is a regression, not a new normal.
 > * **R2 (adjusted) — `inventory."Category" = 'PPE'` is valid for UI filtering,
 >   but `ppe_rules` still governs per-item usable days.** With no rule, an item
 >   has NO expiry and always demands a safety document.
-> * **R3 (adjusted) — material MAY travel to site uninspected.** Do **not**
->   block DN creation for want of an inspection. The **MTC is** mandatory at DN
->   creation; the **QC hard block applies only at SK issuance**. Two gates, two
->   moments — this is the most-misread part of the system.
+> * **R3 (superseded 2026-08-12 by R3b) — material MAY travel to site
+>   uninspected.** Do **not** block DN creation for want of an inspection. The
+>   QC hard block applies only at SK issuance.
+> * **R3b — the MTC gate MOVED to issuance (operator ruling, 2026-08-12).**
+>   It used to be mandatory at warehouse goods-in and at DN creation. In live
+>   use that was a hard workflow blocker: the truck is in the yard, the
+>   certificate is in somebody's inbox, and refusing the receipt made real
+>   stock invisible to the shelf report, to planning and to everyone. **Goods
+>   are now received and shipped with or without a certificate; nothing may be
+>   ISSUED without one.** Both gates therefore bind at the same moment, at
+>   `stage_consumption` **and** `approve_smr`.
+>   * The receipt block was traded for a **chase-up to Logistics**
+>     (`quality.warn_mtc_missing`) — without that the ruling deletes a control
+>     rather than moving it.
+>   * **Certificates are INHERITED down the chain** (`quality.visible_mtc`):
+>     uploaded against the PO line by Logistics, against the DN by the
+>     warehouse, or at the site by the SK, ranked most-specific-first. A site
+>     never re-uploads a document that exists upstream, and a certificate for
+>     site A does **not** clear site B — it attests to one batch, and matching
+>     on material alone would be a gate that opens once and never closes.
+>   * ⚠️ **Do not "restore" the receipt or DN block.** Suite BM asserts
+>     `assert_mtc` is absent from `warehouse.receive` and `create_dn`, and
+>     `qsep-mtc.spec.ts` drives the whole chain end to end.
 > * **R4/R5 — the PPE forecast is deterministic, and the window is 15 days.**
 >   `suggested = expiring − on_hand − on_order`, floored at 0, with employee
 >   NAMES attached. No statistical model: 22 roster workers and no history is
@@ -673,8 +692,8 @@ of them is a regression, not a new normal.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1428 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **75 / 75** (~26 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **1440 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **81 / 81** (~30 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |

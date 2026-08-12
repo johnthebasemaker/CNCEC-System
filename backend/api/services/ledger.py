@@ -339,6 +339,12 @@ async def stage_consumption(session: AsyncSession, *, username: str, data: dict)
     from . import ppe, quality
 
     sap = data["SAP_Code"].strip()
+    # BOTH halves of the issue gate, in the order that gives the most useful
+    # refusal. Paperwork first: a missing certificate is fixed by a different
+    # person (Logistics) than a missing inspection (the QC), and it is the one
+    # the store keeper can chase immediately.
+    await quality.assert_mtc_for_issue(
+        session, sap_code=sap, site_id=data["Site_ID"], actor=username)
     await quality.assert_qc_cleared(
         session, sap_code=sap, site_id=data["Site_ID"],
         qty=float(data["Quantity"]), lot=(data.get("Lot_Number") or None),

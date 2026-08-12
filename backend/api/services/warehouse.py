@@ -123,12 +123,16 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
     (Surface-Shield) lines only — the other 430 materials in the master go
     through exactly as before:
 
-      * **A Material Test Certificate is mandatory.** `mtc_map` maps the same
-        PO line ids as `received_map` to an `mtc_documents.id`. A controlled
-        line with no certificate is refused with a 422 that names it. This
-        used to be enforced only on the site-side Store Keeper's own receipt
-        form, so shields could be booked into a warehouse — and shipped on —
-        with no paperwork anywhere in the chain.
+      * **A Material Test Certificate is recorded when there is one.**
+        `mtc_map` maps the same PO line ids as `received_map` to an
+        `mtc_documents.id`. ⚠️ It is NOT mandatory here, and that is the
+        2026-08-12 ruling: this function briefly refused uncertified shields
+        and that turned out to be a hard workflow blocker — the truck is in
+        the yard, the certificate is in somebody's inbox, and refusing the
+        receipt makes real material invisible to the whole system. An
+        uncertified line is booked in and Logistics is told to chase the
+        document. The block now sits at ISSUE (`assert_mtc_for_issue`), which
+        is the moment the certificate actually protects a worker.
       * **A quality inspection is opened**, so the warehouse QC is told there
         is material to look at. Opening it does NOT gate the delivery: the
         operator ruled on 2026-08-09 that uninspected material may travel to
@@ -149,6 +153,7 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
     affected = 0
     inspections: list[int] = []
     received_lines: list[dict] = []
+    missing_mtc: list[str] = []
     for raw_id, raw_qty in received_map.items():
         try:
             item_id, qty = int(raw_id), float(raw_qty)
@@ -168,13 +173,21 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
         if new_delivered - returned > ordered + 1e-9:
             return {"error": f"cannot receive {qty}: over-delivers line {item_id} "
                              f"(ordered {ordered}, already {already})"}
-        # MTC gate. Raises 422 for a controlled line with no certificate;
-        # returns None (and asks for nothing) for everything else.
+        # MTC. Recorded, never demanded — see the 2026-08-12 ruling in
+        # services/quality.py. Returns the covering certificate's id when one
+        # exists, and None for an uncertified shield as well as for the other
+        # 430 materials; the two cases are told apart below.
         material_code = line[3]
-        mtc_id = await quality.assert_mtc(
+        mtc_id = await quality.note_mtc(
             session, material_code=material_code, warehouse_id=warehouse_id,
-            po_item_id=item_id, mtc_id=mtc_map.get(str(item_id), mtc_map.get(item_id)),
-            where=f"line {item_id} can be booked into warehouse {warehouse_id}")
+            po_item_id=item_id, mtc_id=mtc_map.get(str(item_id), mtc_map.get(item_id)))
+        # `None` means "no certificate" for a shield and "never asked" for
+        # everything else, so the controlled test has to be re-run rather than
+        # inferred — otherwise the audit line and the chase-up notification
+        # would name all 430 ordinary materials.
+        if mtc_id is None and await quality.is_controlled(
+                session, material_code=material_code):
+            missing_mtc.append(str(material_code))
         new_status = "delivered" if new_delivered - returned >= ordered - 1e-9 else "partially_delivered"
         await session.execute(update(po_items_t).where(po_items_t.c["id"] == item_id)
                               .values(Delivered_Qty=new_delivered, line_status=new_status))
@@ -208,7 +221,16 @@ async def receive(session: AsyncSession, *, username: str, assignment_id: int,
 
     await write_audit(session, username, "WAREHOUSE_RECEIVE", "po_items",
                       f"PO={po_number} assignment={assignment_id} lines={affected}"
-                      + (f" qc_inspections={len(inspections)}" if inspections else ""))
+                      + (f" qc_inspections={len(inspections)}" if inspections else "")
+                      + (f" mtc_missing={','.join(sorted(set(missing_mtc)))}"
+                         if missing_mtc else ""))
+    # The goods are in. Whoever can get the certificate is now the only person
+    # who can unblock them, and they are not in this room.
+    for mat in sorted(set(missing_mtc)):
+        await quality.warn_mtc_missing(
+            session, sap_code=None, material_code=mat,
+            where=f"goods-in on PO {po_number}", warehouse_id=warehouse_id,
+            created_by=username)
 
     # QSEP slice 6 — draft the DNs the destination site is waiting for. The
     # PO's own Site_ID is the destination; a PO with no site is a warehouse
@@ -361,24 +383,29 @@ async def create_dn(session: AsyncSession, *, username: str, po_number: str, war
             return {"error": f"line {iid}: shipping {qty} exceeds available {available:g} "
                              f"(delivered {delivered}, returned {returned}, on live DNs {float(shipped or 0):g})"}
 
-    # QSEP — THE MTC GATE, at the point where material leaves for a site.
+    # QSEP — the MTC is RECORDED here, not demanded.
     #
-    # This is where the operator's rule bites: a Surface Shield may not be
-    # SENT without a Material Test Certificate. Note what is deliberately NOT
-    # checked here — whether QC has inspected it. Uninspected material is
-    # allowed to travel and wait at the site; it is the ISSUE that is blocked
-    # (services/quality.assert_qc_cleared). Fusing the two would strand every
-    # delivery behind an inspector's shift pattern.
+    # ⚠️ This used to be a hard gate: a Surface Shield could not be put on a
+    # Delivery Note without a certificate. The 2026-08-12 ruling moved the
+    # block to issue, and moving it out of here specifically is the point —
+    # leaving it would have reproduced the same workflow blocker one hop
+    # later. The warehouse would be able to receive the material and then be
+    # unable to send it anywhere, which is a stall with an extra step.
     #
-    # Matching is on Material_Code because that is all a DN line has. A gate
-    # written against SAP_Code alone would find nothing here and pass silently.
+    # Nothing about the TRAVEL of controlled material is gated now: neither
+    # its certificate nor its inspection status (`assert_qc_cleared` is
+    # deliberately absent here too). It is stopped once, at the site store
+    # keeper's hand-over to a worker.
+    #
+    # Matching is on Material_Code because that is all a DN line has. A lookup
+    # written against SAP_Code alone would find nothing here and silently
+    # stamp no certificate on any note.
     mtc_ids: dict[int, int] = {}
     for li in line_items:
         iid = int(li["po_item_id"])
-        found = await quality.assert_mtc(
+        found = await quality.note_mtc(
             session, material_code=by_id[iid][1], warehouse_id=warehouse_id,
-            po_item_id=iid, mtc_id=li.get("mtc_document_id"),
-            where=f"line {iid} can be put on a Delivery Note to {site_id}")
+            po_item_id=iid, mtc_id=li.get("mtc_document_id"))
         if found is not None:
             mtc_ids[iid] = found
 
@@ -602,10 +629,19 @@ async def stage_dn_receipt(session: AsyncSession, *, username: str, dn_number: s
         # the SITE's QC gets an inspection. The source_ref is the DN line id
         # rather than the pending receipt, because the DN line is what a
         # retry would replay; the unique constraint then makes it idempotent.
+        #
+        # The certificate comes WITH the goods (2026-08-12): whatever
+        # Logistics attached to the PO line or the warehouse attached to this
+        # DN is what the site's QC should be reading, so it is resolved down
+        # the chain and stamped on the inspection rather than left for the
+        # store keeper to re-upload a second copy of.
+        paper = await quality.visible_mtc(
+            session, sap_code=str(sap), material_code=mat, site_id=site_id)
         iid = await quality.open_inspection(
             session, sap_code=str(sap), material_code=mat,
             lot=it.get("Lot_Number"), qty=qty, source_type="dn_receipt",
             source_ref=f"{dn_number}:{it['id']}", site_id=site_id,
+            mtc_document_id=(int(paper["id"]) if paper else None),
             created_by=username)
         if iid:
             inspections.append(iid)

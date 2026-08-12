@@ -94,19 +94,34 @@ written.
 * **SME ⇄ ERP decoupling (rule 1a)** — every SME number comes from
   `sme_inventory_seed`. A warehouse receipt must not move an SME figure.
 
-### The QSEP two-gate rule (2026-08-09)
-**The certificate binds at DISPATCH; quality approval binds at ISSUE.** They are
-different gates at different moments and confusing them produces confident
-wrong "fixes".
+### The QSEP two-gate rule (2026-08-09, **certificate gate MOVED 2026-08-12**)
+**Both gates now bind at ISSUE.** The certificate used to bind at DISPATCH; the
+operator moved it on 2026-08-12 after it blocked live work (see
+`PROJECT_HANDOVER.md` R3b). Nothing about RECEIVING or SHIPPING controlled
+material is gated any more.
 
-| Gate | Where it fires | Refuses whom |
-|---|---|---|
-| Material Test Certificate | Delivery Note creation | the warehouse clerk |
-| QC approval | Store Keeper's issue, and again at HOD approval | the store keeper |
+| Gate | Where it fires | Refuses whom | Fixed by |
+|---|---|---|---|
+| Material Test Certificate | Store Keeper's issue (`stage_consumption` + `approve_smr`) | the store keeper | **Logistics** |
+| QC approval | the same two places, and again at HOD approval | the store keeper | **the QC** |
 
-**Material MAY travel to site uninspected** — that is the operator's ruling
-(R3). What it may not do is reach a worker. And the QC block **does not overturn
-FEFO**: `assert_qc_cleared` is about QUALITY STATUS on 36 SAPs, while FEFO and
+Two gates, one moment, **two different people to chase** — a refusal message
+that does not say which gate sends the SK to the wrong person.
+
+**Receiving is never refused.** A receipt states that something physically
+arrived; refusing to record it does not un-arrive it, it just hides real stock
+from the shelf report and from planning. The receipt block was traded for a
+notification to Logistics (`quality.warn_mtc_missing`) — if you ever remove
+that, the ruling has deleted a control rather than moved it.
+
+**Certificates are inherited, not re-uploaded** (`quality.visible_mtc`): PO line
+→ DN → warehouse → site, ranked most-specific-first, and scoped to the site the
+goods actually reached. If a store keeper is ever uploading a second copy of a
+PDF Logistics already has, that is the bug.
+
+**Material MAY travel to site uninspected** — the original ruling (R3). What it
+may not do is reach a worker. And the QC block **does not overturn FEFO**:
+`assert_qc_cleared` is about QUALITY STATUS on 36 SAPs, while FEFO and
 over-issue stay allow-and-log on everything. Never implement one by promoting
 the other's warning to an error.
 
@@ -129,6 +144,34 @@ which fails safe and is precisely why nobody noticed.
 
 ## 3. What was added most recently
 
+> **2026-08-12 — the MTC gate moved, and an RBAC plan written.** One branch,
+> `fix/mtc-issuance-gate-and-nav-audit`. This is the first change to a locked
+> QSEP ruling since the programme shipped, and it was made on the operator's
+> instruction after the old rule blocked live work.
+>
+> * **The certificate gate moved from DISPATCH to ISSUE** (ruling R3b in
+>   `PROJECT_HANDOVER.md`). `warehouse.receive()` and `create_dn()` now RECORD a
+>   certificate and demand nothing; `stage_consumption` and `approve_smr` refuse
+>   without one. Removing the DN block was not optional — leaving it would have
+>   reproduced the same stall one hop later, with the warehouse able to receive
+>   material and unable to send it anywhere.
+> * **The block was traded for a notification, not deleted.**
+>   `quality.warn_mtc_missing` tells Logistics whenever controlled material is
+>   booked in uncertified, because they are the only people who can produce the
+>   document and the material is unissuable until they do.
+> * **Certificates are inherited down the chain** (`quality.visible_mtc`) —
+>   PO line → DN → warehouse → site, ranked, and scoped to the site the goods
+>   actually reached. The person who hits the gate is not the person holding the
+>   document, and without this the SK would be re-uploading Logistics' PDF.
+> * **`QcClearanceBanner`** on the issue form shows BOTH halves of the gate at
+>   once. Showing one at a time sends the store keeper to fix the wrong thing,
+>   and they come back and get refused again by the other.
+> * **`PROPOSED_NAV_FIX.md` — a plan only, no navigation code touched.** The
+>   headline is not in the brief: `canAccessPath()` **fails open** — an
+>   unrecognised path is allowed, and group-level access is ignored entirely, so
+>   the sidebar and the route guard enforce different policies. Nothing exploits
+>   it today; the next page added without a manifest entry is open to everyone.
+>
 > **2026-08-10 — the agentic & optimisation pass.** One branch,
 > `chore/overnight-agentic-optimizations`. Nothing here changed a business
 > rule; the two behaviour changes are both bug fixes and both are pinned.
@@ -317,8 +360,8 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1428 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **75 / 75** | `cd tests/e2e && npm test` |
+| Backend service tests | **1440 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **81 / 81** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
@@ -477,6 +520,7 @@ again — pushing an existing tag is a no-op.
 | [`PROJECT_HANDOVER.md`](PROJECT_HANDOVER.md) | **The authority.** All locked rules with their evidence, the baselines, developer utilities, caveats |
 | [`MANUAL_TESTING_GUIDE.md`](MANUAL_TESTING_GUIDE.md) | **Every manual test, ordered by business workflow**, with the 5 W's + 1 H for each feature and Given/When/Then per case. Also the fastest way to learn what the system PROMISES. Keeping it current is rule 13 |
 | [`PROPOSED_PHASE_6_PLAN.md`](PROPOSED_PHASE_6_PLAN.md) | The QSEP plan as approved, with the operator's rulings inline |
+| [`PROPOSED_NAV_FIX.md`](PROPOSED_NAV_FIX.md) | **AWAITING REVIEW — no code written.** The RBAC/navigation isolation plan: the computed per-role page matrix as it stands today, the fail-open route guard, the seven UI↔API disagreements, and a proposed target matrix with every grant and revocation reasoned. Four open questions for the operator at the end |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The system brain — backend/frontend/DB/testing/security map |
 | [`REPO_MAP.md`](REPO_MAP.md) | The `legacy/` ⇄ `tools/` ⇄ `data-archive/` segregation contract |
 | [`OVERNIGHT_OPTIMIZATION_RUNLOG.md`](OVERNIGHT_OPTIMIZATION_RUNLOG.md) | Chatbot retrieval, idle logout, throttle, indexes, ⌘K |

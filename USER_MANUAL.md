@@ -4036,19 +4036,44 @@ Today that means the **Surface Shields** category — 36 materials out of the 46
 in the master list. Nothing else in the catalogue is affected by any rule in this
 section.
 
-There are two separate gates, at two different moments, and they are commonly
-confused:
+There are two separate gates. Both apply at the **same moment** — the instant
+before material goes to a worker — but they are satisfied by **different
+people**, which is what makes them worth telling apart:
 
-| Gate | When it applies | What it demands | Who is stopped |
-|---|---|---|---|
-| **Material Test Certificate** | When a Delivery Note is created to send material out | A certificate must already be on file for that material | The warehouse clerk cutting the DN |
-| **QC approval** | When a Store Keeper issues material to the field | A QC must have inspected and approved that quantity at that site | The Store Keeper at the issue form |
+| Gate | When it applies | What it demands | Who is stopped | Who fixes it |
+|---|---|---|---|---|
+| **Material Test Certificate** | When a Store Keeper issues material to the field | A certificate on file covering that material at that site | The Store Keeper at the issue form | **Logistics** (or the warehouse, or the SK) |
+| **QC approval** | The same moment | A QC must have inspected and approved that quantity at that site | The Store Keeper at the issue form | **The QC** |
 
-**Material may travel to site without having been inspected.** That is
-deliberate and was decided by the operator: holding a truck at the gate for an
-inspection that can happen on arrival costs more than it saves. What material
-may *not* do is reach a worker's hands uninspected. So the certificate binds at
-dispatch, and the approval binds at issue.
+**Material may be received, and may travel to site, with neither.** That is
+deliberate and was decided by the operator. Holding a truck at the gate for
+paperwork that is sitting in somebody's inbox costs more than it saves — and
+worse, refusing to *record* a delivery does not stop it arriving; it only stops
+the system knowing about it, so real material sits in a yard invisible to the
+stock report and to everyone planning around it. What material may *not* do is
+reach a worker's hands unchecked. So both gates bind at issue.
+
+When a controlled item is received without a certificate, **Logistics is
+notified automatically** to chase it from the supplier. Nobody has to remember.
+
+### You should almost never upload the same certificate twice
+
+The certificate follows the material down the chain. Whoever has it files it
+**once**:
+
+- **Logistics** attaches it to the **purchase order line** — before the goods
+  have even shipped, and without knowing which site will end up with them;
+- the **warehouse** attaches it to the **Delivery Note** as the material leaves;
+- the **Store Keeper** uploads it at the site, from the Receive form or from the
+  banner on the Issue form.
+
+Any one of those clears the material for issue at the destination site, and the
+issue form tells you which document cleared it and where it came from. A
+certificate filed for one site does **not** clear another — it attests to one
+batch from one production run.
+
+If you find yourself uploading a second copy of a document the company already
+has, stop and report it. That is a fault, not a workflow.
 
 ### Raising an inspection
 

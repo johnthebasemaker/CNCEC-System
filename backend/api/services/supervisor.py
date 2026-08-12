@@ -207,6 +207,8 @@ async def approve_smr(session: AsyncSession, *, sk_username: str, request_id: in
         # be bypassed by every supervisor request. The check runs per line,
         # before anything is written, so a blocked line fails the whole
         # approval rather than half-posting a batch.
+        await quality.assert_mtc_for_issue(
+            session, sap_code=it["SAP_Code"], site_id=site_id, actor=sk_username)
         await quality.assert_qc_cleared(
             session, sap_code=it["SAP_Code"], site_id=site_id, qty=qty,
             actor=sk_username)

@@ -3066,10 +3066,17 @@ async def test_entry_guards():
             check("guards: receipt-meta lists pack conversion",
                   any(c.get("Pack_UOM") == "Drum" and float(c.get("Factor")) == 200.0 for c in convs), str(convs)[:120])
 
-            # Rubber receipt without an MTC → blocked.
+            # Rubber receipt without an MTC → ACCEPTED (2026-08-12 ruling).
+            # This check is inverted from what it was, deliberately: refusing
+            # to record goods that have physically arrived made real stock
+            # invisible to the whole system while it sat in the yard. The
+            # certificate now gates ISSUE instead (suites BM/BN).
             base = {"Date": "2026-07-09", "SAP_Code": RUB, "Quantity": 5, "Site_ID": "CNCEC"}
             r = await ac.post("/entry/receipts", headers=H(sk_t), json=base)
-            check("guards: rubber receipt without MTC → 422", r.status_code == 422, f"got {r.status_code}")
+            check("guards: rubber receipt WITHOUT an MTC is booked in, not refused "
+                  "— a receipt states that something physically happened, and "
+                  "refusing to record it does not un-happen it",
+                  r.status_code == 201, f"got {r.status_code} {r.text[:120]}")
 
             # Upload an MTC, then the receipt is accepted + linked.
             up = await ac.post("/entry/mtc", headers=H(sk_t),
@@ -3530,10 +3537,19 @@ async def test_email_outbox():
             check("email: admin console → 200 with counts",
                   r.status_code == 200 and "items" in r.json() and "counts" in r.json(), f"got {r.status_code}")
 
-            # Trigger 1 — MTC-missing: blocked rubber receipt still 422s AND emails logistics.
+            # Trigger 1 — MTC-missing. Retargeted 2026-08-12: the RECEIPT is
+            # no longer refused (and must not be — checked here so a revert
+            # would fail), so the email now fires on the blocked ISSUE, which
+            # is the moment somebody is actually standing there unable to work.
             r = await ac.post("/entry/receipts", headers=H(worker_t),
                               json={"Date": "2026-07-09", "SAP_Code": RUB, "Quantity": 2, "Site_ID": "CNCEC"})
-            check("email: rubber receipt w/o MTC still → 422", r.status_code == 422, f"got {r.status_code}")
+            check("email: rubber receipt w/o MTC is booked in, not refused",
+                  r.status_code == 201, f"got {r.status_code} {r.text[:120]}")
+            r = await ac.post("/entry/consumption", headers=H(worker_t),
+                              json={"Date": "2026-07-09", "SAP_Code": RUB, "Quantity": 2,
+                                    "Site_ID": "CNCEC"})
+            check("email: ISSUING it without an MTC → 422", r.status_code == 422
+                  and "Material Test Certificate" in r.text, f"got {r.status_code} {r.text[:160]}")
             mm = await rows_for("mtc_missing")
             check("email: MTC-missing alert enqueued + sent to logistics inbox",
                   any(x["status"] == "sent" and x["to_email"] == "logistics@svc.test" for x in mm), str(mm)[:160])
@@ -12041,23 +12057,32 @@ async def test_mtc_gate_and_inspections():
            and quality.decision_status(10, 9.9999999999) == "approved"),
           "decision_status branches drifted")
 
-    # ── 3. the gate raises, and only for controlled material ─────────────────
+    # ── 3. receiving never raises; ISSUING does ──────────────────────────────
     from fastapi import HTTPException as _HX
     async with SessionLocal() as s:
+        got = await quality.note_mtc(s, sap_code=s_sap, warehouse_id="WH-01")
+        check("bm: a shield with NO certificate can still be received. This "
+              "is the 2026-08-12 ruling and the check that fails if the block "
+              "is ever put back at goods-in: note_mtc returns None and does "
+              "not raise", got is None, str(got))
+
         raised = None
         try:
-            await quality.assert_mtc(s, sap_code=s_sap, warehouse_id="WH-01",
-                                     where="this test")
+            await quality.assert_mtc_for_issue(s, sap_code=s_sap, site_id="CNCEC")
         except _HX as e:
             raised = e
-        check("bm: a shield with no certificate is refused with a 422 that "
-              "names the material and says what to do next",
+        check("bm: ISSUING that same uncertified shield IS refused, with a 422 "
+              "that names all three places the certificate could come from — "
+              "the store keeper at the gate is usually not the person holding "
+              "the document",
               raised is not None and raised.status_code == 422
-              and "Material Test Certificate" in str(raised.detail),
-              str(raised.detail if raised else "no exception raised"))
-        got = await quality.assert_mtc(s, sap_code=p_sap, warehouse_id="WH-01")
-        check("bm: an ordinary material is asked for nothing and returns None",
-              got is None, str(got))
+              and "Material Test Certificate" in str(raised.detail)
+              and "purchase order" in str(raised.detail)
+              and "delivery note" in str(raised.detail),
+              str(raised.detail if raised else "the issue was ALLOWED"))
+        ok = await quality.assert_mtc_for_issue(s, sap_code=p_sap, site_id="CNCEC")
+        check("bm: an ordinary material is asked for nothing at issue either — "
+              "the gate covers 36 SAPs, not the 466-row master", ok is None, str(ok))
 
         # file a certificate, then the same call passes
         mid = (await s.execute(_sqt(
@@ -12065,9 +12090,9 @@ async def test_mtc_gate_and_inspections():
             '"Material_Code_Ref", mtc_number, submitted_by, status) '
             "VALUES (NULL, 'WH-01', :sap, :mat, 'SVCQ-MTC-1', 'SVCQ-wh', 'attached') "
             "RETURNING id"), {"sap": s_sap, "mat": s_mat})).scalar()
-        found = await quality.assert_mtc(s, sap_code=s_sap, warehouse_id="WH-01")
-        check("bm: with a certificate filed at that warehouse the gate opens",
-              found == mid, f"{found} vs {mid}")
+        found = await quality.note_mtc(s, sap_code=s_sap, warehouse_id="WH-01")
+        check("bm: with a certificate filed at that warehouse it is recorded "
+              "against the movement", found == mid, f"{found} vs {mid}")
         found_by_mat = await quality.find_mtc(s, material_code=s_mat,
                                               warehouse_id="WH-01")
         check("bm: and it is findable by Material_Code, which is the only key "
@@ -12082,6 +12107,102 @@ async def test_mtc_gate_and_inspections():
         check("bm: a certificate filed at WH-01 does not clear WH-99 — the "
               "paperwork travels with the goods, not with the material code",
               found_other_wh is None, str(found_other_wh))
+        await s.rollback()
+
+    # ── 3b. the certificate is SHARED down the chain, not re-uploaded ────────
+    #
+    # The corollary of moving the gate to issue (2026-08-12): the person who
+    # hits the gate is the site Store Keeper, and the person holding the
+    # document is Logistics or the warehouse. If the SK had to upload their
+    # own copy we would get the same PDF stored three times, three different
+    # "the" certificates for one lot, and an SK blocked by paperwork that
+    # demonstrably exists upstream. Each branch below is a real recorded link.
+    SITE = "SVCQ-SITE"
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            "INSERT INTO purchase_orders (\"PO_Number\", \"Site_ID\", status, created_by) "
+            "VALUES ('SVCQ-PO-1', :site, 'delivered', 'SVCQ-log')"), {"site": SITE})
+        pil = (await s.execute(_sqt(
+            'INSERT INTO po_items ("PO_Number", line_no, "Material_Code", "Qty") '
+            "VALUES ('SVCQ-PO-1', 1, :mat, 10) RETURNING id"), {"mat": s_mat})).scalar()
+
+        none_yet = await quality.visible_mtc(s, sap_code=s_sap, site_id=SITE)
+        check("bm-chain: with nothing uploaded anywhere the site sees no "
+              "certificate — the baseline the branches below have to beat",
+              none_yet is None, str(none_yet))
+
+        # (a) Logistics attaches it to the PO line, naming no site at all.
+        po_mtc = (await s.execute(_sqt(
+            'INSERT INTO mtc_documents ("SAP_Code", "Material_Code_Ref", po_item_id, '
+            "mtc_number, submitted_by, status) VALUES (:sap, :mat, :pil, "
+            "'SVCQ-MTC-PO', 'SVCQ-log', 'attached') RETURNING id"),
+            {"sap": s_sap, "mat": s_mat, "pil": pil})).scalar()
+        got = await quality.visible_mtc(s, sap_code=s_sap, site_id=SITE)
+        check("bm-chain: a certificate Logistics attached to the PO LINE is "
+              "visible at the destination site — this is the whole 'upload it "
+              "once' rule, and the SK never touches the document",
+              got is not None and got["id"] == po_mtc and got["source"] == "po",
+              str(got))
+
+        # …and it is NOT visible to a site the PO was never destined for.
+        elsewhere = await quality.visible_mtc(s, sap_code=s_sap, site_id="SVCQ-OTHER")
+        check("bm-chain: …but NOT to an unrelated site. A certificate attests "
+              "to one batch from one mill run; matching on material alone "
+              "would mean one upload clears every shipment of that SAP to "
+              "every site forever — a gate that opens once and never closes",
+              elsewhere is None, str(elsewhere))
+
+        # (b) fail-closed on a site-less caller.
+        unbound = await quality.visible_mtc(s, sap_code=s_sap, site_id="")
+        check("bm-chain: a scoped account with NO site of its own sees no "
+              "certificate. `COALESCE(\"Site_ID\",'') = ''` would otherwise "
+              "match every certificate that names no site, making the unbound "
+              "account the one account that can issue anything",
+              unbound is None, str(unbound))
+
+        # (c) the warehouse attaches it to the DN instead.
+        await s.execute(_sqt(
+            "DELETE FROM mtc_documents WHERE id = :i"), {"i": po_mtc})
+        await s.execute(_sqt(
+            'INSERT INTO delivery_notes ("DN_Number", "PO_Number", "Warehouse_ID", '
+            '"Site_ID", status, created_by) VALUES (\'SVCQ-DN-1\', \'SVCQ-PO-1\', '
+            "'WH-01', :site, 'in_transit', 'SVCQ-wh')"), {"site": SITE})
+        await s.execute(_sqt(
+            'INSERT INTO dn_items ("DN_Number", po_item_id, "Material_Code", "Qty") '
+            "VALUES ('SVCQ-DN-1', :pil, :mat, 10)"), {"pil": pil, "mat": s_mat})
+        dn_mtc = (await s.execute(_sqt(
+            'INSERT INTO mtc_documents ("SAP_Code", "Material_Code_Ref", "DN_Number", '
+            "mtc_number, submitted_by, status) VALUES (:sap, :mat, 'SVCQ-DN-1', "
+            "'SVCQ-MTC-DN', 'SVCQ-wh', 'attached') RETURNING id"),
+            {"sap": s_sap, "mat": s_mat})).scalar()
+        got = await quality.visible_mtc(s, sap_code=s_sap, site_id=SITE)
+        check("bm-chain: a certificate the WAREHOUSE attached to the delivery "
+              "note is visible at the receiving site too",
+              got is not None and got["id"] == dn_mtc and got["source"] == "dn",
+              str(got))
+        check("bm-chain: …and the answer explains ITSELF, naming the note the "
+              "certificate arrived on. 'Cleared by some certificate' is not "
+              "an audit trail",
+              "SVCQ-DN-1" in str(got.get("label")), str(got))
+
+        # (d) with paper in the chain, the issue gate opens.
+        cleared = await quality.assert_mtc_for_issue(s, sap_code=s_sap, site_id=SITE)
+        check("bm-chain: and THAT is what opens the issue gate — the store "
+              "keeper is cleared by a document they never uploaded",
+              cleared == dn_mtc, f"{cleared} vs {dn_mtc}")
+
+        # (e) the site's own upload wins when both exist (rank 1).
+        own = (await s.execute(_sqt(
+            'INSERT INTO mtc_documents ("Site_ID", "SAP_Code", "Material_Code_Ref", '
+            "mtc_number, submitted_by, status) VALUES (:site, :sap, :mat, "
+            "'SVCQ-MTC-SITE', 'SVCQ-sk', 'attached') RETURNING id"),
+            {"site": SITE, "sap": s_sap, "mat": s_mat})).scalar()
+        got = await quality.visible_mtc(s, sap_code=s_sap, site_id=SITE)
+        check("bm-chain: the site's OWN certificate outranks an inherited one "
+              "— the most specific link wins, so a locally-filed document is "
+              "never shadowed by something upstream",
+              got is not None and got["id"] == own and got["source"] == "site",
+              str(got))
         await s.rollback()
 
     # ── 4. the inspection ledger, and its idempotency ────────────────────────
@@ -12126,21 +12247,40 @@ async def test_mtc_gate_and_inspections():
     # the defect, and the fix must not be to stop writing the comment.
     src = _code_only(_read_src("backend/api/services/warehouse.py"))
     dn_body = src[src.index("async def create_dn ("):src.index("async def _dn_row (")]
-    check("bm: create_dn enforces the MTC — the point at which material is "
-          "SENT to a site is where the paperwork rule bites",
-          "assert_mtc" in dn_body, "create_dn has no MTC gate")
-    check("bm: create_dn does NOT require a QC approval. The operator ruled "
-          "that uninspected material may travel and wait at the site; only "
-          "ISSUE is blocked. Fusing the two would strand every delivery "
+    check("bm: create_dn RECORDS the MTC but never demands one. Leaving the "
+          "block here would have reproduced the 2026-08-12 workflow blocker "
+          "one hop later — the warehouse able to receive the material and "
+          "then unable to send it anywhere",
+          "note_mtc" in dn_body and "assert_mtc" not in dn_body,
+          "create_dn is still gating dispatch on paperwork")
+    check("bm: create_dn does NOT require a QC approval either. The operator "
+          "ruled that uninspected material may travel and wait at the site; "
+          "only ISSUE is blocked. Fusing the two would strand every delivery "
           "behind an inspector's shift pattern",
           "assert_qc_cleared" not in dn_body,
           "create_dn is blocking on inspection status — that is the fused "
           "behaviour the 2026-08-09 ruling rejected")
     recv_body = src[src.index("async def receive ("):src.index("async def _generate_dn_number (")]
-    check("bm: warehouse goods-in enforces the MTC too, and opens the "
-          "inspection — this path had NO category test at all before QSEP",
-          "assert_mtc" in recv_body and "open_inspection" in recv_body,
-          "warehouse.receive is still ungated")
+    check("bm: warehouse goods-in records the MTC and opens the inspection, "
+          "and REFUSES NOTHING — the truck is in the yard and the material "
+          "exists whether or not the certificate has caught up",
+          ("note_mtc" in recv_body and "open_inspection" in recv_body
+           and "assert_mtc" not in recv_body),
+          "warehouse.receive is still gating goods-in on paperwork")
+    check("bm: …but an uncertified shield is not booked in SILENTLY. The "
+          "block was replaced by a chase-up to the only people who can "
+          "produce the document, or the ruling just deletes a control",
+          "warn_mtc_missing" in recv_body, "goods-in warns nobody")
+    # The gate has to be in BOTH mouths of the issue path. A guard in
+    # stage_consumption alone is bypassed by every supervisor request.
+    led_body = _code_only(_read_src("backend/api/services/ledger.py"))
+    sup_body = _code_only(_read_src("backend/api/services/supervisor.py"))
+    check("bm: the MTC block sits in BOTH mouths of the issue path — "
+          "ledger.stage_consumption AND supervisor.approve_smr, which writes "
+          "pending_issues directly and would walk past a guard in the first",
+          "assert_mtc_for_issue" in led_body and "assert_mtc_for_issue" in sup_body,
+          f"ledger={'assert_mtc_for_issue' in led_body} "
+          f"supervisor={'assert_mtc_for_issue' in sup_body}")
     stage_body = src[src.index("async def stage_dn_receipt ("):]
     check("bm: DN receipt at the site opens a SITE inspection — it inserts "
           "pending_receipts directly and never called the entry guards",
@@ -12219,6 +12359,18 @@ async def test_qc_issuance_block():
         return
     s_sap, p_sap = shield[0], plain[0]
     SITE = "CNCEC"
+
+    # The issue path has TWO gates since 2026-08-12 — paperwork and
+    # inspection — and this suite is about the second one. File a certificate
+    # up front so every refusal below is unambiguously the QC gate talking;
+    # otherwise the MTC gate fires first and the suite passes for the wrong
+    # reason. (`_qsep_cleanup` removes anything submitted_by LIKE 'SVCQ-%'.)
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO mtc_documents ("Site_ID", "SAP_Code", "Material_Code_Ref", '
+            "mtc_number, submitted_by, status) VALUES (:site, :sap, NULL, "
+            "'SVCQ-BN-MTC', 'SVCQ-bn', 'attached')"), {"site": SITE, "sap": s_sap})
+        await s.commit()
 
     def _issue(sap, qty, lot=None):
         return {"Date": "2026-08-09", "SAP_Code": sap, "Quantity": qty,

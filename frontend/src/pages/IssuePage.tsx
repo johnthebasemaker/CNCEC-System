@@ -21,6 +21,7 @@ import EntryDocsUpload from '../components/EntryDocsUpload'
 import type { EntryDoc, OcrDocResult } from '../components/EntryDocsUpload'
 import { useFormDraft } from '../lib/formDraft'
 import ItemSnapshot from '../components/ItemSnapshot'
+import QcClearanceBanner from '../components/QcClearanceBanner'
 import QrScanner from '../components/QrScanner'
 import { BARCODE_FORMATS, matchScanToSap } from '../lib/barcode'
 import { loadDefaults, saveDefaults } from '../lib/smartDefaults'
@@ -375,6 +376,10 @@ export default function IssuePage() {
               )}
             </div>
           )}
+
+          {/* Both halves of the issue gate — MTC on file AND QC-approved qty.
+              Silent for every material outside the controlled category. */}
+          <QcClearanceBanner sap={watchSap} site={watchSite} />
 
           {/* Current stock + 30-day trend for the picked material (advisory). */}
           <ItemSnapshot sap={watchSap} site={watchSite} />

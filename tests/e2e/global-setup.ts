@@ -131,6 +131,39 @@ export default async function globalSetup() {
   psql(
     "INSERT INTO receipts (\"Date\", \"SAP_Code\", \"Quantity\", \"Site_ID\", \"Received_by\") "
     + "VALUES (CURRENT_DATE::text, 'E2EQC-1', 100, 'CNCEC', 'e2e-setup')", E2E_DB)
+  // A Material Test Certificate for it, filed at CNCEC.
+  //
+  // ⚠️ Needed so the QC specs can isolate the INSPECTION half of the issue
+  // gate. Since 2026-08-12 an issue is refused for two independent reasons —
+  // no certificate (paperwork, Logistics' problem) and no QC approval
+  // (inspection, the QC's problem). Without this row every quality assertion
+  // below would pass on the wrong refusal, and the QC gate could rot away
+  // completely without a single test noticing. `E2EQC-2` deliberately has NO
+  // certificate — that is the material the MTC spec drives.
+  psql(
+    "INSERT INTO mtc_documents (\"Site_ID\", \"SAP_Code\", \"Material_Code_Ref\", "
+    + "mtc_number, submitted_by, status) "
+    + "VALUES ('CNCEC','E2EQC-1','E2EQC-MAT','E2E-MTC-1','e2e-setup','attached')",
+    E2E_DB)
+
+  // A SECOND controlled material with stock, an approved inspection, and
+  // deliberately NO certificate anywhere: the only thing standing between it
+  // and the field is the MTC gate, which is what `qsep-mtc.spec.ts` proves.
+  psql(
+    "INSERT INTO inventory (\"SAP_Code\", \"Material_Code\", "
+    + "\"Equipment_Description\", \"Category\", \"UOM\") "
+    + "VALUES ('E2EQC-2','E2EQC-MAT-2','E2E uncertified shield','Surface Shields','EA') "
+    + "ON CONFLICT (\"SAP_Code\") DO UPDATE SET \"Category\" = excluded.\"Category\"",
+    E2E_DB)
+  psql(
+    "INSERT INTO qc_inspections (\"Site_ID\", \"SAP_Code\", \"Material_Code\", "
+    + "source_type, source_ref, submitted_qty, approved_qty, status, created_by) "
+    + "VALUES ('CNCEC','E2EQC-2','E2EQC-MAT-2','receipt','E2E-SEED-2',100,100,"
+    + "'approved','e2e-setup')",
+    E2E_DB)
+  psql(
+    "INSERT INTO receipts (\"Date\", \"SAP_Code\", \"Quantity\", \"Site_ID\", \"Received_by\") "
+    + "VALUES (CURRENT_DATE::text, 'E2EQC-2', 100, 'CNCEC', 'e2e-setup')", E2E_DB)
 
   // ── 1e. the PPE fixtures ─────────────────────────────────────────────────
   // A PPE-category material, a usable-time rule, an employee to receive it,
