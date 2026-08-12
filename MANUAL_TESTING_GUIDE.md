@@ -942,6 +942,12 @@ Manual testing here is for judgement ("should a QC see this?"), not for coverage
 | TC-SEC-17 | **Given** **any** role, **When** they type a URL the system does not recognise, **Then** refused. ⛔ ⚠️ **Inverted 2026-08-12** — an unknown path used to be **allowed**. |
 | TC-SEC-18 | 🤖 **Given** a new page is added with no entry in the navigation manifest, **Then** the build fails (`npm run test:nav`). *Failing closed turns a silent leak into a silent lockout; this is what makes it loud.* |
 | TC-SEC-19 | **Given** an **auditor**, **Then** they still read the Estimator, the HOD pages and every record. ✅ **Run this.** Over-narrowing the oversight role is the failure mode of a tightening pass, and it stays quiet until an audit. |
+| TC-SEC-20 | **Given** a **store keeper**, **When** they call `GET /receipts`, `/consumption`, `/returns`, `/lots` or `/purchase-requests` **directly**, **Then** refused. ⛔ *Hiding the menu row was never the control. Correctly scoping them to their own site's entire receipt history still handed them an oversight surface that is not theirs.* |
+| TC-SEC-21 | **Given** a **warehouse user**, **a QC** or **Logistics**, **When** they call `GET /employees` directly, **Then** refused. ⛔ **This is the same table `/hr/employees` serves.** Narrowing one door and not the other closes nothing. |
+| TC-SEC-22 | **Given** **Logistics**, **When** they download `/documents/master/employees` or an employee badge, **Then** refused. ⛔ *The roster as a spreadsheet is the worst of the four doors — it leaves the system entirely.* |
+| TC-SEC-23 | **Given** a **store keeper**, **When** they try to print an employee badge, **Then** refused ⛔ — **but** they may still read a name from the roster ✅. *Reading one name to type an employee ID is not the same act as exporting the whole roster; the two are gated differently on purpose.* |
+| TC-SEC-24 | **Given** **any** role, **When** they call `GET /inventory`, **Then** allowed. ✅ **Run this after any RBAC change.** It is the catalogue every entry form reads; a tightening pass that sweeps it up breaks issuing for the whole company. |
+| TC-SEC-25 | **Given** **Logistics**, **Then** they can still edit **vendors** and **warehouses** ✅ but not **employees** ⛔. *The one master-data entity that is admin-only, so the privacy revocation is not undone by the editor next to it.* |
 
 ---
 
@@ -1128,7 +1134,7 @@ regression, not a new normal.**
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1453 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1474 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |

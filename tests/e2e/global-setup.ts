@@ -263,5 +263,49 @@ export default async function globalSetup() {
 
   await waitFor(`${API_URL}/health`, 'backend')
   await waitFor(WEB_URL, 'frontend')
+  await warmVite()
   console.log('[e2e] stack ready — backend :%d, frontend :%d, db %s', API_PORT, WEB_PORT, E2E_DB)
+}
+
+/**
+ * Make Vite transform the app ONCE, before any worker starts.
+ *
+ * ⚠️ This is not an optimisation, it is a determinism fix, and it was worth
+ * chasing because the symptom looked like a flaky test. `waitFor(WEB_URL)`
+ * proves the dev server answers — it does NOT prove the dev server has
+ * transformed anything. On a cold `node_modules/.vite` (any run after a
+ * frontend edit, and every CI run) the first request for each module triggers
+ * an on-demand transform, and with four workers all requesting different
+ * modules at once the whole suite slows by roughly 5x: 30s warm, 2.8m cold.
+ *
+ * Nothing in the suite noticed except `sme-tiers`, whose `beforeAll` renders
+ * the heaviest page in the product and blew a 60s budget — so the failure
+ * presented as "the SME grid is flaky" when the SME grid was fine and the
+ * bundler was busy. Raising the timeout would have hidden it; the cost is
+ * paid once here instead, off the clock of every spec.
+ *
+ * Best-effort: a failure here must never fail the run. The worst case is the
+ * old behaviour.
+ */
+async function warmVite(): Promise<void> {
+  const t0 = Date.now()
+  try {
+    const html = await (await fetch(WEB_URL)).text()
+    // EVERY script tag, not the first. Dev HTML leads with `/@vite/client`,
+    // which is a few KB and transforms nothing — warming only that looked
+    // like it was working (0.3s, no error) while the app entry stayed cold.
+    // The conventional entry is added as a fallback so a silent regex miss
+    // cannot turn this into a no-op that still logs a reassuring line.
+    const srcs = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1])
+    if (!srcs.some((s) => s.includes('main'))) srcs.push('/src/main.tsx')
+    let bytes = 0
+    for (const s of srcs) {
+      const r = await fetch(new URL(s, WEB_URL).href)
+      if (r.ok) bytes += (await r.text()).length
+    }
+    console.log(`[e2e] vite warmed ${srcs.length} entr${srcs.length === 1 ? 'y' : 'ies'} `
+      + `(${(bytes / 1024).toFixed(0)} KB) in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
+    return
+  } catch { /* best-effort — see the docstring */ }
+  console.log(`[e2e] vite warm-up skipped after ${((Date.now() - t0) / 1000).toFixed(1)}s`)
 }

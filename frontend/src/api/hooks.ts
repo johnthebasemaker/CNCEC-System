@@ -65,8 +65,16 @@ export interface ListParams {
   category?: string
 }
 
-export function useList(path: string, params: ListParams) {
+/**
+ * `enabled` exists because the generated entity reads are role-gated as of
+ * 2026-08-12. A page that is open to more roles than one of its PICKERS is
+ * (the Documents page offers an employee badge to everybody) must not fire a
+ * request it knows will 403 — that is a guaranteed error toast on every visit
+ * for a control the caller is not shown anyway.
+ */
+export function useList(path: string, params: ListParams, enabled = true) {
   return useQuery<ListResponse>({
+    enabled,
     queryKey: [path, params],
     queryFn: () => fetchList(path, params as Record<string, unknown>),
     placeholderData: (prev) => prev,

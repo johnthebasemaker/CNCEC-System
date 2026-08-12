@@ -144,6 +144,37 @@ which fails safe and is precisely why nobody noticed.
 
 ## 3. What was added most recently
 
+> **2026-08-12 (c) — the generated CRUD reads.** Branch
+> `fix/crud-rbac-alignment`, closing the finding the previous pass recorded
+> and left open.
+>
+> * `crud.make_read_router` stamped a bare `get_current_user` on every GET it
+>   generated, for eleven entities. **`read_roles` is now a required-in-practice
+>   parameter** and each entity states its own; suite BV fails if a row omits it.
+>   Exactly one entity is open — `inventory`, the catalogue every picker reads.
+> * ⚠️ **Worker identity had FOUR doors**, not one. Narrowing `/hr/employees`
+>   last pass left `/employees` (the same table), the badge PDFs and
+>   `/documents/master/employees` (the roster as a spreadsheet) wide open. All
+>   four now agree. A privacy control with one door open is not a control.
+> * **`/master/employees` is admin-only** — the single place this pass departs
+>   from the frontend matrix rather than mirroring it. Logistics keeps vendors
+>   and warehouses; leaving them a create/update/delete editor over the table
+>   whose READ was just revoked would have made the revocation theatre.
+> * **Bulk identity is narrower than single-name identity, on purpose.** An SK
+>   reads a name to type an employee ID on every PPE issue; printing or
+>   exporting the whole roster stays with `{hod, auditor, admin}`. Suite AL has
+>   asserted since Phase 5 that an SK cannot print a badge — that judgement was
+>   left standing rather than overturned in passing.
+> * **The `sme-tiers` E2E flake is fixed at the root**, and it was never the
+>   SME grid. `waitFor(WEB_URL)` proved the dev server *answered*, not that it
+>   had *transformed* anything, so on a cold `node_modules/.vite` four workers
+>   raced Vite's on-demand transform and the whole suite ran 5× slower — 30s
+>   warm, 2.8m cold — which only the heaviest page's `beforeAll` noticed.
+>   `global-setup` now warms the entry graph once. Reproduced deterministically
+>   before, gone across four cold runs after.
+>   ⚠️ Also: `test.setTimeout()` at describe scope does **not** raise a hook's
+>   budget. The previous attempt to raise it read as though it had worked.
+>
 > **2026-08-12 (b) — the strict-RBAC pass.** Branch
 > `fix/strict-rbac-navigation`, executing the approved
 > [`PROPOSED_NAV_FIX.md`](PROPOSED_NAV_FIX.md) in five steps.
@@ -390,7 +421,7 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1453 / 0** (suites A…BU) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1474 / 0** (suites A…BV) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |

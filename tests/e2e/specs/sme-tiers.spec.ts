@@ -46,18 +46,22 @@ test.describe('sme-tiers:hod', () => {
   let page: Page
   let panel: Locator
 
-  // ⚠️ The hook's own budget, raised deliberately. In isolation this page
-  // renders in under 8s; the wait below is not about the page being slow, it
-  // is about CONTENTION. The SME cascade is a CPU-bound computation inside a
-  // single-process test API, so while it runs it starves the event loop, and
-  // every other spec's request queues behind it — and it queues behind theirs.
-  // Adding specs to the suite therefore lengthens THIS wait, which is how a
-  // 60s budget that had held for months started failing roughly one run in
-  // two when `qsep-mtc.spec.ts` was added. Production runs multiple workers
-  // and does not have this shape.
-  test.setTimeout(180_000)
-
   test.beforeAll(async ({ browser }) => {
+    // ⚠️ INSIDE the hook, and that placement is the whole point. A
+    // `test.setTimeout()` at describe scope sets the budget for the TESTS and
+    // leaves hooks on the config default — so the previous attempt to raise
+    // this read as though it had worked and the hook still died at 60s. Called
+    // here, it raises THIS hook's own budget, which is the thing that was
+    // expiring.
+    //
+    // What it is buying time for is CONTENTION, not a slow page: in isolation
+    // this renders in under 8s. The SME cascade is a CPU-bound computation
+    // inside a single-process test API, so while it runs it starves the event
+    // loop and every other spec's request queues behind it — and it queues
+    // behind theirs. A cold Vite dep-optimize on the first run after a
+    // frontend edit is enough to tip it. Production runs multiple workers and
+    // does not have this shape.
+    test.setTimeout(180_000)
     const ctx = await browser.newContext({ storageState: storageStatePath('hod') })
     page = await ctx.newPage()
     await page.goto('/sme')

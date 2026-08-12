@@ -19,7 +19,7 @@ Design choices:
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import (
@@ -29,7 +29,8 @@ from sqlalchemy import (
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, resolve_site_param, site_scope
+from .auth import (get_current_user, require_roles, resolve_site_param,
+                   site_scope)
 from .db import get_session
 
 # Case-insensitive substrings that mark a column as secret; never serialised.
@@ -46,11 +47,37 @@ def _is_sensitive(name: str) -> bool:
 
 def make_read_router(table, *, prefix: str, tag: str, id_col: str,
                      site_col: Optional[str] = None,
+                     read_roles: Optional[Sequence[str]] = None,
                      writable: bool = False, write_dep=None) -> APIRouter:
-    """Reads are open to any authenticated user (the router is included behind
-    get_current_user in main). Writes (when `writable`) are additionally gated
-    by `write_dep` — a role dependency (e.g. require_level(3)) so a low-privilege
-    user cannot mutate master data via the API even though the nav hides it."""
+    """Build the two GET routes for one entity, gated by role.
+
+    `read_roles` names the roles that may read this entity (admin is always
+    allowed — see `auth.require_roles`). **`None` means genuinely open to any
+    authenticated user**, and only two entities are: the inventory master,
+    which every entry form needs, and nothing else.
+
+    ⚠️ WHY THIS PARAMETER EXISTS. Until 2026-08-12 there was no such thing:
+    every generated read route carried a bare `get_current_user`, and the
+    docstring here said reads were "open to any authenticated user" as though
+    that were a design. It was not — it was the default nobody had revisited,
+    and the navigation manifest was doing all the real work. So a store keeper
+    who typed `/receipts` got the whole ledger; a QC who typed `/employees`
+    got every worker's name and phone number. Eight entities, one blanket rule.
+
+    That mattered most for `/employees`, which is the SAME table the roster
+    endpoint serves. Narrowing `GET /hr/employees` in the previous pass while
+    this route stayed open would have been a fix in name only — the data was
+    two URLs away the whole time.
+
+    Site scoping is unchanged and still does its own narrowing underneath: a
+    scoped caller sees their own site, and '' (no site of their own) matches
+    nothing. Roles decide WHICH LEDGER you may read at all; scoping decides
+    WHOSE ROWS. Both are needed — scoping alone let a store keeper read their
+    own site's entire receipt history, which is an oversight surface and not
+    theirs.
+
+    Writes (when `writable`) keep their own, stricter `write_dep`.
+    """
     # Columns safe to emit: everything except binary blobs and secret-named cols.
     out_cols = [
         c for c in table.columns
@@ -73,6 +100,11 @@ def make_read_router(table, *, prefix: str, tag: str, id_col: str,
 
     router = APIRouter(prefix=prefix, tags=[tag])
 
+    # Applied to the two GET routes only — NOT at router level, which would
+    # also gate the writes and leave `/employees` in the absurd position of
+    # being readable by fewer roles than may edit it.
+    _rguard = [Depends(require_roles(*read_roles))] if read_roles else []
+
     def _coerce_id(raw: str):
         if id_is_int:
             try:
@@ -85,7 +117,7 @@ def make_read_router(table, *, prefix: str, tag: str, id_col: str,
     # search hits SAP codes, names, categories, lot/PR/PO numbers, remarks, …).
     search_cols = [c for c in out_cols if isinstance(c.type, Text)]
 
-    @router.get("", summary=f"List {tag}")
+    @router.get("", dependencies=_rguard, summary=f"List {tag}")
     async def list_items(
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
@@ -124,7 +156,8 @@ def make_read_router(table, *, prefix: str, tag: str, id_col: str,
         return {"total": total, "limit": limit, "offset": offset,
                 "count": len(items), "items": items}
 
-    @router.get("/{item_id}", summary=f"Get one {tag} by {id_col}")
+    @router.get("/{item_id}", dependencies=_rguard,
+                summary=f"Get one {tag} by {id_col}")
     async def get_item(item_id: str,
                        user: dict = Depends(get_current_user),
                        session: AsyncSession = Depends(get_session)):

@@ -339,10 +339,12 @@ export const NAV: NavGroup[] = [
     id: 'master',
     label: 'Master Data',
     access: w({ minLevel: 3 }),
+    // Per-entity, defaulting to the group's own rule. `employees` overrides it
+    // to admin-only — see the note in entities.ts.
     children: WRITE_ENTITIES.map((e) => ({
       key: `/master/${e.key}`,
       label: e.label,
-      access: w({ minLevel: 3 }) as AccessRule,
+      access: w(e.access ?? { minLevel: 3 }) as AccessRule,
     })),
   },
   {
@@ -492,7 +494,13 @@ export function canAccessPath(user: User | null, pathname: string): boolean {
     // rule. `/records/anything-at-all` used to resolve to `minLevel: 2`.
     return ent ? canAccess(user, ent.access) : false
   }
-  if (path.startsWith('/master/')) return canAccess(user, w({ minLevel: 3 }))
+  if (path.startsWith('/master/')) {
+    const key = path.slice('/master/'.length)
+    const ent = WRITE_ENTITIES.find((e) => e.key === key)
+    // Same fail-closed treatment as `/records/`: an unknown entity key is
+    // refused rather than handed the group's generic rule.
+    return ent ? canAccess(user, w(ent.access ?? { minLevel: 3 })) : false
+  }
   if (PUBLIC_PATH_PREFIXES.some((p) => path.startsWith(p))) return true
   for (const g of NAV) {
     const node = g.children.find((n) => n.key === path)
