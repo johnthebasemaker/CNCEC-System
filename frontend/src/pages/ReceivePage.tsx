@@ -123,9 +123,14 @@ export default function ReceivePage() {
 
   const addToBatch = async () => {
     const v = await form.validateFields()
+    // ⚠️ A WARNING, NOT A BLOCK (2026-08-12). This used to `return` here, and
+    // with the server refusing the same receipt it meant a store keeper could
+    // not record material that had physically arrived. Both gates moved to
+    // ISSUE; receiving is never refused for want of paperwork.
     if (meta?.is_rubber && !v.mtc_document_id) {
-      message.error('This is a Rubber material — attach an MTC document before adding it')
-      return
+      message.warning(
+        'Surface Shield received without an MTC — it will be booked in, but nobody '
+        + 'can issue it until the certificate is on file. Logistics has been told.')
     }
     // Smart defaults: remember the routine fields for the next session.
     saveDefaults('receive', { Site_ID: v.Site_ID, Supplier: v.Supplier ?? '' })
@@ -302,7 +307,8 @@ export default function ReceivePage() {
               </Form.Item>
             </Col>
           </Row>
-          {/* Phase 6 receipt guards — pack→base UoM + Rubber MTC gate. */}
+          {/* Phase 6 receipt guards — pack→base UoM + the MTC, which is
+              collected here as a convenience and enforced at ISSUE. */}
           {(meta?.conversions?.length || meta?.is_rubber) && (
             <Row gutter={16}>
               {!!meta?.conversions?.length && (
@@ -319,9 +325,12 @@ export default function ReceivePage() {
               )}
               {meta?.is_rubber && (
                 <Col xs={24} md={16}>
-                  <Form.Item label="MTC (Material Test Certificate) — required for Rubber"
-                    required validateStatus={watchMtc ? 'success' : 'warning'}
-                    help={watchMtc ? 'Attached' : 'A Rubber material cannot be added without an MTC'}>
+                  <Form.Item label="MTC (Material Test Certificate) — required before ISSUE"
+                    validateStatus={watchMtc ? 'success' : 'warning'}
+                    help={watchMtc
+                      ? 'Attached'
+                      : 'Optional here. Receive the goods now; the material cannot be '
+                        + 'issued to the field until a certificate is on file'}>
                     <Space>
                       <Upload showUploadList={false} accept=".pdf,.jpg,.jpeg,.png"
                         customRequest={async ({ file, onSuccess, onError }) => {

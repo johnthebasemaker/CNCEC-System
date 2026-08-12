@@ -24,7 +24,8 @@ from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (get_current_user, require_roles, resolve_site_param,
-                   resolve_site_write, site_filter_applies, site_row_visible)
+                   resolve_site_write, site_filter_applies, site_row_visible,
+                   site_scope)
 from .db import get_session
 from . import entry_docs
 from .services import emailer
@@ -104,9 +105,19 @@ async def _receipt_meta(session, sap: str) -> dict:
 
 
 async def _apply_receipt_guards(session, data: dict) -> Optional[int]:
-    """Enforce the MTC gate for Rubber materials and convert an entry (pack) UoM
-    to the base UoM. Mutates data['Quantity']/['Remarks'] in place; returns the
-    mtc_document_id to link post-stage. Raises HTTPException on a failed gate."""
+    """Convert an entry (pack) UoM to the base UoM, and pick up any MTC.
+
+    Mutates data['Quantity']/['Remarks'] in place; returns the
+    mtc_document_id to link post-stage. Raises HTTPException only for a UoM
+    it cannot convert.
+
+    ⚠️ This used to REFUSE a Surface-Shield receipt with no certificate. The
+    2026-08-12 ruling removed that: material arriving from a vendor or from
+    Logistics is booked in whether or not the paper has caught up, and the
+    block moved to issue. A receipt is a statement that something physically
+    happened, and refusing to record it does not un-happen it — it just makes
+    real stock invisible to everyone downstream.
+    """
     sap = str(data["SAP_Code"]).strip()
     meta = await _receipt_meta(session, sap)
     entry_uom = (data.get("entry_uom") or "").strip()
@@ -119,10 +130,10 @@ async def _apply_receipt_guards(session, data: dict) -> Optional[int]:
         data["Quantity"] = round(orig * factor, 6)
         note = f"[{orig:g} {entry_uom} × {factor:g} → {data['Quantity']:g} {meta['base_uom']}]"
         data["Remarks"] = ((str(data.get("Remarks") or "").strip() + " " + note).strip())
-    mtc_id = data.get("mtc_document_id")
-    if meta["is_rubber"] and not mtc_id:
-        raise HTTPException(422, f"{sap} is a Rubber material — an MTC document is required")
-    return mtc_id
+    # A controlled material with no certificate attached is no longer refused;
+    # `_warn_if_uncertified` picks that up AFTER staging, once it can tell
+    # whether the site already inherits one from the PO or the DN.
+    return data.get("mtc_document_id")
 
 
 async def _link_mtc(session, mtc_id: Optional[int], pending_id) -> None:
@@ -154,22 +165,56 @@ async def _open_site_inspection(session, *, data: dict, mtc_id: Optional[int],
 _mtc_t = ledger._MD.tables["mtc_documents"]
 
 
+async def _warn_if_uncertified(session, *, data: dict, mtc_id: Optional[int],
+                               actor: str) -> None:
+    """A Surface Shield was just received with no certificate covering it.
+
+    The 2026-08-12 counterpart to dropping the receipt block. Nothing is
+    refused; Logistics is told, because they are the ones who can get the
+    document from the supplier and the material cannot be issued until they
+    do. Runs INSIDE the receipt transaction — the notification is part of
+    the receipt being recorded, not a best-effort afterthought.
+
+    The `visible_mtc` check first is what stops this being a nag: if the site
+    already inherits a certificate from the purchase order or the delivery
+    note, the paperwork exists and nobody needs chasing.
+    """
+    if mtc_id:
+        return
+    sap = str(data["SAP_Code"]).strip()
+    site = data.get("Site_ID")
+    if await quality.visible_mtc(session, sap_code=sap, site_id=site):
+        return
+    await quality.warn_mtc_missing(
+        session, sap_code=sap, material_code=None,
+        where="a site goods receipt", site_id=site, created_by=actor)
+
+
 async def _alert_mtc_missing(session, exc: HTTPException, actor: str) -> None:
-    """Phase 7b — the parked 'missing-MTC → Logistics email' follow-up: when the
-    MTC gate blocks a Rubber receipt, email the logistics inbox so they chase
-    the certificate with the supplier. Best-effort (post-rollback) — never
-    changes the 422 the store keeper sees."""
-    if exc.status_code != 422 or "MTC document is required" not in str(exc.detail):
+    """Phase 7b — the parked 'missing-MTC → Logistics email' follow-up.
+
+    ⚠️ Retargeted 2026-08-12. It used to fire when the MTC gate blocked a
+    RECEIPT; receipts are no longer blocked, so it now fires when the gate
+    blocks an ISSUE. That is the same event in business terms — a Surface
+    Shield is stuck for want of a certificate and only Logistics can unstick
+    it — and it is the moment somebody is actually standing there unable to
+    work, so it is if anything the better trigger.
+
+    Best-effort (post-rollback) — never changes the 422 the store keeper sees.
+    """
+    if exc.status_code != 422 or "Material Test Certificate" not in str(exc.detail):
         return
     try:
         await session.rollback()   # the begin() block already rolled back; be safe
         await emailer.send_email(
             session, to=emailer.logistics_to(),
-            subject="MTC missing — Rubber receipt blocked",
-            body=(f"A goods receipt was blocked because no Material Test Certificate "
-                  f"was attached.\n\nDetail: {exc.detail}\nEntered by: {actor}\n\n"
-                  f"Please obtain the MTC from the supplier so the receipt can be re-entered."),
-            event_key="mtc_missing", related_table="pending_receipts",
+            subject="MTC missing — issue to the field blocked",
+            body=(f"A material issue was blocked because no Material Test Certificate "
+                  f"is on file for the material at that site.\n\nDetail: {exc.detail}\n"
+                  f"Attempted by: {actor}\n\n"
+                  f"Please obtain the MTC from the supplier and attach it to the "
+                  f"purchase order — the site will inherit it automatically."),
+            event_key="mtc_missing", related_table="pending_issues",
             created_by=actor)
         await session.commit()
     except Exception:  # noqa: BLE001 — alerting must never mask the 422
@@ -258,6 +303,8 @@ async def create_receipt(
             await _open_site_inspection(session, data=data, mtc_id=mtc_id,
                                         pending_id=result.get("pending_id"),
                                         actor=user["username"])
+            await _warn_if_uncertified(session, data=data, mtc_id=mtc_id,
+                                       actor=user["username"])
             await entry_docs.link_attachments(session, doc_ids,
                                               entry_table="pending_receipts",
                                               entry_date=body.Date)
@@ -293,7 +340,10 @@ async def create_consumption(
             await _notify_hod_staged(session, kind_label="Issue", site_id=body.Site_ID,
                                      actor=user["username"], ref=result.get("pending_id"),
                                      detail=f"{body.SAP_Code} · qty {body.Quantity:g} · {body.Site_ID}")
-    except HTTPException:
+    except HTTPException as e:
+        # An issue blocked for want of a certificate emails Logistics, who are
+        # the only people who can produce one (2026-08-12).
+        await _alert_mtc_missing(session, e, user["username"])
         raise
     except (IntegrityError, DataError) as e:
         raise HTTPException(400, f"{type(e).__name__}: {e.orig}")
@@ -437,27 +487,37 @@ async def upload_mtc(file: UploadFile = File(...), sap_code: str = Form(...),
                      warehouse_id: Optional[str] = Form(None),
                      material_code: Optional[str] = Form(None),
                      po_item_id: Optional[int] = Form(None),
+                     dn_number: Optional[str] = Form(None),
                      mtc_number: Optional[str] = Form(None),
                      lot_number: Optional[str] = Form(None),
                      quantity: Optional[float] = Form(None),
                      user: dict = Depends(require_roles(
                          "store_keeper", "warehouse_user", "logistics")),
                      session: AsyncSession = Depends(get_session)):
-    """Attach the certificate. QSEP widened this in three ways.
+    """Attach the certificate. Any of the three roles that touch the chain may.
 
-    * **Warehouse uploads.** The mandatory gate now bites at warehouse
-      goods-in and at DN creation, so the people who need to satisfy it are
-      warehouse and logistics — not only the site Store Keeper who used to be
-      the sole caller. `site_id` is consequently optional, and exactly one of
-      site / warehouse must be named.
+    Store Keeper, warehouse user and Logistics all upload here, and that is
+    the point: after the 2026-08-12 ruling the person who HITS the gate (the
+    site SK, at issue) is usually not the person HOLDING the document
+    (Logistics, who got it with the PO). Whoever has the PDF files it once
+    and the site inherits it — see `quality.visible_mtc`.
+
+    * **Where it is filed.** `site_id` or `warehouse_id`, never both. With
+      neither, a scoped caller files it at their own binding; a global caller
+      (Logistics) may file it against a `po_item_id` or `dn_number` alone,
+      which is how a certificate gets in before anyone knows which site will
+      end up with the material.
     * **`material_code`.** `dn_items` carry a Material_Code and no SAP at all,
-      so a certificate findable only by SAP is a certificate the DN gate can
-      never match. It is resolved from the master when not supplied.
-    * **`po_item_id`.** Lets a certificate be pinned to the exact PO line it
-      covers, which is what `warehouse.receive()` looks for.
+      so a certificate findable only by SAP is one the DN path can never
+      match. It is resolved from the master when not supplied.
+    * **`po_item_id` / `dn_number`.** The two links that carry a certificate
+      downstream to the site that receives the goods. Filing with neither, and
+      no site, is possible only for a warehouse user — that certificate covers
+      that warehouse's own stock and reaches a site once a DN ships it.
     """
     blob = await file.read()
     site = wh = None
+    dn = (dn_number or "").strip() or None
     if warehouse_id and site_id:
         raise HTTPException(422, "name a site OR a warehouse for this certificate, not both")
     if warehouse_id:
@@ -465,13 +525,26 @@ async def upload_mtc(file: UploadFile = File(...), sap_code: str = Form(...),
         wh = resolve_warehouse_param(user, warehouse_id.strip())
     elif site_id:
         site = resolve_site_write(user, site_id)
+    elif po_item_id is not None or dn:
+        # Pinned to a PO line or a DN, so the chain says where it belongs and
+        # the caller does not have to. A SITE-scoped caller is still pinned to
+        # their own site — an unbound one must not slip through by naming a PO.
+        site = (resolve_site_write(user, None)
+                if site_filter_applies(site_scope(user)) else None)
     else:
-        # No place named: fall back to the caller's own binding, which is what
-        # a store keeper has always relied on.
+        # No place named and nothing to pin it to: fall back to the caller's
+        # own binding, which is what a store keeper has always relied on.
         site = resolve_site_write(user, None)
     sap = sap_code.strip()
     mat = (material_code or "").strip() or None
     async with session.begin():
+        # Inside the transaction on purpose: a query before `session.begin()`
+        # autobegins one and the `begin()` below then raises.
+        if dn:
+            exists = (await session.execute(text(
+                'SELECT 1 FROM delivery_notes WHERE "DN_Number" = :d'), {"d": dn})).first()
+            if exists is None:
+                raise HTTPException(404, f"delivery note {dn!r} not found")
         if mat is None:
             row = (await session.execute(text(
                 'SELECT "Material_Code" FROM inventory '
@@ -480,7 +553,7 @@ async def upload_mtc(file: UploadFile = File(...), sap_code: str = Form(...),
         mid = (await session.execute(insert(_mtc_t).values(
             Site_ID=site, Warehouse_ID=wh, SAP_Code=sap,
             Material_Code=mat, Material_Code_Ref=mat, mtc_number=mtc_number,
-            Lot_Number=lot_number, Quantity=quantity,
+            Lot_Number=lot_number, Quantity=quantity, DN_Number=dn,
             po_item_id=(int(po_item_id) if po_item_id is not None else None),
             file_name=file.filename, mime_type=file.content_type,
             file_blob=blob, status="attached", submitted_by=user["username"]
@@ -560,6 +633,8 @@ async def create_bulk(body: BulkEntryIn = Body(...),
                     await _open_site_inspection(session, data=row, mtc_id=mtc_id,
                                                 pending_id=res.get("pending_id"),
                                                 actor=user["username"])
+                    await _warn_if_uncertified(session, data=row, mtc_id=mtc_id,
+                                               actor=user["username"])
                 staged.append(res.get("pending_id"))
                 by_site[m.Site_ID] = by_site.get(m.Site_ID, 0) + 1
             await entry_docs.link_attachments(

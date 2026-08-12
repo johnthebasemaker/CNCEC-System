@@ -39,7 +39,7 @@ whose symptom appeared far from its cause:
 | **1** | **COMPONENT IDENTITY** | The key is `(Material_Code, SAP_Code)`. Pooling by code alone summed four unlike drums and *inverted* the shortfall. |
 | **7** | **RBAC — AUDITOR** | View-only is enforced by **method-level ASGI middleware** (`backend/api/readonly.py`), never per-endpoint. Every `POST/PUT/PATCH/DELETE` is refused unless it is on the small documented allowlist — so a route added next year is closed by default instead of failing open. |
 
-Rules 2-6 and 8-13 below are equally binding; those five are simply the ones a
+Rules 2-6 and 8-14 below are equally binding; those five are simply the ones a
 newcomer is most likely to undo by accident.
 
 **Two more that the QSEP programme added (2026-08-09), both stated in full
@@ -49,6 +49,12 @@ later in this file:**
   feature change that does not update it is not finished, and a role added to
   `ROLE_META` must be added to the assistant's chapter map and the printed
   booklet recipes in the same commit.
+* **Rule 14 (2026-08-12) — navigation access is a ROLE MATRIX and it fails
+  closed.** `minLevel` is a seniority ladder and the roles are not one, so a
+  page names the jobs that need it (`anyRole`). `canAccessPath` refuses any
+  path it does not recognise, `npm run test:nav` fails the build when a route
+  has no rule, and narrowing a page means narrowing its endpoints in the same
+  commit — a menu is not a control.
 * **The QC block is the FIRST hard block on the issue path, and it does not
   overturn FEFO.** `services/quality.assert_qc_cleared` refuses to issue
   controlled material beyond what QC has released. That is about QUALITY STATUS
@@ -503,6 +509,49 @@ of the Store Keeper chapter and had no printed booklet at all. `_ROLE_ALLOWED`
 falls back to `store_keeper` for an unknown role, which fails in the safe
 direction and is exactly why nobody noticed.
 
+### 14. NAVIGATION ACCESS IS A ROLE MATRIX, AND IT FAILS CLOSED
+
+*Locked 2026-08-12, executing the approved `PROPOSED_NAV_FIX.md`.*
+
+**`minLevel` is not an access rule for a page.** It is a seniority ladder — SK 0
+· warehouse/supervisor/qc 1 · hod 2 · logistics/auditor 3 · admin 4 — and the
+roles are not a ladder. They are four different JOBS plus two oversight roles. A
+store keeper is not "less senior" than a warehouse user; they do a different job
+in a different place.
+
+`minLevel: 1` admits **six of the eight roles**. That is how seven roles ended
+up able to read the staff roster with phone numbers, and how the store keeper
+became the one role locked out of the Stock page. Use `anyRole` and name the
+jobs. `minLevel` survives only where it genuinely means seniority: `/reports`,
+`/master/*`, `/admin/*` and the oversight ledgers in `entities.ts`.
+
+**Three mechanisms have to agree, and each one used to be checked differently:**
+
+| Surface | File | Was |
+|---|---|---|
+| the sidebar | `buildMenu` in `AppLayout.tsx` | checked group **and** node |
+| the route guard | `canAccessPath` in `nav.tsx` | checked node **only**, and allowed unknown paths |
+| the API | the routers | frequently wider than both |
+
+`canAccessPath` now checks the group first and **refuses anything it does not
+recognise**. That inverts the failure mode from "a new page is open to
+everyone" to "a new page is unreachable", which is safe but silent — so
+**`npm run test:nav`** (in CI) fails the build when a route in `App.tsx` has no
+manifest entry. Both halves are required: the fail-closed default alone would
+just trade a leak for an outage.
+
+⚠️ **A menu is not a control.** Before this pass the sidebar hid the roster from
+the store keeper while `GET /hr/employees` was `get_current_user` and served it
+to anybody, and it showed Logistics no SME page while `/sme/*` was
+`require_level(2)` and served them every Estimator endpoint. When you narrow a
+page, narrow its endpoints in the same commit — suite **BU** asserts the
+refusals per role, and `tests/e2e/specs/rbac-matrix.spec.ts` asserts all 8
+roles × 44 pages through the shipped functions.
+
+**Changing the matrix means editing `nav.tsx` AND `rbac-matrix.spec.ts`
+together.** If you find yourself editing only the spec to make a test pass, an
+access rule changed without anyone deciding to change it.
+
 ## Developer utilities — the three scripts in `bin/`
 
 Three separate jobs, deliberately not one script. `dev.sh` owns the DEV stack it
@@ -647,10 +696,29 @@ of them is a regression, not a new normal.
 > * **R2 (adjusted) — `inventory."Category" = 'PPE'` is valid for UI filtering,
 >   but `ppe_rules` still governs per-item usable days.** With no rule, an item
 >   has NO expiry and always demands a safety document.
-> * **R3 (adjusted) — material MAY travel to site uninspected.** Do **not**
->   block DN creation for want of an inspection. The **MTC is** mandatory at DN
->   creation; the **QC hard block applies only at SK issuance**. Two gates, two
->   moments — this is the most-misread part of the system.
+> * **R3 (superseded 2026-08-12 by R3b) — material MAY travel to site
+>   uninspected.** Do **not** block DN creation for want of an inspection. The
+>   QC hard block applies only at SK issuance.
+> * **R3b — the MTC gate MOVED to issuance (operator ruling, 2026-08-12).**
+>   It used to be mandatory at warehouse goods-in and at DN creation. In live
+>   use that was a hard workflow blocker: the truck is in the yard, the
+>   certificate is in somebody's inbox, and refusing the receipt made real
+>   stock invisible to the shelf report, to planning and to everyone. **Goods
+>   are now received and shipped with or without a certificate; nothing may be
+>   ISSUED without one.** Both gates therefore bind at the same moment, at
+>   `stage_consumption` **and** `approve_smr`.
+>   * The receipt block was traded for a **chase-up to Logistics**
+>     (`quality.warn_mtc_missing`) — without that the ruling deletes a control
+>     rather than moving it.
+>   * **Certificates are INHERITED down the chain** (`quality.visible_mtc`):
+>     uploaded against the PO line by Logistics, against the DN by the
+>     warehouse, or at the site by the SK, ranked most-specific-first. A site
+>     never re-uploads a document that exists upstream, and a certificate for
+>     site A does **not** clear site B — it attests to one batch, and matching
+>     on material alone would be a gate that opens once and never closes.
+>   * ⚠️ **Do not "restore" the receipt or DN block.** Suite BM asserts
+>     `assert_mtc` is absent from `warehouse.receive` and `create_dn`, and
+>     `qsep-mtc.spec.ts` drives the whole chain end to end.
 > * **R4/R5 — the PPE forecast is deterministic, and the window is 15 days.**
 >   `suggested = expiring − on_hand − on_order`, floored at 0, with employee
 >   NAMES attached. No statistical model: 22 roster workers and no history is
@@ -673,8 +741,8 @@ of them is a regression, not a new normal.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1428 / 0** (suites A…BT) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **75 / 75** (~26 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **1453 / 0** (suites A…BU) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **90 / 90** (~30 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |

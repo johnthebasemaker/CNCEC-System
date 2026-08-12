@@ -39,11 +39,19 @@ export const READ_ENTITIES: ReadEntity[] = [
   { key: 'consumption', label: 'Consumption', path: '/consumption', hasSite: true, access: { minLevel: 2 } },
   { key: 'returns', label: 'Returns', path: '/returns', hasSite: true, access: { minLevel: 2 } },
   { key: 'lots', label: 'Lots', path: '/lots', hasSite: true, access: { minLevel: 2 } },
-  { key: 'purchase-orders', label: 'Purchase Orders', path: '/purchase-orders', hasSite: true, access: { minLevel: 3 } },
+  // POs: was `minLevel: 3` (logistics/auditor/admin). The warehouse user
+  // receives goods AGAINST a purchase order and could not look one up, which
+  // is why they were phoning Logistics to have line quantities read out to
+  // them (2026-08-12). Named roles rather than a level, because "level 3 and
+  // above" is not the reason any of these three need it.
+  { key: 'purchase-orders', label: 'Purchase Orders', path: '/purchase-orders', hasSite: true, access: { anyRole: ['warehouse_user', 'logistics', 'auditor'] } },
   // Purchase Requests browse — same standard as the PO page (UAT Phase 2).
   // hod+ (HODs raise PRs; logistics/admin oversee them).
   { key: 'purchase-requests', label: 'Purchase Requests', path: '/purchase-requests', hasSite: true, access: { minLevel: 2 } },
-  { key: 'equipment', label: 'Equipment (SME)', path: '/equipment', hasSite: true, access: { anyRole: ['hod'] } },
+  // Equipment: the auditor was the one read entity it had been missed from.
+  // `/sme/*` is the source and it admits the auditor, so the API had always
+  // allowed this read while the browse row alone hid it.
+  { key: 'equipment', label: 'Equipment (SME)', path: '/equipment', hasSite: true, access: { anyRole: ['hod', 'auditor'] } },
 ]
 
 const STATUS: Field = {

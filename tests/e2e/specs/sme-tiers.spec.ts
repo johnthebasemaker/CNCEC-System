@@ -46,6 +46,17 @@ test.describe('sme-tiers:hod', () => {
   let page: Page
   let panel: Locator
 
+  // ⚠️ The hook's own budget, raised deliberately. In isolation this page
+  // renders in under 8s; the wait below is not about the page being slow, it
+  // is about CONTENTION. The SME cascade is a CPU-bound computation inside a
+  // single-process test API, so while it runs it starves the event loop, and
+  // every other spec's request queues behind it — and it queues behind theirs.
+  // Adding specs to the suite therefore lengthens THIS wait, which is how a
+  // 60s budget that had held for months started failing roughly one run in
+  // two when `qsep-mtc.spec.ts` was added. Production runs multiple workers
+  // and does not have this shape.
+  test.setTimeout(180_000)
+
   test.beforeAll(async ({ browser }) => {
     const ctx = await browser.newContext({ storageState: storageStatePath('hod') })
     page = await ctx.newPage()
@@ -55,7 +66,7 @@ test.describe('sme-tiers:hod', () => {
     // also hit the Dashboard's copy — scope everything to THIS panel.
     panel = page.getByRole('tabpanel', { name: /Total Overview/ })
     await expect(panel.getByText('MASTER TABLE — EQUIPMENT × SYSTEM CODE'))
-      .toBeVisible({ timeout: 60_000 })
+      .toBeVisible({ timeout: 150_000 })
   })
 
   test.afterAll(async () => { await page?.context().close() })

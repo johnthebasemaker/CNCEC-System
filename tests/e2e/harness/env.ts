@@ -29,6 +29,7 @@ export const E2E_PASSWORD = 'E2ePlaywright!2026'
 
 export type Role =
   | 'admin' | 'hod' | 'sk' | 'supervisor' | 'logistics'
+  | 'warehouse' | 'auditor'
   | 'qc' | 'qcwh' | 'qcnone'
 export const USERS: Record<Role, string> = {
   admin: 'admin', // global admin
@@ -36,6 +37,14 @@ export const USERS: Record<Role, string> = {
   sk: 'worker', // store_keeper @ CNCEC
   supervisor: 'supervisor', // supervisor @ CNCEC
   logistics: 'Logistics', // logistics, global
+  // The last two of the eight roles. Created by global-setup step 1f, for the
+  // same reason as the QC accounts below: the legacy data has nobody to log in
+  // as. Without them the RBAC matrix could only assert six of eight roles, and
+  // the two it could not reach are precisely the two the 2026-08-12 pass
+  // narrowed most (warehouse lost the roster and the PPE forecast; the auditor
+  // lost the locator and a duplicate menu entry).
+  warehouse: 'e2e_wh', // warehouse_user @ WH-01
+  auditor: 'e2e_auditor', // auditor, global, view-only
   // QSEP. The legacy data has no QC accounts, so global-setup CREATES these
   // three inside the throwaway DB (step 1d) before the password reset runs.
   // All three exist because QC is the system's only DUAL-SCOPE role and each

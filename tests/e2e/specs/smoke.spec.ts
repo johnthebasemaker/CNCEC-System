@@ -31,9 +31,14 @@ const ROUTES: Record<Role, Check[]> = {
     { path: '/entry/receive' },
     { path: '/entry/return' },
     { path: '/sk/requests' },
-    // the P0 role manifest does NOT give store keepers the Stock page — the
-    // app lands them on their Issue home instead; assert that lock holds
-    { path: '/stock', marker: 'Issue Stock (Consumption)' },
+    // ⚠️ INVERTED 2026-08-12. The P0 role manifest used to bounce a store
+    // keeper off /stock to their Issue home, and this line asserted that
+    // lock. It was never a decision — `minLevel: 1` on the Dashboard and the
+    // Stock page made the person who physically holds the stock the ONE role
+    // that could not open the screen named after it, while `/stock/*` on the
+    // server (`get_current_user`) had always allowed them. The manifest now
+    // names roles instead of a level, and the SK lands on Stock.
+    { path: '/stock', marker: 'Stock (derived)' },
     { path: '/entry/count' },
   ],
   supervisor: [

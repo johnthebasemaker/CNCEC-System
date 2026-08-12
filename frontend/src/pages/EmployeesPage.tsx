@@ -237,12 +237,15 @@ export default function EmployeesPage() {
   const [site, setSite] = useState<string | undefined>()
   const { data: sites } = useSites()
   const { data: rows, isLoading } = useHrEmployees({ site_id: site, q: q || undefined })
-  const { data: dq } = useHrDataQuality()
   const [transferring, setTransferring] = useState<Row | null>(null)
   const [viewing, setViewing] = useState<string | null>(null)
 
   const isHod = user?.role === 'hod'
   const global = (user?.level ?? 0) >= 3
+  // The roster page is open to the SK and the supervisor since 2026-08-12, and
+  // the hygiene panel behind this query is not — ask for it only when the
+  // caller can actually have it.
+  const { data: dq } = useHrDataQuality(isHod || global)
   const siteless = (dq?.siteless_employees as Row[] | undefined) ?? []
 
   const columns: ColumnsType<Row> = [

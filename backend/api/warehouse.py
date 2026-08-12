@@ -53,12 +53,13 @@ async def _guard_row_warehouse(session: AsyncSession, table, key_col: str,
 
 class ReceiveIn(BaseModel):
     received: dict[str, float] = Field(..., description="{po_item_id: qty_received}")
-    # QSEP — {po_item_id: mtc_documents.id}. Mandatory for Surface-Shield
-    # lines and ignored for everything else, so existing callers receiving
-    # ordinary material are unaffected.
+    # QSEP — {po_item_id: mtc_documents.id}. OPTIONAL since 2026-08-12: goods
+    # are booked in with or without a certificate and the block moved to
+    # issue, so this records which document covered the delivery rather than
+    # gating it. Ignored for everything outside the controlled category.
     mtc: dict[str, int] = Field(
         default_factory=dict,
-        description="{po_item_id: mtc_document_id} — required for Surface Shields")
+        description="{po_item_id: mtc_document_id} — optional; recorded, not required")
 
 
 class DNLineIn(BaseModel):

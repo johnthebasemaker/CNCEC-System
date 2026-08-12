@@ -245,10 +245,20 @@ async def distributions(site_id: Optional[str] = None, status: Optional[str] = N
 
 
 # ── forecast ─────────────────────────────────────────────────────────────────
+#
+# ⚠️ It carries NAMES (see the docstring), so it is roster-adjacent data and
+# was `require_level(0)` — literally everyone. Three roles now, each with a
+# use for it (operator ruling, 2026-08-12): the store keeper who issues the
+# gear, the HOD who owns the site, and Logistics, who place the order this
+# list exists to size. A warehouse user, a supervisor, an inspector and an
+# auditor were all reading who-holds-what for no operational reason.
+_FORECAST_ROLES = require_roles("store_keeper", "hod", "logistics")
+
+
 @router.get("/forecast", summary="PPE expiring in the next N days, netted for ordering")
 async def forecast(site_id: Optional[str] = None,
                    days: int = Query(svc.FORECAST_DAYS, ge=1, le=180),
-                   user: dict = Depends(require_level(0)),
+                   user: dict = Depends(_FORECAST_ROLES),
                    session: AsyncSession = Depends(get_session)):
     """The bulk-order list, with the names attached.
 
@@ -281,7 +291,11 @@ async def export_ppe(key: str, format: str = Query("xlsx"),
                      site_id: Optional[str] = None,
                      id_number: Optional[str] = None,
                      days: int = Query(svc.FORECAST_DAYS, ge=1, le=180),
-                     user: dict = Depends(require_level(1)),
+                     # Same three roles as the forecast itself. It was
+                     # `require_level(1)`, which is the store keeper's page
+                     # with the store keeper (level 0) unable to press its own
+                     # Export button, and a warehouse user able to press it.
+                     user: dict = Depends(_FORECAST_ROLES),
                      session: AsyncSession = Depends(get_session)):
     import io
 

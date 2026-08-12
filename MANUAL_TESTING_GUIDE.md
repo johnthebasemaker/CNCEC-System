@@ -346,7 +346,7 @@ Supervisor request  →  SK approves  →  HOD approves the issue
 | TC-P2P-24 | **Given** a submitted DN, **When** Logistics approves and then the HOD approves, **Then** it can be shipped. |
 | TC-P2P-25 | **Given** a submitted DN, **When** the HOD rejects it, **Then** a reason is required and is shown to the warehouse. ⛔ |
 | TC-P2P-26 | **Given** a shipped DN, **When** the destination Store Keeper opens Incoming Deliveries, **Then** it is listed and can be staged into stock. ✅ |
-| TC-P2P-27 | **Given** a DN containing a **controlled** material, **When** it is created **without a Material Test Certificate on file**, **Then** it is refused. → §5.2 ⛔ |
+| TC-P2P-27 | **Given** a DN containing a **controlled** material, **When** it is created **without a Material Test Certificate on file**, **Then** it **succeeds** — the certificate is recorded on the note when one exists and demanded at issue, never at dispatch. → §5.2 ✅ ⚠️ **Inverted 2026-08-12.** |
 | TC-P2P-28 | **Given** a mixed R/L and B/L line set, **When** one DN is attempted for both, **Then** it is refused. ⛔ |
 
 ### 4.6 Reading scanned purchase documents (OCR)
@@ -399,14 +399,28 @@ confirm, then create the PR or PO — which links the stored scan to the record.
 **Read the two-gate distinction first.** It is the single most misunderstood
 part of the system, and testing it wrongly produces confident false bug reports.
 
+> 🔄 **CHANGED 2026-08-12 — the certificate gate MOVED.** It used to bind at
+> warehouse goods-in and at Delivery Note creation. It now binds at **issue**,
+> the same moment as the QC gate. If you are working from an older printout,
+> TC-QC-03 through TC-QC-06 have been rewritten and their expected results are
+> **inverted**. See §5.2.
+
 | Gate | Binds at | Demands | Blocks whom |
 |---|---|---|---|
-| **Material Test Certificate** | Delivery Note creation | A certificate on file | The warehouse clerk |
+| **Material Test Certificate** | Issue to the field | A certificate on file for that site | The Store Keeper |
 | **QC approval** | Issue to the field | An inspected, approved quantity | The Store Keeper |
 
-⚠️ **Material may travel to site uninspected.** Do **not** raise a bug because a
-DN was allowed for material with no inspection — that is the ruling. What must
-never happen is uninspected material reaching a worker.
+⚠️ **Material may be received and may travel with neither.** Do **not** raise a
+bug because a warehouse booked in an uncertified Surface Shield, or because a DN
+was allowed for material with no inspection and no certificate. Both are the
+ruling. A receipt states that something physically arrived, and refusing to
+record it does not un-arrive it — it just hides real stock from everyone. What
+must never happen is either kind of unchecked material reaching a worker.
+
+⚠️ **Two gates, two different people to chase.** A refusal at issue can be
+*either* gate. A missing certificate is Logistics' to fix; a missing inspection
+is the QC's. The clearance banner on the issue form names both, and a tester who
+reports only "issue refused" has not finished the test — say **which** gate.
 
 ### 5.1 Scope: what is and is not controlled
 
@@ -419,18 +433,31 @@ never happen is uninspected material reaching a worker.
 
 | | |
 |---|---|
-| **Who** | Warehouse User |
-| **What** | A Material Test Certificate is mandatory before controlled material is dispatched |
-| **Where** | Entry → MTC upload; enforced at Delivery Note creation |
-| **When** | At DN creation — **not** at receipt, and **not** at issue |
-| **Why** | The certificate must travel with the material. Chasing it after the truck has gone never works. |
+| **Who** | Store Keeper (blocked); Logistics, Warehouse User or the SK (any may unblock) |
+| **What** | A Material Test Certificate is mandatory before controlled material is **issued to a worker** |
+| **Where** | Uploaded from Entry → Receive, or from the clearance banner on Entry → Issue; enforced at issue |
+| **When** | At issue — **not** at receipt, and **not** at Delivery Note creation |
+| **Why** | Refusing a *receipt* for missing paperwork does not stop the material arriving; it only stops the system knowing it arrived, so real stock sits in a yard invisible to the shelf report and to planning. The certificate protects the person putting the material on the job, so it is checked at the moment before it reaches them. |
+| **Which** | Three ways to satisfy it, and any one is enough — see TC-QC-06 |
+
+**The upload-once rule.** The person who hits this gate (the site SK) is usually
+not the person holding the document (Logistics, who got it with the PO, or the
+warehouse clerk, who got it with the delivery). A certificate attached to the
+purchase order or to the delivery note is **inherited by the destination site**.
+The SK should almost never need to upload one, and if testers find themselves
+uploading a second copy of the same PDF, that is the bug.
 
 | ID | Given / When / Then |
 |---|---|
-| TC-QC-03 | **Given** controlled material with **no** certificate, **When** a DN is created for it, **Then** refused, and the message says a certificate is mandatory and where to upload it. ⛔ |
-| TC-QC-04 | **Given** the certificate is then uploaded, **When** the DN is retried, **Then** it succeeds. ✅ |
-| TC-QC-05 | **Given** an **uncontrolled** material with no certificate, **When** a DN is created, **Then** it succeeds — nothing is asked for. ✅ |
-| TC-QC-06 | 🤖 **Given** a DN line, **Then** confirm the gate resolves the material correctly. *DN lines carry a material code, not a part number; a lookup that only understood part numbers would silently pass every DN line and the gate would be decorative.* Test with a DN, not only with an issue. |
+| TC-QC-03 | **Given** controlled material with **no** certificate, **When** the warehouse receives it, or a DN is created for it, or a site SK books it in, **Then** all three **succeed**. ✅ ⚠️ **Inverted 2026-08-12.** A refusal here is now the bug. |
+| TC-QC-04 | **Given** that same uncertified material, **When** the SK tries to **issue** it, **Then** refused, and the message names all three ways to get a certificate on file. ⛔ |
+| TC-QC-05 | **Given** the certificate is then uploaded, **When** the issue is retried, **Then** it succeeds. ✅ |
+| TC-QC-06 | **Given** **Logistics** uploads the certificate against the **purchase order** (never touching the site), **When** the site SK issues, **Then** it succeeds and the clearance banner names the PO as the source. ✅ **Run this.** It is the whole point of the rule; without it three copies of one PDF end up in the system. |
+| TC-QC-06b | **Given** the **warehouse** attaches the certificate to the **Delivery Note**, **Then** the receiving site inherits it the same way, and the banner names the DN. ✅ |
+| TC-QC-06c | **Given** a certificate uploaded for site A, **When** site B issues the same material, **Then** site B is still **refused**. ⛔ *A certificate attests to one batch from one mill run. If one upload cleared every site, the gate would open once and never close again.* |
+| TC-QC-06d | **Given** an **uncontrolled** material with no certificate, **Then** nothing is ever asked for, at any step. ✅ |
+| TC-QC-06e | 🤖 **Given** a DN line, **Then** confirm the certificate resolves the material correctly. *DN lines carry a material code, not a part number; a lookup that only understood part numbers would silently match nothing on the DN path.* Test with a DN, not only with an issue. |
+| TC-QC-06f | **Given** an uncertified Surface Shield is received anywhere, **Then** **Logistics is notified** to chase the document. ✅ *The block was traded for a chase-up. If the notification is missing, the ruling has silently deleted a control rather than moved it.* |
 
 ### 5.3 Inspecting
 
@@ -891,6 +918,31 @@ are the ones that matter.
 | TC-SEC-08 | **Given** an Admin, **When** they open any workspace, **Then** allowed — the single deliberate exception. ✅ |
 | TC-SEC-09 | **Given** any user, **When** they request another site's record by id directly, **Then** refused — not merely hidden from the list. ⛔ |
 
+### 13.1 The strict role matrix (2026-08-12)
+
+Pages used to be gated by a **seniority level**, and the roles are not a
+ladder — they are four different jobs plus two oversight roles. `minLevel: 1`
+admitted six of the eight roles, which is how seven roles ended up holding the
+staff roster and how the store keeper ended up as the one role locked out of
+the Stock page. Pages now **name the jobs** that need them.
+
+⚠️ **The matrix is asserted automatically** — `tests/e2e/specs/rbac-matrix.spec.ts`
+drives all eight roles against every page, through the shipped access functions.
+Manual testing here is for judgement ("should a QC see this?"), not for coverage.
+
+| ID | Given / When / Then |
+|---|---|
+| TC-SEC-10 | **Given** a **store keeper**, **Then** they can open **Dashboard** and **Stock**. ✅ ⚠️ **Inverted 2026-08-12** — they used to be bounced to their Issue page. The person holding the stock was the one role that could not open the screen named after it. |
+| TC-SEC-11 | **Given** a **store keeper**, **Then** they can open the **Employees** roster. ✅ *They type an employee ID on every PPE issue and were the only role denied the list to type it from.* |
+| TC-SEC-12 | **Given** a **warehouse user**, **a QC** or **Logistics**, **Then** the Employees roster is **refused**, in the menu and by the API. ⛔ **The privacy row.** Names and phone numbers; none of these three manages, moves or equips people. |
+| TC-SEC-13 | **Given** a **QC inspector**, **Then** they see Stock, Inventory records, Inspections, Documents and their account — and **not** the Dashboard, Locator, Assets, PPE or Employees. ⛔ *An inspector's job is a queue.* |
+| TC-SEC-14 | **Given** **Logistics**, **When** they open the **Warehouse** portal, **Then** allowed. ✅ *`/warehouse/*` has always accepted them server-side; the menu now agrees. Covering an unstaffed shed is real work.* |
+| TC-SEC-15 | **Given** **Logistics**, **When** they call any **SME/Estimator** endpoint, **Then** refused. ⛔ *This was the reported leak: the sidebar showed them no SME page while the API served them every one.* |
+| TC-SEC-16 | **Given** a **warehouse user**, **Then** they can browse **Purchase Orders**. ✅ *They receive goods against a PO and were phoning Logistics to have line quantities read out.* |
+| TC-SEC-17 | **Given** **any** role, **When** they type a URL the system does not recognise, **Then** refused. ⛔ ⚠️ **Inverted 2026-08-12** — an unknown path used to be **allowed**. |
+| TC-SEC-18 | 🤖 **Given** a new page is added with no entry in the navigation manifest, **Then** the build fails (`npm run test:nav`). *Failing closed turns a silent leak into a silent lockout; this is what makes it loud.* |
+| TC-SEC-19 | **Given** an **auditor**, **Then** they still read the Estimator, the HOD pages and every record. ✅ **Run this.** Over-narrowing the oversight role is the failure mode of a tightening pass, and it stays quiet until an audit. |
+
 ---
 
 ## 14. Edge cases, and how to drain any model
@@ -1076,11 +1128,12 @@ regression, not a new normal.**
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1428 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1453 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
-| Playwright E2E | **75 / 75** | `cd tests/e2e && npm test` |
+| Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
+| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | Frontend build | clean | `npm run build --prefix frontend` |
 | Manual PDFs | **0 overlapping text pairs** | `.venv/bin/python build_manual_pdf.py --role all` |
 
