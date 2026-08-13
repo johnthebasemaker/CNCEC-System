@@ -548,6 +548,21 @@ page, narrow its endpoints in the same commit — suite **BU** asserts the
 refusals per role, and `tests/e2e/specs/rbac-matrix.spec.ts` asserts all 8
 roles × 44 pages through the shipped functions.
 
+**And narrow EVERY door to the data, not the one you were looking at.** Worker
+identity turned out to have four: `/hr/employees`, the generated `/employees`
+CRUD read, the badge PDFs, and `/documents/master/employees` — the whole roster
+as a spreadsheet, which is the worst of them because it leaves the system
+entirely. Closing one is not closing any. The generated reads are the easiest
+to miss because nobody writes them: `crud.make_read_router` produces two GETs
+per entity, and it stamped `get_current_user` on all of them for eleven
+entities until 2026-08-12. Every entity now states `read_roles` explicitly —
+suite **BV** fails the build if a row omits the key, because an omission
+inherits "anybody" and would come back silently.
+
+**Bulk identity is gated more tightly than a single name**, and the asymmetry
+is deliberate: a store keeper reads a worker's name to type an employee ID on
+every PPE issue, which is not the same act as exporting the roster.
+
 **Changing the matrix means editing `nav.tsx` AND `rbac-matrix.spec.ts`
 together.** If you find yourself editing only the spec to make a test pass, an
 access rule changed without anyone deciding to change it.
@@ -741,7 +756,7 @@ of them is a regression, not a new normal.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1453 / 0** (suites A…BU) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1474 / 0** (suites A…BV) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **90 / 90** (~30 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |

@@ -406,19 +406,32 @@ async def test_site_scoping():
         hod_t = await token("hod", "hod2026")           # hod @ CNCEC (level 2 → scoped)
         admin_t = await token("admin", "admin2026")     # level 4 → global
 
-        r = await ac.get("/receipts", params={"limit": 500}, headers=H(worker_t))
+        # ⚠️ The scoped reader here is the HOD, not the store keeper. It was
+        # the store keeper until 2026-08-12, when the ledger entities became
+        # hod/logistics/auditor — the SK was simply the most convenient scoped
+        # account, never the point of the test. The HOD is scoped to CNCEC in
+        # exactly the same way, so the property is unchanged; and the SK's new
+        # refusal is asserted below rather than silently dropped.
+        r = await ac.get("/receipts", params={"limit": 500}, headers=H(hod_t))
         items = r.json().get("items", [])
         check("scoped list returns only own-site rows",
               r.status_code == 200 and len(items) > 0
               and all((i.get("Site_ID") or "").strip() == "CNCEC" for i in items),
               f"status={r.status_code} n={len(items)}")
 
-        r = await ac.get("/receipts", params={"site_id": "HQ"}, headers=H(worker_t))
+        r = await ac.get("/receipts", params={"site_id": "HQ"}, headers=H(hod_t))
         check("scoped user asking for another site → 403", r.status_code == 403,
               f"got {r.status_code}")
 
+        r = await ac.get("/receipts", params={"limit": 1}, headers=H(worker_t))
+        check("a store keeper is refused the receipt LEDGER outright — roles "
+              "decide which ledger you may read, scoping decides whose rows. "
+              "Correctly scoping an SK to their own site's entire receipt "
+              "history still handed them an oversight surface that is not theirs",
+              r.status_code == 403, f"got {r.status_code}")
+
         ra = (await ac.get("/receipts", params={"limit": 1}, headers=H(admin_t))).json()
-        rw = (await ac.get("/receipts", params={"limit": 1}, headers=H(worker_t))).json()
+        rw = (await ac.get("/receipts", params={"limit": 1}, headers=H(hod_t))).json()
         check("admin sees at least as many rows as a scoped user",
               ra.get("total", 0) >= rw.get("total", 0), f"{ra.get('total')} vs {rw.get('total')}")
 
@@ -427,7 +440,7 @@ async def test_site_scoping():
         foreign = (await ac.get("/receipts", params={"limit": 1, "site_id": "HQ"},
                                 headers=H(admin_t))).json().get("items", [])
         if foreign:
-            r = await ac.get(f"/receipts/{foreign[0]['id']}", headers=H(worker_t))
+            r = await ac.get(f"/receipts/{foreign[0]['id']}", headers=H(hod_t))
             check("scoped get-one of another site's row → 404", r.status_code == 404,
                   f"got {r.status_code}")
         else:
@@ -3981,7 +3994,11 @@ async def test_search_filters():
                   r.status_code == 200 and r.json().get("total", -1) >= 0, f"got {r.status_code}")
 
         # Site scoping still binds under q (worker pinned to CNCEC).
-        r = await ac.get("/consumption", headers=H(worker_t), params={"q": "1001", "limit": 5})
+        # Read as the HOD: the consumption ledger became hod/logistics/auditor
+        # on 2026-08-12, and this check is about `q` not defeating the site
+        # pin — not about which role does the reading.
+        hod_t = await token("hod", "hod2026")
+        r = await ac.get("/consumption", headers=H(hod_t), params={"q": "1001", "limit": 5})
         items = r.json().get("items", [])
         check("search: scoped user q respects site pinning",
               r.status_code == 200 and all((i.get("Site_ID") or "CNCEC") == "CNCEC" for i in items),
@@ -14083,6 +14100,182 @@ async def test_strict_rbac_api_gates():
         await _qsep_cleanup()
 
 
+# --- Suite BV: the generated CRUD reads ---------------------------------------
+async def test_crud_read_rbac():
+    """Suite BV — the generated entity routes, per role.
+
+    `crud.make_read_router` stamped a bare `get_current_user` on every GET it
+    generated, for eleven entities, since the day it was written. The
+    navigation manifest hid the pages and the API served the data to anybody
+    who typed the URL — so the manifest was documentation, not a control.
+
+    **The one that mattered.** `/employees` is the SAME table `/hr/employees`
+    serves. Narrowing that endpoint in the previous pass while this route
+    stayed open would have been a fix in name only: every name and phone
+    number was two URLs away the whole time. There turned out to be a THIRD
+    door as well (`/documents/master/employees`, the roster as a spreadsheet),
+    and a fourth (the badge PDFs). All four are checked below, because a
+    privacy control with one door left open is not a control.
+
+    Scoping is NOT a substitute and the distinction is worth stating: site
+    scoping decides WHOSE ROWS you see, roles decide WHICH LEDGER you may read
+    at all. A store keeper reading their own site's entire receipt history was
+    correctly scoped and still wrong — that is an oversight surface, and it is
+    not theirs.
+
+    ⚠️ Every check here is NEGATIVE except the ones marked otherwise. The
+    positives were already true before this change and would survive a revert;
+    only the refusals would go quiet.
+    """
+    import bcrypt as _bc
+    from sqlalchemy import text as _sqt
+
+    await _qsep_seed_users()
+
+    h = _bc.hashpw(_QSEP_PW.encode(), _bc.gensalt(rounds=4)).decode()
+    async with SessionLocal() as s:
+        for uname, role, site in (("SVCQ-sup", "supervisor", "CNCEC"),
+                                  ("SVCQ-aud", "auditor", None)):
+            await s.execute(_sqt("DELETE FROM users WHERE username = :u"), {"u": uname})
+            await s.execute(_sqt(
+                'INSERT INTO users (username, password_hash, role, "Site_ID") '
+                "VALUES (:u, :h, :r, :s)"),
+                {"u": uname, "h": h, "r": role, "s": site})
+        await s.commit()
+
+    ROLES = {"sk": "SVCQ-sk", "wh": "SVCQ-wh", "sup": "SVCQ-sup", "qc": "SVCQ-qc",
+             "hod": "SVCQ-hod", "log": "SVCQ-log", "aud": "SVCQ-aud",
+             "admin": "SVCQ-admin"}
+    LEDGER = {"hod", "log", "aud", "admin"}
+    ROSTER = {"sk", "sup", "hod", "aud", "admin"}
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            H = {}
+            for key, uname in ROLES.items():
+                H[key] = await _qsep_login(ac, uname)
+            check("bv-setup: all eight roles signed in", all(H[k] for k in ROLES),
+                  str({k: bool(v) for k, v in H.items()}))
+
+            async def sweep(label: str, path: str, allowed: set, *,
+                            note: str = "") -> None:
+                wrong = []
+                for key in ROLES:
+                    st = (await ac.get(path, headers=H[key])).status_code
+                    if (st != 403) != (key in allowed):
+                        wrong.append(f"{key}={st}")
+                check(f"bv: {label}" + (f" — {note}" if note else ""),
+                      not wrong, f"wrong verdicts: {wrong}")
+
+            # ── 1. the ledgers are an OVERSIGHT surface ──────────────────────
+            for prefix in ("/receipts", "/consumption", "/returns", "/lots",
+                           "/purchase-requests"):
+                await sweep(f"GET {prefix} is hod/logistics/auditor only",
+                            prefix, LEDGER)
+            check("bv: …and the store keeper's refusal is specifically a 403, "
+                  "not an empty list. Returning nothing would look identical "
+                  "on screen and would hide the boundary from the next reader",
+                  (await ac.get("/receipts", headers=H["sk"])).status_code == 403,
+                  str((await ac.get("/receipts", headers=H["sk"])).status_code))
+
+            # ── 2. the two entities with their own audiences ─────────────────
+            await sweep("GET /purchase-orders admits the WAREHOUSE",
+                        "/purchase-orders", {"wh", "log", "aud", "admin"},
+                        note="they receive goods against a PO and could not "
+                             "look one up")
+            await sweep("GET /equipment is the SME read-lock",
+                        "/equipment", {"hod", "aud", "admin"})
+
+            # ── 3. THE PII ROW — all four doors ──────────────────────────────
+            await sweep("GET /employees carries the roster role set, the same "
+                        "as /hr/employees", "/employees", ROSTER,
+                        note="the same table; a different rule here would mean "
+                             "the previous pass narrowed nothing")
+            # BULK worker identity is narrower than reading a single name.
+            # Printing or exporting the whole roster is a different act with a
+            # different blast radius, so it keeps the audience it already had
+            # (level 2) minus the role the operator revoked identity from.
+            # Suite AL has asserted since Phase 5 that an SK cannot print a
+            # badge; that judgement is left standing rather than overturned.
+            DOCS = {"hod", "aud", "admin"}
+            await sweep("the printable badge SHEET is hod/auditor only",
+                        "/documents/employee-badges", DOCS)
+            await sweep("…and the single-badge PNG",
+                        "/documents/employee-badge/SVCQ-NOBODY", DOCS,
+                        note="a 404 for the unknown id is fine — this asks WHO")
+            await sweep("…and the roster SPREADSHEET, which is the worst of "
+                        "the four doors because it leaves the system entirely",
+                        "/documents/master/employees?format=csv", DOCS,
+                        note="Logistics could pull the whole staff list at "
+                             "level 2 while both API doors were being closed")
+            # The same route must NOT have been narrowed for ordinary master
+            # data — the per-entity guard has to be per-entity.
+            r = await ac.get("/documents/master/vendors?format=csv", headers=H["log"])
+            check("bv: …while the VENDORS export is untouched for Logistics. "
+                  "The roster guard is per-entity; narrowing the whole route "
+                  "would have broken three exports to fix one",
+                  r.status_code == 200, f"got {r.status_code}")
+
+            # ── 4. the material master stays open (POSITIVE) ─────────────────
+            wrong = [k for k in ROLES
+                     if (await ac.get("/inventory", headers=H[k])).status_code != 200]
+            check("bv: GET /inventory remains open to every role. It is the "
+                  "catalogue every entry form and picker reads, and nothing "
+                  "about it is sensitive — a tightening pass that swept it up "
+                  "would break the issue form for the whole company",
+                  not wrong, f"refused for: {wrong}")
+
+            # ── 5. writes did not move with the reads ────────────────────────
+            r = await ac.post("/vendors", headers=H["log"],
+                              json={"Vendor_Code": "SVCQ-V1", "Vendor_Name": "svc"})
+            check("bv: Logistics still WRITES ordinary master data (vendors)",
+                  r.status_code in (201, 400), f"got {r.status_code}")
+            if r.status_code == 201:
+                async with SessionLocal() as s:
+                    await s.execute(_sqt("DELETE FROM vendors WHERE \"Vendor_Code\" = 'SVCQ-V1'"))
+                    await s.commit()
+            r = await ac.post("/employees", headers=H["log"],
+                              json={"ID_Number": "SVCQ-E1", "Name": "svc"})
+            check("bv: …but NOT the employee roster. Every other master entity "
+                  "is Logistics+admin; this one is admin-only, because leaving "
+                  "them a create/update/delete editor over the table whose "
+                  "READ was just revoked would make the revocation theatre",
+                  r.status_code == 403, f"got {r.status_code}")
+
+            # ── 6. scoping still applies UNDERNEATH the role gate ────────────
+            # Roles decide which ledger; scoping decides whose rows. Losing the
+            # second while adding the first would hand an HOD every site.
+            r = await ac.get("/receipts?site_id=SVCQ-SITE-B", headers=H["hod"])
+            check("bv: an HOD asking for ANOTHER site's receipts is still "
+                  "refused. The role gate is added ON TOP of site scoping, "
+                  "never instead of it",
+                  r.status_code == 403, f"got {r.status_code}")
+
+            # ── 7. the factory default is still OPEN, deliberately ───────────
+            # `read_roles=None` means open. That is correct for `inventory` and
+            # dangerous everywhere else, so the entity table is checked for a
+            # row that forgot to say anything.
+            from .main import ENTITIES as _ENTS
+            silent = [e["prefix"] for e in _ENTS if "read_roles" not in e]
+            check("bv: EVERY entity states its read_roles explicitly, even the "
+                  "open one. A row that omits the key inherits 'anybody' — "
+                  "which is exactly the default this suite exists to have "
+                  "removed, and it would come back silently",
+                  not silent, f"entities with no read_roles: {silent}")
+            opened = [e["prefix"] for e in _ENTS if e.get("read_roles") is None]
+            check("bv: …and exactly ONE entity is open: /inventory",
+                  opened == ["/inventory"], f"open entities: {opened}")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM users WHERE username IN "
+                                 "('SVCQ-sup','SVCQ-aud')"))
+            await s.execute(_sqt("DELETE FROM vendors WHERE \"Vendor_Code\" = 'SVCQ-V1'"))
+            await s.execute(_sqt("DELETE FROM employees WHERE \"ID_Number\" = 'SVCQ-E1'"))
+            await s.commit()
+        await _qsep_cleanup()
+
+
 async def main() -> int:
     await _relax_entry_gates()
     print("Service-level invariants (rolled back) + auth/role guards:\n")
@@ -14248,6 +14441,9 @@ async def main() -> int:
     print("\n BU. Strict RBAC — the API gates narrowed on 2026-08-12, and the "
           "refusals that would otherwise go quiet")
     await test_strict_rbac_api_gates()
+    print("\n BV. The generated CRUD reads — a manifest that hid pages while "
+          "the API served the data to anyone who typed the URL")
+    await test_crud_read_rbac()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

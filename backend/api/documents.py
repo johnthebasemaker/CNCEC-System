@@ -300,9 +300,30 @@ async def qr_labels(site_id: Optional[str] = None,
 
 
 # --- employee badges ----------------------------------------------------------
+#
+# ⚠️ WORKER IDENTITY IN BULK, so `require_level(2)` MINUS Logistics.
+#
+# There turned out to be FOUR doors to the same names and ID numbers:
+# `/hr/employees`, the generated `/employees` CRUD read, these badges, and the
+# roster spreadsheet below. Closing the first two while a level-2 caller could
+# still print or export the whole roster would have moved the leak rather than
+# fixed it — and the printed version is the worse one, because it leaves the
+# system entirely.
+#
+# Note this is a NARROWER set than the roster API's, on purpose. Reading a name
+# to type an employee ID is what a store keeper does on every PPE issue;
+# printing or exporting the whole roster is a different act with a different
+# blast radius, and it stays with the roles that already had it (level 2) less
+# the one the operator revoked worker identity from. Suite AL has asserted
+# since Phase 5 that a store keeper is refused the badge PNG, which is the
+# same judgement — it is left standing rather than overturned in passing.
+_BADGE_ROLES = require_roles("hod", "auditor")
+_ROSTER_DOC_ROLES = ("hod", "auditor", "admin")
+
+
 @router.get("/employee-badges", summary="Printable employee QR-badge sheet (3×4)")
 async def employee_badges(site_id: Optional[str] = None,
-                          user: dict = Depends(require_level(2)),
+                          user: dict = Depends(_BADGE_ROLES),
                           session: AsyncSession = Depends(get_session)):
     site_id = resolve_site_param(user, site_id)
     if site_id == "":
@@ -321,7 +342,7 @@ async def employee_badges(site_id: Optional[str] = None,
 @router.get("/employee-badge/{id_number}",
             summary="One employee's QR badge as a PNG (payload = raw ID_Number)")
 async def employee_badge_png(id_number: str,
-                             user: dict = Depends(require_level(2)),
+                             user: dict = Depends(_BADGE_ROLES),
                              session: AsyncSession = Depends(get_session)):
     from fastapi.responses import Response
     emp = _MD.tables["employees"]
@@ -375,6 +396,16 @@ async def export_master(entity: str, format: str = Query("xlsx"),
                         session: AsyncSession = Depends(get_session)):
     if entity not in _MASTER:
         raise HTTPException(404, f"unknown master entity {entity!r}")
+    # ⚠️ The employees export is the whole staff roster as a spreadsheet, and
+    # `require_level(2)` handed it to Logistics — the role the operator
+    # revoked worker identity from on 2026-08-12. Gated per-entity rather than
+    # by narrowing the whole route, because vendors, warehouses and inventory
+    # are ordinary master data that level 2 should keep exporting.
+    if entity == "employees" and user["role"] not in _ROSTER_DOC_ROLES:
+        raise HTTPException(
+            403, "the employee roster export is restricted to the HOD and the "
+                 "auditor — reading a name to type an ID is not the same act "
+                 "as taking the whole roster out of the system")
     fmt = format.lower()
     if fmt not in _FORMATS:
         raise HTTPException(400, f"format must be one of {sorted(_FORMATS)}")

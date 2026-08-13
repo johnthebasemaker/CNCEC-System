@@ -129,7 +129,12 @@ const MATRIX: Matrix = {
   // ── master + admin ────────────────────────────────────────────────────────
   '/master/vendors': ['logistics'],
   '/master/warehouses': ['logistics'],
-  '/master/employees': ['logistics'],
+  // ⚠️ ADMIN ONLY — the one master-data entity that is not Logistics'.
+  // Revoking the roster from Logistics for privacy while leaving them a full
+  // create/update/delete editor over the same table would have made the
+  // revocation cosmetic: reading every name and phone number from here is one
+  // click. Empty array = nobody but admin (2026-08-12).
+  '/master/employees': [],
   '/admin/users': [],
   '/admin/pending': [],
   '/admin/overdue': [],

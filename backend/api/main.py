@@ -32,7 +32,7 @@ if _ROOT not in sys.path:
 from backend import models  # noqa: E402
 
 from .admin import router as admin_router  # noqa: E402
-from .auth import get_current_user, require_level, site_scope  # noqa: E402
+from .auth import get_current_user, require_level, require_roles, site_scope  # noqa: E402
 from .auth import router as auth_router  # noqa: E402
 from .config import CORS_ORIGINS  # noqa: E402
 from .crud import make_read_router  # noqa: E402
@@ -86,18 +86,51 @@ _MD = models.Base.metadata
 # consumption / returns / inventory / lots / purchase_orders) stay READ-ONLY
 # here: their writes carry identity-math / FEFO / audit logic that must be ported
 # into a services layer (a dedicated later milestone), not naive INSERTs.
+# ── the generated entity routers, and who may READ each one ──────────────────
+#
+# `read_roles` mirrors the frontend matrix one-for-one (PROPOSED_NAV_FIX.md
+# §4.2, `frontend/src/config/entities.ts`). Admin is implicit everywhere —
+# `require_roles` always allows it.
+#
+# ⚠️ These all used to be a bare `get_current_user`. The navigation manifest
+# hid the pages and the API served the data to anyone who typed the URL, which
+# meant the manifest was documentation rather than a control. Keep the two in
+# step: a `/records/*` row narrowed in `entities.ts` and left wide here is not
+# narrowed at all.
+#
+# `read_roles: None` means genuinely open, and exactly one entity is —
+# `inventory`, the material master, which every entry form and picker in the
+# product reads. Nothing about it is sensitive: it is the catalogue.
+_LEDGER = ["hod", "logistics", "auditor"]      # oversight surfaces
+_ROSTER = ["store_keeper", "supervisor", "hod", "auditor"]   # = employees.py
+
 ENTITIES = [
-    {"name": "inventory",       "prefix": "/inventory",       "tag": "inventory",       "id_col": "SAP_Code", "site_col": "Site_ID"},
-    {"name": "receipts",        "prefix": "/receipts",        "tag": "receipts",        "id_col": "id",       "site_col": "Site_ID"},
-    {"name": "consumption",     "prefix": "/consumption",     "tag": "consumption",     "id_col": "id",       "site_col": "Site_ID"},
-    {"name": "returns",         "prefix": "/returns",         "tag": "returns",         "id_col": "id",       "site_col": "Site_ID"},
-    {"name": "lots",            "prefix": "/lots",            "tag": "lots",            "id_col": "id",       "site_col": "Site_ID"},
-    {"name": "purchase_orders", "prefix": "/purchase-orders", "tag": "purchase_orders", "id_col": "id",       "site_col": "Site_ID"},
-    {"name": "pr_master",       "prefix": "/purchase-requests", "tag": "purchase_requests", "id_col": "id",   "site_col": "Site_ID"},
-    {"name": "sme_equipment",   "prefix": "/equipment",       "tag": "equipment",       "id_col": "id",       "site_col": "Site_ID"},
-    {"name": "employees",       "prefix": "/employees",       "tag": "employees",       "id_col": "id",       "site_col": "Site_ID", "writable": True},
-    {"name": "vendors",         "prefix": "/vendors",         "tag": "vendors",         "id_col": "id",       "site_col": None,       "writable": True},
-    {"name": "warehouses",      "prefix": "/warehouses",      "tag": "warehouses",      "id_col": "id",       "site_col": None,       "writable": True},
+    {"name": "inventory",       "prefix": "/inventory",       "tag": "inventory",       "id_col": "SAP_Code", "site_col": "Site_ID", "read_roles": None},
+    {"name": "receipts",        "prefix": "/receipts",        "tag": "receipts",        "id_col": "id",       "site_col": "Site_ID", "read_roles": _LEDGER},
+    {"name": "consumption",     "prefix": "/consumption",     "tag": "consumption",     "id_col": "id",       "site_col": "Site_ID", "read_roles": _LEDGER},
+    {"name": "returns",         "prefix": "/returns",         "tag": "returns",         "id_col": "id",       "site_col": "Site_ID", "read_roles": _LEDGER},
+    {"name": "lots",            "prefix": "/lots",            "tag": "lots",            "id_col": "id",       "site_col": "Site_ID", "read_roles": _LEDGER},
+    # The warehouse receives goods AGAINST a PO and must be able to look one up.
+    {"name": "purchase_orders", "prefix": "/purchase-orders", "tag": "purchase_orders", "id_col": "id",       "site_col": "Site_ID", "read_roles": ["warehouse_user", "logistics", "auditor"]},
+    {"name": "pr_master",       "prefix": "/purchase-requests", "tag": "purchase_requests", "id_col": "id",   "site_col": "Site_ID", "read_roles": _LEDGER},
+    # SME equipment: the planners and the oversight role. Matches /sme/*.
+    {"name": "sme_equipment",   "prefix": "/equipment",       "tag": "equipment",       "id_col": "id",       "site_col": "Site_ID", "read_roles": ["hod", "auditor"]},
+    # ⚠️ THE SAME TABLE `/hr/employees` SERVES — names, phone numbers. It must
+    # carry the same role set, or narrowing that endpoint was cosmetic: the
+    # data sat two URLs away the whole time.
+    #
+    # And its WRITES drop from level 3 to admin-only, which is the one place
+    # this pass departs from the frontend matrix rather than mirroring it. The
+    # operator revoked the roster from Logistics for worker privacy on
+    # 2026-08-12; leaving them a full create/update/delete editor over the same
+    # table would have made that revocation theatre — they would simply have
+    # read every name and phone number from the Master Data page instead. The
+    # HOD keeps the operation that actually matters (transfers, via /hr).
+    {"name": "employees",       "prefix": "/employees",       "tag": "employees",       "id_col": "id",       "site_col": "Site_ID", "read_roles": _ROSTER, "writable": True, "write_dep": require_roles()},
+    {"name": "vendors",         "prefix": "/vendors",         "tag": "vendors",         "id_col": "id",       "site_col": None,       "read_roles": ["logistics"], "writable": True},
+    # Warehouses are named on user accounts and on every DN, so the warehouse
+    # portal and the admin user forms both need the list.
+    {"name": "warehouses",      "prefix": "/warehouses",      "tag": "warehouses",      "id_col": "id",       "site_col": None,       "read_roles": ["warehouse_user", "logistics"], "writable": True},
 ]
 
 
@@ -215,10 +248,13 @@ for e in ENTITIES:
         _MD.tables[e["name"]],
         prefix=e["prefix"], tag=e["tag"],
         id_col=e["id_col"], site_col=e["site_col"],
+        # Reads: the roles named on the entity above (None = any authenticated
+        # user, and only `inventory` is). Writes (master data): level ≥ 3
+        # (logistics/admin) unless the entity overrides it — mirrors the
+        # frontend Master-Data nav gate.
+        read_roles=e.get("read_roles"),
         writable=e.get("writable", False),
-        # Reads: any authenticated user. Writes (master data): level ≥ 3
-        # (logistics/admin) — mirrors the frontend Master-Data nav gate.
-        write_dep=require_level(3),
+        write_dep=e.get("write_dep") or require_level(3),
     ), dependencies=_auth)
 
 # Derived (computed) stock endpoints — /stock/live, /by-site, /lots, /expiring.

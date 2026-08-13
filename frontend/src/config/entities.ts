@@ -28,6 +28,12 @@ export interface WriteEntity {
   path: string
   idKey: string
   fields: Field[]
+  /**
+   * Who may open this master-data editor. Defaults to `{ minLevel: 3 }` —
+   * Logistics and admin — which is what master data has always meant here.
+   * Set it only to make an entity STRICTER; see `employees`.
+   */
+  access?: EntityAccess
 }
 
 export const READ_ENTITIES: ReadEntity[] = [
@@ -97,6 +103,14 @@ export const WRITE_ENTITIES: WriteEntity[] = [
     label: 'Employees',
     path: '/employees',
     idKey: 'id',
+    // ⚠️ ADMIN ONLY, and the exception is deliberate (2026-08-12). Every other
+    // master-data entity is Logistics + admin. The operator revoked the staff
+    // roster from Logistics for worker privacy, and this editor is the SAME
+    // table with create/update/delete on top — leaving it open would have made
+    // that revocation cosmetic, since reading every name and phone number from
+    // here takes one click. The HOD keeps the operation that matters
+    // (transfers, on the Employees page); nobody has lost a workflow.
+    access: { anyRole: [] },
     fields: [
       { name: 'ID_Number', label: 'ID Number', required: true },
       { name: 'Name', label: 'Name', required: true },

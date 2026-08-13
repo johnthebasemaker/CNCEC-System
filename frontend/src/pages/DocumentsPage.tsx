@@ -41,7 +41,17 @@ export default function DocumentsPage() {
     })), [inventory.data])
 
   // Single employee badge PNG (legacy admin Roster+Badges parity).
-  const employees = useList('/employees', { limit: 600 })
+  //
+  // Worker identity is role-gated as of 2026-08-12 while this page stays open
+  // to everyone, so the badge control and the roster export are offered only
+  // to the roles the server will actually serve. Firing the query regardless
+  // would 403 on every visit — an error toast for a picker they cannot use.
+  //
+  // ⚠️ Narrower than the roster API's role set on purpose: reading a name to
+  // type an employee ID (what an SK does on every PPE issue) is not the same
+  // act as printing or exporting the whole roster.
+  const canBadge = ['hod', 'auditor', 'admin'].includes(String(user?.role ?? ''))
+  const employees = useList('/employees', { limit: 600 }, canBadge)
   const [badgeEmp, setBadgeEmp] = useState<string | undefined>()
   const employeeOptions = useMemo(() => (employees.data?.items ?? [])
     .filter((r: ApiRow) => String(r.status ?? 'active') === 'active')
@@ -139,22 +149,24 @@ export default function DocumentsPage() {
                   </Button>
                 )}
               </Space>
-              <div style={{ marginTop: 12 }}>
-                <Typography.Text type="secondary">Single badge (PNG):</Typography.Text>
-                <Space.Compact style={{ width: '100%', marginTop: 4 }}>
-                  <Select allowClear showSearch optionFilterProp="label"
-                    placeholder="Pick an employee" style={{ width: '100%' }}
-                    value={badgeEmp} onChange={setBadgeEmp}
-                    options={employeeOptions} />
-                  <Button icon={<IdcardOutlined />} disabled={!badgeEmp}
-                    loading={busy === 'badge1'}
-                    onClick={() => badgeEmp && go('badge1',
-                      `/documents/employee-badge/${encodeURIComponent(badgeEmp)}`,
-                      {}, `badge_${badgeEmp}.png`)}>
-                    PNG
-                  </Button>
-                </Space.Compact>
-              </div>
+              {canBadge && (
+                <div style={{ marginTop: 12 }}>
+                  <Typography.Text type="secondary">Single badge (PNG):</Typography.Text>
+                  <Space.Compact style={{ width: '100%', marginTop: 4 }}>
+                    <Select allowClear showSearch optionFilterProp="label"
+                      placeholder="Pick an employee" style={{ width: '100%' }}
+                      value={badgeEmp} onChange={setBadgeEmp}
+                      options={employeeOptions} />
+                    <Button icon={<IdcardOutlined />} disabled={!badgeEmp}
+                      loading={busy === 'badge1'}
+                      onClick={() => badgeEmp && go('badge1',
+                        `/documents/employee-badge/${encodeURIComponent(badgeEmp)}`,
+                        {}, `badge_${badgeEmp}.png`)}>
+                      PNG
+                    </Button>
+                  </Space.Compact>
+                </div>
+              )}
             </Card>
           </Col>
         )}
@@ -165,8 +177,12 @@ export default function DocumentsPage() {
               <Typography.Paragraph type="secondary" style={{ minHeight: 40 }}>
                 Download a master table as a spreadsheet, CSV, or PDF.
               </Typography.Paragraph>
+              {/* The employees export is the whole staff roster as a
+                  spreadsheet; only the roles that may read a name are offered
+                  it (the server refuses the rest — 2026-08-12). */}
               <Select style={{ width: '100%', marginBottom: 12 }} value={entity} onChange={setEntity}
-                options={MASTER_ENTITIES} />
+                options={MASTER_ENTITIES.filter(
+                  (m) => m.value !== 'employees' || canBadge)} />
               <Space wrap>
                 {(['xlsx', 'csv', 'pdf'] as const).map((fmt) => (
                   <Button key={fmt}
