@@ -466,6 +466,16 @@ class Receipts(Base):
     DN_Number = Column(Text)
     Warehouse_ID = Column(Text)
     PO_Number_Source = Column(Text)
+    # alembic c7a93e5d2b18 — when the row entered the LEDGER, as opposed to
+    # `Date`, which is the delivery date copied off the vendor's paperwork.
+    # The return form's "last 30 days" rule means the former and had been
+    # measuring the latter, so goods received this morning against a document
+    # dated six weeks ago were invisible on the return form.
+    #
+    # ⚠️ NULL on every row that predates the migration, deliberately — see the
+    # revision docstring. A backfilled CURRENT_TIMESTAMP would have claimed all
+    # 632 historical receipts were posted on migration day.
+    posted_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     # Hot-path indexes (alembic e7c3b95a41d2). Stock maths filters this
     # ledger by (SAP_Code, Site_ID) and every report windows it by Date;
     # with primary keys alone both were sequential scans. NON-UNIQUE by
@@ -1103,6 +1113,19 @@ class DeliveryNotes(Base):
     # clerk can tell which rows in their queue they did not create.
     auto_generated = Column(Integer, nullable=False, server_default=text('0'))
     source_assignment_id = Column(Integer)
+    # alembic b4f21c8ea9d7 — the paperwork the truck actually leaves with.
+    # `dn_document_no` is the number printed on the PHYSICAL document, which
+    # is somebody else's numbering scheme and therefore free text; DN_Number
+    # above is ours and the two are unrelated strings. `dn_attachment_id`
+    # points at entry_attachments (doc_type 'delivery_note'). Both nullable:
+    # every DN shipped before 2026-08-13 went out without them, and a
+    # backfill would have to invent what the driver was carrying. The gate
+    # lives in ship_dn, where a NULL can still be refused going forward.
+    dn_document_no = Column(Text)
+    dn_attachment_id = Column(Integer)
+    shipped_at = Column(DateTime)
+    shipped_by = Column(Text)
+
 
 class PoAssignments(Base):
     __tablename__ = "po_assignments"
@@ -1751,9 +1774,18 @@ class QcInspections(Base):
     inspected_at = Column(DateTime)
     created_by = Column(Text, nullable=False)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    # alembic c7a93e5d2b18 — the handle a rejection hands to the store keeper.
+    # The QC quotes it, the SK types it into the return form, and the form
+    # fills itself from this row. UNIQUE (partially, since approvals leave it
+    # NULL) because two returns against one Return No would take the rejected
+    # quantity out of stock twice.
+    return_no = Column(Text)
+    return_posted_id = Column(Integer)
     __table_args__ = (
         UniqueConstraint("source_type", "source_ref", "SAP_Code", "Lot_Number",
                          name="uq_qc_inspection_source"),
+        Index("ux_qc_inspection_return_no", "return_no", unique=True,
+              postgresql_where=text("return_no IS NOT NULL")),
         # The issuance guard reads (Site_ID, SAP_Code, status) on every
         # surface-shield issue. NOT indexed yet — rule 11 says an index is
         # benchmarked before it is added, and this table has zero rows.
@@ -1771,6 +1803,15 @@ class AssetTransfers(Base):
     A partial unique index (`ux_asset_transfer_open`) allows exactly one
     request per asset in `pending_source_hod`, so two sites cannot both hold
     a claim on the same hammer with the second approval silently winning.
+
+    ⚠️ That index lived ONLY in alembic a3c17e9b25d4 until 2026-08-13, so it
+    was present on every database Alembic had walked and absent from every
+    database built by `metadata.create_all` — which is how
+    `tools/migration/cutover_migrate.py` builds the schema on cutover day. A
+    production box would have been loaded WITHOUT the guard this docstring
+    promises, and nothing would have said so: the race is silent by nature,
+    and the suite that covers it (BR) had only ever run against a migrated
+    database. Declaring it here makes the two paths agree.
     """
     __tablename__ = "asset_transfers"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1789,6 +1830,12 @@ class AssetTransfers(Base):
     decided_at = Column(DateTime)
     decision_notes = Column(Text)
     movement_id = Column(Integer)
+    __table_args__ = (
+        # Mirrors alembic a3c17e9b25d4 exactly — same name, same predicate, so
+        # create_all() and `alembic upgrade head` converge on one database.
+        Index("ux_asset_transfer_open", "asset_unit_id", unique=True,
+              postgresql_where=text("status = 'pending_source_hod'")),
+    )
 
 
 class QcTransferRequests(Base):

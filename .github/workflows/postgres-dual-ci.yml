@@ -130,7 +130,15 @@ jobs:
                -c "ALTER ROLE gi_ai_ro PASSWORD 'gi_ai_ro_ci'"
 
       # Service-level invariants (rolled back — no persistence) + auth/role guards
-      # driven through the real ASGI app. Runs after dual_ci has populated Postgres.
+      # driven through the real ASGI app.
+      #
+      # ⚠️ Since 2026-08-13 this step does NOT run against the database named
+      # below. backend/api/testdb.py provisions its own throwaway database from
+      # gi_database.db before the engine is built, because suites B…BW commit
+      # through the real ASGI app and cannot be rolled back. DATABASE_URL now
+      # supplies only the CLUSTER (host/port/credentials); its database is never
+      # opened. GI_AI_RO_URL keeps its credentials and has its database
+      # redirected the same way, so the name lives in one place.
       - name: Service + guard tests (rolled-back services, HTTP auth/role gates)
         env:
           DATABASE_URL: postgresql+psycopg2://gihub:gihub_ci@localhost:5432/gihub

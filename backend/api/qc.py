@@ -34,12 +34,15 @@ so neither site_scope() nor warehouse_scope() answers the question alone;
 """
 from __future__ import annotations
 
+import datetime as _dt
+from pathlib import Path
 from typing import Optional
 
 import bcrypt
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -383,7 +386,53 @@ async def list_inspections(status: Optional[str] = Query(None),
     stmt = _scope_filter(user, stmt)
     rows = (await session.execute(
         stmt.order_by(inspections_t.c["id"].desc()).limit(limit))).mappings().all()
-    return {"items": [dict(m) for m in rows]}
+    return {"items": await _decorate(session, [dict(m) for m in rows])}
+
+
+async def _decorate(session: AsyncSession, rows: list[dict]) -> list[dict]:
+    """Add the material NAME and the certificate's file details.
+
+    An inspector was being shown `1032` and asked to approve it. The SAP code
+    is the system's identifier, not the thing on the drum in front of them —
+    deciding quality from a number means walking back to the shelf to find out
+    what it is, every time.
+
+    The MTC is the other half of the same problem: `mtc_document_id` rendered
+    as "certificate #41", which tells an inspector a certificate EXISTS while
+    giving them no way to read it. Approving material against a certificate
+    you cannot open is the inspection not actually happening.
+
+    Two queries for the whole page rather than two per row — this list runs to
+    200 rows, and the N+1 version would be 400 round trips to decorate one
+    screen.
+    """
+    if not rows:
+        return rows
+    saps = {str(r.get("SAP_Code") or "").strip() for r in rows if r.get("SAP_Code")}
+    names: dict[str, str] = {}
+    if saps:
+        res = await session.execute(text(
+            'SELECT TRIM("SAP_Code") AS sap, "Equipment_Description" AS name '
+            'FROM inventory WHERE TRIM("SAP_Code") = ANY(CAST(:saps AS text[]))'
+        ), {"saps": list(saps)})
+        names = {r.sap: r.name for r in res if r.name}
+
+    mtc_ids = [int(r["mtc_document_id"]) for r in rows if r.get("mtc_document_id")]
+    certs: dict[int, dict] = {}
+    if mtc_ids:
+        res = await session.execute(text(
+            'SELECT id, mtc_number, file_name, "Site_ID", "Warehouse_ID" '
+            'FROM mtc_documents WHERE id = ANY(CAST(:ids AS int[]))'
+        ), {"ids": mtc_ids})
+        certs = {r.id: {"mtc_number": r.mtc_number, "file_name": r.file_name}
+                 for r in res}
+
+    for r in rows:
+        r["Material_Name"] = names.get(str(r.get("SAP_Code") or "").strip())
+        c = certs.get(int(r["mtc_document_id"])) if r.get("mtc_document_id") else None
+        r["mtc_number"] = c["mtc_number"] if c else None
+        r["mtc_file_name"] = c["file_name"] if c else None
+    return rows
 
 
 @router.get("/inspections/{iid}", summary="One inspection")
@@ -396,7 +445,53 @@ async def get_inspection(iid: int, user: dict = Depends(require_roles(
     # that an inspection exists at a site the caller cannot see.
     if row is None or not await _row_visible(user, row):
         raise HTTPException(404, "no such inspection")
-    return dict(row)
+    return (await _decorate(session, [dict(row)]))[0]
+
+
+@router.get("/inspections/{iid}/certificate",
+            summary="Download the Material Test Certificate behind this inspection")
+async def inspection_certificate(iid: int, inline: bool = Query(True),
+                                 user: dict = Depends(require_roles(
+                                     "qc", "hod", "logistics", "warehouse_user",
+                                     "store_keeper", "auditor")),
+                                 session: AsyncSession = Depends(get_session)):
+    """The certificate itself, reached THROUGH the inspection.
+
+    Deliberately not a `/mtc/{id}/download` route. Scoping here is inherited
+    from the inspection — `_row_visible` already decides whether this caller
+    may see this row, and a certificate is exactly as visible as the
+    inspection that references it. A by-id route on `mtc_documents` would have
+    needed its own scoping rule, which is a second place for it to be wrong,
+    and the dual-scope QC role is precisely where that goes wrong quietly.
+
+    404, never 403, on a row the caller cannot see: a direct fetch must not
+    confirm that a certificate exists somewhere they cannot look.
+    """
+    row = (await session.execute(select(inspections_t)
+           .where(inspections_t.c["id"] == iid))).mappings().first()
+    if row is None or not await _row_visible(user, row):
+        raise HTTPException(404, "no such inspection")
+    if not row.get("mtc_document_id"):
+        raise HTTPException(404, "no certificate is linked to this inspection")
+
+    doc = (await session.execute(text(
+        'SELECT file_name, mime_type, file_blob, disk_path '
+        'FROM mtc_documents WHERE id = :i'), {"i": int(row["mtc_document_id"])})).first()
+    if doc is None:
+        raise HTTPException(404, "the linked certificate no longer exists")
+    name, mime, blob, path = doc
+    data = blob
+    if data is None and path:
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            data = None
+    if not data:
+        raise HTTPException(404, "the certificate has no stored file")
+    disp = "inline" if inline else "attachment"
+    return StreamingResponse(
+        iter([bytes(data)]), media_type=mime or "application/octet-stream",
+        headers={"Content-Disposition": f'{disp}; filename="{name or f"MTC-{iid}"}"'})
 
 
 class DecideIn(BaseModel):
@@ -438,15 +533,27 @@ async def decide_inspection(iid: int, body: DecideIn = Body(...),
                 422, "give a reason — you are rejecting "
                      f"{rejected:g} of {submitted:g}")
         status = quality.decision_status(submitted, approved)
+        # A rejection mints a Return No. It is the handle that turns "12 of 30
+        # approved" into something the store keeper can act on: they type it
+        # into the return form and the form fills itself from this row.
+        # Without it, every rejection was rebuilt by hand — find the material,
+        # find the source receipt, retype the quantity and the reason — and
+        # nothing tied the resulting return back to the inspection that caused
+        # it.
+        return_no = await _mint_return_no(session, iid) if rejected > 1e-9 else None
         await session.execute(update(inspections_t).where(inspections_t.c["id"] == iid)
                               .values(approved_qty=approved, rejected_qty=rejected,
                                       status=status, decision_reason=reason or None,
                                       inspected_by=user["username"],
-                                      inspected_at=func.now()))
+                                      inspected_at=func.now(),
+                                      return_no=return_no))
         await write_audit(session, user["username"], "QC_DECIDE", "qc_inspections",
                           f"id={iid} {row['SAP_Code']} lot={row['Lot_Number'] or '-'} "
-                          f"{approved:g}/{submitted:g} → {status}")
+                          f"{approved:g}/{submitted:g} → {status}"
+                          + (f" return_no={return_no}" if return_no else ""))
         place = row["Site_ID"] or row["Warehouse_ID"] or "-"
+        rej_line = (f" Return No {return_no} — quote it on the Return Stock form "
+                    f"to send {rejected:g} back." if return_no else "")
         # The Store Keeper is the person the decision actually constrains —
         # they are the one who will be refused at the issue form otherwise.
         await dispatch(
@@ -457,11 +564,43 @@ async def decide_inspection(iid: int, body: DecideIn = Body(...),
             title=f"QC {status.replace('_', ' ')} — {row['SAP_Code']}",
             body=(f"Lot {row['Lot_Number'] or '—'} at {place}: {approved:g} of "
                   f"{submitted:g} approved for issue."
-                  + (f" Reason: {reason}" if reason else "")),
+                  + (f" Reason: {reason}" if reason else "") + rej_line),
             link_page="/qc/inspections", related_table="qc_inspections",
             related_ref=iid, created_by=user["username"])
+        # The HOD is told too, and only when something was rejected. They
+        # approve the resulting return, so a Return No that reaches the store
+        # keeper and not the approver just moves the phone call one desk over.
+        if return_no:
+            await dispatch(
+                session, event_key="qc_rejection_return", severity="warning",
+                recipient_role="hod", recipient_site=row["Site_ID"],
+                wa_template="action_required",
+                title=f"Return {return_no} raised by QC — {row['SAP_Code']}",
+                body=(f"{rejected:g} of {submitted:g} rejected at {place}"
+                      + (f" ({reason})" if reason else "")
+                      + f". The store keeper will post return {return_no} against "
+                        "it; it needs your approval and a delivery note."),
+                link_page="/approvals", related_table="qc_inspections",
+                related_ref=iid, created_by=user["username"])
     return {"decided": True, "id": iid, "status": status,
-            "approved_qty": approved, "rejected_qty": rejected}
+            "approved_qty": approved, "rejected_qty": rejected,
+            "return_no": return_no}
+
+
+async def _mint_return_no(session: AsyncSession, iid: int) -> str:
+    """`QCR-YYYYMMDD-<inspection id>` — unique by construction.
+
+    The inspection id is in the string rather than a per-day counter because a
+    counter needs a read-then-write and therefore a lock, and two inspectors
+    deciding at the same moment is the ordinary case, not the rare one. The id
+    is already unique and already the thing this return refers to, so the
+    number is both collision-free and traceable by eye — an operator reading
+    `QCR-20260813-41` can find inspection 41 without a lookup.
+
+    The date is in front so returns sort chronologically in any list that
+    orders them as text, which is every list a human reads.
+    """
+    return f"QCR-{_dt.date.today():%Y%m%d}-{iid}"
 
 
 @router.get("/clearance", summary="How much of a material is cleared for issue")

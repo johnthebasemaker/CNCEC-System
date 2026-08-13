@@ -3,6 +3,7 @@ import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useIncomingDns, useReceiveDn, useSiteDnItems } from '../api/hooks'
 import type { Row } from '../api/client'
+import { DN_DOC_COLUMN } from '../components/DeliveryDocLink'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -40,6 +41,11 @@ export default function IncomingDeliveriesPage() {
     { title: 'From WH', dataIndex: 'Warehouse_ID', key: 'Warehouse_ID' },
     { title: 'Site', dataIndex: 'Site_ID', key: 'Site_ID' },
     { title: 'Driver', dataIndex: 'Driver_Name', key: 'Driver_Name', render: (v) => v ?? '—' },
+    // The store keeper is the person holding the paper version of this while
+    // the truck is in front of them, so this is the column that matters most
+    // of the five places it appears — it is what lets them check that the
+    // document in the cab is the document the system is expecting.
+    DN_DOC_COLUMN,
     { title: 'Status', dataIndex: 'status', key: 'status', render: (v: string) => <Tag color="blue">{v}</Tag> },
     {
       title: 'Action', key: '__act',

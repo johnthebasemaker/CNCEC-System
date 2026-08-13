@@ -310,7 +310,7 @@ async def history(warehouse_id: Optional[str] = None,
         params["wh"] = warehouse_id
     dns = (await session.execute(text(f'''
         SELECT "DN_Number", "PO_Number", "Warehouse_ID", "Site_ID", rl_bl_family,
-               "DN_Date", status, created_by
+               "DN_Date", status, created_by, {wh.DN_DOC_COLUMNS}
         FROM delivery_notes WHERE {dn_where} AND status NOT IN ('prepared', 'in_transit')
         ORDER BY "DN_Number" DESC LIMIT 200'''), params)).mappings().all()
 
@@ -344,12 +344,30 @@ async def submit_dn(dn_number: str, user: dict = Depends(_ROLE),
     return _guard(res)
 
 
+class ShipIn(BaseModel):
+    """The paperwork that must ride with the shipment (2026-08-13).
+
+    `dn_document_no` is the number on the PHYSICAL document — the carrier's or
+    the vendor's, not ours — so it is free text with no pattern. Constraining
+    it to a shape we invented is how a real delivery note becomes unrecordable
+    at the loading bay.
+
+    `attachment_id` is an `entry_attachments` row of doc_type `delivery_note`,
+    uploaded through the ordinary /entry/attachments endpoint first. The MTC
+    upload is unchanged and stays optional.
+    """
+    dn_document_no: str
+    attachment_id: int
+
+
 @router.post("/dns/{dn_number}/ship", summary="Mark an HOD-approved DN outbound (in_transit)")
-async def ship(dn_number: str, user: dict = Depends(_ROLE),
+async def ship(dn_number: str, body: ShipIn = Body(...), user: dict = Depends(_ROLE),
                session: AsyncSession = Depends(get_session)):
     async with session.begin():
         await _guard_row_warehouse(session, _delivery_notes_t, "DN_Number", dn_number, user)
-        res = await wh.ship_dn(session, username=user["username"], dn_number=dn_number)
+        res = await wh.ship_dn(session, username=user["username"], dn_number=dn_number,
+                               dn_document_no=body.dn_document_no,
+                               attachment_id=body.attachment_id)
     return _guard(res)
 
 

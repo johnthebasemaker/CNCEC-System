@@ -217,6 +217,21 @@ export interface ReturnSource {
   id: number; Date: string; Quantity: number
   DN_No: string | null; Supplier: string | null; Lot_Number: string | null
 }
+/**
+ * Track 4 — resolve a QC Return No into a pre-filled return.
+ *
+ * Deliberately a MUTATION rather than a query keyed on the typed text: a
+ * query would fire on every keystroke, and `QCR-20260813-4` is a valid-looking
+ * prefix of `QCR-20260813-41`, so a half-typed number would resolve to a
+ * DIFFERENT rejection and fill the form with the wrong material. The store
+ * keeper presses Fetch when they have finished typing.
+ */
+export const useQcReturnLookup = () =>
+  useMutation({
+    mutationFn: async (returnNo: string) =>
+      (await api.get<Row>(`/entry/qc-return/${encodeURIComponent(returnNo)}`)).data,
+  })
+
 export function useReturnSources(sap?: string, site?: string, days: 30 | 365 = 30) {
   return useQuery<ReturnSource[]>({
     queryKey: ['/entry/return-sources', sap, site, days],
@@ -577,8 +592,15 @@ export const useWhReceive = () =>
     api.post(`/warehouse/assignments/${id}/receive`, { received }).then((r) => r.data as Row))
 export const useCreateDn = () =>
   useWhMutation((body: Row) => api.post('/warehouse/dns', body).then((r) => r.data as Row))
+// Shipping now carries the paperwork (2026-08-13): the number printed on the
+// PHYSICAL delivery note, and the scan of it. Both are required by ship_dn —
+// the modal checks them first so the refusal is immediate, but the service is
+// what actually holds the rule.
 export const useShipDn = () =>
-  useWhMutation((dn: string) => api.post(`/warehouse/dns/${dn}/ship`).then((r) => r.data as Row))
+  useWhMutation(({ dn, dn_document_no, attachment_id }:
+    { dn: string; dn_document_no: string; attachment_id: number }) =>
+    api.post(`/warehouse/dns/${dn}/ship`, { dn_document_no, attachment_id })
+      .then((r) => r.data as Row))
 // Phase 6 — DN two-stage approval.
 export const useSubmitDn = () =>
   useWhMutation((dn: string) => api.post(`/warehouse/dns/${dn}/submit`).then((r) => r.data as Row))

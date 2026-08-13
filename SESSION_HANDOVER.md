@@ -1,11 +1,24 @@
 # SESSION HANDOVER — read this first, then `PROJECT_HANDOVER.md`
 
-> **Updated 2026-08-09**, closing the **QSEP** programme (Quality · Safety ·
-> Employees · Procurement) and the documentation pass that followed it.
-> Branch **`main`**, at **`6723329`** (PR #38 merged).
+> **Updated 2026-08-13** by the workflow-polish and test-isolation pass
+> (branch `feat/workflow-polish-and-test-isolation`).
 > The project is **feature-complete, stable and security-audited**.
 > Every live gate is green. **Nothing is mid-flight — there is no half-finished
 > work to pick up.**
+>
+> 🔄 **The one thing that changes your habits: the backend suite no longer
+> writes to your database.** It builds and runs against its own
+> `gihub_svctest`, and **refuses to start** if that resolves to the same
+> database as `DATABASE_URL`. If you go looking for a test's rows in `gihub`
+> afterwards, they are not there and that is the fix, not a bug. See
+> `PROJECT_HANDOVER.md` rule 15.
+>
+> ⚠️ **Two production-cutover gaps were found by that change** — one fixed
+> (a partial unique index that lived only in Alembic, so a cutover-built
+> production box would not have had it), one **still open** (cutover stamps
+> Alembic to head without running it, so data backfills are skipped on a fresh
+> cut). Both are written up under *FUTURE* in `PROJECT_HANDOVER.md`. Read them
+> before the Hetzner deployment.
 >
 > **Shipped version is `1.2.0`**, and three files must always agree on it:
 > `frontend/src-tauri/tauri.conf.json`, `frontend/package.json`,
@@ -144,6 +157,60 @@ which fails safe and is precisely why nobody noticed.
 
 ## 3. What was added most recently
 
+> **2026-08-13 — test isolation, and four workflow refinements.** Branch
+> `feat/workflow-polish-and-test-isolation`.
+>
+> * **The suite stopped writing to the live database (rule 15).** Suite A rolls
+>   back; suites B…BX drive the real ASGI app and **cannot** — a request that
+>   returns 201 has committed by the time the assertion reads it. Cleanup was
+>   never the answer: an interrupted run skips its own `finally`, and those are
+>   the runs developers do most. `backend/api/testdb.py` rewrites
+>   `DATABASE_URL` **before `db.py` is imported** (that ordering is the whole
+>   mechanism) and exits non-zero if source and target are the same name.
+>   Rebuild costs ~1 s.
+> * ⚠️ **It immediately found two production-cutover bugs**, because the test
+>   database is now built the way production's will be. `ux_asset_transfer_open`
+>   existed only in Alembic, so `create_all` never made it — **a production box
+>   would have shipped without the guard that stops two sites claiming the same
+>   asset**, and that race is silent. Fixed in `models.py`. The second is still
+>   open: cutover STAMPS Alembic without running it, so **data** backfills are
+>   skipped on a fresh cut.
+> * **The suite was depending on one laptop's data.** The 2026-08-13 wipe turned
+>   1474/0 into an `IndexError` on the FIRST suite, because employee `30001` had
+>   been in the live table since June and nothing recreated it.
+> * **PO assignment**: `po_list` never returned the assignment, so the grid
+>   offered `Assign` forever and a second click wrote a second row, a second
+>   notification, and two warehouses each expecting the goods. The grid now
+>   names the warehouse; the API refuses a re-route and treats a repeat of the
+>   same warehouse as idempotent. **An audit of every other action button found
+>   no second instance** — the rest are already gated on row status.
+> * **Shipping carries paperwork.** `ship_dn` took no arguments; a truck left
+>   and the site got goods whose physical delivery note existed only in the cab.
+>   The number on that document is the carrier's, unrelated to our `DN_Number`
+>   — tying the two together is the point. Visible in all five portals through
+>   one shared column, because five hand-maintained column lists is how three
+>   show it and the fourth quietly does not.
+> * **QC could not see what it was judging.** The queue showed `1032` and
+>   "certificate #41" — a code instead of a material, and proof a document
+>   exists with no way to open it. Both fixed; the certificate download hangs
+>   off the *inspection* so scoping is inherited rather than re-derived.
+> * **A rejection now mints a Return No** the SK pastes into Return Stock to
+>   fill the form. Capped at the rejected quantity, DN + document mandatory
+>   **regardless of `require_entry_documents`**, single-use, and site-scoped
+>   (the number is a date plus a small integer, so an unscoped lookup would
+>   enumerate every rejection in the company). ⚠️ It does **not** overturn the
+>   "rejected stock is not auto-returned" ruling — it is an invitation for a
+>   human, not an automatic vendor return.
+> * **The return dropdown was measuring the wrong date.** The 30-day window ran
+>   on the delivery date typed off the vendor's paperwork, so goods received
+>   that morning against a six-week-old document were invisible while older
+>   ones were listed. `receipts.posted_at` fixes it; **no backfill**, so
+>   historical rows stay NULL and fall back to `Date`.
+> * **A ninth Morning Briefing probe** for uncertified Surface Shields, routed
+>   by location — warehouse → Logistics/Warehouse/warehouse QC, site →
+>   SK/HOD/site QC/Logistics. Logistics is on both lists because they are the
+>   only role who can actually get the document.
+>
 > **2026-08-12 (c) — the generated CRUD reads.** Branch
 > `fix/crud-rbac-alignment`, closing the finding the previous pass recorded
 > and left open.
@@ -421,13 +488,14 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1474 / 0** (suites A…BV) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1502 / 0** (suites A…BX, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
+| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | Frontend | `tsc -b` + build + `oxlint` clean | `npm run build --prefix frontend` |
-| Alembic | single head **`a3c17e9b25d4`** | `cd backend && alembic heads` |
+| Alembic | single head **`c7a93e5d2b18`** | `cd backend && alembic heads` |
 | **Manual PDFs** | **0 overlapping text pairs** × 8 booklets | `.venv/bin/python build_manual_pdf.py --role all` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 

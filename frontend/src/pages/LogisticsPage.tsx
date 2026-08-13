@@ -432,22 +432,42 @@ function PurchaseOrders() {
     { title: 'Expected', dataIndex: 'Expected_Delivery', key: 'Expected_Delivery', render: (v) => v ?? '—' },
     { title: 'Status', dataIndex: 'status', key: 'status', render: (v: string) => <Tag>{v}</Tag> },
     {
+      // Where the PO actually went. Previously invisible, which is why a
+      // second Assign looked like a reasonable thing to click.
+      title: 'Warehouse',
+      dataIndex: 'assigned_warehouse',
+      key: 'assigned_warehouse',
+      render: (v: string | null, r: Row) => (v
+        ? <Tag color="blue" title={`assigned by ${r.assigned_by ?? '—'}`}>{v}</Tag>
+        : <span style={{ opacity: 0.45 }}>unassigned</span>),
+    },
+    {
       title: 'Action',
       key: '__act',
       width: 220,
-      render: (_: unknown, r: Row) => (
-        <Space>
-          <Button
-            size="small"
-            disabled={['closed', 'force_closed', 'cancelled'].includes(String(r.status))}
-            onClick={() => { setPo(r); form.resetFields() }}
-          >
-            Assign
-          </Button>
-          <ForceCloseButton targetType="po" targetRef={String(r.PO_Number)}
-            disabled={['closed', 'force_closed', 'cancelled'].includes(String(r.status))} />
-        </Space>
-      ),
+      render: (_: unknown, r: Row) => {
+        const terminal = ['closed', 'force_closed', 'cancelled'].includes(String(r.status))
+        // A PO gets ONE warehouse. Once it has one, the button is replaced by
+        // the fact rather than merely greyed out — a disabled button invites
+        // the question "why can't I?", and the answer is already on the row.
+        // The API refuses a second assignment regardless (assign_po); this is
+        // the half that stops the click, not the half that stops the write.
+        const assigned = !!r.assigned_warehouse
+        return (
+          <Space>
+            {assigned
+              ? <Tag color="green">assigned</Tag>
+              : (
+                <Button size="small" disabled={terminal}
+                  onClick={() => { setPo(r); form.resetFields() }}>
+                  Assign
+                </Button>
+              )}
+            <ForceCloseButton targetType="po" targetRef={String(r.PO_Number)}
+              disabled={terminal} />
+          </Space>
+        )
+      },
     },
   ]
 

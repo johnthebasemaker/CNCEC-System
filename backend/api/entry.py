@@ -264,6 +264,12 @@ class ReturnIn(BaseModel):
     override_reason: Optional[str] = Field(
         None, description="justification when returning against a receipt older than 30 days")
     attachment_ids: list[int] = Field(default_factory=list)
+    # Track 4 — the QC rejection this return discharges. When set, the return
+    # is capped at the rejected quantity, the DN and the document become
+    # mandatory REGARDLESS of require_entry_documents, and the inspection is
+    # marked as discharged so the same rejection cannot be returned twice.
+    qc_return_no: Optional[str] = Field(
+        None, description="Return No from a QC rejection (QCR-YYYYMMDD-<id>)")
 
 
 class AdjustmentIn(BaseModel):
@@ -378,6 +384,55 @@ async def create_return(
                 raise HTTPException(404, f"SAP_Code {body.SAP_Code!r} not in inventory")
             data = body.model_dump()
             strict = await entry_docs.docs_required(session)
+
+            # ── Track 4: a return discharging a QC rejection ────────────────
+            # Resolved BEFORE the ordinary gates because it TIGHTENS them.
+            # `require_entry_documents` is an operator convenience switch;
+            # sending rejected material back to a vendor without a delivery
+            # note is not something a convenience switch should be able to
+            # turn off, so this branch demands both regardless of it.
+            qc_ref = (body.qc_return_no or "").strip()
+            qc_row = None
+            if qc_ref:
+                qc_row = (await session.execute(text(
+                    'SELECT id, "SAP_Code", "Site_ID", "Lot_Number", rejected_qty, '
+                    '       return_posted_id, decision_reason '
+                    '  FROM qc_inspections WHERE return_no = :r'
+                    '   FOR UPDATE'), {"r": qc_ref})).mappings().first()
+                if qc_row is None:
+                    raise HTTPException(404, f"no QC rejection carries Return No {qc_ref!r}")
+                if not site_row_visible(site_scope(user), qc_row.get("Site_ID")):
+                    raise HTTPException(404, f"no QC rejection carries Return No {qc_ref!r}")
+                # Locked above with FOR UPDATE, so two store keepers posting
+                # the same Return No at once serialise here instead of both
+                # passing the check and taking the quantity out twice.
+                if qc_row.get("return_posted_id"):
+                    raise HTTPException(
+                        409, f"Return {qc_ref} was already posted "
+                             f"(return #{qc_row['return_posted_id']})")
+                if str(qc_row["SAP_Code"]).strip() != body.SAP_Code.strip():
+                    raise HTTPException(
+                        422, f"Return {qc_ref} is for {qc_row['SAP_Code']}, "
+                             f"not {body.SAP_Code}")
+                if (qc_row.get("Site_ID") or "") != body.Site_ID:
+                    raise HTTPException(
+                        422, f"Return {qc_ref} was raised at {qc_row.get('Site_ID') or '—'}, "
+                             f"not {body.Site_ID}")
+                cap = float(qc_row["rejected_qty"] or 0)
+                if float(body.Quantity) > cap + 1e-9:
+                    raise HTTPException(
+                        422, f"Return {qc_ref} covers {cap:g} rejected — cannot "
+                             f"return {body.Quantity:g}. Returning LESS is fine.")
+                if not (body.Return_DN_No or "").strip():
+                    raise HTTPException(
+                        422, f"Return {qc_ref} is going back to the supplier — a "
+                             "Return DN No. is required even though the entry-document "
+                             "setting is off")
+                if not body.attachment_ids:
+                    raise HTTPException(
+                        422, f"attach the signed delivery note for return {qc_ref} — "
+                             "rejected material does not leave site undocumented")
+
             # Parity A2 — the legacy return gates, active with the master
             # require_entry_documents switch: mandatory Return DN No. +
             # attachment; returns are made against a source receipt from the
@@ -408,15 +463,42 @@ async def create_return(
                 data["received_qty"] = float(src.Quantity)
                 if age_days <= 30:
                     data["override_reason"] = None   # inside the window — no flag
-            elif strict:
+            elif strict and qc_row is None:
                 raise HTTPException(422, "pick the source receipt this return is against")
+            # ⚠️ A QC return needs NO source receipt, and that is not a
+            # loosening. The source-receipt rule exists to prove a return is
+            # against something real and recent; a QC rejection proves that
+            # better — it names the material, the site, the lot, the quantity
+            # and the inspector, and it is capped by the rejected quantity
+            # above. Demanding a receipt on top would also be unsatisfiable
+            # for the common case: an inspection raised at a WAREHOUSE has no
+            # site receipt to point at, so the store keeper would be told to
+            # pick from an empty list. If one IS supplied it is still validated
+            # by the branch above; it is optional here, not ignored.
+            data.pop("qc_return_no", None)   # not a pending_returns column
             result = await ledger.stage_return(session, username=user["username"], data=data)
             await entry_docs.link_attachments(session, doc_ids,
                                               entry_table="pending_returns",
                                               entry_date=body.Date)
+            if qc_row is not None:
+                # Discharge the rejection. Written here, at STAGE, rather than
+                # when the HOD approves: the goods are physically going back
+                # now, and leaving the Return No live through the approval gap
+                # is precisely the window in which somebody posts it twice.
+                await session.execute(text(
+                    "UPDATE qc_inspections SET return_posted_id = :p "
+                    " WHERE id = :i"),
+                    {"p": result.get("pending_id"), "i": qc_row["id"]})
+                await ledger.write_audit(
+                    session, user["username"], "QC_RETURN_POSTED", "qc_inspections",
+                    f"return_no={qc_ref} inspection={qc_row['id']} "
+                    f"{body.SAP_Code} qty={body.Quantity:g} dn={body.Return_DN_No}")
             await _notify_hod_staged(session, kind_label="Return", site_id=body.Site_ID,
                                      actor=user["username"], ref=result.get("pending_id"),
-                                     detail=f"{body.SAP_Code} · qty {body.Quantity:g} · {body.Site_ID}")
+                                     detail=f"{body.SAP_Code} · qty {body.Quantity:g} · {body.Site_ID}"
+                                            + (f" · QC {qc_ref}" if qc_ref else ""))
+            if qc_row is not None:
+                result["qc_return_no"] = qc_ref
             return result
     except HTTPException:
         raise
@@ -430,16 +512,120 @@ async def return_sources(sap: str, site_id: str, days: int = 30,
                          session: AsyncSession = Depends(get_session)):
     """Legacy rule: returns are picked from receipts in the last 30 days
     (365 with the override window). Rows carry qty + DN so the form can cap
-    the return quantity."""
+    the return quantity.
+
+    ⚠️ THE WINDOW IS MEASURED ON TWO DATES, AND HAS TO BE.
+
+    `receipts."Date"` is the DELIVERY date, typed by the store keeper off the
+    vendor's or carrier's paperwork. While people typed today's date it was a
+    fair stand-in for "when did this arrive in the system". It stopped being
+    one once receipts began flowing in through the DN chain carrying the
+    carrier's own date: goods received this morning, dated six weeks ago on
+    the document, fell outside a 30-day window that is trying to say "recent".
+    That is the reported bug — newly received items missing from the dropdown
+    while older ones were listed.
+
+    `posted_at` (alembic c7a93e5d2b18) records when the row entered the
+    ledger, which is what the rule actually means. A receipt qualifies on
+    EITHER date, so nothing that used to be offered has been taken away.
+
+    `posted_at IS NULL` on every receipt that predates the migration, and
+    those fall back to `Date` alone. That is why the OR is written with an
+    explicit NULL check rather than a COALESCE to `Date` — the two columns
+    have different types (timestamp vs text), and silently casting one into
+    the other is how a comparison starts quietly returning false.
+    """
     days = 365 if days > 30 else 30
     cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     rows = (await session.execute(text(
-        'SELECT id, "Date", "Quantity", "DN_No", "Supplier", "Lot_Number" '
+        'SELECT id, "Date", "Quantity", "DN_No", "Supplier", "Lot_Number", posted_at '
         'FROM receipts WHERE TRIM("SAP_Code") = TRIM(:sap) '
-        "AND COALESCE(\"Site_ID\",'HQ') = :site AND \"Date\" >= :cutoff "
-        'ORDER BY "Date" DESC, id DESC LIMIT 100'),
+        "AND COALESCE(\"Site_ID\",'HQ') = :site "
+        'AND ("Date" >= :cutoff '
+        '     OR (posted_at IS NOT NULL AND posted_at >= CAST(:cutoff AS timestamp))) '
+        # NULLS LAST rather than casting "Date" into a timestamp to sort on
+        # one key: `Date` is free text, and a single malformed row would take
+        # the whole endpoint down with a cast error. Newly posted receipts
+        # sort to the top, which is what the store keeper is looking for;
+        # historical rows keep their old Date ordering below them.
+        'ORDER BY posted_at DESC NULLS LAST, "Date" DESC, id DESC '
+        'LIMIT 100'),
         {"sap": sap, "site": site_id, "cutoff": cutoff})).mappings().all()
     return {"items": [dict(r) for r in rows], "window_days": days}
+
+
+@router.get("/qc-return/{return_no}", summary="Look up a QC rejection by its Return No (parity Track 4)")
+async def qc_return_lookup(return_no: str,
+                           user: dict = Depends(require_roles("store_keeper", "hod")),
+                           session: AsyncSession = Depends(get_session)):
+    """Everything the return form needs, from the number the QC quoted.
+
+    The store keeper types `QCR-20260813-41` and gets back the material, the
+    site, the rejected quantity, the lot, the inspector's reason and — where
+    it can be resolved — the receipt the goods came in on. They can still
+    change any of it before posting; this fills the form, it does not lock it.
+    Quantity in particular is capped, not fixed, because a store keeper may
+    legitimately send back less than QC rejected (some of it already issued,
+    some still being argued about with the vendor).
+
+    SCOPED, and the scoping is the interesting part. A Return No is a
+    guessable string — date plus a small integer — so an unscoped lookup would
+    be an enumeration oracle over every rejection at every site. It is
+    resolved through `site_row_visible`, the same check every other by-id
+    fetch uses, and answers 404 rather than 403 on a foreign row so it does
+    not confirm that a rejection exists somewhere the caller cannot look.
+    """
+    ref = (return_no or "").strip()
+    if not ref:
+        raise HTTPException(422, "give the Return No from the QC rejection")
+    row = (await session.execute(text(
+        'SELECT i.id, i."SAP_Code", i."Material_Code", i."Site_ID", i."Warehouse_ID", '
+        '       i."Lot_Number", i.rejected_qty, i.submitted_qty, i.approved_qty, '
+        '       i.decision_reason, i.inspected_by, i.inspected_at, i.status, '
+        '       i.return_no, i.return_posted_id, i.source_type, i.source_ref, '
+        '       inv."Equipment_Description" AS "Material_Name" '
+        '  FROM qc_inspections i '
+        '  LEFT JOIN inventory inv ON TRIM(inv."SAP_Code") = TRIM(i."SAP_Code") '
+        ' WHERE i.return_no = :r'), {"r": ref})).mappings().first()
+    if row is None:
+        raise HTTPException(404, f"no QC rejection carries Return No {ref!r}")
+    if not site_row_visible(site_scope(user), row.get("Site_ID")):
+        raise HTTPException(404, f"no QC rejection carries Return No {ref!r}")
+    if row.get("return_posted_id"):
+        raise HTTPException(
+            409, f"Return {ref} has already been posted (return #{row['return_posted_id']}). "
+                 "A Return No covers one return — raise a new one with QC if more "
+                 "of this lot is going back.")
+
+    # The source receipt, when the inspection came from one. `source_ref` is
+    # the receipt id for a site receipt; warehouse-side inspections reference
+    # an assignment/line pair instead and simply have no receipt to point at,
+    # which is why this is best-effort rather than required.
+    source_receipt_id = None
+    if row["source_type"] in ("site_receipt", "dn_receipt"):
+        try:
+            source_receipt_id = int(str(row["source_ref"]).split(":")[0])
+        except (TypeError, ValueError):
+            source_receipt_id = None
+
+    return {
+        "return_no": row["return_no"],
+        "inspection_id": row["id"],
+        "SAP_Code": row["SAP_Code"],
+        "Material_Code": row["Material_Code"],
+        "Material_Name": row["Material_Name"],
+        "Site_ID": row["Site_ID"],
+        "Lot_Number": row["Lot_Number"],
+        # The cap. The form pre-fills this and refuses more (see create_return).
+        "rejected_qty": float(row["rejected_qty"] or 0),
+        "submitted_qty": float(row["submitted_qty"] or 0),
+        "approved_qty": float(row["approved_qty"] or 0),
+        "Reason": "defect",
+        "decision_reason": row["decision_reason"],
+        "inspected_by": row["inspected_by"],
+        "inspected_at": str(row["inspected_at"]) if row["inspected_at"] else None,
+        "source_receipt_id": source_receipt_id,
+    }
 
 
 @router.post("/adjustments", status_code=201, summary="Submit a stock-count adjustment for HOD approval")

@@ -119,15 +119,41 @@ async def pr_lines(session: AsyncSession, pr_number: str, site_id: str | None):
 
 
 async def po_list(session: AsyncSession, status: str | None):
+    """Purchase orders, each carrying its CURRENT assignment.
+
+    The assignment columns were added 2026-08-13. Without them the Logistics
+    grid had no way to know a PO was already assigned, so it offered `Assign`
+    on every row forever and a second click silently created a second
+    assignment — a second warehouse notification, and two warehouses each
+    believing the goods were theirs. The UI could not have got this right; it
+    was never told.
+
+    LEFT JOIN on the newest assignment, so an UNassigned PO still returns its
+    row with NULLs. There is no 'cancelled' assignment state — the only three
+    ever written are assigned · partial · received (the last two by the
+    warehouse as it receives), and all three mean "this PO has a warehouse".
+    """
     where, params = "", {}
     if status:
-        where = "WHERE status = :status"
+        where = "WHERE po.status = :status"
         params["status"] = status
     sql = text(f'''
-        SELECT "PO_Number", "PR_Number", "Site_ID", "Vendor_Name", "PO_Date",
-               "Expected_Delivery", status, created_by, created_at
-        FROM purchase_orders {where}
-        ORDER BY "PO_Number" DESC LIMIT 500''')
+        SELECT po."PO_Number", po."PR_Number", po."Site_ID", po."Vendor_Name",
+               po."PO_Date", po."Expected_Delivery", po.status, po.created_by,
+               po.created_at,
+               a."Warehouse_ID"  AS assigned_warehouse,
+               a.assigned_by     AS assigned_by,
+               a.assigned_at     AS assigned_at,
+               a.status          AS assignment_status
+        FROM purchase_orders po
+        LEFT JOIN LATERAL (
+            SELECT "Warehouse_ID", assigned_by, assigned_at, status
+            FROM po_assignments
+            WHERE "PO_Number" = po."PO_Number"
+            ORDER BY id DESC LIMIT 1
+        ) a ON TRUE
+        {where}
+        ORDER BY po."PO_Number" DESC LIMIT 500''')
     return _rows(await session.execute(sql, params))
 
 
@@ -810,6 +836,36 @@ async def assign_po(session: AsyncSession, *, username: str, po_number: str, war
         return {"error": f"PO {po_number} not found"}
     if po[0] in ("closed", "force_closed", "cancelled"):
         return {"error": f"PO {po_number} is {po[0]} — cannot assign"}
+
+    # Already assigned? Refuse, and say to whom.
+    #
+    # Hiding the button (2026-08-13) is the visible half of this fix; THIS is
+    # the half that holds. A disabled button does not survive a double-click
+    # before the grid refetches, a stale tab, or anybody calling the endpoint
+    # directly — and the failure was silent by construction: two rows in
+    # po_assignments, two `po_assigned_to_warehouse` notifications, and two
+    # warehouses each told the goods were coming to them. Nothing raised, so
+    # the first anyone knew was a warehouse waiting for a delivery that had
+    # been routed elsewhere.
+    #
+    # Re-assignment is refused rather than replaced on purpose: moving a PO
+    # that another warehouse has already been told to expect is a decision,
+    # not a correction. There is no route for it today, and inventing a silent
+    # one here would be the same bug wearing a different shape.
+    prior = (await session.execute(select(
+        po_assignments_t.c["Warehouse_ID"], po_assignments_t.c["status"]
+    ).where(po_assignments_t.c["PO_Number"] == po_number)
+     .order_by(po_assignments_t.c["id"].desc()).limit(1))).first()
+    if prior is not None:
+        if prior[0] == warehouse_id:
+            # Idempotent: the same warehouse twice is a double-click, not a
+            # conflict. Report success without writing a second row or
+            # notifying the warehouse again.
+            return {"assigned": True, "po_number": po_number,
+                    "warehouse_id": warehouse_id, "already": True}
+        return {"error": f"PO {po_number} is already assigned to {prior[0]} "
+                         f"({prior[1]}) — it cannot be assigned to "
+                         f"{warehouse_id} as well"}
 
     await session.execute(insert(po_assignments_t).values(
         PO_Number=po_number, Warehouse_ID=warehouse_id, Expected_Delivery=expected_delivery,
