@@ -1,4 +1,14 @@
-# PROJECT STATUS — resume here (updated 2026-07-30 · FEATURE-COMPLETE · deployment PAUSED, fine-tuning next)
+# PROJECT STATUS — resume here (updated 2026-08-13 · FEATURE-COMPLETE · deployment PAUSED, fine-tuning next)
+
+> 🔄 **2026-08-13 — the backend suite runs against its OWN database.**
+> `gihub_svctest`, rebuilt from `gi_database.db` before the engine is created,
+> because suites B…BX commit through the real ASGI app and cannot roll back.
+> Your `gihub` is never opened. `PROJECT_HANDOVER.md` rule 15.
+> ⚠️ Two **production-cutover** gaps surfaced the moment the tests ran against
+> a database built the way production builds one — one fixed (a partial unique
+> index that lived only in Alembic), one still open (cutover stamps Alembic
+> without running it, so data backfills are skipped). Both under *FUTURE* in
+> `PROJECT_HANDOVER.md`.
 
 > 📌 **A fresh session should read [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md)
 > FIRST** — it carries the locked architecture rules, the current baselines and
@@ -55,16 +65,18 @@ kit: `docs/DEPLOY.md` + `deploy/`), plus one Cloudflare dashboard action for
 the native apps (§3.6). Locked rules + baselines:
 [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md).
 
-## 1. Gates (all green locally — 2026-07-30)
+## 1. Gates (all green locally — 2026-08-13)
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **951/0** (suites A…AZ) | `DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub JWT_SECRET=ci-only-service-test-secret-key-32bytes-min .venv/bin/python -u -m backend.api.service_tests` |
-| Playwright E2E | **42/42** (~19 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **1502/0** (suites A…BX, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **90/90** (~37 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | Legacy regression | **599/0** | `.venv/bin/python legacy/bug_check.py` |
-| Frontend | build + `tsc -b` ✅ | `npm run build --prefix frontend` |
-| SME engine parity | **1,276 comparisons** | `npm run parity:sme --prefix frontend` |
-| Alembic | single head **`a4e9b1c73f28`** (sme_component_pooling) | see ARCHITECTURE §8 |
+| Frontend | build + `tsc -b` + `oxlint` ✅ | `npm run build --prefix frontend` |
+| SME engine parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
+| SME UI math | **33/0** | `npm run test:ui-math --prefix frontend` |
+| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
+| Alembic | single head **`c7a93e5d2b18`** (QC rejection returns) | see ARCHITECTURE §8 |
 | Derived-view parity | **5/5** ⚠️ fresh cutover / CI only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Release pipeline | desktop ✅ (dmg/exe/msi on v0.1.0–v1.0.1) · Android fixed (JDK 21) — next tag should attach the `.apk` | `git tag vX.Y.Z && git push origin vX.Y.Z` |
 

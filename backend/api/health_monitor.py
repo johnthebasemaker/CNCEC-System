@@ -243,6 +243,104 @@ async def probe_qc_blocked_stock(session: AsyncSession, site: Optional[str]) -> 
                 + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
 
 
+async def missing_mtc_rows(session: AsyncSession, site: Optional[str]) -> list[dict]:
+    """Surface Shields with stock and no certificate, split by WHERE they are.
+
+    Two populations, because they are two different problems with two
+    different sets of people who can fix them:
+
+      site       on-hand at a site (receipts − consumption − returns > 0) with
+                 nothing that `visible_mtc` will accept. This is material a
+                 store keeper will be refused on, at the counter, in front of
+                 whoever is waiting for it.
+      warehouse  delivered against a purchase order into a warehouse and not
+                 yet covered. It has not blocked anybody YET — it will block
+                 the receiving site the moment it is shipped, which is the
+                 cheapest possible moment to have already fixed it.
+
+    ⚠️ Both use the SAME resolvers the gate uses — `visible_mtc` for the site
+    and `find_mtc` for the warehouse. Reimplementing "has a certificate" here
+    would produce an alert that disagrees with the refusal, and an alert that
+    names materials which are actually fine is one people learn to skip.
+
+    `warn_mtc_missing` already fires at goods-in. This is the sweep that
+    catches what nobody acted on — the receipt notification is a single event
+    that scrolls away, and the material stays unissuable long after it does.
+    """
+    from .services import quality
+    category = await quality.controlled_category(session)
+    out: list[dict] = []
+
+    # ── at a site ────────────────────────────────────────────────────────────
+    clause, params = _site_clause(site, 'a."Site_ID"')
+    rows = (await session.execute(text(f"""
+        WITH activity AS (
+            SELECT TRIM("SAP_Code") AS sap, COALESCE("Site_ID",'HQ') AS "Site_ID",
+                   SUM("Quantity") AS rec, 0 AS con, 0 AS ret
+              FROM receipts    GROUP BY 1, 2
+            UNION ALL
+            SELECT TRIM("SAP_Code"), COALESCE("Site_ID",'HQ'), 0, SUM("Quantity"), 0
+              FROM consumption GROUP BY 1, 2
+            UNION ALL
+            SELECT TRIM("SAP_Code"), COALESCE("Site_ID",'HQ'), 0, 0, SUM("Quantity")
+              FROM returns     GROUP BY 1, 2
+        )
+        SELECT a.sap, a."Site_ID" AS site,
+               MAX(i."Equipment_Description") AS name,
+               SUM(a.rec) - SUM(a.con) - SUM(a.ret) AS on_hand
+          FROM activity a
+          JOIN inventory i ON TRIM(i."SAP_Code") = a.sap
+         WHERE i."Category" = :cat {clause}
+         GROUP BY a.sap, a."Site_ID"
+        HAVING SUM(a.rec) - SUM(a.con) - SUM(a.ret) > 0
+    """), {"cat": category, **params})).all()
+    for r in rows:
+        if await quality.visible_mtc(session, sap_code=r.sap, site_id=r.site) is None:
+            out.append({"where": "site", "place": r.site, "sap": r.sap,
+                        "name": r.name, "qty": float(r.on_hand)})
+
+    # ── at a warehouse ───────────────────────────────────────────────────────
+    # A warehouse holds stock as `po_items.Delivered_Qty` under an assignment,
+    # not as ledger rows — the ledger starts at the receiving SITE. Site-scoped
+    # briefings skip this half entirely: a warehouse is not inside any one
+    # site, so attributing its stock to a site would be an invention.
+    if site is None:
+        wrows = (await session.execute(text("""
+            SELECT a."Warehouse_ID" AS wh, pi.id AS po_item_id,
+                   pi."Material_Code" AS mat, pi."Description" AS name,
+                   (COALESCE(pi."Delivered_Qty",0) - COALESCE(pi."Returned_Qty",0)) AS qty
+              FROM po_items pi
+              JOIN po_assignments a ON a."PO_Number" = pi."PO_Number"
+              JOIN inventory i ON i."Material_Code" = pi."Material_Code"
+             WHERE i."Category" = :cat
+               AND COALESCE(pi."Delivered_Qty",0) - COALESCE(pi."Returned_Qty",0) > 0
+        """), {"cat": category})).all()
+        for r in wrows:
+            found = await quality.find_mtc(session, material_code=r.mat,
+                                           warehouse_id=r.wh, po_item_id=r.po_item_id)
+            if found is None:
+                out.append({"where": "warehouse", "place": r.wh, "sap": r.mat,
+                            "name": r.name, "qty": float(r.qty)})
+    return out
+
+
+async def probe_missing_mtc(session: AsyncSession, site: Optional[str]) -> dict | None:
+    """The digest line. The role-targeted alerts are dispatched separately —
+    see `dispatch_missing_mtc` — because the people who can FIX this are not
+    the admins and HODs the briefing goes to."""
+    cap = await _setting_int(session, "health_max_examples")
+    rows = await missing_mtc_rows(session, site)
+    items = [f"{r['sap']} ({r['name'] or '—'}) at {r['place']}: {r['qty']:g} "
+             f"{'in the warehouse' if r['where'] == 'warehouse' else 'on site'}"
+             for r in rows]
+    return _finding(
+        "missing_mtc", f"{len(items)} Surface Shield(s) have no Material Test Certificate",
+        "critical", items[:cap], "/logistics",
+        detail=("Controlled material that cannot be issued until a certificate "
+                "is uploaded — " + "; ".join(items[:cap])
+                + (f" (+{len(items) - cap} more)" if len(items) > cap else "")))
+
+
 async def probe_returnables_overdue(session: AsyncSession, site: Optional[str]) -> dict | None:
     """Tools past their expected return time.
 
@@ -396,6 +494,7 @@ async def probe_pr_stale(session: AsyncSession, site: Optional[str]) -> dict | N
 Probe = Callable[[AsyncSession, Optional[str]], Awaitable[Optional[dict]]]
 
 PROBES: list[tuple[str, Probe]] = [
+    ("missing_mtc",         probe_missing_mtc),
     ("qc_blocked_stock",    probe_qc_blocked_stock),
     ("negative_stock",      probe_negative_stock),
     ("dn_draft_stale",      probe_dn_draft_stale),
@@ -517,17 +616,93 @@ async def run_and_dispatch(session: AsyncSession, *, force: bool = False) -> dic
                 created_by="health-monitor", delivery="urgent")
             sent += 1
 
+    mtc = await dispatch_missing_mtc(session, force=force)
+    sent += mtc["dispatched"]
+
     # Audited on EVERY run, including a clean one that dispatched nothing —
     # this is how "is the agent alive?" gets answered without a daily
     # all-clear message that trains people to ignore the channel.
     await write_audit(session, "health-monitor", "HEALTH_BRIEFING", "app_notifications",
-                      f"scopes={len(scopes)} dispatched={sent} " +
+                      f"scopes={len(scopes)} dispatched={sent} "
+                      f"mtc_alerts={mtc['dispatched']}/{mtc['materials']} " +
                       " ".join(f"{k}:{v['total']}/{v['worst']}"
                                for k, v in sorted(summary.items())))
     await session.commit()
     log.info("health briefing: %d scope(s), %d dispatch(es) — %s",
              len(scopes), sent, summary)
-    return {"scopes": len(scopes), "dispatched": sent, "summary": summary}
+    return {"scopes": len(scopes), "dispatched": sent, "summary": summary,
+            "missing_mtc": mtc}
+
+
+# ── the missing-MTC alert, routed to the people who can act on it ────────────
+#
+# The briefing goes to admins and HODs. That is the wrong audience for this one
+# finding: an HOD cannot obtain a certificate from a supplier, and the store
+# keeper who is about to be refused at the counter is not on the list at all.
+# So this finding gets its own dispatch with its own routing, keyed on WHERE
+# the material is sitting.
+#
+# Logistics is on BOTH lists, and that is the point rather than an oversight —
+# they are the only role that can actually get the document from the supplier.
+# Everyone else on each list is someone the missing certificate is about to
+# cost something: the warehouse cannot ship it usefully, the store keeper
+# cannot issue it, the QC cannot complete an inspection against it.
+_MTC_ALERT_ROLES = {
+    "warehouse": ("logistics", "warehouse_user", "qc"),
+    "site":      ("store_keeper", "hod", "qc", "logistics"),
+}
+
+
+async def dispatch_missing_mtc(session: AsyncSession, *, force: bool = False) -> dict:
+    """One alert per place holding uncertified Surface Shields.
+
+    Grouped BY PLACE, not per material: a warehouse holding nine uncertified
+    materials should get one message listing nine, not nine messages. The
+    daily repeat is deliberate — this is a standing condition, not an event,
+    and it stops the day somebody uploads the certificate.
+
+    Scoping rides on `dispatch`'s own recipient fields: `recipient_site` for a
+    site's SK/HOD/QC, `recipient_warehouse` for a warehouse's user and QC.
+    That is what keeps a site's store keeper out of another site's alert, and
+    it is the same mechanism every other notification uses rather than a
+    second, parallel idea of who-sees-what.
+    """
+    rows = await missing_mtc_rows(session, None)
+    if not rows and not force:
+        return {"dispatched": 0, "materials": 0, "places": 0}
+
+    places: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        places.setdefault((r["where"], r["place"]), []).append(r)
+
+    sent = 0
+    for (where, place), found in sorted(places.items()):
+        listed = ", ".join(f"{f['sap']} ({f['name'] or '—'}) {f['qty']:g}"
+                           for f in found[:6])
+        more = f" (+{len(found) - 6} more)" if len(found) > 6 else ""
+        at = "warehouse" if where == "warehouse" else "site"
+        body = (f"{len(found)} Surface Shield material(s) at {at} {place} have no "
+                f"Material Test Certificate on file: {listed}{more}. "
+                "The stock is booked in and counted, but no store keeper can "
+                "issue it to the field until the certificate is uploaded. "
+                "Logistics can attach it to the purchase order, the warehouse "
+                "to the delivery note, or the store keeper can upload it directly.")
+        for role in _MTC_ALERT_ROLES[where]:
+            await dispatch(
+                session, event_key="mtc_missing_daily", severity="warning",
+                recipient_role=role,
+                # Exactly one of these is set per branch. A warehouse is not
+                # inside a site, so tagging a warehouse alert with a site would
+                # send it to store keepers who cannot see the stock it names.
+                recipient_site=place if where == "site" else None,
+                recipient_warehouse=place if where == "warehouse" else None,
+                wa_template="action_required",
+                title=f"MTC outstanding — {len(found)} material(s) at {place}",
+                body=body, link_page="/qc/inspections",
+                related_table="mtc_documents", related_ref=f"mtc-daily:{place}",
+                created_by="health-monitor")
+            sent += 1
+    return {"dispatched": sent, "materials": len(rows), "places": len(places)}
 
 
 async def briefing_loop() -> None:

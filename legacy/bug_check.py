@@ -1488,7 +1488,24 @@ def check_models_schema_parity() -> None:
                ("delivery_notes", "auto_generated"),
                ("delivery_notes", "source_assignment_id"),
                ("pr_master", "source_attachment_id"),
-               ("purchase_orders", "source_attachment_id")}
+               ("purchase_orders", "source_attachment_id"),
+               # 2026-08-13 workflow polish (alembic b4f21c8ea9d7): a shipment
+               # may not leave the warehouse without the document travelling
+               # with it. `dn_document_no` is the number printed on the
+               # PHYSICAL note — the carrier's numbering, not ours, and
+               # unrelated to DN_Number — and `dn_attachment_id` points at the
+               # scan in entry_attachments. New-stack only: the frozen portal
+               # shipped on a bare click and had nowhere to put either.
+               ("delivery_notes", "dn_document_no"),
+               ("delivery_notes", "dn_attachment_id"),
+               ("delivery_notes", "shipped_at"),
+               ("delivery_notes", "shipped_by"),
+               # 2026-08-13 (alembic c7a93e5d2b18): when a receipt entered the
+               # LEDGER, as distinct from `Date`, which is the delivery date
+               # copied off the vendor's paperwork. The return form's 30-day
+               # window means the former and had been measuring the latter.
+               # NULL on every pre-migration row on purpose — see the revision.
+               ("receipts", "posted_at")}
     extra = model_only - allowed
     assert not extra, f"unexpected model-only columns (update models.py or DB): {extra}"
 

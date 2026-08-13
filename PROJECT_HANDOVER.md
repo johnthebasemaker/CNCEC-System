@@ -1,13 +1,20 @@
 # PROJECT HANDOVER — the authority on what is locked
 
-> **Updated 2026-08-09**, closing the QSEP programme (Quality · Safety ·
-> Employees · Procurement) and the documentation pass that followed it.
+> **Updated 2026-08-13** by the workflow-polish and test-isolation pass.
 > This file holds the LOCKED architecture rules, the baselines, and the
 > developer utilities. It is the authority; when anything else disagrees with
 > it, it wins.
 >
-> **New in this revision: rule 13 — `MANUAL_TESTING_GUIDE.md` is part of the
-> Definition of Done.** A feature change that does not update it is not done.
+> **New in this revision: rule 15 — the tests do not open the live database.**
+> `service_tests` commits through the real ASGI app and cannot roll back, so it
+> now builds and runs against its own `gihub_svctest` and **refuses to start**
+> if that resolves to the same database as the source. Two schema/data gaps in
+> the production cutover were found the moment the suite began running against
+> a database built the way production builds one — see rule 15 and *FUTURE*.
+>
+> Still binding from the previous revision: **rule 13 —
+> `MANUAL_TESTING_GUIDE.md` is part of the Definition of Done.** A feature
+> change that does not update it is not done.
 >
 > **Starting a fresh session? Read [`SESSION_HANDOVER.md`](SESSION_HANDOVER.md)
 > first** — it is the five-minute orientation, and it points back here for the
@@ -567,6 +574,64 @@ every PPE issue, which is not the same act as exporting the roster.
 together.** If you find yourself editing only the spec to make a test pass, an
 access rule changed without anyone deciding to change it.
 
+### 15. THE TESTS DO NOT OPEN THE LIVE DATABASE
+
+*Locked 2026-08-13.*
+
+`service_tests` is not a unit suite. Suite A calls the write services in a
+transaction and rolls back; **suites B…BX drive the real ASGI app over httpx and
+cannot**, because a request that returns 201 has already committed by the time
+the assertion reads it. The commit *is* the thing under test.
+
+So every run wrote into whatever `DATABASE_URL` named — and the local default
+named the operator's live database. A full pass left audit rows, mock PRs,
+notifications, outbox entries, test users, vendors and employees mixed in among
+real stock movements.
+
+**Cleanup is the wrong shape for this.** The suites do clean up after
+themselves, and it does not help: a run that fails early, is interrupted, or
+dies on an uncaught exception skips its own `finally`, and those are the runs a
+developer does most often.
+
+`backend/api/testdb.py` provisions a separate `gihub_svctest` and rewrites
+`DATABASE_URL` **before `backend.api.db` is imported** — that ordering is the
+entire mechanism, because the engine is built at import time from whatever the
+URL says at that instant. `DATABASE_URL` now supplies only the CLUSTER; its
+database is never opened. Provisioning **exits non-zero** if the source and
+target resolve to the same name, so a mis-set variable is a loud abort rather
+than a silent write to production data. Suite **BW** asserts all of it,
+including the refusal.
+
+**The test database is rebuilt from `gi_database.db` by the production cutover
+script**, which is the second half of the point. That file is in git and is
+itself a gate, so every machine and CI start from identical rows. Before this,
+the suite had quietly come to depend on data that existed only on the
+operator's box: the 2026-08-13 database wipe turned 1474/0 into a hard
+`IndexError` on the FIRST suite, because employee `30001` had been sitting in
+the live `employees` table since June and nothing recreated it. A test that
+passes because of what a laptop happens to contain is not a gate.
+
+⚠️ **Two things follow from building the schema the way production builds it,
+and both were found this way:**
+
+1. **`ux_asset_transfer_open` existed only in alembic** — so it was present on
+   every migrated database and absent from every `metadata.create_all` one,
+   which is how `cutover_migrate.py` builds a production box. The partial
+   unique index that stops two sites both claiming the same asset would simply
+   not have been there, and the race is silent by nature. It is now declared in
+   `models.py` too. **When you add a constraint in a migration, add it to
+   `models.py` in the same commit.**
+2. **`cutover_migrate.py` STAMPS alembic to head without running it**, so every
+   migration that backfilled *data* is skipped on a freshly cut-over database.
+   The schema is right; the corrections are not replayed. `testdb._apply_fixtures`
+   carries the two that the suite depends on (the `employees` site backfill,
+   the nine PPE-categorised SAPs) and names them. ⚠️ **This is an open item for
+   the Hetzner deployment, not just for tests** — see FUTURE.
+
+`GI_TEST_DB=off` runs in place, for debugging a failure that only reproduces
+against live data. It prints a warning. `GI_TEST_DB_REUSE=1` skips the ~1s
+rebuild while iterating on one suite.
+
 ## Developer utilities — the three scripts in `bin/`
 
 Three separate jobs, deliberately not one script. `dev.sh` owns the DEV stack it
@@ -756,14 +821,15 @@ of them is a regression, not a new normal.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1474 / 0** (suites A…BV) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **90 / 90** (~30 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **1502 / 0** (suites A…BX, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **90 / 90** (~37 s, own throwaway DB) | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
+| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | ~~Derived-view parity~~ | ❌ **RETIRED as a gate 2026-08-05** — see below | `tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
-| Alembic | single head **`a3c17e9b25d4`** (asset global identity + transfers) | see ARCHITECTURE §8 |
+| Alembic | single head **`c7a93e5d2b18`** (QC rejection returns + receipt `posted_at`) | see ARCHITECTURE §8 |
 | **Manual PDFs** | **0 overlapping text pairs**, all 8 booklets | `.venv/bin/python build_manual_pdf.py --role all` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 
@@ -809,6 +875,7 @@ recovery commands live in [`deploy/cloudflared/README.md`](deploy/cloudflared/RE
 
 | PR | Commit | What |
 |---|---|---|
+| — | `feat/workflow-polish-and-test-isolation` | **Test isolation + four workflow refinements (2026-08-13).** The backend suite stopped writing to the live database (**rule 15**), which immediately exposed two schema defects — see below. **Procurement:** `po_list` now returns the assignment, so the grid replaces `Assign` with the warehouse it went to, and `assign_po` refuses a re-route while treating a repeat of the same warehouse as idempotent. **Shipping:** `ship_dn` demands the number on the PHYSICAL delivery note plus a scan of it (alembic `b4f21c8ea9d7`), surfaced in all five portals through one `DN_DOC_COLUMNS` / `DeliveryDocLink` pair. **Quality:** the inspection queue shows the material NAME and an openable certificate (scoping inherited from the inspection, not re-derived); a rejection mints a **Return No** the SK pastes into Return Stock to fill the form, capped, DN-mandatory regardless of the entry-document switch, and single-use (alembic `c7a93e5d2b18`). **Returns:** the 30-day source-receipt window was measured on the vendor's delivery date rather than on when the row entered the ledger, so goods received that morning were missing from the dropdown — `receipts.posted_at` fixes it without a backfill. **Health:** a ninth Morning Briefing probe for uncertified Surface Shields, routed by location to the people who can act. Suites **BW** (7) + **BX** (21) |
 | #36 | `9f8be2e` | **QSEP slices 1-3 — Quality Control.** The `qc` role at level 1 with **dual scoping** (a site OR a warehouse, never both, and neither means it sees NOTHING); `/qc/accounts` creation by HOD/Warehouse/Logistics inside their own scope; QC site transfers as a REQUEST an **Admin** decides. MTC logic extracted to `services/quality.py`, mandatory at **DN creation**. The `qc_inspections` ledger, and the hard issuance block at **both** `stage_consumption` and `approve_smr` |
 | #37 | `d481a37` | **QSEP slices 4-5 — PPE and Employees.** PPE via **Option A (Integrated)**: the *standard* Issue form grows `employee_id_number` + `safety_doc_id` when a PPE item is picked, and one transaction does the stock consumption AND the distribution. Mandatory `early_reason` when replacing unexpired gear. `employee_movements`, HOD immediate transfers, and PPE history keyed on the globally-unique `ID_Number` so it **carries over on transfer**. 15-day forecast netting stock and open POs, with employee names |
 | #38 | `6447ddb` | **QSEP slice 6 — Procurement, OCR and asset polish.** `warehouse.auto_draft_dns` reusing `create_dn()` grouped by `rl_bl_family`; urgent reschedules bypassing the digest; OCR persisting uploads to `entry_attachments` **before** parsing, with the lane chosen by whether text was extractable rather than by MIME type; global `(SAP_Code, Serial_No)` asset identity + source-HOD-approved transfers; password policy 12→8 **with complexity**, in one place |
@@ -956,6 +1023,32 @@ operator items at the time of pausing:
 * ⚠️ **The tunnel token is passed as a command-line argument**, so it is visible in
   full to any local process via `ps aux`. Consider rotating it and moving it into
   the plist's `EnvironmentVariables` rather than `ProgramArguments`.
+
+#### ⚠️ NEW 2026-08-13 — two cutover gaps found by running the tests against a cutover-built database
+
+Both were invisible while the suite only ever ran against a database Alembic had
+walked. They are **deployment** items, not test items.
+
+1. **FIXED — schema.** `ux_asset_transfer_open` lived only in alembic
+   `a3c17e9b25d4`, and `cutover_migrate.py` builds the schema with
+   `metadata.create_all` from `models.py`. A production box would have loaded
+   **without** the partial unique index that stops two sites both holding an
+   open transfer claim on the same asset. It is now declared in `models.py`, and
+   suite BW asserts it on a models-built schema. **The general rule: a
+   constraint added in a migration must be added to `models.py` in the same
+   commit, or it only exists on databases that were migrated rather than
+   created.**
+
+2. **OPEN — data.** `cutover_migrate.py` STAMPS `alembic_version` to head
+   without running the migrations, so every revision that backfilled *data* is
+   skipped on a freshly cut-over database. Known instance: alembic
+   `d2f84b19e57c` set `employees."Site_ID"` for employee `30816`, and **a
+   site-less employee is invisible to every supervisor request** (`create_smr`
+   tests `(site or '') != site_id`, which no site satisfies). On the live
+   database this is already applied — it will bite on the **next fresh cut**.
+   Before go-live, either replay the data-only migrations by hand or audit
+   `employees` for blank sites. `testdb._apply_fixtures` lists what the suite
+   depends on and is the closest thing to an inventory of it.
 
 ---
 

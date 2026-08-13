@@ -2603,6 +2603,25 @@ The new **↩️ Return Items** tab (between Receipt Staging and Returnable Item
 3. **✓ Approve** → writes a row to the `returns` ledger (so `Current_Stock` reduces by the returned qty, the dashboard `Return` column ticks up, and the entry shows up in monthly / consumption reports). Then automatically opens the **logistics email draft** with item, qty, reason, and the original receipt's DN/PR/Lot context.
 4. **✗ Reject** → marks the request rejected. The SK sees this in their request history.
 
+### Returning material that Quality rejected (added August 2026)
+
+When a Quality inspector rejects some or all of a batch, they no longer just tell you a number. The rejection is given a **Return No** that looks like `QCR-20260813-41`, and it is shown to the inspector, to you, and to your Head of Department.
+
+1. Type or paste that Return No into the box at the top of Return Stock and press **Fetch**.
+2. The form fills itself in: the material, the site, the lot, the quantity that was rejected, and the inspector's own reason.
+3. Change anything you need to. **You may return less than was rejected** — some of it may already be out on the job, or still being discussed with the supplier. You cannot return more.
+4. A **Return DN number and a scanned document are always required** for this kind of return, even at sites where supporting documents are otherwise optional. Rejected material does not leave the site without paperwork.
+5. Submit as normal. Your Head of Department approves it, and the quantity then leaves stock.
+
+Two things worth knowing:
+
+- **A Return No can only be used once.** If you try it a second time you will be told which return already used it. This is deliberate — without it the same rejected quantity would be taken out of stock twice.
+- **You are not asked to pick a source receipt** for these returns. The rejection already records where the material came from, and material inspected at a warehouse has no site receipt to point at.
+
+### If a recently received item is missing from the Source Receipt list
+
+This was fixed in August 2026. The list used to be built from the delivery date written on the supplier's paperwork, so goods you received this morning against a document dated weeks earlier did not appear, while older items did. The list now also considers when the receipt was actually entered, and the most recently entered receipts appear at the top.
+
 ### Dashboard / report impact
 
 - The **Return** column on the Live Dashboard reflects approved returns (since `returns` is the source of truth).
@@ -4098,6 +4117,47 @@ from issue until somebody decides what happens to it. That was an explicit
 instruction: an automatic vendor return removes the evidence before anyone has
 looked at it.
 
+### What the inspector sees, and the Return No (added August 2026)
+
+The inspection screen now shows the **material's name**, with the SAP and
+material codes underneath it. Before this it showed only the codes, which meant
+judging a material by a number rather than by what it is.
+
+If a Material Test Certificate is on file, the certificate number appears with
+an **Open certificate** link that opens the actual document — in the queue and
+again in the inspection dialog. Previously it only said that a certificate
+existed, with no way to read it, which meant approvals were being made against
+documents nobody had opened.
+
+When an inspector rejects any quantity, the system issues a **Return No** such
+as `QCR-20260813-41`. It is announced to the inspector on the spot, listed
+against the inspection, and sent to both the site's Store Keeper and its Head of
+Department. The Store Keeper types it into **Return Stock** and the return form
+fills itself in — see §13.10.
+
+> This does **not** change the rule above. The Return No is an invitation for a
+> person to raise a return; nothing moves, and nothing is sent back to a vendor,
+> until the Store Keeper posts it and the HOD approves it.
+
+### The daily missing-certificate alert (added August 2026)
+
+Every morning the system checks for Surface Shield material that is in stock
+with no Material Test Certificate on file, and tells the people who can do
+something about it:
+
+| Where the material is | Who is told |
+|---|---|
+| In a warehouse | Logistics, the Warehouse User, and the warehouse's QC |
+| At a site | That site's Store Keeper, HOD and QC, and Logistics |
+
+Logistics appears on both lists because they are the only people who can obtain
+the document from the supplier. One message per location lists everything
+outstanding there, rather than one message per material.
+
+The alert repeats every morning until the certificate is uploaded, and then
+stops on its own. That repetition is intended: this is a standing condition, not
+a one-off event, and the material cannot be issued to anybody while it lasts.
+
 ### What the Store Keeper sees when the block fires
 
 The issue form refuses with a message that names the actual numbers, so nobody
@@ -4233,6 +4293,54 @@ because a convenience failed would be far worse. The reason is written to the
 audit log and the clerk cuts the note by hand.
 
 Auto-drafting can be switched off in Settings.
+
+### Assigning a purchase order to a warehouse (changed August 2026)
+
+A purchase order goes to **one** warehouse. The Purchase Orders list now shows a
+**Warehouse** column naming where each order was sent, and once an order has
+been assigned the **Assign** button is replaced by an `assigned` tag.
+
+Previously the button stayed on every row for ever, and the list gave no
+indication that an order had already been routed. Pressing it a second time
+created a second assignment and told a second warehouse to expect the same
+goods, with nothing anywhere reporting a problem.
+
+- Assigning the **same** warehouse again — a double-click, or an old tab — is
+  accepted and changes nothing. No duplicate, no second notification.
+- Assigning a **different** warehouse is refused, and the message names the
+  warehouse that already holds the order. Re-routing an order another warehouse
+  is already expecting is a decision for a person to make, not something the
+  system will do quietly.
+
+### Shipping a delivery note (changed August 2026)
+
+Pressing **Ship** now asks for two things before the delivery leaves:
+
+- **The delivery note number printed on the physical document** — the carrier's
+  or the supplier's number. This is *not* the DN number the system generated;
+  the point is to connect the two, so that a delivery can be reconciled later
+  without a telephone call.
+- **A scan or a photograph of the signed note.** The camera button opens the
+  phone camera directly, which is the practical option at a loading bay.
+
+Both are required. If either is missing you are told which one, separately —
+one is typing and the other is scanning, and being sent to redo the half you
+had already done is its own small waste.
+
+A **Material Test Certificate is still optional here and works exactly as
+before.** A certificate covers the *material* and is inherited from the purchase
+order or the delivery note down to the receiving site, so nobody uploads it
+twice. A delivery note covers *this shipment* and is inherited by nothing. They
+are different documents answering different questions.
+
+Once shipped, the document number and a download link appear beside the delivery
+for everyone who touches it — the warehouse, Logistics, the HOD, Quality and the
+receiving Store Keeper. The Store Keeper is the one holding the paper copy while
+the truck waits, so this is where it matters most.
+
+> Deliveries shipped before this change show **"not shipped yet"** in that
+> column. There is no document for them because none was ever captured, and
+> inventing a number would be worse than saying so.
 
 ### Marking a reschedule urgent
 

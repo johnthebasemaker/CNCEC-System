@@ -10,6 +10,7 @@ import { Table } from '../lib/smartTable'
 import type { ColumnsType } from 'antd/es/table'
 import { useDnDecide, useDnQueue, useScopedDnItems } from '../api/hooks'
 import type { Row } from '../api/client'
+import { DN_DOC_COLUMN } from './DeliveryDocLink'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -56,6 +57,11 @@ export default function DnApprovalQueue({ scope }: { scope: 'logistics' | 'hod' 
     { title: 'Site', dataIndex: 'Site_ID', render: (v) => v ?? '—' },
     { title: 'Family', dataIndex: 'rl_bl_family', render: (v) => v ?? '—' },
     { title: 'Date', dataIndex: 'DN_Date', render: (v) => v ?? '—' },
+    // Approvers see the paperwork they are approving. A DN in this queue has
+    // not shipped yet, so it usually reads "not shipped yet" — the column
+    // earns its place on re-submission after a rejection, where the document
+    // from the first attempt is exactly what the approver wants to check.
+    DN_DOC_COLUMN,
     { title: 'Status', dataIndex: 'status', render: (v: string) => <Tag color="gold">{v}</Tag> },
     {
       title: 'Action', key: '__act', width: 190,

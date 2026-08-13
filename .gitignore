@@ -65,6 +65,12 @@ reports_archive/
 # must never reach the remote.
 .backups/
 
+# Same content, without the leading dot. The DBA runs of 2026-08-13 wrote
+# pre-wipe and pre-migration pg_dumps here, and the directory was NOT covered
+# by the rule above — a full dump of live stock, prices, vendors and staff was
+# one `git add -A` away from the remote.
+backups/
+
 # Live operational tracking workbooks (operator-owned, synced via
 # tools/excel_sync.py — never commit; archived snapshots in data-archive/
 # and legacy/scripts/sme_seed_data/ predate this rule and stay tracked).

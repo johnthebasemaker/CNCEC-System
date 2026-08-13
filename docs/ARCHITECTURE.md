@@ -6,9 +6,10 @@
 > finalized 2026-07-18 (pre-deploy batch); updated 2026-07-26 (native-app
 > program); **updated 2026-07-30 (SME allocation overhaul: two-tier
 > Available-vs-Ordered + reverse SQM + COMPONENT IDENTITY; global table
-> tools)** at gates `service_tests 951/0 (suites A…AZ) · Playwright 42/42 ·
-> parity:sme 1,276 · bug_check 599/0 · build+tsc ✅ · alembic single head
-> a4e9b1c73f28`.
+> tools)**; **updated 2026-08-13 (workflow polish + test isolation)** at gates
+> `service_tests 1502/0 (suites A…BX, own throwaway DB) · Playwright 90/90 ·
+> parity:sme 1,313 · ui-math 33/0 · bug_check 599/0 · nav 46 routes ·
+> build+tsc ✅ · alembic single head c7a93e5d2b18`.
 > **The Hetzner deployment is PAUSED by decision** — next phase is Feature
 > Fine-Tuning and UI Polish. Locked rules + baselines in one page:
 > [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md).
@@ -113,9 +114,9 @@ SME SAP codes). Modules:
 | Module | Owns |
 |---|---|
 | `auth.py` | bcrypt login, 15-min JWT access + **RTR refresh families in `refresh_sessions`** (signed refresh JWT; `client_type` web 7d / native 90d; replay ⇒ THAT family revoked, other devices survive — full model in §6), TOTP 2FA, role levels (SK 0 · warehouse/supervisor 1 · hod 2 · logistics 3 · admin 4; `require_roles` always admits admin; `site_scope` pins level <3), registration + admin approval, **dual-OTP phone change** (`phone_otp.stage` 'old'→'new'; commit only after the NEW number verifies) |
-| `entry.py` | SK staging: receipts/consumption/returns/adjustments + `/entry/bulk`. Guards: **MTC hard-block for `Category == "Surface Shields"`** (setting `mtc_required_category`; missing MTC also emails logistics), pack→base UoM conversion (`uom_conversions`), **WBS required when the site has active `wbs_master` rows**, **supporting-document gate** (below), return source-receipt gates, FEFO auto-pick w/ allow-and-log override alerts. **`GET /entry/lining-systems`** (2026-07-18): recipe SAP lists per system code + site Done/Pending SQM — powers the Surface-Shields system-first Issue workflow (UI enforces: shield SAP without a selected system is refused; the code travels as an `LS <code>` Remarks suffix) |
+| `entry.py` | SK staging: receipts/consumption/returns/adjustments + `/entry/bulk`. Guards: **the MTC gate for `Category == "Surface Shields"` binds at ISSUE, not at receipt** (setting `mtc_required_category`; moved 2026-08-12 — a receipt is never refused, and an uncertified goods-in notifies Logistics instead), pack→base UoM conversion (`uom_conversions`), **WBS required when the site has active `wbs_master` rows**, **supporting-document gate** (below), return source-receipt gates, FEFO auto-pick w/ allow-and-log override alerts. **`GET /entry/lining-systems`** (2026-07-18): recipe SAP lists per system code + site Done/Pending SQM — powers the Surface-Shields system-first Issue workflow (UI enforces: shield SAP without a selected system is refused; the code travels as an `LS <code>` Remarks suffix) |
 | `bulk_import.py` | **Bulk Excel Import** (`POST /import/{kind}`; kinds `inventory`/`ledger` admin-only, `sme-*` {hod,admin}): dry-run→commit, upsert-only, header-name-driven, category canonicalisation, 3-tier ledger reconcile (exact-match / qty-correction / insert), Material_Code uniqueness resolution — the same plan/apply code `tools/excel_sync.py` drives |
-| `entry_docs.py` | **Entry document system (parity A1/A4)**: `entry_attachments` upload/list/download/delete, `require_entry_documents` gate, WBS config endpoints |
+| `entry_docs.py` | **Entry document system (parity A1/A4)**: `entry_attachments` upload/list/download/delete, `require_entry_documents` gate, WBS config endpoints. Doc types `consumption`/`receipt`/`return`/`safety_approval`/**`delivery_note`** (2026-08-13, the scan a warehouse must attach before a DN may ship) — the last two are per-item and per-shipment respectively, so neither goes through the per-BATCH `assert_entry_docs` gate |
 | `hod.py` | pending queues, per-row approve/reject(+reason)/edit (`{"fields":{...}}`), `bulk-approve` (≤200), submitter bell dispatch (receipts have NO submitter column by design — returns/issues/adjustments do), return-approval → logistics email |
 | `exec_summary.py` + `exec_pdf.py` | Executive Summary JSON/xlsx/**server-rendered fpdf2 PDF** (content-measured tables; nothing clips) |
 | `weekly_report.py` | Friday 17:00 auto exec-PDF → `generated_reports` + sha256-tokenized 72-h link `/reports/weekly-exec/{token}` → WhatsApp+bell to every admin/HOD; `POST /admin/reports/weekly-exec/run`; needs `PUBLIC_BASE_URL` in deploy/.env |
@@ -132,7 +133,10 @@ SME SAP codes). Modules:
 | `console.py` | admin settings (whitelist incl. `maintenance_mode`, `require_entry_documents`, `mtc_required_category`), pg_dump backup, sessions revoke, outbox retries, lot lifecycle. **Bug Tracking Engine (2026-07-18)**: `bug_reports` + `title/severity/rollback_notes/safety_constraints/triage_notes`; admin triage drawer; **`GET /admin/feedback/{id}/prompt`** renders a self-contained coding-agent implementation prompt (report + triage + rollback plan + the project's non-negotiable gates) and `GET /admin/feedback-export.md` a batch digest — the portal never mutates code itself |
 | `documents.py` | SOP/manual downloads, QR label sheets, employee badges, **`GET /documents/material-stickers`** (2026-07-24, {hod,admin}): 2×6 full-bleed A4 rack stickers replicating the operator's CNCEC sheet — Material Name (auto-shrink 17→11pt), QR from `SAP_Code`, SAP/MAT lines, category; `sap_codes` repeats = copies, category filter, site-scoped |
 | `stock.py` | stock views + **`GET /stock/material-card?sap=&days=`** (2026-07-24; **Material Intelligence 2026-08-01**): the 📷 scan payload. `sap` resolves a SAP code, a **Material_Code**, OR a raw label payload (`"1163\|Cable Tie Wire ( Nylon)"` — the operator's stickers are `SAP\|Description`, and passing the whole string was the reported 404); `site_scope` pinning (''→403) is applied AFTER resolution. Returns stock + a gap-free 7–365-day receipt/consumption series with a **backwards-walked closing-balance line**, burn rate + **days of cover**, open **lots** (FEFO order, balance derived like SQL_LOT_BALANCE), last 12 **movements**, and a per-site split for unscoped roles only |
-| `service_tests.py` | the 963-check gate (suites A…AZ), see §8 |
+| `qc.py` | the `qc` role, dual scoping (`qc_scope`), accounts + admin-decided transfers, the `qc_inspections` ledger and the one decide endpoint. **2026-08-13:** the list/fetch are decorated with the material NAME (from `inventory."Equipment_Description"`) and the certificate's number/filename, and `GET /qc/inspections/{id}/certificate` streams the MTC **through the inspection**, inheriting its scoping rather than re-deriving it. A rejection mints `return_no` = `QCR-YYYYMMDD-<id>` |
+| `health_monitor.py` | the 07:00 Morning Briefing: nine probes, each individually guarded, silent on a clean run but always audited, body forced to ONE line (Meta rejects a newline in a template parameter). **2026-08-13:** `probe_missing_mtc` + `dispatch_missing_mtc` — uncertified Surface Shields, grouped by PLACE and routed by location (warehouse → logistics/warehouse_user/qc; site → store_keeper/hod/qc/logistics) because the briefing's own admin+HOD audience cannot fix it |
+| `testdb.py` | **the throwaway database the service tests run against (2026-08-13, rule 15).** Provisions `gihub_svctest` from `gi_database.db` via the production cutover script and rewrites `DATABASE_URL` before `db.py` is imported; refuses to run if source and target are the same name. `_apply_fixtures` carries the state a cutover-built database lacks (the AI read-only role, the `employees` site backfill, the nine PPE SAPs, the entry-doc switch) |
+| `service_tests.py` | the 1502-check gate (suites A…BX), see §8 |
 
 ## 3. Database facts that bite
 
@@ -150,6 +154,20 @@ SME SAP codes). Modules:
   `email_outbox`, `pending_summary_notifications` are new-stack-only.
 - Locked rulings: **FEFO + over-issue/negative stock are allow-and-log, never
   hard-block** (2026-06-30); legacy hard-blocked — deliberate divergence.
+- ⚠️ **`receipts."Date"` is the DELIVERY date typed off the vendor's paperwork,
+  not when the row entered the ledger.** `posted_at` (2026-08-13,
+  `c7a93e5d2b18`) is the latter, and the return form's 30-day window needs
+  BOTH — it was measuring `Date` alone, so goods received this morning against
+  a six-week-old document vanished from the source-receipt dropdown.
+  `posted_at` is **NULL on every pre-migration row** (no backfill: a
+  `DEFAULT CURRENT_TIMESTAMP` on `ADD COLUMN` would have declared all 632
+  historical receipts posted on migration day), so readers must fall back to
+  `Date` rather than assuming it is set.
+- ⚠️ **A constraint that lives only in an Alembic revision does not exist on a
+  database built by `metadata.create_all`** — which is how
+  `tools/migration/cutover_migrate.py` builds production. Declare it in
+  `models.py` too, in the same commit. `ux_asset_transfer_open` was missing
+  from every created-from-models database until 2026-08-13.
 
 ## 4. Entry gates (parity sprint, 2026-07-13)
 
@@ -304,8 +322,18 @@ memory — deliberately not reproduced here).
 
 ## 8. Testing — the gates
 
+> 🔄 **2026-08-13 — the service tests run against their OWN database.**
+> `backend/api/testdb.py` provisions `gihub_svctest` from `gi_database.db`
+> (via the production cutover script) and rewrites `DATABASE_URL` **before
+> `backend.api.db` is imported** — the engine is built at import time, so that
+> ordering is the entire mechanism. `DATABASE_URL` below now names only the
+> CLUSTER; its database is never opened, and provisioning exits non-zero if
+> the two resolve to the same name. Suites B…BX commit through the real ASGI
+> app and cannot be rolled back, which is why isolation and not cleanup is the
+> answer. See `PROJECT_HANDOVER.md` rule 15.
+
 ```bash
-# 1. service tests (951 checks, suites A…AZ) — CI mirror, hermetic
+# 1. service tests (1502 checks, suites A…BX) — CI mirror, own throwaway DB
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
 JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 .venv/bin/python -u -m backend.api.service_tests

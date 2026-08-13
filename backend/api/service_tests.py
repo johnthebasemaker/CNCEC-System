@@ -12,7 +12,15 @@ loads from gi_database.db):
      endpoint guards: 401 without a token, 403 for the wrong role (including the
      master-data write gate), 200 on an open read.
 
-Run:  DATABASE_URL=postgresql+psycopg2://…  python backend/api/service_tests.py
+⚠️ Suite A rolls back. NOTHING ELSE DOES, and nothing else can — a request that
+returns 201 through the ASGI app has committed by the time the assertion reads
+it. So the suite runs against its OWN throwaway database, rebuilt from
+`gi_database.db` before the engine is created; see `backend/api/testdb.py` for
+why cleaning up afterwards is the wrong shape for this problem.
+
+Run:  python -m backend.api.service_tests
+      DATABASE_URL only names the CLUSTER (host/port/user); its database is
+      never opened. GI_TEST_DB=off restores the old in-place behaviour.
 Exit code is non-zero if any check fails (so CI fails the build).
 """
 from __future__ import annotations
@@ -27,12 +35,20 @@ import sys
 # BEFORE the .db/.main imports below trigger the config loader.
 os.environ.setdefault("GI_DOTENV", "0")
 
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+# ⚠️ ORDER IS THE WHOLE MECHANISM. `db.py` builds its engine at import time from
+# whatever DATABASE_URL says at that instant, so the swap has to happen on the
+# line BEFORE it — not in main(), not in a fixture. Everything below this point
+# is already bound to the throwaway database.
+from . import testdb  # noqa: E402
 
-from .db import SessionLocal, engine
-from .main import app
-from .services import ledger, notifications, procurement, supervisor
+testdb.provision()
+
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
+
+from .db import SessionLocal, engine  # noqa: E402
+from .main import app  # noqa: E402
+from .services import ledger, notifications, procurement, supervisor  # noqa: E402
 
 _MD = ledger._MD
 pr_master_t = _MD.tables["pr_master"]
@@ -2932,8 +2948,31 @@ async def test_dn_approval():
             check("dn: submit → pending_logistics",
                   r.status_code == 200 and await dn_status() == "pending_logistics", f"got {r.status_code}")
 
-            r = await ac.post(f"/warehouse/dns/{DN}/ship", headers=H(admin_t))
+            # Shipping carries paperwork since 2026-08-13: the number on the
+            # PHYSICAL delivery note plus a scan of it. Upload the scan once
+            # here and reuse the id — the attachment must belong to the person
+            # shipping, which is the same check assert_entry_docs makes of a
+            # batch document.
+            up = await ac.post("/entry/attachments", headers=H(admin_t),
+                               files={"file": ("dn.pdf", b"%PDF-1.4 svc dn", "application/pdf")},
+                               data={"doc_type": "delivery_note", "site_id": "CNCEC"})
+            check("dn: a delivery_note document can be uploaded",
+                  up.status_code == 201, f"got {up.status_code} {up.text[:120]}")
+            att_id = up.json().get("id") if up.status_code == 201 else 0
+            SHIP = {"dn_document_no": "SVC-DN-0001", "attachment_id": att_id}
+
+            r = await ac.post(f"/warehouse/dns/{DN}/ship", headers=H(admin_t), json=SHIP)
             check("dn: ship before approval → 409", r.status_code == 409, f"got {r.status_code}")
+
+            # The paperwork gate is checked SEPARATELY from the approval gate,
+            # and each names only its own missing half — an error that listed
+            # both would send somebody to redo the part they had already done.
+            r = await ac.post(f"/warehouse/dns/{DN}/ship", headers=H(admin_t),
+                              json={"dn_document_no": "", "attachment_id": att_id})
+            check("dn: ship with no document NUMBER is refused, and the message "
+                  "names the number rather than 'paperwork'",
+                  r.status_code == 409 and "number" in r.text.lower(),
+                  f"got {r.status_code} {r.text[:120]}")
 
             r = await ac.post(f"/logistics/dns/{DN}/decide", headers=H(worker_t), json={"action": "approve"})
             check("dn: worker → 403 on logistics decide", r.status_code == 403, f"got {r.status_code}")
@@ -2949,9 +2988,25 @@ async def test_dn_approval():
             check("dn: HOD approve → hod_approved",
                   r.status_code == 200 and await dn_status() == "hod_approved", f"got {r.status_code}")
 
-            r = await ac.post(f"/warehouse/dns/{DN}/ship", headers=H(admin_t))
+            r = await ac.post(f"/warehouse/dns/{DN}/ship", headers=H(admin_t), json=SHIP)
             check("dn: ship after HOD approval → in_transit",
                   r.status_code == 200 and await dn_status() == "in_transit", f"got {r.status_code}")
+
+            # The document has to be READABLE afterwards, from the DN, by
+            # everyone downstream — that is the whole point of recording it.
+            # Reading it back through the row (rather than through the
+            # uploader's own attachment list) is what proves the link exists.
+            from sqlalchemy import text as _dnsql
+            async with SessionLocal() as s:
+                doc = (await s.execute(_dnsql(
+                    'SELECT dn_document_no, dn_attachment_id, shipped_by '
+                    'FROM delivery_notes WHERE "DN_Number" = :d'), {"d": DN})).first()
+            check("dn: the shipped DN carries its document number, its "
+                  "attachment and who shipped it — the site store keeper "
+                  "matching the paper in the cab has something to match it to",
+                  doc is not None and doc[0] == "SVC-DN-0001"
+                  and doc[1] == att_id and doc[2] == "admin",
+                  f"got {doc}")
     finally:
         async with SessionLocal() as s:
             await s.execute(delete(dni).where(dni.c["DN_Number"] == DN))
@@ -4171,11 +4226,19 @@ async def test_notification_qa():
                 await s.commit()
 
             # 11-14 · DN multi-stage machine.
+            # The shipment needs its paperwork (2026-08-13). This pathway is
+            # about NOTIFICATIONS, so the document is created directly rather
+            # than through the upload endpoint — the gate itself is suite P's.
+            qa_up = await ac.post("/entry/attachments", headers=H(admin_t),
+                                  files={"file": ("qa-dn.pdf", b"%PDF-1.4 qa", "application/pdf")},
+                                  data={"doc_type": "delivery_note", "site_id": "CNCEC"})
             async with SessionLocal() as s:
                 await _wh.submit_dn(s, username="admin", dn_number=DN)
                 await _wh.decide_dn_logistics(s, username="admin", dn_number=DN, action="approve")
                 await _wh.decide_dn_hod(s, username="hod", dn_number=DN, action="approve")
-                await _wh.ship_dn(s, username="admin", dn_number=DN)
+                await _wh.ship_dn(s, username="admin", dn_number=DN,
+                                  dn_document_no="QA-DN-1",
+                                  attachment_id=qa_up.json().get("id"))
                 await s.commit()
 
             # 15-16 · Supervisor request → SK approval.
@@ -14100,6 +14163,366 @@ async def test_strict_rbac_api_gates():
         await _qsep_cleanup()
 
 
+# --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
+async def test_workflow_polish():
+    """Suite BX — the operational refinements of 2026-08-13.
+
+    Four unrelated-looking complaints that turn out to share one shape: the
+    system knew something and did not say it, so a person had to hold it in
+    their head and eventually didn't.
+
+      · the PO grid never received the assignment, so it offered `Assign` on
+        an already-assigned PO forever
+      · a shipment left with no record of the document in the driver's cab
+      · an inspector was shown a SAP code and a certificate id, and asked to
+        judge quality from neither
+      · a QC rejection was announced as a number and rebuilt by hand
+    """
+    import datetime as _d
+
+    from sqlalchemy import text as _sqt
+
+    from .services import procurement as _proc
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            H = await _qsep_login(ac, "SVCQ-admin")
+            Hsk = await _qsep_login(ac, "SVCQ-sk")
+            Hqc = await _qsep_login(ac, "SVCQ-qc")
+
+            # ── 1. a PO is assigned ONCE ────────────────────────────────────
+            PO = "SVCX-PO-1"
+            async with SessionLocal() as s:
+                await s.execute(_sqt(
+                    'INSERT INTO purchase_orders ("PO_Number", "PR_Number", "Site_ID", '
+                    'status, created_by) VALUES (:p, \'SVCX-PR\', \'CNCEC\', '
+                    "'open', 'SVCQ-admin')"), {"p": PO})
+                # A SECOND active warehouse. The re-assignment guard can only be
+                # proved against a real one — against a bogus id, assign_po
+                # refuses on "warehouse not found" and the duplicate check is
+                # never reached, so the test would pass while proving nothing.
+                await s.execute(_sqt(
+                    'INSERT INTO warehouses ("Warehouse_ID", "Name", status) '
+                    "VALUES ('SVCX-WH2', 'svc bx second warehouse', 'active') "
+                    'ON CONFLICT ("Warehouse_ID") DO NOTHING'))
+                await s.commit()
+
+            async with SessionLocal() as s:
+                first = await _proc.assign_po(s, username="SVCQ-admin", po_number=PO,
+                                              warehouse_id="WH-01", notes="")
+                await s.commit()
+            check("bx: a PO can be assigned to a warehouse",
+                  first.get("assigned") is True, str(first))
+
+            async with SessionLocal() as s:
+                same = await _proc.assign_po(s, username="SVCQ-admin", po_number=PO,
+                                             warehouse_id="WH-01", notes="")
+                await s.commit()
+            check("bx: assigning the SAME warehouse twice is IDEMPOTENT, not an "
+                  "error — that is a double-click, and refusing it would teach "
+                  "people the button is broken",
+                  same.get("assigned") is True and same.get("already") is True, str(same))
+
+            async with SessionLocal() as s:
+                n = (await s.execute(_sqt(
+                    'SELECT count(*) FROM po_assignments WHERE "PO_Number" = :p'),
+                    {"p": PO})).scalar()
+            check("bx: …and it wrote NO second assignment row. Two rows meant "
+                  "two warehouse notifications and two warehouses each told the "
+                  "goods were coming to them",
+                  n == 1, f"got {n} assignment rows")
+
+            async with SessionLocal() as s:
+                other = await _proc.assign_po(s, username="SVCQ-admin", po_number=PO,
+                                              warehouse_id="SVCX-WH2", notes="")
+            check("bx: assigning a DIFFERENT warehouse is REFUSED and names the "
+                  "one that already holds it. Re-routing a PO another warehouse "
+                  "is expecting is a decision, not a correction",
+                  "already assigned to WH-01" in str(other.get("error", "")), str(other))
+            check("bx: …and the refusal is not a bare 'no' — it names the "
+                  "warehouse that has it AND the one being refused, because "
+                  "whoever clicked needs to know who to talk to",
+                  "SVCX-WH2" in str(other.get("error", "")), str(other))
+
+            async with SessionLocal() as s:
+                row = (await s.execute(_sqt(
+                    "SELECT assigned_warehouse FROM ("
+                    "  SELECT a.\"Warehouse_ID\" AS assigned_warehouse "
+                    "    FROM purchase_orders po LEFT JOIN LATERAL ("
+                    "      SELECT \"Warehouse_ID\" FROM po_assignments "
+                    "       WHERE \"PO_Number\" = po.\"PO_Number\" ORDER BY id DESC LIMIT 1"
+                    "    ) a ON TRUE WHERE po.\"PO_Number\" = :p) x"), {"p": PO})).scalar()
+            check("bx: po_list exposes the assignment, which is what the grid "
+                  "needs to stop offering the button. It returned no assignment "
+                  "column at all before, so the UI could not have got this right",
+                  row == "WH-01", f"got {row!r}")
+
+            # ── 2. QC sees the material NAME and can open the certificate ───
+            SAP = "1001"
+            async with SessionLocal() as s:
+                name = (await s.execute(_sqt(
+                    'SELECT "Equipment_Description" FROM inventory '
+                    'WHERE TRIM("SAP_Code") = :s'), {"s": SAP})).scalar()
+                await s.execute(_sqt(
+                    'INSERT INTO qc_inspections ("Site_ID", "SAP_Code", source_type, '
+                    'source_ref, submitted_qty, status, created_by) VALUES '
+                    "(:site, :sap, 'site_receipt', 'SVCQ-BX-1', 30, 'pending', 'SVCQ-sk')"),
+                    {"site": "CNCEC", "sap": SAP})
+                await s.commit()
+
+            r = await ac.get("/qc/inspections?status=pending", headers=Hqc)
+            got = [i for i in r.json()["items"] if i.get("source_ref") == "SVCQ-BX-1"]
+            check("bx: the inspection queue carries the material NAME. An "
+                  "inspector was being shown '1001' and asked to judge quality "
+                  "from it — the SAP code is our identifier, not the thing on "
+                  "the drum in front of them",
+                  len(got) == 1 and got[0].get("Material_Name") == name,
+                  f"got {got[:1]}")
+
+            iid = got[0]["id"] if got else 0
+            r = await ac.get(f"/qc/inspections/{iid}/certificate", headers=Hqc)
+            check("bx: an inspection with no certificate answers 404 on the "
+                  "download rather than a broken file",
+                  r.status_code == 404, f"got {r.status_code}")
+
+            # Attach one, then it must be downloadable BY THE INSPECTOR.
+            async with SessionLocal() as s:
+                await s.execute(_sqt(
+                    'INSERT INTO mtc_documents ("Site_ID", "SAP_Code", mtc_number, '
+                    'file_name, mime_type, file_blob, submitted_by) VALUES '
+                    "(:site, :sap, 'MTC-BX', 'bx.pdf', 'application/pdf', "
+                    ":blob, 'SVCQ-log')"),
+                    {"site": "CNCEC", "sap": SAP, "blob": b"%PDF-1.4 bx"})
+                mid = (await s.execute(_sqt(
+                    "SELECT id FROM mtc_documents WHERE mtc_number = 'MTC-BX'"))).scalar()
+                await s.execute(_sqt("UPDATE qc_inspections SET mtc_document_id = :m "
+                                     "WHERE id = :i"), {"m": mid, "i": iid})
+                await s.commit()
+
+            r = await ac.get(f"/qc/inspections/{iid}/certificate", headers=Hqc)
+            check("bx: the certificate is DOWNLOADABLE from the inspection. It "
+                  "used to render as 'certificate #41' — which tells an "
+                  "inspector one exists and gives them no way to read it, so "
+                  "the approval was made against a document nobody had opened",
+                  r.status_code == 200 and r.content.startswith(b"%PDF"),
+                  f"got {r.status_code}")
+
+            # Scoping is INHERITED from the inspection, and that is the point of
+            # hanging the route here rather than on mtc_documents by id.
+            r = await ac.get(f"/qc/inspections/{iid}/certificate",
+                             headers=await _qsep_login(ac, "SVCQ-qcwh"))
+            check("bx: …but a WAREHOUSE-bound inspector cannot pull a SITE "
+                  "inspection's certificate, and gets 404 rather than 403 — a "
+                  "direct fetch must not confirm what exists where it cannot look",
+                  r.status_code == 404, f"got {r.status_code}")
+
+            # ── 3. a rejection mints a Return No, and it discharges once ────
+            r = await ac.post(f"/qc/inspections/{iid}/decide", headers=Hqc,
+                              json={"approved_qty": 18, "reason": "pinholes on 12"})
+            body = r.json() if r.status_code == 200 else {}
+            ret_no = body.get("return_no")
+            check("bx: rejecting part of a lot mints a Return No. Without it the "
+                  "store keeper was told '18 of 30' and left to rebuild the "
+                  "return by hand — material, receipt, quantity, reason, all "
+                  "retyped and none of it linked back to the inspection",
+                  r.status_code == 200 and bool(ret_no) and str(ret_no).startswith("QCR-"),
+                  f"got {r.status_code} {body}")
+
+            r = await ac.get(f"/entry/qc-return/{ret_no}", headers=Hsk)
+            pre = r.json() if r.status_code == 200 else {}
+            check("bx: the store keeper resolves that number into a filled form "
+                  "— material, site, lot, the rejected quantity and the "
+                  "inspector's own reason",
+                  r.status_code == 200 and pre.get("SAP_Code") == SAP
+                  and abs(float(pre.get("rejected_qty", 0)) - 12) < 1e-9
+                  and pre.get("Material_Name") == name
+                  and pre.get("decision_reason") == "pinholes on 12",
+                  f"got {r.status_code} {pre}")
+
+            # A Return No is date + a small integer, so it is guessable. The
+            # lookup has to be scoped or it is an enumeration oracle over every
+            # rejection at every site.
+            r = await ac.get(f"/entry/qc-return/{ret_no}",
+                             headers=await _qsep_login(ac, "SVCQ-hod2"))
+            check("bx: an HOD at ANOTHER site cannot resolve the Return No, and "
+                  "gets 404. The number is date + a small integer and therefore "
+                  "guessable — unscoped, it would enumerate every rejection in "
+                  "the company",
+                  r.status_code == 404, f"got {r.status_code}")
+
+            # The return itself: paperwork is mandatory even with the
+            # entry-document switch OFF (which is how the test DB runs).
+            up = await ac.post("/entry/attachments", headers=Hsk,
+                               files={"file": ("ret.pdf", b"%PDF-1.4 ret", "application/pdf")},
+                               data={"doc_type": "return", "site_id": "CNCEC"})
+            aid = up.json().get("id") if up.status_code == 201 else 0
+            base = {"Date": _d.date.today().isoformat(), "SAP_Code": SAP,
+                    "Site_ID": "CNCEC", "Reason": "defect",
+                    "qc_return_no": ret_no}
+
+            r = await ac.post("/entry/returns", headers=Hsk,
+                              json={**base, "Quantity": 12, "attachment_ids": [aid]})
+            check("bx: a QC return with no Return DN No. is REFUSED even though "
+                  "require_entry_documents is off. Rejected material going back "
+                  "to a supplier is not something an operator convenience "
+                  "switch should be able to wave through",
+                  r.status_code == 422 and "Return DN No" in r.text,
+                  f"got {r.status_code} {r.text[:140]}")
+
+            r = await ac.post("/entry/returns", headers=Hsk,
+                              json={**base, "Quantity": 12, "Return_DN_No": "RDN-BX",
+                                    "attachment_ids": []})
+            check("bx: …and with no attached delivery note, likewise",
+                  r.status_code == 422 and "delivery note" in r.text.lower(),
+                  f"got {r.status_code} {r.text[:140]}")
+
+            r = await ac.post("/entry/returns", headers=Hsk,
+                              json={**base, "Quantity": 13, "Return_DN_No": "RDN-BX",
+                                    "attachment_ids": [aid]})
+            check("bx: returning MORE than QC rejected is refused — the "
+                  "rejection is the cap, and exceeding it would take stock out "
+                  "that nothing authorised",
+                  r.status_code == 422 and "covers 12" in r.text,
+                  f"got {r.status_code} {r.text[:140]}")
+
+            r = await ac.post("/entry/returns", headers=Hsk,
+                              json={**base, "Quantity": 12, "Return_DN_No": "RDN-BX",
+                                    "attachment_ids": [aid]})
+            check("bx: the complete return posts, and carries its Return No",
+                  r.status_code == 201 and r.json().get("qc_return_no") == ret_no,
+                  f"got {r.status_code} {r.text[:160]}")
+
+            up2 = await ac.post("/entry/attachments", headers=Hsk,
+                                files={"file": ("r2.pdf", b"%PDF-1.4 r2", "application/pdf")},
+                                data={"doc_type": "return", "site_id": "CNCEC"})
+            r = await ac.post("/entry/returns", headers=Hsk,
+                              json={**base, "Quantity": 12, "Return_DN_No": "RDN-BX2",
+                                    "attachment_ids": [up2.json().get("id")]})
+            check("bx: the SAME Return No cannot be posted twice. One rejection "
+                  "is one return — a second would deduct the rejected quantity "
+                  "from stock all over again, and nothing about the second "
+                  "posting would look wrong",
+                  r.status_code == 409 and "already posted" in r.text.lower(),
+                  f"got {r.status_code} {r.text[:140]}")
+
+            # ── 4. the return-sources window measures the right date ────────
+            async with SessionLocal() as s:
+                # A receipt whose DELIVERY date is six weeks old but which
+                # entered the ledger just now — exactly the shape the DN flow
+                # produces, and exactly what used to vanish from the dropdown.
+                old = (_d.date.today() - _d.timedelta(days=42)).isoformat()
+                await s.execute(_sqt(
+                    'INSERT INTO receipts ("Date", "SAP_Code", "Quantity", "Site_ID", '
+                    '"DN_No", posted_at) VALUES (:d, :s, 5, \'CNCEC\', \'SVCX-DN\', now())'),
+                    {"d": f"{old} 00:00:00", "s": SAP})
+                await s.commit()
+
+            r = await ac.get(f"/entry/return-sources?sap={SAP}&site_id=CNCEC&days=30",
+                             headers=Hsk)
+            found = [x for x in r.json()["items"] if x.get("DN_No") == "SVCX-DN"]
+            check("bx: a receipt POSTED today but DATED six weeks ago is offered "
+                  "as a return source. The 30-day window was measured on the "
+                  "delivery date copied off the vendor's paperwork, so goods "
+                  "received this morning were missing from the dropdown while "
+                  "older ones were listed",
+                  len(found) == 1, f"{len(found)} match(es) in {len(r.json()['items'])} rows")
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM receipts WHERE \"DN_No\" = 'SVCX-DN'"))
+            await s.execute(_sqt("DELETE FROM pending_returns WHERE \"SAP_Code\" = '1001' "
+                                 "AND \"Return_DN_No\" LIKE 'RDN-BX%'"))
+            await s.execute(_sqt("DELETE FROM qc_inspections WHERE source_ref = 'SVCQ-BX-1'"))
+            await s.execute(_sqt("DELETE FROM mtc_documents WHERE mtc_number = 'MTC-BX'"))
+            await s.execute(_sqt("DELETE FROM po_assignments WHERE \"PO_Number\" = 'SVCX-PO-1'"))
+            await s.execute(_sqt("DELETE FROM purchase_orders WHERE \"PO_Number\" = 'SVCX-PO-1'"))
+            await s.execute(_sqt("DELETE FROM warehouses WHERE \"Warehouse_ID\" = 'SVCX-WH2'"))
+            await s.execute(_sqt("DELETE FROM entry_attachments WHERE uploaded_by = 'SVCQ-sk'"))
+            await s.commit()
+        await _qsep_cleanup()
+
+
+# --- Suite BW: the suite's own database isolation -----------------------------
+async def test_database_isolation():
+    """Suite BW — the tests must not be able to reach the live database.
+
+    This suite exists because the property it protects is INVISIBLE when it
+    works and expensive when it breaks. Every other suite passes just as
+    happily while committing its fixtures into the operator's real inventory;
+    the litter is only noticed later, by a human, in a stock report.
+
+    So the check is not "did we clean up" — it is "are we even connected to
+    the right database". The engine is inspected directly rather than
+    re-deriving the URL from the environment, because the engine is what every
+    other suite actually writes through.
+    """
+    from sqlalchemy import text as _sqt
+
+    from . import testdb
+
+    url = engine.url
+    live = testdb._split_url(testdb._sync(
+        os.environ.get("GI_LIVE_DB_URL", "") or "postgresql://x/gihub"))[1]
+
+    check("bw: the engine every other suite writes through is pointed at the "
+          "throwaway database, not the live one. 1,400+ checks commit through "
+          "the real ASGI app — if this is ever wrong, they all still pass and "
+          "the damage shows up in somebody's stock report a week later",
+          url.database != live, f"engine database is {url.database!r}")
+
+    check("bw: …and it is specifically the provisioned test database",
+          url.database == os.environ.get("GI_TEST_DB") or url.database == testdb.DEFAULT_TEST_DB,
+          f"expected {testdb.DEFAULT_TEST_DB!r}, got {url.database!r}")
+
+    # The guard is the part that has to fail LOUDLY. A silent fall-back to the
+    # live database is the exact accident being designed out, so assert the
+    # refusal rather than trusting the comment that describes it.
+    import subprocess as _sp
+    env = dict(os.environ, GI_TEST_DB="gihub", DATABASE_URL="postgresql://postgres@127.0.0.1:5433/gihub")
+    proc = _sp.run([sys.executable, "-c",
+                    "from backend.api import testdb; testdb.provision()"],
+                   cwd=str(testdb._ROOT), env=env, capture_output=True, text=True)
+    check("bw: provisioning REFUSES when the test database and the source "
+          "database are the same name, and exits non-zero rather than "
+          "quietly writing to the live one",
+          proc.returncode != 0 and "REFUSING" in proc.stdout,
+          f"exit {proc.returncode}: {(proc.stdout + proc.stderr)[:200]}")
+
+    # The fixtures are data the live database has and a cutover-built one does
+    # not. If one silently stops applying, the suite that depends on it fails
+    # far away from the cause — so name them here.
+    async with SessionLocal() as s:
+        site = (await s.execute(_sqt(
+            'SELECT "Site_ID" FROM employees WHERE "ID_Number" = \'30816\''))).scalar()
+        check("bw: fixture — the employees site backfill (alembic d2f84b19e57c) "
+              "is applied. cutover_migrate STAMPS alembic to head without "
+              "running it, so every DATA migration is skipped on a freshly "
+              "cut-over database — schema right, corrections missing",
+              (site or "") == "CNCEC", f"Site_ID is {site!r}")
+
+        n_ppe = (await s.execute(_sqt(
+            'SELECT count(*) FROM inventory WHERE "Category" = \'PPE\''))).scalar()
+        check("bw: fixture — the nine PPE-categorised SAPs exist. The operator "
+              "re-categorised them after the frozen snapshot was taken, so the "
+              "workbook still calls them 'Safety' and suite BO would have "
+              "nothing to test",
+              n_ppe == 9, f"got {n_ppe}")
+
+        # The index that only alembic had. Found BY this isolation work: the
+        # suite had only ever run against a migrated database, so a schema
+        # built the way production's will be built was never exercised.
+        idx = (await s.execute(_sqt(
+            "SELECT count(*) FROM pg_indexes WHERE indexname = "
+            "'ux_asset_transfer_open'"))).scalar()
+        check("bw: the asset-transfer partial unique index exists on a schema "
+              "built from models.py. It lived only in alembic a3c17e9b25d4 "
+              "until 2026-08-13, so cutover_migrate would have loaded a "
+              "PRODUCTION box without the guard that stops two sites both "
+              "claiming the same asset",
+              idx == 1, f"got {idx}")
+
+
 # --- Suite BV: the generated CRUD reads ---------------------------------------
 async def test_crud_read_rbac():
     """Suite BV — the generated entity routes, per role.
@@ -14444,6 +14867,12 @@ async def main() -> int:
     print("\n BV. The generated CRUD reads — a manifest that hid pages while "
           "the API served the data to anyone who typed the URL")
     await test_crud_read_rbac()
+    print("\n BX. Workflow polish — the system knew four things and said none "
+          "of them, so a person had to hold them and eventually didn't")
+    await test_workflow_polish()
+    print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
+          "real app, so WHICH database they reach is itself a gate")
+    await test_database_isolation()
     await engine.dispose()
 
     print(f"\n== SERVICE TESTS: {'✅ PASS' if not FAILED else '❌ FAIL'} "

@@ -309,6 +309,9 @@ Supervisor request  →  SK approves  →  HOD approves the issue
 | TC-P2P-14 | **Given** a submitted PR, **When** Logistics converts it, **Then** a PO is created carrying the PR's lines, and the PR is linked to it. ✅ |
 | TC-P2P-15 | **Given** a PO, **When** it is routed to a warehouse, **Then** it appears in that warehouse's assignment list and in **no other** warehouse's. |
 | TC-P2P-16 | **Given** a PO, **When** an HOD tries to open the Logistics Portal, **Then** refused — **rank does not grant a workspace**. ⛔ |
+| TC-P2P-16a | **Given** an **already-assigned** PO, **When** Logistics opens the Purchase Orders tab, **Then** the row shows the **warehouse it went to** and the Assign button is **replaced by an `assigned` tag** — not merely greyed out. *(new 2026-08-13)* |
+| TC-P2P-16b | **Given** an already-assigned PO, **When** the same warehouse is assigned again (a double-click, or a stale tab), **Then** it **succeeds silently** — no second assignment row, and the warehouse is **not** notified twice. ✅ |
+| TC-P2P-16c | **Given** an already-assigned PO, **When** a **different** warehouse is assigned, **Then** it is **refused**, and the message names both the warehouse that holds it and the one being refused. ⛔ ⚠️ *Re-routing a PO another warehouse is already expecting is a decision, and there is deliberately no silent path for it.* |
 
 ### 4.4 The warehouse receives the goods
 
@@ -348,6 +351,11 @@ Supervisor request  →  SK approves  →  HOD approves the issue
 | TC-P2P-26 | **Given** a shipped DN, **When** the destination Store Keeper opens Incoming Deliveries, **Then** it is listed and can be staged into stock. ✅ |
 | TC-P2P-27 | **Given** a DN containing a **controlled** material, **When** it is created **without a Material Test Certificate on file**, **Then** it **succeeds** — the certificate is recorded on the note when one exists and demanded at issue, never at dispatch. → §5.2 ✅ ⚠️ **Inverted 2026-08-12.** |
 | TC-P2P-28 | **Given** a mixed R/L and B/L line set, **When** one DN is attempted for both, **Then** it is refused. ⛔ |
+| TC-P2P-28a | **Given** an HOD-approved DN, **When** **Ship** is pressed, **Then** a dialog demands the **Delivery Note number printed on the physical document** and a **scan or photo of it** — both mandatory. *(new 2026-08-13)* ⚠️ *That number is the carrier's, not ours. It is unrelated to `DN_Number`, which the system generates — the whole point is to tie the two together.* |
+| TC-P2P-28b | **Given** the Ship dialog, **When** the document number is left blank, **Then** it is refused with a message naming **the number**; **When** the file is left off, **Then** the message names **the file**. ⛔ ⚠️ *Deliberately two separate errors — one is typing, the other is scanning, and a combined "paperwork missing" sends somebody to redo the half they had already done.* |
+| TC-P2P-28c | **Given** a DN shipped with its paperwork, **When** the **Store Keeper**, **HOD**, **Logistics**, **QC** or the **warehouse** views it, **Then** the document number and a working download link appear **next to the delivery**, in all five places. ✅ |
+| TC-P2P-28d | **Given** a DN shipped **before 2026-08-13**, **Then** the document column reads **"not shipped yet"** rather than a dead link. ⚠️ *Not a defect. No backfill was attempted, because inventing a document number for a delivery nobody scanned would be worse than admitting there isn't one.* |
+| TC-P2P-28e | **Given** the Ship dialog, **Then** the **MTC upload is unchanged and still optional**. ⚠️ *A certificate covers the MATERIAL and is inherited PO → DN → warehouse → site so nobody uploads it twice; a delivery note covers THIS SHIPMENT and is inherited by nothing. Do not fuse them.* |
 
 ### 4.6 Reading scanned purchase documents (OCR)
 
@@ -477,11 +485,16 @@ uploading a second copy of the same PDF, that is the bug.
 | TC-QC-09 | **Given** a pending inspection of 100, **When** the QC approves 40, **Then** the status is **partially approved**. |
 | TC-QC-10 | **Given** a pending inspection of 100, **When** the QC approves 0, **Then** the status is **rejected**. |
 | TC-QC-11 | **Given** a rejected inspection, **Then** the material **stays in stock**, is marked unusable, and is **not** routed to Vendor Returns. ⚠️ **Explicit ruling.** An automatic vendor return removes the evidence before anyone has looked at it. |
+| TC-QC-11a | **Given** a rejection of any quantity, **Then** a **Return No** (`QCR-YYYYMMDD-⟨inspection id⟩`) is minted, shown to the QC on decide, listed in the queue, and sent to **both the Store Keeper and the HOD**. *(new 2026-08-13)* ⚠️ *This does not overturn TC-QC-11: the Return No is an INVITATION for a human to raise a return, not an automatic vendor return. Nothing moves until the SK posts it and the HOD approves.* → §5.6 |
 | TC-QC-12 | **Given** a decided inspection, **When** the QC decides it again, **Then** refused. ⛔ |
 | TC-QC-13 | **Given** an inspection, **When** a **Store Keeper** tries to decide it, **Then** refused — reading the queue is open, deciding is not. ⛔ |
 | TC-QC-14 | **Given** a **site-bound** QC, **When** they open Inspections, **Then** they see their site's and no other's. |
 | TC-QC-15 | **Given** a **warehouse-bound** QC, **When** they open Inspections, **Then** they see their warehouse's, and **no site rows at all**. |
 | TC-QC-16 | **Given** a QC account with **neither** binding, **When** they open Inspections, **Then** the list is **empty** — never everything. ⛔ *This is the fail-closed test. If it ever shows all sites, stop and report immediately.* |
+| TC-QC-16a | **Given** any inspection, **Then** the queue **and** the inspect dialog show the **material NAME**, with the SAP and material codes beneath it. *(new 2026-08-13)* ⚠️ *The inspector was previously shown `1032` and asked to judge quality from it. The SAP code is the system's identifier, not the thing on the drum in front of them.* |
+| TC-QC-16b | **Given** an inspection whose material has a certificate on file, **Then** the dialog shows the **certificate number** and an **Open certificate** link that downloads the actual file; the queue carries the same link. ✅ *It used to read "certificate #41" — which says one exists and gives no way to read it, so the approval was made against a document nobody had opened.* |
+| TC-QC-16c | **Given** an inspection with **no** certificate, **Then** the dialog says so plainly and the download answers 404 rather than offering a broken link. |
+| TC-QC-16d | **Given** a **warehouse-bound** QC, **When** they request the certificate of a **site** inspection by URL, **Then** **404**. ⛔ *The certificate is exactly as visible as the inspection that references it — scoping is inherited, not re-implemented.* |
 
 ### 5.4 The issue block — the hard gate
 
@@ -516,6 +529,34 @@ uploading a second copy of the same PDF, that is the bug.
 | TC-QC-29 | **Given** a pending QC transfer, **When** an **Admin** approves it, **Then** the QC's binding changes. ✅ |
 | TC-QC-30 | **Given** a pending QC transfer, **When** the **HOD** tries to approve it themselves, **Then** refused. ⛔ *A QC whose remit is set by the person they inspect is not independent.* |
 | TC-QC-31 | **Given** a decided transfer, **When** decided again, **Then** refused. ⛔ |
+
+### 5.6 Returning what QC rejected *(new 2026-08-13)*
+
+| | |
+|---|---|
+| **Who** | QC (raises the number) · Store Keeper (posts the return) · HOD (approves it) |
+| **What** | Sending rejected material back, against the rejection that authorised it |
+| **Where** | Quality → Inspections (the number) → Entry → Return Stock (the return) |
+| **When** | After a partial or full rejection |
+| **Why** | The SK used to be told "18 of 30 approved" and left to rebuild the return by hand — material, receipt, quantity and reason all retyped, and none of it linked back to the inspection that caused it |
+| **Which** | The Return No **replaces** the source-receipt pick; everything else on the form still applies |
+
+⚠️ **This section supersedes nothing in §5.4.** Rejected stock still sits in
+stock and still cannot be issued. What is new is a documented way to send it
+back, not an automatic one.
+
+| ID | Given / When / Then |
+|---|---|
+| TC-QC-32 | **Given** a Return No from a rejection, **When** the SK pastes it into Return Stock and presses **Fetch**, **Then** the form fills itself: material, site, lot, the rejected quantity, and the inspector's own reason in Remarks. ✅ |
+| TC-QC-33 | **Given** a fetched return, **When** the SK edits the quantity **downwards**, **Then** it is accepted. ⚠️ *Returning LESS than QC rejected is legitimate — some may already be issued, some still being argued about with the vendor. The rejection is a cap, not a fixed value.* |
+| TC-QC-34 | **Given** a fetched return, **When** the SK enters **more** than was rejected, **Then** refused, naming the cap. ⛔ |
+| TC-QC-35 | **Given** a fetched return, **When** it is posted **without a Return DN No.**, **Then** refused — **even if the site's entry-document setting is off**. ⛔ ⚠️ *Rejected material going back to a supplier is not something an operator convenience switch may wave through. Test this with `require_entry_documents` **off**, or you have not tested it.* |
+| TC-QC-36 | **Given** the same, **When** it is posted with **no attached document**, **Then** likewise refused. ⛔ |
+| TC-QC-37 | **Given** a complete QC return, **When** it is posted, **Then** it is staged for HOD approval like any other return, and on approval the quantity **leaves stock**. ✅ |
+| TC-QC-38 | **Given** a Return No that has already been posted, **When** it is used a second time, **Then** refused. ⛔ ⚠️ **Run this.** One rejection is one return; a second would deduct the rejected quantity all over again and nothing about it would look wrong afterwards. |
+| TC-QC-39 | **Given** a Return No from **another site**, **When** an SK or HOD there tries to fetch it, **Then** **404**. ⛔ *The number is a date plus a small integer and therefore guessable — unscoped, it would enumerate every rejection in the company.* |
+| TC-QC-40 | **Given** a QC return, **Then** **no source receipt is required**. ⚠️ *Not a loosening. The rejection proves provenance better than a receipt pick does, and an inspection raised at a **warehouse** has no site receipt to point at — demanding one would show the SK an empty list they cannot get past.* |
+
 
 ---
 
@@ -662,6 +703,9 @@ here are the most expensive kind.
 | TC-OPS-04 | **Given** an issue for more than is in stock, **Then** it is **allowed and logged with a warning**, not blocked. ⚠️ **Standing rule.** The shelf is often right and the ledger often lags. Do not report this. |
 | TC-OPS-05 | **Given** stock in several lots, **When** an issue is made, **Then** FEFO is applied and any deviation is **logged, not blocked**. ⚠️ Same standing rule. |
 | TC-OPS-06 | **Given** a return, **When** submitted against a receipt, **Then** it is staged for approval. |
+| TC-OPS-06a | **Given** a receipt **posted today** but **dated weeks ago** on the vendor's paperwork, **When** the SK opens Return Stock, **Then** it **is offered** as a source receipt. *(fixed 2026-08-13)* ⚠️ *This was the reported bug: the 30-day window was measured on the delivery date typed off the document, not on when the row entered the ledger. Goods received this morning were missing while older ones were listed. Both dates now qualify.* |
+| TC-OPS-06b | **Given** the same list, **Then** the **most recently posted** receipts sort to the top. |
+| TC-OPS-06c | **Given** a receipt that predates 2026-08-13, **Then** it still appears on its **delivery date** as before — nothing that used to be offered has been taken away. ✅ |
 | TC-OPS-07 | **Given** an adjustment, **When** submitted without a reason code, **Then** refused. ⛔ |
 | TC-OPS-08 | **Given** a stock count with variances, **When** staged, **Then** one adjustment per variance is created. |
 | TC-OPS-09 | **Given** a Store Keeper, **When** they attempt to view another site's stock, **Then** they cannot. ⛔ |
@@ -899,6 +943,18 @@ are the ones that matter.
 | TC-HM-11 | **Given** more findings than fit, **Then** the digest ends with an explicit "(+N more)", never mid-sentence. |
 | TC-HM-12 | **Given** findings of mixed severity, **Then** the worst are first — the top of a digest read on a phone is the part that matters. |
 | TC-HM-13 | **Given** the feature switched off in Settings, **Then** nothing is sent, force included. An operator in a known incident can silence it without stopping the API. |
+| TC-HM-14 | **Given** Surface Shields in stock with **no Material Test Certificate**, **Then** the briefing reports them, **and** a separate alert goes to the people who can act. *(new 2026-08-13 — the ninth probe.)* |
+| TC-HM-15 | **Given** uncertified material **in a warehouse**, **Then** the alert reaches **Logistics, the Warehouse User and the warehouse's QC** — and nobody at a site. |
+| TC-HM-16 | **Given** uncertified material **at a site**, **Then** the alert reaches that site's **Store Keeper, HOD and QC, plus Logistics** — and no other site. ⛔ |
+| TC-HM-17 | **Given** a warehouse holding **nine** uncertified materials, **Then** each recipient gets **one** alert listing nine, not nine alerts. ⚠️ *Grouped by place. Per-material messages are how a real alert becomes something people filter.* |
+| TC-HM-18 | **Given** the certificate is then uploaded, **Then** the alert **stops the next morning** with no further action. *This is a standing condition, not an event — it repeats daily until fixed, and that repetition is the design.* |
+| TC-HM-19 | 🤖 **Given** the same material, **Then** the daily alert and the **issue refusal** must agree about whether a certificate exists. ⚠️ *Both read the same resolver. An alert that names material which is actually fine is one people learn to skip — and then the real one is skipped too.* |
+
+⚠️ **Why the missing-MTC alert does not follow the briefing's own routing.** The
+digest goes to admins and HODs. An HOD cannot obtain a certificate from a
+supplier, and the store keeper who is about to be refused at the counter is not
+on that list at all. Logistics appears on **both** location lists deliberately —
+they are the only role who can actually get the document.
 
 > **Automated:** service-test suite BS (19 checks) plus three Playwright cases.
 
@@ -1026,8 +1082,11 @@ If you only have an hour, run these:
 
 - **Don't report FEFO or over-issue warnings as bugs.** They are allow-and-log by
   standing rule, and the QC block did not change that.
-- **Don't report that a DN was allowed for uninspected material.** That is the
-  ruling — the certificate binds at dispatch, approval binds at issue.
+- **Don't report that a DN was allowed for uninspected or uncertified material.**
+  That is the ruling — since 2026-08-12 **both** gates bind at **issue**, and
+  neither binds at receipt or at dispatch. *(This line still said "the
+  certificate binds at dispatch" until 2026-08-13; it was describing the rule
+  the operator moved.)*
 - **Don't report an empty PPE Forecast** without first checking whether any
   usable-time rules exist. Today, none do.
 - **Don't report a suggestion of 0** when stock or an open order already covers
@@ -1042,6 +1101,22 @@ If you only have an hour, run these:
 - **Don't skip the negative-property tests** (TC-PPE-01, TC-QC-02, TC-PPE-08).
   They prove a new feature did not leak into everything else, and nothing else
   will catch that.
+- **Don't report a DN shipped before 2026-08-13 showing "not shipped yet"** in
+  the delivery-document column. No backfill was attempted on purpose —
+  inventing a document number for a delivery nobody scanned would be worse than
+  admitting there isn't one.
+- **Don't report that a QC rejection did not raise a return by itself.** The
+  Return No is an invitation for a human to raise one; nothing moves until the
+  Store Keeper posts it and the HOD approves. TC-QC-11 still stands.
+- **Don't report the missing-MTC alert repeating every morning.** It is a
+  standing condition, not an event, and it stops the day the certificate is
+  uploaded.
+- **Don't report that a QC return skipped the source-receipt picker.** The
+  rejection is stronger provenance, and a warehouse-raised inspection has no
+  site receipt to point at.
+- **Don't run the backend suite expecting to inspect its rows afterwards in
+  your dev database.** Since 2026-08-13 it runs against `gihub_svctest` and
+  your database is never opened. Connect to the test database instead.
 
 ---
 
@@ -1134,7 +1209,7 @@ regression, not a new normal.**
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1474 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **1502 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
 | Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
@@ -1142,6 +1217,17 @@ regression, not a new normal.**
 | Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | Frontend build | clean | `npm run build --prefix frontend` |
 | Manual PDFs | **0 overlapping text pairs** | `.venv/bin/python build_manual_pdf.py --role all` |
+
+> 🔄 **The backend suite no longer touches your database (2026-08-13).** It
+> builds and runs against its own throwaway `gihub_svctest`, rebuilt from
+> `gi_database.db` before the engine is created, because suites B…BX commit
+> through the real ASGI app and cannot be rolled back. Running the tests used
+> to leave thousands of rows — audit entries, mock PRs, notifications, test
+> users — in whatever database `DATABASE_URL` named, which locally was the live
+> one. `DATABASE_URL` now supplies only the cluster; its database is never
+> opened, and provisioning **refuses to run** if the two resolve to the same
+> name. Suite BW asserts all of this. `GI_TEST_DB=off` restores the old
+> behaviour for debugging a failure that only reproduces against live data.
 
 ---
 

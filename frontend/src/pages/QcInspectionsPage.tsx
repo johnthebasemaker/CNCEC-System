@@ -18,7 +18,7 @@ import {
   Alert, App, Button, Card, Descriptions, Empty, InputNumber, Input, Modal,
   Segmented, Space, Tag, Typography,
 } from 'antd'
-import { ExperimentOutlined } from '@ant-design/icons'
+import { ExperimentOutlined, FileSearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Table } from '../lib/smartTable'
 import { useQcDecide, useQcInspections } from '../api/hooks'
@@ -61,9 +61,20 @@ function DecideModal({ row, onClose }: { row: Row | null; onClose: () => void })
       const res = await decide.mutateAsync({
         id: Number(row!.id), approved_qty: qty, reason: reason.trim() || undefined,
       })
-      message.success(
-        `${STATUS_TAG[String(res.status)]?.label ?? res.status} — `
-        + `${num(res.approved_qty)} cleared for issue`)
+      // The Return No is the whole handoff, so it is announced rather than
+      // left to be discovered in the grid — the inspector usually reads it
+      // straight out to the store keeper standing next to them.
+      if (res.return_no) {
+        message.warning({
+          content: `Return ${String(res.return_no)} raised for ${num(res.rejected_qty)} `
+            + 'rejected — give this number to the store keeper.',
+          duration: 8,
+        })
+      } else {
+        message.success(
+          `${STATUS_TAG[String(res.status)]?.label ?? res.status} — `
+          + `${num(res.approved_qty)} cleared for issue`)
+      }
       onClose()
     } catch (e) {
       message.error(errMsg(e))
@@ -82,19 +93,46 @@ function DecideModal({ row, onClose }: { row: Row | null; onClose: () => void })
       afterOpenChange={(open) => { if (open) { setQty(submitted); setReason('') } }}
     >
       <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
+        {/* The NAME leads. An inspector was previously shown '1032' and asked
+            to approve it — the SAP code is our identifier, not the thing on
+            the drum in front of them, so deciding quality from it meant a walk
+            back to the shelf. The codes stay, underneath, because they are
+            what everything else in the system is keyed on. */}
         <Descriptions.Item label="Material">
-          {String(row?.SAP_Code ?? '')}
-          {row?.Material_Code ? ` · ${row.Material_Code}` : ''}
+          <Typography.Text strong>
+            {String(row?.Material_Name ?? '(name not in the material master)')}
+          </Typography.Text>
+          <br />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            SAP {String(row?.SAP_Code ?? '')}
+            {row?.Material_Code ? ` · ${row.Material_Code}` : ''}
+          </Typography.Text>
         </Descriptions.Item>
         <Descriptions.Item label="Lot">{String(row?.Lot_Number ?? '—')}</Descriptions.Item>
         <Descriptions.Item label="Where">
           {String(row?.Site_ID || row?.Warehouse_ID || '—')}
         </Descriptions.Item>
         <Descriptions.Item label="Submitted">{submitted}</Descriptions.Item>
-        <Descriptions.Item label="MTC">
+        {/* Openable, not merely acknowledged. This used to render
+            "certificate #41" — which tells an inspector a certificate exists
+            and gives them no way to read it, so the approval was made against
+            a document nobody had opened. */}
+        <Descriptions.Item label="Certificate">
           {row?.mtc_document_id
-            ? <Tag color="green">certificate #{String(row.mtc_document_id)}</Tag>
-            : <Tag>not linked</Tag>}
+            ? (
+              <Space size={4} wrap>
+                <Tag color="green">{String(row.mtc_number ?? `#${row.mtc_document_id}`)}</Tag>
+                <Button
+                  size="small" type="link" icon={<FileSearchOutlined />}
+                  style={{ padding: '0 4px' }}
+                  href={`/api/qc/inspections/${row.id}/certificate?inline=1`}
+                  target="_blank" rel="noreferrer"
+                >
+                  {String(row.mtc_file_name ?? 'Open certificate')}
+                </Button>
+              </Space>
+            )
+            : <Tag>not linked — inspect the physical paperwork</Tag>}
         </Descriptions.Item>
       </Descriptions>
 
@@ -160,8 +198,20 @@ export default function QcInspectionsPage() {
         return <Tag color={t.color}>{t.label}</Tag>
       },
     },
-    { title: 'Material', dataIndex: 'SAP_Code', key: 'sap', width: 110 },
-    { title: 'Material code', dataIndex: 'Material_Code', key: 'mat', ellipsis: true },
+    // Name first, codes underneath — the queue is read by someone deciding
+    // what to walk over and look at, and '1032' does not tell them.
+    {
+      title: 'Material', key: 'material', width: 260, ellipsis: true,
+      render: (_, r) => (
+        <div>
+          <div>{String(r.Material_Name ?? '—')}</div>
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            {String(r.SAP_Code ?? '')}
+            {r.Material_Code ? ` · ${r.Material_Code}` : ''}
+          </Typography.Text>
+        </div>
+      ),
+    },
     { title: 'Lot', dataIndex: 'Lot_Number', key: 'lot', width: 120,
       render: (v) => String(v ?? '—') },
     {
@@ -174,10 +224,38 @@ export default function QcInspectionsPage() {
       width: 100, render: num },
     { title: 'Rejected', dataIndex: 'rejected_qty', key: 'rej', align: 'right',
       width: 100, render: num },
+    // Visible to every role that reads this page, which is the point: the SK
+    // needs it to raise the return, and the HOD needs it to recognise the
+    // return when it arrives for approval.
+    {
+      title: 'Return No', dataIndex: 'return_no', key: 'ret', width: 170,
+      render: (v, r) => (v
+        ? (
+          <Tag color={r.return_posted_id ? 'default' : 'volcano'}>
+            {String(v)}{r.return_posted_id ? ' · posted' : ''}
+          </Tag>
+        )
+        : <Typography.Text type="secondary" style={{ fontSize: 12 }}>—</Typography.Text>),
+    },
     { title: 'Reason', dataIndex: 'decision_reason', key: 'why', ellipsis: true,
       render: (v) => String(v ?? '') },
     { title: 'Inspector', dataIndex: 'inspected_by', key: 'by', width: 130,
       render: (v) => String(v ?? '—') },
+    // Openable from the queue as well as from the modal: an inspector often
+    // wants to read the certificate BEFORE deciding which row to open.
+    {
+      title: 'Certificate', key: '__mtc', width: 150,
+      render: (_, r) => (r.mtc_document_id
+        ? (
+          <Button size="small" type="link" icon={<FileSearchOutlined />}
+            style={{ padding: 0 }}
+            href={`/api/qc/inspections/${r.id}/certificate?inline=1`}
+            target="_blank" rel="noreferrer">
+            {String(r.mtc_number ?? 'open')}
+          </Button>
+        )
+        : <Typography.Text type="secondary" style={{ fontSize: 12 }}>none</Typography.Text>),
+    },
     {
       title: 'Action', key: '__act', width: 120, fixed: 'right',
       render: (_, r) => (

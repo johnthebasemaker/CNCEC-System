@@ -33,7 +33,10 @@ export default function EntryDocsUpload({
   // document. It reuses this component and the same /entry/attachments store
   // rather than getting its own: the BLOB handling, the size cap, the MIME
   // allowlist, the camera capture and the audit row are all already right here.
-  docType: 'consumption' | 'receipt' | 'return' | 'safety_approval'
+  // 'delivery_note' (2026-08-13) is the signed DN a warehouse must attach
+  // before a shipment may leave, and it reuses this for the same reasons —
+  // including the camera, which is the point at a loading bay.
+  docType: 'consumption' | 'receipt' | 'return' | 'safety_approval' | 'delivery_note'
   siteId?: string
   docNumber?: string
   value: EntryDoc[]
@@ -132,7 +135,9 @@ export default function EntryDocsUpload({
   // Safety Approval".
   const heading = docType === 'safety_approval'
     ? { label: 'Signed safety approval', hint: 'the signed form authorising this issue' }
-    : { label: 'Supporting documents', hint: 'hand-written note / delivery note' }
+    : docType === 'delivery_note'
+      ? { label: 'Signed delivery note', hint: 'a scan or photo of the document travelling with the goods' }
+      : { label: 'Supporting documents', hint: 'hand-written note / delivery note' }
 
   return (
     <div style={{ marginBottom: 12 }}>

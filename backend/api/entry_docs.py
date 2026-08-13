@@ -55,9 +55,15 @@ settings_t = _MD.tables["app_settings"]
 # Library filter and the download route recognise them. They are NOT in the
 # `_UPLOADABLE` set below: a purchase-document scan enters through the
 # extract endpoint so it is parsed and linked, never as a loose attachment.
+# `delivery_note` (2026-08-13) is the scanned physical DN a warehouse must
+# attach before a shipment may leave. Like `safety_approval` it reuses this
+# store rather than getting its own table, and like it, it is NOT part of the
+# per-BATCH `assert_entry_docs` gate below — it is per-SHIPMENT, and
+# services/warehouse.ship_dn validates it against the DN being shipped.
 _DOC_TYPES = ("consumption", "receipt", "return", "safety_approval",
-              "pr_scan", "po_scan")
-_UPLOADABLE = ("consumption", "receipt", "return", "safety_approval")
+              "delivery_note", "pr_scan", "po_scan")
+_UPLOADABLE = ("consumption", "receipt", "return", "safety_approval",
+               "delivery_note")
 _MAX_FILE_MB = 15
 _ALLOWED_MIME_PREFIXES = ("image/", "application/pdf",
                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
