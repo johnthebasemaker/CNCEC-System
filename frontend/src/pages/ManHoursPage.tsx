@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Key } from 'react'
 import {
   App, Button, Card, Checkbox, Col, DatePicker, Form, Input, InputNumber, Modal, Popconfirm,
@@ -35,6 +35,74 @@ interface TabProps {
 const sp = (site?: string) => (site ? { site_id: site } : {})
 
 // --- 👥 Employees -----------------------------------------------------------
+/**
+ * The overtime thresholds, editable by the HOD.
+ *
+ * They live here rather than under Admin → Settings because they are a
+ * contract term the HOD owns; putting them behind an admin gate means the
+ * person accountable for the labour figures cannot correct them.
+ */
+function OtSettingsCard() {
+  const { message } = App.useApp()
+  const qc = useQueryClient()
+  const { data, isFetching } = useMh('/mh/settings', {})
+  const live = (data as unknown as {
+    thresholds?: Record<string, number> })?.thresholds ?? {}
+  const [gi, setGi] = useState<number | null>(null)
+  const [nonGi, setNonGi] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (live.GI != null) setGi(Number(live.GI))
+    if (live.NON_GI != null) setNonGi(Number(live.NON_GI))
+  }, [live.GI, live.NON_GI])
+
+  const save = useMutation({
+    mutationFn: (b: Record<string, unknown>) =>
+      api.put('/mh/settings', b).then((r) => r.data),
+    onSuccess: () => {
+      message.success('Thresholds saved — new timesheets only')
+      qc.invalidateQueries({ queryKey: ['/mh/settings'] })
+      qc.invalidateQueries({ queryKey: ['/mh/employees'] })
+    },
+    onError: (e) => message.error(errMsg(e)),
+  })
+
+  return (
+    <Card size="small" title="Overtime thresholds" style={{ marginBottom: 16 }}
+      loading={isFetching}>
+      <Space wrap align="end">
+        <div>
+          <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+            GI — OT after
+          </Typography.Text>
+          <InputNumber min={0} max={24} step={0.5} value={gi} onChange={setGi}
+            addonAfter="h" style={{ width: 130 }} />
+        </div>
+        <div>
+          <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+            Non-GI — OT after
+          </Typography.Text>
+          <InputNumber min={0} max={24} step={0.5} value={nonGi} onChange={setNonGi}
+            addonAfter="h" style={{ width: 130 }} />
+        </div>
+        <Button type="primary" loading={save.isPending}
+          disabled={gi == null && nonGi == null}
+          onClick={() => save.mutate({ gi, non_gi: nonGi })}>
+          Save
+        </Button>
+      </Space>
+      <Typography.Paragraph type="secondary"
+        style={{ marginTop: 12, marginBottom: 0, fontSize: 12 }}>
+        Net worked hours before overtime begins. Both shifts are 12 hours
+        (11 worked + 1 hour lunch), so 11 worked splits 8 + 3 for GI and
+        10 + 1 for Non-GI at the standard values. Saving does not re-split
+        timesheets already posted.
+      </Typography.Paragraph>
+    </Card>
+  )
+}
+
+
 function EmployeesTab({ site }: TabProps) {
   const { message } = App.useApp()
   const qc = useQueryClient()
@@ -56,13 +124,30 @@ function EmployeesTab({ site }: TabProps) {
   })
 
   const items = data?.items ?? []
-  const supply = items.filter((r) => r.Worker_Type === 'Supply').length
+  const nonGi = items.filter((r) => r.Worker_Type === 'NON_GI').length
+  const night = items.filter((r) => r.Shift === 'Night').length
+  const thresholds = (data as unknown as {
+    ot_thresholds?: Record<string, number> })?.ot_thresholds ?? {}
   const columns: ColumnsType<ApiRow> = [
     { title: 'Code', dataIndex: 'Employee_Code', width: 90 },
     { title: 'Name', dataIndex: 'Name' },
     { title: 'Designation', dataIndex: 'Designation', render: (v) => v || '—' },
-    { title: 'Type', dataIndex: 'Worker_Type', width: 90,
-      render: (v: string) => <Tag color={v === 'Supply' ? 'blue' : 'default'}>{v}</Tag> },
+    { title: 'Type', dataIndex: 'Worker_Type', width: 100,
+      filters: [{ text: 'GI', value: 'GI' }, { text: 'Non-GI', value: 'NON_GI' }],
+      onFilter: (v, r) => r.Worker_Type === v,
+      render: (v: string) => (
+        <Tag color={v === 'NON_GI' ? 'blue' : 'default'}>
+          {v === 'NON_GI' ? 'Non-GI' : v}
+        </Tag>) },
+    { title: 'Shift', dataIndex: 'Shift', width: 90,
+      filters: [{ text: 'Day', value: 'Day' }, { text: 'Night', value: 'Night' }],
+      onFilter: (v, r) => r.Shift === v,
+      render: (v: string) => (
+        <Tag color={v === 'Night' ? 'purple' : 'gold'}>{v || 'Day'}</Tag>) },
+    // Shown per row because "why does this person's OT start at 10?" is a
+    // question asked AT the roster, not on the settings page.
+    { title: 'OT after', dataIndex: 'OT_After_Hours', width: 90, align: 'right',
+      render: (v: unknown) => (v == null ? '—' : `${Number(v)} h`) },
     { title: 'Company', dataIndex: 'Company', render: (v) => v || '—' },
     { title: 'Status', dataIndex: 'status', width: 100,
       render: (v: string) => <Tag color={v === 'active' ? 'green' : 'red'}>{v}</Tag> },
@@ -80,8 +165,10 @@ function EmployeesTab({ site }: TabProps) {
 
   return (
     <div>
+      <OtSettingsCard />
       <Card size="small" title="Add / update a worker" style={{ marginBottom: 16 }}>
-        <Form form={form} layout="inline" initialValues={{ worker_type: 'OWN' }}
+        <Form form={form} layout="inline"
+          initialValues={{ worker_type: 'GI', shift: 'Day' }}
           onFinish={(v) => upsert.mutate(v)}>
           <Form.Item name="employee_code" rules={[{ required: true, message: 'code' }]}>
             <Input placeholder="Employee code" style={{ width: 130 }} />
@@ -91,14 +178,25 @@ function EmployeesTab({ site }: TabProps) {
           </Form.Item>
           <Form.Item name="designation"><Input placeholder="Designation" style={{ width: 140 }} /></Form.Item>
           <Form.Item name="worker_type">
-            <Radio.Group options={[{ value: 'OWN', label: 'OWN' }, { value: 'Supply', label: 'Supply' }]} />
+            <Radio.Group options={[{ value: 'GI', label: 'GI' },
+                                   { value: 'NON_GI', label: 'Non-GI' }]} />
+          </Form.Item>
+          <Form.Item name="shift">
+            <Radio.Group options={[{ value: 'Day', label: 'Day' },
+                                   { value: 'Night', label: 'Night' }]} />
           </Form.Item>
           <Form.Item name="company"><Input placeholder="Company" style={{ width: 120 }} /></Form.Item>
           <Button type="primary" htmlType="submit" loading={upsert.isPending}>Save</Button>
         </Form>
       </Card>
       <Typography.Paragraph type="secondary">
-        {items.length} workers ({supply} Supply) — kept separate from the system users table.
+        {items.length} workers · {nonGi} Non-GI · {night} on nights — kept
+        separate from the system users table. Overtime starts after{' '}
+        <b>{thresholds.GI ?? 8} h</b> for GI and{' '}
+        <b>{thresholds.NON_GI ?? 10} h</b> for Non-GI worked hours; both shifts
+        are 12 hours (11 worked + 1 lunch). Changing a threshold applies to new
+        timesheets only — hours already posted keep the split they were saved
+        with.
       </Typography.Paragraph>
       <Table sticky={{ offsetHeader: 64 }} size="small" loading={isFetching} columns={columns} dataSource={items}
         rowKey={(r) => String(r.id)} scroll={{ x: 'max-content' }}

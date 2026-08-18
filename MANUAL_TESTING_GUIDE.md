@@ -1172,6 +1172,82 @@ idempotent.
 
 ---
 
+## 14d. Manpower benchmarks and the roster (Phase 3 + 4)
+
+> Added 2026-08-18 (Phase 7, branch `feat/phase7-foundations`). Rule 13.
+
+### 14d.1 A benchmark's identity is five parts
+
+`sme_manpower_norm` is keyed on **Type + Lining_System_Code +
+Execution_Sub_Activity_Code + Activity + Variant_Key**. Each part is there
+because the real workbook breaks the shorter key:
+
+| Part | What it separates |
+|---|---|
+| `Type` | LSC4/ESC41 and LSC5/ESC51 appear once for civil and once for mechanical |
+| `Activity` | LSC10/ESC101 is ONE seal-coat code serving both PU systems — 70 m²/shift for 4 mm, 90 for 6 mm |
+| `Variant_Key` | CV blasting is filed under ESC1 **twice**: 300 m²/shift with a crew of 4, and 40 with a crew of 2. Nothing else in the row differs. |
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-MP-01** | Import a workbook with two same-identity rows carrying **different** numbers | **Rejected**, and the message names `Variant_Key` as the fix. Keeping either row silently would plan a blasting crew against a benchmark 7.5× wrong. |
+| **TC-MP-02** | Give those two rows distinct `Variant_Key` values and re-import | Both land. |
+| **TC-MP-03** | Import a workbook with two **identical** rows (same identity, same numbers) | Collapsed to one, reported as an "identical repeat". The workbook really does list blasting twice. |
+| **TC-MP-04** | Import the real `Manpower_Hour_Details.xlsx` | Block A only. Block B (rows 41-49, the day/night worked example) is skipped and the warning says so. |
+| **TC-MP-05** | Look at Master Data → Manpower benchmarks | Blasting and Buffing carry a **manpower only** badge — no Surface Shield recipe exists for them. That is a category, not missing data. |
+
+> ⚠️ Blasting rows carry `ESC1`/`ESC2` in the **Lining_System_Code** column.
+> That is not a data error: blasting prepares a surface and belongs to no
+> lining system. Those are the activities a supervisor opens without a store
+> keeper.
+
+### 14d.2 Roles
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-MP-06** | Rename or delete a **workbook** role | Refused (409). It is the vocabulary the benchmarks are written in — rename it in the workbook and re-sync. |
+| **TC-MP-07** | Add a custom role, then delete it while a crew cites it | Add succeeds (code canonicalised, e.g. `scaffolder` → `SCAFFOLDER`); delete refused while in use. |
+| **TC-MP-08** | Set a crew headcount to 0 | The role is **removed** from the crew, not stored as zero. |
+| **TC-MP-09** | Put an unknown role code in a crew | Refused 422 — a typo would otherwise become an invisible zero in every plan. |
+
+### 14d.3 Shifts and overtime
+
+Both shifts are **12 physical hours** — 11 worked plus 1 hour lunch. `Shift`
+records *which* one, never how long it is. Overtime starts at a threshold that
+depends on the **worker**, not the shift:
+
+| Worker type | OT after | 11 worked hours becomes |
+|---|---|---|
+| GI | 8 h | 8 normal + 3 OT |
+| Non-GI | 10 h | 10 normal + 1 OT |
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-MP-10** | Post a 06:00→18:00 timesheet (60 min break) for a GI worker | 11 total, **8 normal + 3 OT**. |
+| **TC-MP-11** | The same for a Non-GI worker | 11 total, **10 normal + 1 OT**. |
+| **TC-MP-12** | A night shift 18:00→06:00 | Still 11 net — the midnight rollover is handled. |
+| **TC-MP-13** | Change a threshold in Man-Hours → Overtime thresholds | New timesheets split at the new value. **Timesheets already posted are not re-split** — that would move overtime somebody has been paid for. |
+| **TC-MP-14** | Corrupt `mh_ot_threshold_non_gi` to a non-number | Falls back to the default rather than failing every timesheet write. |
+| **TC-MP-15** | As a store keeper, read or set `/mh/settings` | 403. The thresholds are the HOD's — deliberately *not* behind the admin gate, because the person accountable for the labour figures must be able to correct them. |
+
+### 14d.4 ⚠️ Worker_Type had TWO legacy values
+
+The ruling named `OWN` → `GI`. The column's vocabulary was **`OWN` | `Supply`**,
+and `Supply` **is** the non-GI case (supplied labour, company DMC). Migrating
+only `OWN` would have left a third value that every threshold lookup silently
+misses, so both are mapped:
+
+* `OWN` → `GI`
+* `Supply` → `NON_GI`
+* anything else → **left alone and reported**, never coerced. A worker silently
+  reclassified is a worker paid against the wrong overtime threshold.
+
+**TC-MP-16** — POST `/mh/employees` with `worker_type: "Supply"`. It is accepted
+and stored as `NON_GI`. The attendance workbook still ships the old words; the
+rename was ours, so the old spelling must not 422.
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

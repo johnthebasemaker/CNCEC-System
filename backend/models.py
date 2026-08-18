@@ -1015,7 +1015,15 @@ class MhEmployees(Base):
     Employee_Code = Column(Text, nullable=False)
     Name = Column(Text, nullable=False)
     Designation = Column(Text)
-    Worker_Type = Column(Text, nullable=False, server_default=text("'OWN'"))
+    # 2026-08-18 Phase 7: the vocabulary is GI | NON_GI. It was OWN | Supply —
+    # the same distinction under the attendance workbook's names — and the
+    # rename is what makes the OT rule below readable, because the two words
+    # now say WHY the thresholds differ rather than where the person is paid
+    # from. Migrated by alembic (OWN→GI, Supply→NON_GI).
+    Worker_Type = Column(Text, nullable=False, server_default=text("'GI'"))
+    # Day | Night. The shift is 12 physical hours either way (11 worked + 1
+    # lunch); this records WHICH one, not how long it is.
+    Shift = Column(Text, nullable=False, server_default=text("'Day'"))
     Company = Column(Text)
     linked_id_number = Column(Text)
     status = Column(Text, nullable=False, server_default=text("'active'"))
@@ -1024,6 +1032,102 @@ class MhEmployees(Base):
     updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     __table_args__ = (
         UniqueConstraint("Site_ID", "Employee_Code"),
+    )
+
+
+class MhRoles(Base):
+    """The role / designation master — the dropdown behind every crew figure.
+
+    Seeded from the nine role COLUMNS of Manpower_Hour_Details.xlsx (Blaster,
+    Potman, Rubber Liner, …) and extendable by an HOD, which is the whole
+    reason it is a table and not an enum: the workbook's nine are what the
+    benchmarks are expressed in, but a site hires roles the workbook never
+    anticipated and must not need a migration to record one.
+    """
+    __tablename__ = "mh_roles"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Role_Code = Column(Text, nullable=False)      # canonical, e.g. 'MASON'
+    Name = Column(Text, nullable=False)           # as printed, e.g. 'Mason'
+    # 'workbook' rows are recreated by the importer and must not be renamed by
+    # hand; 'custom' rows are the HOD's and the importer never touches them.
+    Source = Column(Text, nullable=False, server_default=text("'custom'"))
+    Sort_Order = Column(Integer, nullable=False, server_default=text('0'))
+    status = Column(Text, nullable=False, server_default=text("'active'"))
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Role_Code"),
+    )
+
+
+class SmeManpowerNorm(Base):
+    """One productivity benchmark from Manpower_Hour_Details.xlsx (Block A).
+
+    ⚠️ THE KEY IS FIVE PARTS, and each part earns its place against the real
+    workbook:
+
+      · Type (CV/ME) separates LSC4/ESC41 and LSC5/ESC51, which appear once for
+        civil and once for mechanical;
+      · Activity separates LSC10/ESC101, the PU seal coat, which is one code
+        serving BOTH the 4 mm and 6 mm systems at 70 and 90 m²/shift;
+      · Variant_Key separates what nothing else can — CV blasting is filed
+        under ESC1 twice, at 300 m²/shift with a crew of 4 and at 40 m²/shift
+        with a crew of 2, and no other column in the row differs.
+
+    Without all five the importer would silently keep whichever row it read
+    last, and a blasting crew would be planned against a benchmark 7.5× wrong.
+
+    ⚠️ `Lining_System_Code` is NOT always an LSC code. Blasting rows carry
+    'ESC1'/'ESC2' in that column because blasting prepares a surface and
+    belongs to no lining system. Those are the manpower-ONLY activities that a
+    supervisor opens without a store keeper (Phase 5) — they consume no Surface
+    Shield, so a material benchmark for them does not exist and its absence is
+    not a data error.
+    """
+    __tablename__ = "sme_manpower_norm"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Activity_Code = Column(Text)                  # the workbook's 'Activity Code#'
+    Type = Column(Text, nullable=False)           # CV | ME
+    System = Column(Text)                         # 'Cold Bonding' | 'None'
+    Lining_System_Code = Column(Text, nullable=False)
+    Execution_Sub_Activity_Code = Column(Text, nullable=False)
+    Activity = Column(Text, nullable=False)
+    Sub_Activity = Column(Text)
+    Variant_Key = Column(Text, nullable=False, server_default=text("''"))
+    Crew_Size = Column(Float, nullable=False, server_default=text('0'))
+    # Read from the sheet, never assumed: the workbook ships 11 for every row
+    # except Buffing, which is 12. Hard-coding either turns the operator's
+    # correction into a code change.
+    Hours_Per_Shift = Column(Float, nullable=False, server_default=text('0'))
+    Manhours_Per_Shift = Column(Float, nullable=False, server_default=text('0'))
+    Standard_Productivity_Per_Shift = Column(Float, nullable=False,
+                                             server_default=text('0'))
+    SQM_Per_Hour_Per_Person = Column(Float, nullable=False, server_default=text('0'))
+    Remarks = Column(Text)
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Type", "Lining_System_Code", "Execution_Sub_Activity_Code",
+                         "Activity", "Variant_Key"),
+    )
+
+
+class SmeManpowerNormRole(Base):
+    """The crew composition of one norm — how many of each role.
+
+    Stored as rows rather than nine columns so an HOD-added role needs no
+    migration, and so `Crew_Size` can be checked against the parts that make
+    it up instead of being a number nobody can decompose.
+    """
+    __tablename__ = "sme_manpower_norm_role"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Norm_ID = Column(Integer, ForeignKey("sme_manpower_norm.id", ondelete="CASCADE"),
+                     nullable=False)
+    Role_Code = Column(Text, nullable=False)
+    Headcount = Column(Float, nullable=False, server_default=text('0'))
+    __table_args__ = (
+        UniqueConstraint("Norm_ID", "Role_Code"),
     )
 
 class MhManhourEstimates(Base):

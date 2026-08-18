@@ -1434,6 +1434,10 @@ def check_models_schema_parity() -> None:
                # exact ERP↔SME join keys, new-stack only — the frozen legacy
                # SQLite never learns them.
                ("sme_recipe", "SAP_Code"), ("sme_inventory_seed", "SAP_Code"),
+               # 2026-08-18 Phase 7 roster (alembic a7e2c9d41b83): which
+               # 12-hour shift a worker is on. New-stack only — the frozen
+               # legacy attendance import has one undifferentiated day.
+               ("mh_employees", "Shift"),
                # 2026-08 execution sub-activity (alembic f1d3b7a24c60): the
                # recipe line's quantity is now per sub-activity, so LSC2's
                # Resin A is 0.2700 as ESC21 primer and 1.4674 as ESC22 screed

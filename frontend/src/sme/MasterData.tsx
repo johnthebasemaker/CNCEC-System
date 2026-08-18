@@ -24,6 +24,7 @@ import {
 } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
 import { buildColumns } from '../lib/columns'
+import { ManpowerNormsTab, RolesTab } from './ManpowerMaster'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -536,6 +537,14 @@ export default function MasterData({ siteId }: { siteId?: string }) {
           {
             key: 'dropdowns', label: 'Locations & Types',
             children: <DropdownsTab siteId={siteId} siteMissing={siteMissing} isHod={isHod} />,
+          },
+          {
+            key: 'manpower', label: 'Manpower benchmarks',
+            children: <ManpowerNormsTab />,
+          },
+          {
+            key: 'roles', label: 'Roles',
+            children: <RolesTab />,
           },
         ]}
       />

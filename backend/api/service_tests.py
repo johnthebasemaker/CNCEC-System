@@ -923,9 +923,12 @@ async def test_manhours():
             check("roster upsert → 200", r.status_code == 200, f"got {r.status_code}")
             emps = (await ac.get("/mh/employees", headers=H(hod_t))).json()["items"]
             mine = [e for e in emps if e["Employee_Code"] == "SVC-EMP-1"]
+            # Posted as 'Supply' — the attendance workbook's word — and stored
+            # as NON_GI. The alias is the point: the 2026-08-18 rename was ours,
+            # so an integrator still sending the old spelling must not 422.
             check("re-upsert updates in place (1 row, new name/type)",
                   len(mine) == 1 and mine[0]["Name"] == "Svc One Renamed"
-                  and mine[0]["Worker_Type"] == "Supply", str(mine))
+                  and mine[0]["Worker_Type"] == "NON_GI", str(mine))
             r = await ac.patch(f"/mh/employees/{mine[0]['id']}/status",
                                headers=H(hod_t), params={"status": "inactive"})
             check("status flip → inactive", r.status_code == 200, f"got {r.status_code}")
@@ -1075,18 +1078,18 @@ async def test_manhours():
             emp_row = next((e for e in (await ac.get("/mh/employees", headers=H(hod_t)))
                             .json()["items"] if e["Employee_Code"] == "SVC-IMP-1"), None)
             check("ADD EMPLOYEE attributes land on the roster",
-                  emp_row is not None and emp_row["Worker_Type"] == "Supply"
+                  emp_row is not None and emp_row["Worker_Type"] == "NON_GI"
                   and emp_row["Company"] == "ACME", str(emp_row))
             r = await ac.post("/mh/import", headers=H(hod_t),
                               files={"file": ("junk.xlsx", b"not an xlsx", "application/octet-stream")})
             check("unparseable workbook → 422", r.status_code == 422, f"got {r.status_code}")
 
             # ---- Phase-11A: import fit + bulk-assign -----------------------
-            # Legend defaults: a SAR-only worker gets OWN→GI.
+            # Legend defaults: a SAR-only worker is GI, company GI.
             emp2 = next((e for e in (await ac.get("/mh/employees", headers=H(hod_t)))
                          .json()["items"] if e["Employee_Code"] == "SVC-IMP-2"), None)
-            check("legend default: SAR-only worker → OWN/GI",
-                  emp2 is not None and emp2["Worker_Type"] == "OWN"
+            check("legend default: SAR-only worker → GI",
+                  emp2 is not None and emp2["Worker_Type"] == "GI"
                   and emp2["Company"] == "GI", str(emp2))
 
             # Workbook 2: literal 'nan' junk cells, a duplicated (code,date)
@@ -8221,6 +8224,14 @@ async def test_pg_excel_sync():
     _MAT_H = ["Item", "Vendor/supplying plant", "Purchasing Document",
               "Document Date", "Material_Code", "SAP_Code", "Material_Name",
               "Nature", "UOM", "Available_Qty", "Ordered_Qty"]
+    # Manpower_Hour_Details.xlsx Block A header (the nine role
+    # columns are trimmed to the two this fixture uses).
+    _MP_H = ["Activity Code#", "Type", "System", "Lining_System_Code",
+             "Activity", "Execution_Sub_Activity_Code", "Sub-Activity",
+             "Blaster", "Potman", "Rubber Liner", "Coating applicator",
+             " Person/Crew", "Hrs./shift", "Manhr. / Shift",
+             "Standard Productivity /Shift", "SQ. Mtr/Hr./Person",
+             "Remarks", "Variant_Key"]
 
     def _books(tag: str) -> dict[str, bytes]:
         """The four root workbooks, miniaturised under a unique key prefix.
@@ -8249,6 +8260,15 @@ async def test_pg_excel_sync():
                 ["1", f"{tag} Vendor", "4700000009", "2026-03-01",
                  f"{tag}-MAT-1", f"{tag}-S1", f"{tag} Primer", "Liquid", "KG",
                  100, 40]]}),
+            # 2026-08-18: the manpower norms joined the SME set, so the sync
+            # requires this workbook like the other three. A fixture that omits
+            # it aborts at the "read every workbook up front" pre-flight, which
+            # is the sync working, not failing.
+            "Manpower_Hour_Details.xlsx": _xlsx({"Productivity Estimation": [
+                _MP_H,
+                ["1", "ME", "None", "9907", f"{tag} Lining", f"{tag}30",
+                 "Primer Application", 0, 0, 2, 1, 3, 11, 33, 130, 3.94,
+                 None, ""]]}),
         }
 
     def _stage(tag: str, books: dict[str, bytes] | None = None) -> str:
@@ -14449,6 +14469,310 @@ def _sme_recipe_workbook(rows: list[tuple]) -> bytes:
     return buf.getvalue()
 
 
+# --- Suite CA: manpower norms and the roster ---------------------------------
+async def test_manpower_norms_and_roster():
+    """Suite CA — Phase 3 + 4: the benchmark master, and the two overtime
+    thresholds that replaced one.
+
+    The workbook files CV blasting under ESC1 TWICE — 300 m²/shift with a crew
+    of 4, and 40 m²/shift with a crew of 2 — and no other column separates
+    them. A three-part key keeps whichever row it read last, so a blasting
+    crew would be planned against a benchmark 7.5x wrong. The importer refuses
+    instead, and says what to type.
+
+    Phase 4's headline is that `Worker_Type` had TWO legacy values, not one.
+    The ruling named OWN→GI; the column's vocabulary was OWN | Supply and
+    `Supply` IS the non-GI case, so migrating only OWN would have left a third
+    value that every threshold lookup silently misses.
+    """
+    import io as _io
+
+    from sqlalchemy import text as _sqt
+
+    from .bulk_import import plan_sme_manpower_norms
+    from .manhours import (MH_OT_THRESHOLD_DEFAULTS, compute_mh_hours,
+                           normalize_worker_type, ot_thresholds)
+
+    # ── 1. the identity is five parts, and each one earns its place ─────────
+    def _wb(rows):
+        import openpyxl as _x
+        wb = _x.Workbook(); ws = wb.active
+        ws.append(["Activity Code#", "Type", "System", "Lining_System_Code",
+                   "Activity", "Execution_Sub_Activity_Code", "Sub-Activity",
+                   "Blaster", "Potman", "Mason", "Helper", " Person/Crew",
+                   "Hrs./shift", "Manhr. / Shift",
+                   "Standard Productivity /Shift", "SQ. Mtr/Hr./Person",
+                   "Remarks", "Variant_Key"])
+        for r in rows:
+            ws.append(list(r))
+        b = _io.BytesIO(); wb.save(b); return b.getvalue()
+
+    # two CV blasting rows under ESC1 with DIFFERENT numbers → REFUSED
+    collide = _wb([
+        (1, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 2, 4, 11, 44, 300, 6.82, "", ""),
+        (2, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", ""),
+    ])
+    async with SessionLocal() as s:
+        plan = await plan_sme_manpower_norms(s, collide)
+    check("CA-01 a real collision is REFUSED, not silently overwritten",
+          len(plan["rejects"]) == 1 and len(plan["inserts"]) == 1,
+          f"inserts={len(plan['inserts'])} rejects={plan['rejects']}")
+    check("CA-02 …and the refusal says what to type",
+          "Variant_Key" in str(plan["rejects"]), str(plan["rejects"])[:200])
+
+    # the SAME two rows, disambiguated → both land
+    fixed = _wb([
+        (1, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 2, 4, 11, 44, 300, 6.82, "", "OPEN-AREA"),
+        (2, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", "PU-AREA"),
+    ])
+    async with SessionLocal() as s:
+        plan = await plan_sme_manpower_norms(s, fixed)
+    check("CA-03 a Variant_Key resolves it and BOTH benchmarks land",
+          len(plan["inserts"]) == 2 and not plan["rejects"],
+          f"inserts={len(plan['inserts'])} rejects={plan['rejects']}")
+
+    # an IDENTICAL repeat is benign — the workbook lists blasting twice
+    same = _wb([
+        (1, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", ""),
+        (2, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", ""),
+    ])
+    async with SessionLocal() as s:
+        plan = await plan_sme_manpower_norms(s, same)
+    check("CA-04 an identical repeat collapses instead of failing",
+          len(plan["inserts"]) == 1 and not plan["rejects"]
+          and any("identical repeat" in w for w in plan["warnings"]),
+          f"inserts={len(plan['inserts'])} warnings={plan['warnings']}")
+
+    # ── 2. Block B is not master data ───────────────────────────────────────
+    root = __import__("pathlib").Path(__file__).resolve().parents[2]
+    mp = root / "Manpower_Hour_Details.xlsx"
+    if mp.exists():
+        async with SessionLocal() as s:
+            plan = await plan_sme_manpower_norms(s, mp.read_bytes())
+        planned = len(plan["inserts"]) + len(plan["updates"]) + plan["unchanged"]
+        check("CA-05 the real workbook plans its Block A benchmarks",
+              planned >= 20, f"planned={planned}")
+        check("CA-06 Block B (the day/night worked example) is NOT imported",
+              any("Block B" in w for w in plan["warnings"]),
+              str(plan["warnings"]))
+        codes = {r["Lining_System_Code"] for r in plan["inserts"]}
+        check("CA-07 blasting rows keep their ESC* code in the system column "
+              "(they belong to no lining system)",
+              any(str(c).startswith("ESC") for c in codes) if codes else True,
+              str(sorted(codes)))
+
+    # ── 3. the worker-type rename covers BOTH legacy values ─────────────────
+    check("CA-08 OWN normalises to GI", normalize_worker_type("OWN") == "GI", "")
+    check("CA-09 Supply normalises to NON_GI — the value the ruling did not "
+          "name, and the one a threshold lookup would otherwise miss",
+          normalize_worker_type("Supply") == "NON_GI", "")
+    check("CA-10 an unrecognised type returns None rather than a default",
+          normalize_worker_type("contractor?") is None, "")
+    async with SessionLocal() as s:
+        stray = (await s.execute(_sqt(
+            'SELECT count(*) FROM mh_employees '
+            "WHERE \"Worker_Type\" NOT IN ('GI', 'NON_GI')"))).scalar_one()
+    check("CA-11 no roster row is left on a pre-rename Worker_Type",
+          stray == 0, f"{stray} row(s)")
+
+    # ── 4. the two thresholds actually split hours differently ──────────────
+    # 11 worked hours: 8 + 3 for GI, 10 + 1 for non-GI.
+    tot_gi, nor_gi, ot_gi = compute_mh_hours("06:00", "18:00", 60,
+                                             MH_OT_THRESHOLD_DEFAULTS["GI"])
+    tot_ng, nor_ng, ot_ng = compute_mh_hours("06:00", "18:00", 60,
+                                             MH_OT_THRESHOLD_DEFAULTS["NON_GI"])
+    check("CA-12 a 12-hour shift is 11 net worked hours for both",
+          abs(tot_gi - 11.0) < 1e-9 and abs(tot_ng - 11.0) < 1e-9,
+          f"{tot_gi} / {tot_ng}")
+    check("CA-13 GI splits 8 normal + 3 OT",
+          abs(nor_gi - 8.0) < 1e-9 and abs(ot_gi - 3.0) < 1e-9,
+          f"{nor_gi} + {ot_gi}")
+    check("CA-14 Non-GI splits 10 normal + 1 OT",
+          abs(nor_ng - 10.0) < 1e-9 and abs(ot_ng - 1.0) < 1e-9,
+          f"{nor_ng} + {ot_ng}")
+    check("CA-15 the night shift's midnight rollover still nets 11",
+          abs(compute_mh_hours("18:00", "06:00", 60)[0] - 11.0) < 1e-9,
+          str(compute_mh_hours("18:00", "06:00", 60)))
+
+    # ── 5. thresholds are CONFIGURED, not compiled in ───────────────────────
+    async with SessionLocal() as s:
+        live = await ot_thresholds(s)
+    check("CA-16 the configured thresholds resolve to the operator's values",
+          live.get("GI") == 8.0 and live.get("NON_GI") == 10.0, str(live))
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            "INSERT INTO app_settings (key, value) VALUES "
+            "('mh_ot_threshold_non_gi', '9.5') ON CONFLICT (key) DO UPDATE "
+            "SET value = EXCLUDED.value"))
+        await s.commit()
+        changed = await ot_thresholds(s)
+    check("CA-17 changing the setting changes the threshold",
+          changed.get("NON_GI") == 9.5, str(changed))
+    async with SessionLocal() as s:
+        await s.execute(_sqt("UPDATE app_settings SET value = 'not-a-number' "
+                             "WHERE key = 'mh_ot_threshold_non_gi'"))
+        await s.commit()
+        corrupt = await ot_thresholds(s)
+    check("CA-18 a corrupt setting falls back to the default instead of "
+          "crashing every timesheet write",
+          corrupt.get("NON_GI") == MH_OT_THRESHOLD_DEFAULTS["NON_GI"],
+          str(corrupt))
+    async with SessionLocal() as s:
+        await s.execute(_sqt("UPDATE app_settings SET value = '10' "
+                             "WHERE key = 'mh_ot_threshold_non_gi'"))
+        await s.commit()
+
+    # ── 6. the API surfaces ─────────────────────────────────────────────────
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+        Hsk = await _qsep_login(ac, "SVCQ-sk")
+
+        r = await ac.get("/sme/master/manpower-norms", headers=H)
+        check("CA-19 the benchmark grid loads", r.status_code == 200,
+              f"{r.status_code} {r.text[:120]}")
+        body = r.json()
+        check("CA-20 …and marks the manpower-ONLY activities (no Surface "
+              "Shield recipe), which is a category, not missing data",
+              any(i.get("Manpower_Only") for i in body.get("items", []))
+              if body.get("items") else True,
+              str([i.get("Activity") for i in body.get("items", [])
+                   if i.get("Manpower_Only")][:4]))
+
+        rr = await ac.get("/sme/master/roles", headers=H)
+        check("CA-21 the role master loads with the workbook's nine",
+              rr.status_code == 200
+              and sum(1 for i in rr.json()["items"]
+                      if i.get("Source") == "workbook") == 9,
+              f"{rr.status_code} n={len(rr.json().get('items', []))}")
+        wb_role = next(i for i in rr.json()["items"]
+                       if i.get("Source") == "workbook")
+        pr = await ac.patch(f"/sme/master/roles/{wb_role['id']}",
+                            json={"Name": "Renamed"}, headers=H)
+        check("CA-22 a WORKBOOK role cannot be renamed — it is the vocabulary "
+              "the benchmarks are written in", pr.status_code == 409,
+              f"{pr.status_code} {pr.text[:120]}")
+        dr = await ac.delete(f"/sme/master/roles/{wb_role['id']}", headers=H)
+        check("CA-23 …nor deleted", dr.status_code == 409,
+              f"{dr.status_code} {dr.text[:120]}")
+
+        cr = await ac.post("/sme/master/roles",
+                           json={"Role_Code": "svcz scaffolder",
+                                 "Name": "Scaffolder"}, headers=H)
+        check("CA-24 an HOD can add a role, and the code is canonicalised",
+              cr.status_code == 201 and cr.json()["Role_Code"] == "SVCZ_SCAFFOLDER",
+              f"{cr.status_code} {cr.text[:140]}")
+        new_role_id = cr.json().get("id")
+
+        # A crew may only cite a role the master knows. The norm is CREATED
+        # here rather than borrowed from the grid: the throwaway database is
+        # built from legacy SQLite, which carries no benchmarks, so a
+        # borrow-if-present check would skip itself and look like a pass.
+        mk = await ac.post("/sme/master/manpower-norms", headers=H, json={
+            "Type": "CV", "Lining_System_Code": "SVCZ-LSC",
+            "Execution_Sub_Activity_Code": "SVCZ-ESC", "Activity": "svcz probe",
+            "Crew_Size": 2})
+        check("CA-25a an HOD can create a benchmark", mk.status_code == 201,
+              f"{mk.status_code} {mk.text[:140]}")
+        nid = mk.json().get("id")
+        bad = await ac.patch(f"/sme/master/manpower-norms/{nid}",
+                             json={"Crew": {"NO_SUCH_ROLE": 2}}, headers=H)
+        check("CA-25b a crew citing an unknown role is refused — a typo "
+              "would otherwise become an invisible zero in every plan",
+              bad.status_code == 422, f"{bad.status_code} {bad.text[:140]}")
+        good = await ac.patch(f"/sme/master/manpower-norms/{nid}",
+                              json={"Crew": {"MASON": 2, "HELPER": 0}},
+                              headers=H)
+        check("CA-25c …and a known one is accepted", good.status_code == 200,
+              f"{good.status_code} {good.text[:140]}")
+        back = (await ac.get("/sme/master/manpower-norms", headers=H)).json()
+        mine = next((i for i in back["items"] if i["id"] == nid), None)
+        check("CA-25d a zero headcount REMOVES the role rather than storing 0",
+              mine is not None and mine["Crew"] == {"MASON": 2.0},
+              str(mine and mine["Crew"]))
+        dupe = await ac.post("/sme/master/manpower-norms", headers=H, json={
+            "Type": "CV", "Lining_System_Code": "SVCZ-LSC",
+            "Execution_Sub_Activity_Code": "SVCZ-ESC", "Activity": "svcz probe"})
+        check("CA-25e the five-part identity is enforced by the API too",
+              dupe.status_code == 409, f"{dupe.status_code} {dupe.text[:140]}")
+        variant = await ac.post("/sme/master/manpower-norms", headers=H, json={
+            "Type": "CV", "Lining_System_Code": "SVCZ-LSC",
+            "Execution_Sub_Activity_Code": "SVCZ-ESC", "Activity": "svcz probe",
+            "Variant_Key": "PU-AREA"})
+        check("CA-25f …and a Variant_Key is what makes the second one legal",
+              variant.status_code == 201,
+              f"{variant.status_code} {variant.text[:140]}")
+        await ac.delete(f"/sme/master/manpower-norms/{nid}", headers=H)
+        if variant.status_code == 201:
+            await ac.delete(f"/sme/master/manpower-norms/{variant.json()['id']}",
+                            headers=H)
+
+        if new_role_id:
+            await ac.delete(f"/sme/master/roles/{new_role_id}", headers=H)
+
+        # RBAC: the masters are the {hod, admin} exact-lock, like the rest of S6
+        for path in ("/sme/master/manpower-norms", "/sme/master/roles"):
+            g = await ac.post(path, json={"Role_Code": "X", "Name": "X",
+                                          "Type": "CV",
+                                          "Lining_System_Code": "X",
+                                          "Execution_Sub_Activity_Code": "X",
+                                          "Activity": "X"}, headers=Hsk)
+            check(f"CA-26 a store keeper cannot write {path}",
+                  g.status_code == 403, f"{g.status_code}")
+
+        # the HOD owns the thresholds; a store keeper does not
+        gs = await ac.get("/mh/settings", headers=H)
+        check("CA-27 the HOD can read the overtime thresholds",
+              gs.status_code == 200 and gs.json()["thresholds"]["GI"] == 8.0,
+              f"{gs.status_code} {gs.text[:120]}")
+        ps = await ac.put("/mh/settings", json={"gi": 8.5}, headers=H)
+        check("CA-28 …and set them", ps.status_code == 200
+              and ps.json()["thresholds"]["GI"] == 8.5,
+              f"{ps.status_code} {ps.text[:140]}")
+        await ac.put("/mh/settings", json={"gi": 8}, headers=H)
+        bs = await ac.put("/mh/settings", json={"gi": 8}, headers=Hsk)
+        check("CA-29 a store keeper cannot", bs.status_code == 403,
+              f"{bs.status_code}")
+
+        # the roster carries the shift and the reason its OT starts where it does
+        emp = await ac.post("/mh/employees",
+                            json={"employee_code": "SVCZ-W1", "name": "Night hand",
+                                  "worker_type": "Supply", "shift": "Night"},
+                            headers=H)
+        check("CA-30 the roster accepts the workbook's word 'Supply' and "
+              "stores it as NON_GI", emp.status_code in (200, 201),
+              f"{emp.status_code} {emp.text[:140]}")
+        lst = await ac.get("/mh/employees", headers=H)
+        mine = [i for i in lst.json()["items"]
+                if i.get("Employee_Code") == "SVCZ-W1"]
+        if mine:
+            row = mine[0]
+            check("CA-31 …as NON_GI, on nights, with its own OT threshold",
+                  row.get("Worker_Type") == "NON_GI"
+                  and row.get("Shift") == "Night"
+                  and float(row.get("OT_After_Hours") or 0) == 10.0,
+                  str({k: row.get(k) for k in
+                       ("Worker_Type", "Shift", "OT_After_Hours")}))
+        bad_shift = await ac.post("/mh/employees",
+                                  json={"employee_code": "SVCZ-W2", "name": "x",
+                                        "worker_type": "GI", "shift": "Twilight"},
+                                  headers=H)
+        check("CA-32 an invented shift is refused", bad_shift.status_code == 422,
+              f"{bad_shift.status_code}")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM mh_employees WHERE \"Employee_Code\" "
+                             "LIKE 'SVCZ-%'"))
+        await s.commit()
+
+
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
 async def test_workflow_polish():
     """Suite BX — the operational refinements of 2026-08-13.
@@ -15164,6 +15488,9 @@ async def main() -> int:
     print("\n BZ. The execution sub-activity joins the recipe identity — the "
           "number it splits was previously being summed")
     await test_execution_sub_activity_identity()
+    print("\n CA. Manpower norms and the roster — one blasting code, two "
+          "crews, and a worker type with two legacy spellings")
+    await test_manpower_norms_and_roster()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

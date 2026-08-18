@@ -21,6 +21,18 @@ Data CRUD (database.py §R20.5 helpers, the semantic contract) is ported here:
   * progress   — upsert with None-preserving semantics (legacy
                  upsert_sme_sqm_progress); standalone scopes without an
                  equipment-master row are allowed (legacy SQM editor).
+  * manpower-norms — the productivity benchmarks from
+                 Manpower_Hour_Details.xlsx, global. Identity is five parts
+                 (Type, Lining_System_Code, Execution_Sub_Activity_Code,
+                 Activity, Variant_Key) — see models.SmeManpowerNorm for why
+                 each one is load-bearing. Each norm carries a CREW: a
+                 role → headcount map in its own table, replaced wholesale on
+                 write because a role removed from a crew has to disappear and
+                 an upsert cannot express an absence.
+  * roles      — the role/designation master behind every crew figure and the
+                 roster's dropdown. Workbook-sourced rows are the vocabulary
+                 the benchmarks are expressed in and cannot be renamed or
+                 deleted; an HOD's own additions can.
   * settings   — location / type dropdown values in system_settings
                  (categories sme_location / sme_equipment_type), site-scoped;
                  deletion refuses values still used by equipment at the site.
@@ -54,6 +66,9 @@ router = APIRouter(prefix="/sme/master", tags=["SME master data (S6)"],
 
 equipment_t = _MD.tables["sme_equipment"]
 recipe_t = _MD.tables["sme_recipe"]
+norm_t = _MD.tables["sme_manpower_norm"]
+norm_role_t = _MD.tables["sme_manpower_norm_role"]
+mh_roles_t = _MD.tables["mh_roles"]
 seed_t = _MD.tables["sme_inventory_seed"]
 progress_t = _MD.tables["sme_sqm_progress"]
 settings_t = _MD.tables["system_settings"]
@@ -669,5 +684,278 @@ async def delete_setting(kind: str, value: str, site_id: Optional[str] = None,
         raise HTTPException(404, "value not found")
     await write_audit(session, user["username"], "SME_DELETE_SETTING",
                       "system_settings", f"{cat}:{site}:{value}")
+    await session.commit()
+    return {"deleted": True}
+
+
+# ─── Manpower norms (global — the benchmark master) ──────────────────────────
+class NormBase(BaseModel):
+    Type: str = Field(min_length=1, max_length=10)
+    Lining_System_Code: str = Field(min_length=1, max_length=40)
+    Execution_Sub_Activity_Code: str = Field(min_length=1, max_length=40)
+    Activity: str = Field(min_length=1, max_length=120)
+    Variant_Key: str = Field(default="", max_length=40)
+    Sub_Activity: Optional[str] = None
+    System: Optional[str] = None
+    Activity_Code: Optional[str] = None
+    Crew_Size: float = Field(default=0, ge=0)
+    Hours_Per_Shift: float = Field(default=0, ge=0)
+    Manhours_Per_Shift: float = Field(default=0, ge=0)
+    Standard_Productivity_Per_Shift: float = Field(default=0, ge=0)
+    SQM_Per_Hour_Per_Person: float = Field(default=0, ge=0)
+    Remarks: Optional[str] = None
+    # role code → headcount. Absent means "leave the crew alone" on a PATCH;
+    # an empty dict means "this norm has no crew", which is a real answer.
+    Crew: Optional[dict[str, float]] = None
+
+
+class NormPatch(BaseModel):
+    Type: Optional[str] = Field(default=None, min_length=1, max_length=10)
+    Lining_System_Code: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    Execution_Sub_Activity_Code: Optional[str] = Field(default=None, min_length=1,
+                                                       max_length=40)
+    Activity: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    Variant_Key: Optional[str] = Field(default=None, max_length=40)
+    Sub_Activity: Optional[str] = None
+    System: Optional[str] = None
+    Activity_Code: Optional[str] = None
+    Crew_Size: Optional[float] = Field(default=None, ge=0)
+    Hours_Per_Shift: Optional[float] = Field(default=None, ge=0)
+    Manhours_Per_Shift: Optional[float] = Field(default=None, ge=0)
+    Standard_Productivity_Per_Shift: Optional[float] = Field(default=None, ge=0)
+    SQM_Per_Hour_Per_Person: Optional[float] = Field(default=None, ge=0)
+    Remarks: Optional[str] = None
+    Crew: Optional[dict[str, float]] = None
+
+
+async def _crew_map(session: AsyncSession, norm_ids: list[int]) -> dict:
+    """{norm_id: {role_code: headcount}} for a batch — one query, not N."""
+    if not norm_ids:
+        return {}
+    out: dict[int, dict] = {}
+    rows = (await session.execute(
+        select(norm_role_t.c["Norm_ID"], norm_role_t.c["Role_Code"],
+               norm_role_t.c["Headcount"])
+        .where(norm_role_t.c["Norm_ID"].in_(norm_ids)))).all()
+    for nid, role, head in rows:
+        out.setdefault(int(nid), {})[str(role)] = float(head or 0)
+    return out
+
+
+async def _known_roles(session: AsyncSession) -> dict:
+    return {str(r.Role_Code): str(r.Name) for r in (await session.execute(
+        select(mh_roles_t.c["Role_Code"], mh_roles_t.c["Name"])
+        .where(mh_roles_t.c["status"] == "active"))).all()}
+
+
+async def _write_crew(session: AsyncSession, norm_id: int, crew: dict,
+                      known: dict) -> None:
+    """Replace a norm's crew. Refuses a role the master does not know — a
+    typo'd role code would otherwise become an invisible zero in every plan."""
+    unknown = sorted(set(crew) - set(known))
+    if unknown:
+        raise HTTPException(422, f"unknown role code(s): {unknown}. Add them "
+                                 f"under Roles first.")
+    await session.execute(delete(norm_role_t)
+                          .where(norm_role_t.c["Norm_ID"] == norm_id))
+    for role_code, headcount in crew.items():
+        if float(headcount or 0) <= 0:
+            continue        # zero is how a role is REMOVED, not stored
+        await session.execute(insert(norm_role_t).values(
+            Norm_ID=norm_id, Role_Code=role_code, Headcount=float(headcount)))
+
+
+@router.get("/manpower-norms", summary="Productivity benchmarks (grid source)")
+async def list_manpower_norms(session: AsyncSession = Depends(get_session)):
+    rows = _rows(await session.execute(select(norm_t).order_by(norm_t.c["id"])))
+    crews = await _crew_map(session, [int(r["id"]) for r in rows])
+    known = await _known_roles(session)
+    # Which norms consume no Surface Shield — the manpower-ONLY activities a
+    # supervisor opens without a store keeper. Computed, never stored: it is a
+    # fact ABOUT the recipe table and would go stale the moment a recipe
+    # line is added.
+    material_keys = {(str(a), str(b)) for a, b in (await session.execute(
+        select(recipe_t.c["Lining_System_Code"],
+               recipe_t.c["Execution_Sub_Activity_Code"]).distinct())).all()}
+    for r in rows:
+        crew = crews.get(int(r["id"]), {})
+        r["Crew"] = crew
+        r["Crew_Text"] = " · ".join(
+            f"{known.get(k, k)} {int(v) if float(v).is_integer() else v}"
+            for k, v in sorted(crew.items()))
+        r["Manpower_Only"] = (str(r.get("Lining_System_Code")),
+                              str(r.get("Execution_Sub_Activity_Code"))
+                              ) not in material_keys
+    return {"items": rows, "roles": known}
+
+
+@router.post("/manpower-norms", status_code=201, summary="Add a benchmark")
+async def create_manpower_norm(body: NormBase,
+                               user: dict = Depends(require_roles("hod")),
+                               session: AsyncSession = Depends(get_session)):
+    values = {k: v for k, v in body.model_dump().items()
+              if v is not None and k != "Crew"}
+    for f in ("Type", "Lining_System_Code", "Execution_Sub_Activity_Code",
+              "Activity"):
+        values[f] = str(values[f]).strip()
+    values["Variant_Key"] = str(values.get("Variant_Key") or "").strip()
+    dup = (await session.execute(
+        select(func.count()).select_from(norm_t).where(
+            norm_t.c["Type"] == values["Type"],
+            norm_t.c["Lining_System_Code"] == values["Lining_System_Code"],
+            norm_t.c["Execution_Sub_Activity_Code"]
+            == values["Execution_Sub_Activity_Code"],
+            norm_t.c["Activity"] == values["Activity"],
+            norm_t.c["Variant_Key"] == values["Variant_Key"]))).scalar_one()
+    if dup:
+        raise HTTPException(409, "a benchmark with that Type / system / "
+                                 "sub-activity / activity / variant already "
+                                 "exists — give this one a Variant_Key")
+    new_id = (await session.execute(
+        insert(norm_t).values(**values).returning(norm_t.c["id"]))).scalar_one()
+    if body.Crew is not None:
+        await _write_crew(session, new_id, body.Crew, await _known_roles(session))
+    await write_audit(session, user["username"], "SME_CREATE_MANPOWER_NORM",
+                      "sme_manpower_norm",
+                      f"{values['Type']}/{values['Lining_System_Code']}/"
+                      f"{values['Execution_Sub_Activity_Code']} id={new_id}")
+    await session.commit()
+    return {"created": True, "id": new_id}
+
+
+@router.patch("/manpower-norms/{norm_id}", summary="Edit a benchmark")
+async def update_manpower_norm(norm_id: int, body: NormPatch,
+                               user: dict = Depends(require_roles("hod")),
+                               session: AsyncSession = Depends(get_session)):
+    changes = body.model_dump(exclude_unset=True)
+    crew = changes.pop("Crew", None)
+    if not changes and crew is None:
+        raise HTTPException(422, "no fields to update")
+    try:
+        if changes:
+            res = await session.execute(update(norm_t)
+                                        .where(norm_t.c["id"] == norm_id)
+                                        .values(**changes))
+            if res.rowcount != 1:
+                raise HTTPException(404, "benchmark not found")
+        if crew is not None:
+            await _write_crew(session, norm_id, crew,
+                              await _known_roles(session))
+        await write_audit(session, user["username"], "SME_UPDATE_MANPOWER_NORM",
+                          "sme_manpower_norm",
+                          f"id={norm_id} fields={sorted(changes)}"
+                          + (" +crew" if crew is not None else ""))
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(409, "that Type / system / sub-activity / activity "
+                                 "/ variant combination already exists")
+    return {"updated": True}
+
+
+@router.delete("/manpower-norms/{norm_id}", summary="Delete a benchmark")
+async def delete_manpower_norm(norm_id: int,
+                               user: dict = Depends(require_roles("hod")),
+                               session: AsyncSession = Depends(get_session)):
+    # norm_role rows cascade on the FK; naming it here documents the intent.
+    res = await session.execute(delete(norm_t).where(norm_t.c["id"] == norm_id))
+    if res.rowcount != 1:
+        raise HTTPException(404, "benchmark not found")
+    await write_audit(session, user["username"], "SME_DELETE_MANPOWER_NORM",
+                      "sme_manpower_norm", f"id={norm_id}")
+    await session.commit()
+    return {"deleted": True}
+
+
+# ─── Roles (global — the crew + roster vocabulary) ───────────────────────────
+class RoleCreate(BaseModel):
+    Role_Code: str = Field(min_length=1, max_length=40)
+    Name: str = Field(min_length=1, max_length=80)
+    Sort_Order: int = 0
+
+
+class RolePatch(BaseModel):
+    Name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    Sort_Order: Optional[int] = None
+    status: Optional[str] = None
+
+
+@router.get("/roles", summary="Role / designation master (grid + dropdown)")
+async def list_roles(session: AsyncSession = Depends(get_session)):
+    rows = _rows(await session.execute(
+        select(mh_roles_t).order_by(mh_roles_t.c["Sort_Order"],
+                                    mh_roles_t.c["Role_Code"])))
+    used = {str(r[0]) for r in (await session.execute(
+        select(norm_role_t.c["Role_Code"]).distinct())).all()}
+    for r in rows:
+        r["In_Use"] = str(r.get("Role_Code")) in used
+    return {"items": rows}
+
+
+@router.post("/roles", status_code=201, summary="Add a role")
+async def create_role(body: RoleCreate,
+                      user: dict = Depends(require_roles("hod")),
+                      session: AsyncSession = Depends(get_session)):
+    code = body.Role_Code.strip().upper().replace(" ", "_")
+    dup = (await session.execute(select(func.count()).select_from(mh_roles_t)
+           .where(mh_roles_t.c["Role_Code"] == code))).scalar_one()
+    if dup:
+        raise HTTPException(409, f"role {code} already exists")
+    new_id = (await session.execute(insert(mh_roles_t).values(
+        Role_Code=code, Name=body.Name.strip(), Source="custom",
+        Sort_Order=int(body.Sort_Order or 0),
+        created_by=user["username"]).returning(mh_roles_t.c["id"]))).scalar_one()
+    await write_audit(session, user["username"], "SME_CREATE_ROLE", "mh_roles",
+                      f"{code} id={new_id}")
+    await session.commit()
+    return {"created": True, "id": new_id, "Role_Code": code}
+
+
+@router.patch("/roles/{role_id}", summary="Edit a role")
+async def update_role(role_id: int, body: RolePatch,
+                      user: dict = Depends(require_roles("hod")),
+                      session: AsyncSession = Depends(get_session)):
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, "no fields to update")
+    row = (await session.execute(select(mh_roles_t)
+           .where(mh_roles_t.c["id"] == role_id))).mappings().first()
+    if row is None:
+        raise HTTPException(404, "role not found")
+    # A workbook role IS the vocabulary the benchmarks are expressed in.
+    # Renaming one silently re-labels every crew figure that cites it.
+    if row["Source"] == "workbook" and "Name" in changes:
+        raise HTTPException(409, f"{row['Role_Code']} comes from "
+                                 f"Manpower_Hour_Details.xlsx — rename it in "
+                                 f"the workbook and re-sync, or the benchmarks "
+                                 f"and the roster stop agreeing")
+    await session.execute(update(mh_roles_t)
+                          .where(mh_roles_t.c["id"] == role_id).values(**changes))
+    await write_audit(session, user["username"], "SME_UPDATE_ROLE", "mh_roles",
+                      f"id={role_id} fields={sorted(changes)}")
+    await session.commit()
+    return {"updated": True}
+
+
+@router.delete("/roles/{role_id}", summary="Delete a role")
+async def delete_role(role_id: int,
+                      user: dict = Depends(require_roles("hod")),
+                      session: AsyncSession = Depends(get_session)):
+    row = (await session.execute(select(mh_roles_t)
+           .where(mh_roles_t.c["id"] == role_id))).mappings().first()
+    if row is None:
+        raise HTTPException(404, "role not found")
+    if row["Source"] == "workbook":
+        raise HTTPException(409, f"{row['Role_Code']} comes from the workbook "
+                                 f"and cannot be deleted here")
+    used = (await session.execute(select(func.count()).select_from(norm_role_t)
+            .where(norm_role_t.c["Role_Code"] == row["Role_Code"]))).scalar_one()
+    if used:
+        raise HTTPException(409, f"{row['Role_Code']} is used by {used} crew "
+                                 f"line(s) — remove it from those benchmarks "
+                                 f"first")
+    await session.execute(delete(mh_roles_t).where(mh_roles_t.c["id"] == role_id))
+    await write_audit(session, user["username"], "SME_DELETE_ROLE", "mh_roles",
+                      f"{row['Role_Code']} id={role_id}")
     await session.commit()
     return {"deleted": True}

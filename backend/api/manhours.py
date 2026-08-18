@@ -26,7 +26,7 @@ import io
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,16 +51,70 @@ sme_recipe_t = _MD.tables["sme_recipe"]
 router = APIRouter(prefix="/mh", tags=["man-hours"],
                    dependencies=[Depends(require_roles("hod"))])
 
-MH_NORMAL_THRESHOLD_HOURS = 8.0
+# Overtime begins after this many NET worked hours. Two thresholds, because a
+# GI employee and a supplied worker are on different contracts — 11 hours worked
+# is 8 normal + 3 OT for GI, and 10 normal + 1 OT for a non-GI worker.
+#
+# These are DEFAULTS, not the rule: an HOD sets the live values through
+# /mh/settings (app_settings keys below). Hard-coding them would make a
+# contract change a code change.
+MH_OT_THRESHOLD_DEFAULTS = {"GI": 8.0, "NON_GI": 10.0}
+MH_OT_SETTING_KEYS = {"GI": "mh_ot_threshold_gi",
+                      "NON_GI": "mh_ot_threshold_non_gi"}
+# Kept for the callers that have no worker in hand (an estimate, an import
+# with no roster row). It is the stricter of the two on purpose: crediting OT
+# that was not earned is the error that costs money and nobody reports.
+MH_NORMAL_THRESHOLD_HOURS = MH_OT_THRESHOLD_DEFAULTS["GI"]
 MH_DEFAULT_BREAK_MINS = 60
+
+# The physical shift is 12 hours either way — 11 worked plus 1 hour of lunch.
+# `Shift` records WHICH one a worker is on, never how long it is.
+MH_SHIFTS = ("Day", "Night")
+MH_WORKER_TYPES = ("GI", "NON_GI")
 
 # Blank-ish markers normalized to NULL on every write path. 'nan' is the
 # legacy pandas str(NaN) artifact that polluted the bootstrap import (fixed by
 # a one-time UPDATE in both DBs on 2026-07-05); this guard keeps it out for good.
 _BLANKISH = {"", "nan", "none", "null"}
 
-# Legend from the attendance workbook's ADD EMPLOYEE sheet: OWN→GI, Supply→DMC.
-_COMPANY_DEFAULTS = {"OWN": "GI", "Supply": "DMC"}
+# Legend from the attendance workbook's ADD EMPLOYEE sheet. The KEYS were
+# renamed OWN→GI and Supply→NON_GI on 2026-08-18 (alembic a7e2c9d41b83); the
+# VALUES are company names and are unchanged.
+_COMPANY_DEFAULTS = {"GI": "GI", "NON_GI": "DMC"}
+
+# What the attendance workbook writes in its `type` column, mapped onto the
+# stored vocabulary. Kept because the workbook still ships the old words — the
+# rename was ours, not the operator's.
+_WORKER_TYPE_ALIASES = {"own": "GI", "gi": "GI",
+                        "supply": "NON_GI", "non_gi": "NON_GI",
+                        "non-gi": "NON_GI", "nongi": "NON_GI"}
+
+
+def normalize_worker_type(v) -> Optional[str]:
+    """Workbook/legacy spelling → stored vocabulary, or None if unrecognised.
+
+    None is returned rather than a default: silently classifying a worker
+    decides their overtime threshold by accident.
+    """
+    s = str(v or "").strip().lower().replace(" ", "_")
+    return _WORKER_TYPE_ALIASES.get(s)
+
+
+async def ot_thresholds(session: AsyncSession) -> dict:
+    """{worker_type: net hours before OT}, HOD-configured or defaulted."""
+    out = dict(MH_OT_THRESHOLD_DEFAULTS)
+    rows = (await session.execute(text(
+        "SELECT key, value FROM app_settings WHERE key = ANY(CAST(:k AS text[]))"),
+        {"k": list(MH_OT_SETTING_KEYS.values())})).all()
+    by_key = {str(k): v for k, v in rows}
+    for wt, key in MH_OT_SETTING_KEYS.items():
+        raw = by_key.get(key)
+        try:
+            if raw is not None and str(raw).strip() != "":
+                out[wt] = float(raw)
+        except (TypeError, ValueError):
+            pass        # a corrupt setting falls back to the default, loudly
+    return out
 
 
 def _clean(v) -> Optional[str]:
@@ -106,8 +160,38 @@ def _time_to_minutes(value) -> Optional[int]:
         return None
 
 
+async def thresholds_for_codes(session: AsyncSession, sid: str,
+                               codes) -> dict:
+    """{employee_code: OT threshold} for a whole batch — ONE query.
+
+    Resolved per batch rather than per row: both timesheet writers are loops,
+    and a per-row lookup turns a 300-line attendance import into 300 extra
+    round-trips. An employee with no roster row is absent from the map and the
+    caller falls back to the stricter GI threshold.
+    """
+    codes = [c for c in {str(c or "").strip() for c in codes} if c]
+    thresholds = await ot_thresholds(session)
+    if not codes:
+        return {}
+    rows = (await session.execute(
+        select(employees_t.c["Employee_Code"], employees_t.c["Worker_Type"])
+        .where(employees_t.c["Site_ID"] == sid,
+               employees_t.c["Employee_Code"].in_(codes)))).all()
+    return {str(c): thresholds.get(str(wt or ""), thresholds["GI"])
+            for c, wt in rows}
+
+
 def compute_mh_hours(in_time, out_time,
-                     break_mins: int = MH_DEFAULT_BREAK_MINS) -> tuple[float, float, float]:
+                     break_mins: int = MH_DEFAULT_BREAK_MINS,
+                     threshold: float = MH_NORMAL_THRESHOLD_HOURS,
+                     ) -> tuple[float, float, float]:
+    """(total, normal, overtime) net hours.
+
+    `threshold` is where overtime starts and depends on the WORKER, not the
+    shift: both types work the same 12-hour shift (11 net), and it splits
+    8 + 3 for GI and 10 + 1 for non-GI. Callers that know the worker pass
+    their threshold; those that do not get the stricter GI default.
+    """
     im, om = _time_to_minutes(in_time), _time_to_minutes(out_time)
     if im is None or om is None:
         return 0.0, 0.0, 0.0
@@ -116,8 +200,9 @@ def compute_mh_hours(in_time, out_time,
         gross += 24 * 60  # overnight shift guard
     net = max(0.0, (gross - int(break_mins or 0)) / 60.0)
     total = round(net, 2)
-    normal = round(min(total, MH_NORMAL_THRESHOLD_HOURS), 2)
-    ot = round(max(0.0, total - MH_NORMAL_THRESHOLD_HOURS), 2)
+    thr = float(threshold if threshold is not None else MH_NORMAL_THRESHOLD_HOURS)
+    normal = round(min(total, thr), 2)
+    ot = round(max(0.0, total - thr), 2)
     return total, normal, ot
 
 
@@ -143,12 +228,69 @@ async def meta(site_id: Optional[str] = None,
             "system_codes": [str(c) for c in codes]}
 
 
+# --- Overtime settings (HOD-configurable, app-level) --------------------------
+class OtSettingsIn(BaseModel):
+    gi: Optional[float] = Field(default=None, ge=0, le=24)
+    non_gi: Optional[float] = Field(default=None, ge=0, le=24)
+
+
+@router.get("/settings", summary="Overtime thresholds (net hours before OT)")
+async def get_ot_settings(user: dict = Depends(require_roles("hod")),
+                          session: AsyncSession = Depends(get_session)):
+    live = await ot_thresholds(session)
+    return {"thresholds": live, "defaults": dict(MH_OT_THRESHOLD_DEFAULTS),
+            "shift_hours_note": "The physical shift is 12 hours (11 worked + "
+                                "1 hour lunch) for both Day and Night. These "
+                                "thresholds split those worked hours into "
+                                "normal and overtime.",
+            "worker_types": list(MH_WORKER_TYPES)}
+
+
+@router.put("/settings", summary="Set an overtime threshold")
+async def put_ot_settings(body: OtSettingsIn = Body(...),
+                          user: dict = Depends(require_roles("hod")),
+                          session: AsyncSession = Depends(get_session)):
+    """HOD-level, not admin-level, and deliberately so.
+
+    The thresholds are a contract term the HOD owns; routing them through
+    /admin/settings would mean the person accountable for the labour figures
+    cannot change them without raising a ticket.
+
+    ⚠️ Changing a threshold does NOT rewrite timesheets already posted. Hours
+    are split at write time, and silently re-splitting history would move
+    overtime somebody has already been paid for.
+    """
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not changes:
+        raise HTTPException(422, "nothing to set")
+    written = {}
+    for field, wt in (("gi", "GI"), ("non_gi", "NON_GI")):
+        if field not in changes:
+            continue
+        key, val = MH_OT_SETTING_KEYS[wt], str(float(changes[field]))
+        res = await session.execute(text(
+            "UPDATE app_settings SET value = :v WHERE key = :k"),
+            {"k": key, "v": val})
+        if res.rowcount == 0:
+            await session.execute(text(
+                "INSERT INTO app_settings (key, value) VALUES (:k, :v) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"),
+                {"k": key, "v": val})
+        written[wt] = float(val)
+    await write_audit(session, user["username"], "MH_OT_THRESHOLD_UPDATE",
+                      "app_settings",
+                      " ".join(f"{k}={v}" for k, v in sorted(written.items())))
+    await session.commit()
+    return {"updated": True, "thresholds": await ot_thresholds(session)}
+
+
 # --- Employees (labor roster — logically separate from the system users table) --
 class EmployeeIn(BaseModel):
     employee_code: str
     name: str
     designation: Optional[str] = ""
-    worker_type: str = "OWN"  # OWN | Supply
+    worker_type: str = "GI"   # GI | NON_GI (the workbook's OWN | Supply)
+    shift: str = "Day"        # Day | Night
     company: Optional[str] = ""
     site_id: Optional[str] = None
 
@@ -160,13 +302,22 @@ async def list_employees(site_id: Optional[str] = None, status: Optional[str] = 
     sid = resolve_site_param(user, site_id)
     t = employees_t
     stmt = select(t.c["id"], t.c["Site_ID"], t.c["Employee_Code"], t.c["Name"],
-                  t.c["Designation"], t.c["Worker_Type"], t.c["Company"],
-                  t.c["status"], t.c["created_at"])
+                  t.c["Designation"], t.c["Worker_Type"], t.c["Shift"],
+                  t.c["Company"], t.c["status"], t.c["created_at"])
     if sid is not None:
         stmt = stmt.where(t.c["Site_ID"] == sid)
     if status:
         stmt = stmt.where(t.c["status"] == status)
-    return {"items": _rows(await session.execute(stmt.order_by(t.c["Employee_Code"])))}
+    rows = _rows(await session.execute(stmt.order_by(t.c["Employee_Code"])))
+    # The roster is where somebody checks WHY a worker's overtime starts where
+    # it does, so ship the threshold beside the type rather than making the
+    # reader hold the settings page in their head.
+    thresholds = await ot_thresholds(session)
+    for r in rows:
+        r["OT_After_Hours"] = thresholds.get(str(r.get("Worker_Type") or ""),
+                                             thresholds["GI"])
+    return {"items": rows, "ot_thresholds": thresholds,
+            "worker_types": list(MH_WORKER_TYPES), "shifts": list(MH_SHIFTS)}
 
 
 @router.post("/employees", summary="Add or update a roster row (upsert on Site+Code)")
@@ -177,19 +328,28 @@ async def upsert_employee(body: EmployeeIn = Body(...),
     code, name = body.employee_code.strip(), body.name.strip()
     if not code or not name:
         raise HTTPException(422, "employee_code and name are required")
-    if body.worker_type not in ("OWN", "Supply"):
-        raise HTTPException(422, "worker_type must be 'OWN' or 'Supply'")
-    # Legend default (ADD EMPLOYEE sheet): OWN→GI, Supply→DMC when blank.
-    company = _clean(body.company) or _COMPANY_DEFAULTS[body.worker_type]
+    # Accepts the workbook's OWN/Supply as well as GI/NON_GI — the rename was
+    # ours, and an integrator posting the old words should not get a 422.
+    wt = normalize_worker_type(body.worker_type)
+    if wt is None:
+        raise HTTPException(422, f"worker_type must be one of "
+                                 f"{list(MH_WORKER_TYPES)} (OWN / Supply are "
+                                 f"accepted as the workbook's names for them)")
+    shift = str(body.shift or "Day").strip().title()
+    if shift not in MH_SHIFTS:
+        raise HTTPException(422, f"shift must be one of {list(MH_SHIFTS)}")
+    # Legend default (ADD EMPLOYEE sheet): GI→GI, NON_GI→DMC when blank.
+    company = _clean(body.company) or _COMPANY_DEFAULTS[wt]
     stmt = pg_insert(employees_t).values(
         Site_ID=sid, Employee_Code=code, Name=name,
         Designation=_clean(body.designation) or "",
-        Worker_Type=body.worker_type, Company=company,
+        Worker_Type=wt, Shift=shift, Company=company,
         status="active", created_by=user["username"])
     stmt = stmt.on_conflict_do_update(
         index_elements=["Site_ID", "Employee_Code"],
         set_={"Name": stmt.excluded.Name, "Designation": stmt.excluded.Designation,
-              "Worker_Type": stmt.excluded.Worker_Type, "Company": stmt.excluded.Company,
+              "Worker_Type": stmt.excluded.Worker_Type,
+              "Shift": stmt.excluded.Shift, "Company": stmt.excluded.Company,
               "updated_at": _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)})
     await session.execute(stmt)
     await write_audit(session, user["username"], "MH_EMPLOYEE_UPSERT", "mh_employees",
@@ -241,8 +401,15 @@ async def _upsert_timesheet(session: AsyncSession, sid: str, code: str, wdate: s
                             equipment_tag: str = "", system_code: str = "",
                             break_mins: int = MH_DEFAULT_BREAK_MINS,
                             status: str = "PR", remarks: str = "",
-                            created_by: str = "system") -> float:
-    total, normal, ot = compute_mh_hours(in_time, out_time, break_mins)
+                            created_by: str = "system",
+                            threshold: Optional[float] = None) -> float:
+    if threshold is None:
+        # Single-row fallback. Batch callers pass `threshold` from
+        # `thresholds_for_codes` instead — see its docstring for why.
+        threshold = (await thresholds_for_codes(session, sid, [code])).get(
+            code, (await ot_thresholds(session))["GI"])
+    total, normal, ot = compute_mh_hours(in_time, out_time, break_mins,
+                                         threshold)
     stmt = pg_insert(timesheets_t).values(
         Site_ID=sid, Employee_Code=code, Work_Date=str(wdate)[:10],
         Location=_clean(location),
@@ -321,6 +488,9 @@ async def save_timesheets(body: TimesheetBatchIn = Body(...),
     if not body.rows:
         raise HTTPException(422, "no rows to save")
     saved = 0
+    thr = await thresholds_for_codes(session, sid,
+                                     [r.employee_code for r in body.rows])
+    gi = (await ot_thresholds(session))["GI"]
     for r in body.rows:
         if not r.employee_code.strip():
             continue
@@ -329,7 +499,8 @@ async def save_timesheets(body: TimesheetBatchIn = Body(...),
             r.in_time, r.out_time, location=body.location or "",
             equipment_tag=body.equipment_tag, system_code=body.system_code,
             break_mins=body.break_mins, remarks=r.remarks or "",
-            created_by=user["username"])
+            created_by=user["username"],
+            threshold=thr.get(r.employee_code.strip(), gi))
         saved += 1
     await write_audit(session, user["username"], "MH_TIMESHEET_BATCH", "mh_timesheets",
                       f"{sid} {body.work_date} {body.equipment_tag}/{body.system_code} "
@@ -1058,7 +1229,7 @@ def parse_attendance_workbook(data: bytes) -> dict:
             name = str(r.get("name") or "").strip()
             if not code or not name:
                 continue
-            wt = "Supply" if str(r.get("type") or "").strip().lower().startswith("supply") else "OWN"
+            wt = normalize_worker_type(r.get("type")) or "GI"
             emp_rows.append({
                 "code": code, "name": name,
                 "designation": _clean(r.get("designation")) or "",
@@ -1092,8 +1263,8 @@ def parse_attendance_workbook(data: bytes) -> dict:
     for t in timesheets:
         by_code.setdefault(t["code"], {
             "code": t["code"], "name": t["name"] or t["code"],
-            "designation": "", "worker_type": "OWN",
-            "company": _COMPANY_DEFAULTS["OWN"]})
+            "designation": "", "worker_type": "GI",
+            "company": _COMPANY_DEFAULTS["GI"]})
     dates = sorted({t["work_date"] for t in timesheets})
     return {"employees": list(by_code.values()), "timesheets": timesheets,
             "dates": dates}
@@ -1200,12 +1371,16 @@ async def import_attendance(file: UploadFile = File(...), replace: bool = True,
         emp_n += 1
     master_n = await _sync_employee_master(session, sid, parsed["employees"])
     ts_n = 0
+    thr = await thresholds_for_codes(session, sid,
+                                     [t["code"] for t in parsed["timesheets"]])
+    gi = (await ot_thresholds(session))["GI"]
     for t in parsed["timesheets"]:
         await _upsert_timesheet(session, sid, t["code"], t["work_date"],
                                 t["in_time"], t["out_time"], location=t["location"],
                                 equipment_tag=t["equipment_tag"], system_code="",
                                 status=t["status"], remarks=t["remarks"],
-                                created_by="import")
+                                created_by="import",
+                                threshold=thr.get(str(t["code"]).strip(), gi))
         ts_n += 1
     await write_audit(session, user["username"], "MH_IMPORT", "mh_timesheets",
                       f"{sid} employees={emp_n} master={master_n} timesheets={ts_n} "
