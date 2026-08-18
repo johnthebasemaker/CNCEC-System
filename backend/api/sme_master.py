@@ -12,7 +12,8 @@ Data CRUD (database.py §R20.5 helpers, the semantic contract) is ported here:
                  legacy Smart Entry pairing). Delete cascades that progress
                  row. Update deliberately does NOT touch progress (legacy
                  cell-edit semantics).
-  * recipes    — global; unique (Lining_System_Code, Material_Code).
+  * recipes    — global; unique (Lining_System_Code,
+                 Execution_Sub_Activity_Code, Material_Code, SAP_Code).
   * materials  — the SME-owned sme_inventory_seed ONLY (Canon Rule 2: ERP
                  `inventory` is never read or written here). Create is an
                  upsert on Material_Code (legacy INSERT OR REPLACE); update
@@ -327,6 +328,10 @@ async def delete_equipment(eq_id: int,
 # ─── Recipes (global — Canon Rule 3: not site-scoped by design) ──────────────
 class RecipeCreate(BaseModel):
     Lining_System_Code: str = Field(min_length=1, max_length=40)
+    # Part of the identity since f1d3b7a24c60 — one system/material/SAP can
+    # legitimately carry a different quantity per execution sub-activity
+    # (LSC2 Resin A: 0.2700 as ESC21 primer, 1.4674 as ESC22 screed).
+    Execution_Sub_Activity_Code: str = Field(default="", max_length=40)
     Material_Code: str = Field(min_length=1, max_length=80)
     SAP_Code: Optional[str] = Field(default=None, max_length=40)
     For_1_SQM: float = Field(default=0, ge=0)
@@ -346,6 +351,7 @@ class RecipeCreate(BaseModel):
 
 class RecipePatch(BaseModel):
     Lining_System_Code: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    Execution_Sub_Activity_Code: Optional[str] = Field(default=None, max_length=40)
     Material_Code: Optional[str] = Field(default=None, min_length=1, max_length=80)
     SAP_Code: Optional[str] = Field(default=None, max_length=40)
     For_1_SQM: Optional[float] = Field(default=None, ge=0)
@@ -374,21 +380,27 @@ async def create_recipe(body: RecipeCreate,
                         user: dict = Depends(require_roles("hod")),
                         session: AsyncSession = Depends(get_session)):
     code = body.Lining_System_Code.strip()
+    esc = (body.Execution_Sub_Activity_Code or "").strip()
     mat = body.Material_Code.strip()
     sap = (body.SAP_Code or "").strip() or None
-    # Identity is (code, material, SAP) — PU component lines share a material
-    # and differ only by variant SAP (1041 / 1041-1 / …).
+    # Identity is (code, SUB-ACTIVITY, material, SAP). PU component lines share
+    # a material and differ only by variant SAP (1041 / 1041-1 / …); coat lines
+    # share all three of those and differ only by sub-activity. Probing without
+    # the ESC refuses the second coat as a duplicate of the first.
     dup = (await session.execute(
         select(func.count()).select_from(recipe_t)
         .where(recipe_t.c["Lining_System_Code"] == code,
+               recipe_t.c["Execution_Sub_Activity_Code"] == esc,
                recipe_t.c["Material_Code"] == mat,
                recipe_t.c["SAP_Code"].is_(None) if sap is None
                else recipe_t.c["SAP_Code"] == sap))).scalar_one()
     if dup:
         raise HTTPException(409, f"system {code} already has a line for {mat}"
-                                 + (f" (SAP {sap})" if sap else ""))
+                                 + (f" (SAP {sap})" if sap else "")
+                                 + (f" under {esc}" if esc else ""))
     values = {k: v for k, v in body.model_dump().items() if v is not None}
     values["Lining_System_Code"], values["Material_Code"] = code, mat
+    values["Execution_Sub_Activity_Code"] = esc
     new_id = (await session.execute(
         insert(recipe_t).values(**values).returning(recipe_t.c["id"]))).scalar_one()
     await write_audit(session, user["username"], "SME_CREATE_RECIPE",
@@ -414,8 +426,8 @@ async def update_recipe(rec_id: int, body: RecipePatch,
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(409, "that (system code, material, SAP) line "
-                                 "already exists")
+        raise HTTPException(409, "that (system code, sub-activity, material, "
+                                 "SAP) line already exists")
     return {"updated": True}
 
 

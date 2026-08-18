@@ -1434,6 +1434,13 @@ def check_models_schema_parity() -> None:
                # exact ERP↔SME join keys, new-stack only — the frozen legacy
                # SQLite never learns them.
                ("sme_recipe", "SAP_Code"), ("sme_inventory_seed", "SAP_Code"),
+               # 2026-08 execution sub-activity (alembic f1d3b7a24c60): the
+               # recipe line's quantity is now per sub-activity, so LSC2's
+               # Resin A is 0.2700 as ESC21 primer and 1.4674 as ESC22 screed
+               # instead of one merged 1.7374. New-stack only — the frozen
+               # legacy estimator consumes a lining system as a whole and has
+               # no sub-activity concept to learn.
+               ("sme_recipe", "Execution_Sub_Activity_Code"),
                # 2026-07-18 Bug Tracking Engine (alembic c7d4e8f19a25):
                # triage/safety fields on bug_reports, new-stack only.
                ("bug_reports", "title"), ("bug_reports", "severity"),

@@ -45,20 +45,8 @@ _FIRST_SAP = (
 
 
 def upgrade() -> None:
-    # 1. collapse the comma lists down to the one component the row survives as
-    op.execute(f'UPDATE sme_inventory_seed SET "SAP_Code" = {_FIRST_SAP}')
-    op.execute('UPDATE sme_inventory_seed SET "SAP_Code" = \'\' '
-               'WHERE "SAP_Code" IS NULL')
-    # 2. guard: the widened key must be unique BEFORE it becomes the PK, so a
-    #    surprise collision fails the migration instead of the constraint
-    dup = op.get_bind().execute(sa.text(
-        'SELECT "Material_Code", "SAP_Code", COUNT(*) c FROM sme_inventory_seed '
-        'GROUP BY 1, 2 HAVING COUNT(*) > 1')).fetchall()
-    if dup:
-        raise RuntimeError(
-            "sme_inventory_seed has duplicate (Material_Code, SAP_Code) rows "
-            f"after SAP normalization: {[tuple(r) for r in dup][:5]}. Resolve "
-            "them by hand — silently merging stock figures is not safe.")
+    # 1-2. normalise the SAP codes and prove the widened key is unique
+    data_upgrade(op.get_bind())
     # 3. widen the primary key
     op.alter_column('sme_inventory_seed', 'SAP_Code',
                     existing_type=sa.Text(), nullable=False,
@@ -67,6 +55,30 @@ def upgrade() -> None:
                        type_='primary')
     op.create_primary_key('sme_inventory_seed_pkey', 'sme_inventory_seed',
                           ['Material_Code', 'SAP_Code'])
+
+
+def data_upgrade(conn) -> None:
+    """DATA step — see cutover_migrate.run_data_migrations.
+
+    The legacy SQLite database stores a component's SAP as a comma list
+    ("1041, 1041-1"), so a freshly cut-over box arrives holding exactly the
+    shape this normalises. Idempotent: SPLIT_PART of an already-collapsed
+    value is itself.
+    """
+    # 1. collapse the comma lists down to the one component the row survives as
+    conn.execute(sa.text(f'UPDATE sme_inventory_seed SET "SAP_Code" = {_FIRST_SAP}'))
+    conn.execute(sa.text('UPDATE sme_inventory_seed SET "SAP_Code" = \'\' '
+                         'WHERE "SAP_Code" IS NULL'))
+    # 2. guard: the widened key must be unique BEFORE it becomes the PK, so a
+    #    surprise collision fails the migration instead of the constraint
+    dup = conn.execute(sa.text(
+        'SELECT "Material_Code", "SAP_Code", COUNT(*) c FROM sme_inventory_seed '
+        'GROUP BY 1, 2 HAVING COUNT(*) > 1')).fetchall()
+    if dup:
+        raise RuntimeError(
+            "sme_inventory_seed has duplicate (Material_Code, SAP_Code) rows "
+            f"after SAP normalization: {[tuple(r) for r in dup][:5]}. Resolve "
+            "them by hand — silently merging stock figures is not safe.")
 
 
 def downgrade() -> None:

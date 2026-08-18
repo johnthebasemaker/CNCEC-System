@@ -1110,6 +1110,68 @@ need regenerating.
 
 ---
 
+## 14c. Execution sub-activity (`ESC*`) on the recipe line
+
+> Added 2026-08-18 (Phase 7, branch `feat/phase7-foundations`). Rule 13.
+
+`For_1_SQM.xlsx` now names an `Execution_Sub_Activity_Code` per benchmark line,
+and it is part of the recipe line's **identity**: unique
+`(Lining_System_Code, Execution_Sub_Activity_Code, Material_Code, SAP_Code)`.
+
+### 14c.1 The number this split
+
+Two LSC2 lines violated the old three-part key:
+
+| System | Material | SAP | ESC21 (primer) | ESC22 (screed) | old merged value |
+|---|---|---|---|---|---|
+| LSC2 | GI-6002243 | 1049 | 0.2700 | 1.4674 | 1.7374 |
+| LSC2 | GI-6002244 | 1050 | 0.1350 | 0.7326 | 0.8676 |
+
+`plan_sme_recipes` did not reject that collision — it **summed** it as a
+deliberate "coat merge". That was correct while a lining system was consumed as
+a whole. It is wrong the moment a supervisor reports actuals against **one**
+sub-activity: a correct primer draw measured against 1.7374 instead of 0.2700
+reads as 15.5 % of benchmark — an apparent 84.5 % under-consumption that would
+demand a written justification for a variance that does not exist.
+
+### 14c.2 What to test
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-ESC-01** | Master Data → Recipes, add a line for a system/material/SAP that already exists, under a **different** ESC | Accepted (201). |
+| **TC-ESC-02** | Repeat it under the **same** ESC | Refused 409, and the message names the sub-activity. |
+| **TC-ESC-03** | Sync `For_1_SQM.xlsx` | 46 recipe rows, and LSC2/GI-6002243 appears **twice** — 0.2700 and 1.4674, never once at 1.7374. |
+| **TC-ESC-04** | On a database upgraded but **not** reseeded, sync | Rows carrying `''` are **adopted** (ESC filled in place) and the sync says so. They must not be duplicated — an adopted row plus its sibling is two rows, not three. |
+| **TC-ESC-05** | Leave a recipe line the workbook no longer names | Reported as "remain unclassified", never deleted. A recipe row is master data; a sync does not decide it is obsolete. |
+
+> ⚠️ `''` is the "not yet classified" sentinel, deliberately **not** NULL:
+> Postgres treats NULLs as distinct, so a nullable column in the unique
+> constraint would stop the constraint constraining.
+
+### 14c.3 Cutover data steps — the gap closed here
+
+The cutover builds the schema from `models.py` with `create_all` and then
+**stamps** `alembic_version` to head. That is right for schema, but it means no
+migration ever *executes*, so every DATA step inside one was skipped: SAP comma
+lists left un-normalised, the two `app_settings` keys absent, blank rows
+unrepaired. A cut-over box came up schema-right and corrections-missing, and
+nothing said so.
+
+The contract: **a migration whose `upgrade()` carries DML exposes
+`data_upgrade(conn)`, and `upgrade()` calls it.** Both paths then run the same
+code — ordinary `alembic upgrade` through `upgrade()`, a cutover through
+`cutover_migrate.run_data_migrations` — so they cannot drift. Every step must be
+idempotent.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-CUT-01** | Run a cutover | Phase [3] prints `data steps run: 5 (…)` after the stamp. |
+| **TC-CUT-02** | Run it twice against the same target | Identical result, no error — every step is idempotent. |
+| **TC-CUT-03** | Add a migration with an `UPDATE` in `upgrade()` and no `data_upgrade` | **Pre-flight refuses**, before a single byte is written. |
+| **TC-CUT-04** | Check row-count parity after a cutover | `app_settings` shows an *expected post-load addition*, not a mismatch. A **shortfall** still fails — that is the direction no data step can cause. |
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

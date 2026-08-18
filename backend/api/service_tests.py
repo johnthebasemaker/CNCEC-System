@@ -14268,6 +14268,187 @@ async def test_system_code_renumbering():
                   str(sorted(vocab, key=mod.syscode_sort_key)))
 
 
+# --- Suite BZ: the execution sub-activity joins the recipe identity ----------
+async def test_execution_sub_activity_identity():
+    """Suite BZ — ESC is part of the recipe line's identity, and the number it
+    splits was previously being SUMMED.
+
+    The 2026-08 For_1_SQM workbook names an `Execution_Sub_Activity_Code` per
+    benchmark line. Two LSC2 lines violate the old (code, material, SAP) key:
+
+        LSC2 · GI-6002243 · 1049  →  ESC21 0.2700  +  ESC22 1.4674
+        LSC2 · GI-6002244 · 1050  →  ESC21 0.1350  +  ESC22 0.7326
+
+    `plan_sme_recipes` did not reject that collision — it SUMMED it as a
+    deliberate "coat merge", which was right while a system was consumed whole
+    and is wrong the moment a supervisor reports against ONE sub-activity: a
+    correct primer draw measured against 1.7374 instead of 0.2700 reads as
+    15.5 % of benchmark and demands a written justification for a variance that
+    does not exist.
+    """
+    from pathlib import Path as _P
+
+    from sqlalchemy import insert as _insert
+    from sqlalchemy import text as _sqt
+    from sqlalchemy.exc import IntegrityError as _IntegrityError
+
+    from .bulk_import import plan_sme_recipes, recipe_t
+
+    root = _P(__file__).resolve().parents[2]
+
+    # ── 1. the split survives the planner, against the REAL workbook ────────
+    rc = root / "For_1_SQM.xlsx"
+    if rc.exists():
+        async with SessionLocal() as s:
+            plan = await plan_sme_recipes(s, rc.read_bytes())
+        by_key = {}
+        for r in plan["inserts"]:
+            by_key[(r["Lining_System_Code"], r.get("Execution_Sub_Activity_Code"),
+                    r["Material_Code"])] = r["For_1_SQM"]
+        for esc, qty in (("ESC21", 0.27), ("ESC22", 1.4674)):
+            got = by_key.get(("LSC2", esc, "GI-6002243"))
+            check(f"BZ-01 LSC2/GI-6002243 keeps its own {esc} quantity",
+                  got is not None and abs(got - qty) < 1e-6, f"got {got}, want {qty}")
+        merged = sum(v for k, v in by_key.items()
+                     if k[0] == "LSC2" and k[2] == "GI-6002243")
+        check("BZ-02 the two coats are NOT summed into one line",
+              len([k for k in by_key if k[0] == "LSC2" and k[2] == "GI-6002243"]) == 2
+              and abs(merged - 1.7374) < 1e-6,
+              f"total across lines {merged}")
+        check("BZ-03 no line is rejected for its sub-activity", not plan["rejects"],
+              str(plan["rejects"])[:200])
+
+    # ── 2. the DATABASE enforces the widened identity ───────────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt('DELETE FROM sme_recipe WHERE "Lining_System_Code" '
+                             "= 'SVCZ-LSC'"))
+        await s.commit()
+    base = {"Lining_System_Code": "SVCZ-LSC", "Material_Code": "SVCZ-MAT",
+            "SAP_Code": "SVCZ-SAP"}
+    async with SessionLocal() as s:
+        await s.execute(_insert(recipe_t).values(
+            **base, Execution_Sub_Activity_Code="ESC21", For_1_SQM=0.27))
+        await s.execute(_insert(recipe_t).values(
+            **base, Execution_Sub_Activity_Code="ESC22", For_1_SQM=1.4674))
+        await s.commit()
+    async with SessionLocal() as s:
+        n = (await s.execute(_sqt(
+            'SELECT count(*) FROM sme_recipe WHERE "Lining_System_Code" '
+            "= 'SVCZ-LSC'"))).scalar_one()
+    check("BZ-04 one (system, material, SAP) may hold two sub-activities",
+          n == 2, f"rows={n}")
+
+    # …and a TRUE duplicate is still refused
+    dup_refused = False
+    try:
+        async with SessionLocal() as s:
+            await s.execute(_insert(recipe_t).values(
+                **base, Execution_Sub_Activity_Code="ESC21", For_1_SQM=9.9))
+            await s.commit()
+    except _IntegrityError:
+        dup_refused = True
+    check("BZ-05 a repeat of the SAME sub-activity is still refused",
+          dup_refused, "the widened key stopped constraining")
+
+    # ── 3. ADOPTION: an unclassified row is filled in place, not duplicated ─
+    # A production box upgraded (not reseeded) holds rows the ESC migration
+    # gave ''. The first sub-activity to claim one must ADOPT it; otherwise a
+    # system whose merged row split into two coats ends up holding three rows.
+    async with SessionLocal() as s:
+        await s.execute(_sqt('DELETE FROM sme_recipe WHERE "Lining_System_Code" '
+                             "= 'SVCZ-LSC'"))
+        await s.execute(_insert(recipe_t).values(
+            Lining_System_Code="SVCZ-ADOPT", Material_Code="SVCZ-MAT",
+            SAP_Code="SVCZ-SAP", Execution_Sub_Activity_Code="", For_1_SQM=1.7374))
+        await s.commit()
+    wb = _sme_recipe_workbook([
+        ("SVCZ-ADOPT", "ESC21", "SVCZ-MAT", "SVCZ-SAP", 0.27),
+        ("SVCZ-ADOPT", "ESC22", "SVCZ-MAT", "SVCZ-SAP", 1.4674),
+    ])
+    async with SessionLocal() as s:
+        plan = await plan_sme_recipes(s, wb)
+    mine_i = [r for r in plan["inserts"] if r["Lining_System_Code"] == "SVCZ-ADOPT"]
+    mine_u = [u for u in plan["updates"]
+              if u["diff"].get("Execution_Sub_Activity_Code", "").startswith("ESC")]
+    check("BZ-06 the unclassified row is ADOPTED (updated), not left behind",
+          len(mine_u) >= 1, f"updates={mine_u}")
+    check("BZ-07 …and its sibling sub-activity is inserted beside it",
+          len(mine_i) == 1, f"inserts={len(mine_i)}")
+    check("BZ-08 adoption is reported, not silent",
+          any("adopted" in w for w in plan["warnings"]), str(plan["warnings"]))
+    async with SessionLocal() as s:
+        await s.execute(_sqt('DELETE FROM sme_recipe WHERE "Lining_System_Code" '
+                             "= 'SVCZ-ADOPT'"))
+        await s.commit()
+
+    # ── 4. the CRUD refuses/permits on the same rule as the database ────────
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+        body = {"Lining_System_Code": "SVCZ-API", "Material_Code": "SVCZ-MAT",
+                "SAP_Code": "SVCZ-SAP", "For_1_SQM": 0.27}
+        r1 = await ac.post("/sme/master/recipes",
+                           json={**body, "Execution_Sub_Activity_Code": "ESC21"},
+                           headers=H)
+        r2 = await ac.post("/sme/master/recipes",
+                           json={**body, "Execution_Sub_Activity_Code": "ESC22",
+                                 "For_1_SQM": 1.4674}, headers=H)
+        r3 = await ac.post("/sme/master/recipes",
+                           json={**body, "Execution_Sub_Activity_Code": "ESC21"},
+                           headers=H)
+        check("BZ-09 the API accepts a second coat under a different ESC",
+              r1.status_code == 201 and r2.status_code == 201,
+              f"{r1.status_code}/{r2.status_code} {r2.text[:120]}")
+        check("BZ-10 …and still refuses a repeat of the same ESC",
+              r3.status_code == 409, f"{r3.status_code} {r3.text[:120]}")
+    async with SessionLocal() as s:
+        await s.execute(_sqt('DELETE FROM sme_recipe WHERE "Lining_System_Code" '
+                             "= 'SVCZ-API'"))
+        await s.commit()
+
+    # ── 5. the cutover data-step contract ───────────────────────────────────
+    # The load builds the schema from models.py and STAMPS alembic, so no
+    # migration ever executes and every DATA step inside one is skipped. The
+    # guard makes the next migration that forgets fail on cutover DAY.
+    import importlib.util as _ilu
+    cm_path = root / "tools" / "migration" / "cutover_migrate.py"
+    if cm_path.exists():
+        _spec = _ilu.spec_from_file_location("_cutover_contract", cm_path)
+        _cm = _ilu.module_from_spec(_spec)
+        try:
+            _spec.loader.exec_module(_cm)
+        except Exception:
+            _cm = None
+        if _cm is not None:
+            problems = _cm.verify_data_migration_contract()
+            check("BZ-11 every migration carrying DML declares a data step",
+                  not problems, "; ".join(problems))
+            import tempfile as _tf
+            with _tf.TemporaryDirectory() as d:
+                open(os.path.join(d, "forgot.py"), "w").write(
+                    '\ndef upgrade():\n    op.execute("UPDATE employees SET x = 1")\n')
+                caught = _cm.verify_data_migration_contract(d)
+            check("BZ-12 …and the guard actually catches one that does not",
+                  len(caught) == 1 and "forgot.py" in caught[0], str(caught))
+
+
+def _sme_recipe_workbook(rows: list[tuple]) -> bytes:
+    """Minimal in-memory For_1_SQM-shaped workbook for the adoption test."""
+    import io as _io
+
+    import openpyxl as _x
+    wb = _x.Workbook()
+    ws = wb.active
+    ws.append(["Lining_System_Code", "Execution_Sub_Activity_Code",
+               "Material_Code", "SAP_Code", "For_1_SQM"])
+    for r in rows:
+        ws.append(list(r))
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
 async def test_workflow_polish():
     """Suite BX — the operational refinements of 2026-08-13.
@@ -14601,9 +14782,11 @@ async def test_database_isolation():
         site = (await s.execute(_sqt(
             'SELECT "Site_ID" FROM employees WHERE "ID_Number" = \'30816\''))).scalar()
         check("bw: fixture — the employees site backfill (alembic d2f84b19e57c) "
-              "is applied. cutover_migrate STAMPS alembic to head without "
-              "running it, so every DATA migration is skipped on a freshly "
-              "cut-over database — schema right, corrections missing",
+              "is applied. cutover_migrate builds the schema from models.py and "
+              "STAMPS alembic rather than running it, so this row exists only "
+              "because run_data_migrations replays each migration's declared "
+              "data_upgrade step. Closed 2026-08-18; until then a fresh cut was "
+              "schema-right and corrections-missing",
               (site or "") == "CNCEC", f"Site_ID is {site!r}")
 
         n_ppe = (await s.execute(_sqt(
@@ -14978,6 +15161,9 @@ async def main() -> int:
     print("\n BY. The 2026-08 system-code renumbering — three readers that "
           "stopped working without ever failing")
     await test_system_code_renumbering()
+    print("\n BZ. The execution sub-activity joins the recipe identity — the "
+          "number it splits was previously being summed")
+    await test_execution_sub_activity_identity()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

@@ -972,8 +972,25 @@ class SmeRecipe(Base):
     # (e.g. GI-8005765) as four Comp-A/B/C/D lines that only the variant SAP
     # (1041 / 1041-1 / -2 / -3) distinguishes — hence part of the identity.
     SAP_Code = Column(Text)
+    # Which execution sub-activity this line's quantity belongs to (ESC21 =
+    # primer coat, ESC22 = screed coat …), from the 2026-08 For_1_SQM workbook.
+    #
+    # ⚠️ IT IS PART OF THE IDENTITY, and adding it SPLIT a number that used to
+    # be merged. LSC2/GI-6002243/1049 appears under BOTH ESC21 (primer, 0.2700)
+    # and ESC22 (screed, 1.4674); the old three-part key could not tell them
+    # apart, so `plan_sme_recipes` summed them into one 1.7374 "coat merge".
+    # That was right while a system was consumed as a whole and is wrong the
+    # moment a supervisor reports against ONE sub-activity — a correct primer
+    # draw compared against 1.7374 reads as 15.5 % of benchmark.
+    #
+    # '' means "not yet classified by a workbook sync" — a real sentinel, not
+    # NULL, because Postgres treats NULLs as distinct and the unique constraint
+    # below would stop constraining anything.
+    Execution_Sub_Activity_Code = Column(Text, nullable=False,
+                                         server_default=text("''"))
     __table_args__ = (
-        UniqueConstraint("Lining_System_Code", "Material_Code", "SAP_Code"),
+        UniqueConstraint("Lining_System_Code", "Execution_Sub_Activity_Code",
+                         "Material_Code", "SAP_Code"),
     )
 
 class SmeSqmProgress(Base):

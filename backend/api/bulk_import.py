@@ -1408,19 +1408,33 @@ async def plan_sme_recipes(session: AsyncSession, data: bytes) -> dict:
     mat_i = _col(headers, "Material_Code")
     sqm_i = _col(headers, "For_1_SQM")
     sap_i = _col(headers, "SAP_Code", "SAP CODE")
+    esc_i = _col(headers, "Execution_Sub_Activity_Code", "Execution Sub Activity Code")
     sap_aware = sap_i is not None  # 2026-07-18 workbook layout
+    esc_aware = esc_i is not None  # 2026-08 workbook layout
     if code_i is None or mat_i is None or sqm_i is None:
         raise HTTPException(422, "recipe sheet needs Lining_System_Code, "
                                  "Material_Code and For_1_SQM")
-    existing = {(str(r["Lining_System_Code"]).strip(), r["Material_Code"],
-                 _s(r.get("SAP_Code")) or ""): dict(r)
+    existing = {(str(r["Lining_System_Code"]).strip(),
+                 _s(r.get("Execution_Sub_Activity_Code")) or "",
+                 r["Material_Code"], _s(r.get("SAP_Code")) or ""): dict(r)
                 for r in (await session.execute(select(recipe_t))).mappings().all()}
+    # Rows a sync has never classified: identity (code, '', material, SAP). The
+    # ESC migration gave every pre-existing row '' because the codes live only
+    # in the workbook. The FIRST sub-activity to claim one ADOPTS it (an update
+    # that fills the ESC in place) rather than inserting a duplicate beside it;
+    # its siblings insert normally. Without this, a system whose merged row was
+    # split into a primer and a screed line would end up holding all three.
+    unclassified = {k: v for k, v in existing.items() if k[1] == ""}
+    adopted: set = set()
     rejects: list[dict] = []
-    # Line identity is (code, material, SAP). PU systems carry Comp-A/B/C/D
-    # lines that share one Material_Code and differ only by variant SAP; a
-    # repeat of the SAME identity in a SAP-aware file is a deliberate coat
-    # line — For_1_SQM sums (e.g. CONDL2 primer + body coat). Legacy files
-    # (no SAP column) keep the historical first-occurrence-wins dedupe.
+    # Line identity is (code, SUB-ACTIVITY, material, SAP). PU systems carry
+    # Comp-A/B/C/D lines that share a Material_Code and differ only by variant
+    # SAP; a repeat of the SAME identity in a SAP-aware file is a deliberate
+    # coat line and For_1_SQM sums. ⚠️ Before the ESC column existed that merge
+    # also swallowed the primer/screed split — LSC2 Resin A is 0.2700 under
+    # ESC21 and 1.4674 under ESC22, and the three-part key summed them to
+    # 1.7374. With ESC in the key those are two lines, which is the point.
+    # Legacy files (no SAP column) keep first-occurrence-wins dedupe.
     agg: dict[tuple, dict] = {}
     dup_skips, coat_merges = 0, 0
     for n, row in enumerate(rows, start=1):
@@ -1431,6 +1445,7 @@ async def plan_sme_recipes(session: AsyncSession, data: bytes) -> dict:
             rejects.append({"row": n, "reason": f"placeholder code {code!r}"})
             continue
         sap = _s(row[sap_i]) if sap_aware and sap_i < len(row) else None
+        esc = (_s(row[esc_i]) or "") if esc_aware and esc_i < len(row) else ""
         qty = _f(row[sqm_i]) or 0.0
         fields = {}
         for field, i in ix.items():
@@ -1441,7 +1456,7 @@ async def plan_sme_recipes(session: AsyncSession, data: bytes) -> dict:
         for mat in (m.strip() for m in mat_cell.split(",")):
             if not mat:
                 continue
-            key = (code, mat, sap or "")
+            key = (code, esc, mat, sap or "")
             cur = agg.get(key)
             if cur is not None:
                 if sap_aware:
@@ -1451,11 +1466,21 @@ async def plan_sme_recipes(session: AsyncSession, data: bytes) -> dict:
                     dup_skips += 1
                 continue
             agg[key] = {"For_1_SQM": qty, **fields,
-                        **({"SAP_Code": sap} if sap else {})}
+                        **({"SAP_Code": sap} if sap else {}),
+                        "Execution_Sub_Activity_Code": esc}
 
-    inserts, updates, unchanged = [], [], 0
-    for (code, mat, sap), fields in agg.items():
-        cur = existing.get((code, mat, sap))
+    inserts, updates, unchanged, adoptions = [], [], 0, 0
+    for (code, esc, mat, sap), fields in agg.items():
+        cur = existing.get((code, esc, mat, sap))
+        if cur is None and esc:
+            # nothing at this identity — adopt this system/material/SAP's
+            # still-unclassified row, if it has one and nobody took it yet.
+            legacy_key = (code, "", mat, sap)
+            legacy_row = unclassified.get(legacy_key)
+            if legacy_row is not None and legacy_key not in adopted:
+                cur = legacy_row
+                adopted.add(legacy_key)
+                adoptions += 1
         if cur is None:
             inserts.append({"Lining_System_Code": code, "Material_Code": mat,
                             **fields})
@@ -1470,8 +1495,22 @@ async def plan_sme_recipes(session: AsyncSession, data: bytes) -> dict:
         warnings.append(f"{dup_skips} repeated (code, material) line(s) skipped "
                         f"— first occurrence wins (legacy bootstrap rule)")
     if coat_merges:
-        warnings.append(f"{coat_merges} repeated (code, material, SAP) coat "
-                        f"line(s) merged — For_1_SQM summed")
+        warnings.append(f"{coat_merges} repeated (code, sub-activity, material, "
+                        f"SAP) coat line(s) merged — For_1_SQM summed")
+    if adoptions:
+        warnings.append(f"{adoptions} previously unclassified line(s) adopted "
+                        f"into a sub-activity (Execution_Sub_Activity_Code "
+                        f"filled in place, not duplicated)")
+    # Anything still '' after this sync is a line the workbook no longer
+    # describes. Reported, never deleted: a recipe row is master data and the
+    # sync is not the place to decide it is obsolete.
+    if esc_aware:
+        orphans = [k for k in unclassified if k not in adopted]
+        if orphans:
+            warnings.append(
+                f"{len(orphans)} recipe line(s) remain unclassified — the "
+                f"workbook names no sub-activity for them, e.g. "
+                f"{', '.join('/'.join(x for x in o if x) for o in orphans[:3])}")
     return {"inserts": inserts, "updates": updates, "unchanged": unchanged,
             "rejects": rejects, "warnings": warnings}
 

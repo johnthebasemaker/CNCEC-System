@@ -137,7 +137,7 @@ def downgrade() -> None:
     # Re-tightening would fail on any warehouse certificate written since the
     # upgrade, so park those at 'HQ' first — the downgrade is a schema revert,
     # not a licence to delete somebody's compliance documents.
-    op.execute("UPDATE mtc_documents SET \"Site_ID\" = 'HQ' WHERE \"Site_ID\" IS NULL")
+    data_upgrade(op.get_bind())
     op.alter_column("mtc_documents", "Site_ID",
                     existing_type=sa.Text(), nullable=False)
     for name in ("qc_inspection_id", "DN_Number", "po_item_id",
@@ -145,3 +145,9 @@ def downgrade() -> None:
         op.drop_column("mtc_documents", name)
     op.drop_table("qc_transfer_requests")
     op.drop_table("qc_inspections")
+
+
+def data_upgrade(conn) -> None:
+    """DATA step — see cutover_migrate.run_data_migrations. Idempotent."""
+    conn.execute(sa.text(
+        'UPDATE mtc_documents SET "Site_ID" = \'HQ\' WHERE "Site_ID" IS NULL'))
