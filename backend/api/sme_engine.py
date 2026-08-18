@@ -87,7 +87,8 @@ metal, drums and shelves. Stock still on a purchase order is none of those.
 
 Deliberate, documented deviations from legacy:
   * non-numeric system codes sort after numeric ones instead of crashing
-    (legacy used int(code) and would raise ValueError);
+    (legacy used int(code) and would raise ValueError), and among themselves
+    they sort NATURALLY — LSC2 before LSC10, not lexically after it;
   * bottleneck material = first line at the minimum fulfillment rate in
     cascade order (legacy relied on an unstable pandas sort for ties);
   * suggestion rows sort stably by (-count, -gain) keeping candidate order on
@@ -144,9 +145,35 @@ def mat_key(material_code: Any, sap_code: Any) -> str:
 
 
 def syscode_sort_key(code: str) -> tuple:
-    """Numeric-first ordering for lining-system codes (legacy sorted by int)."""
+    """Natural ordering for lining-system codes. THE one implementation —
+    `sme._syskey` and `sme_export_layouts._code_sort_key` delegate here.
+
+    A pure-digit code keeps its historical leading slot and numeric order, so a
+    numeric dataset sorts byte-identically to before this function grew a
+    natural-sort tail.
+
+    A code with an alpha prefix and a numeric tail ("LSC2", "LSC10") sorts on
+    that tail. Plain string order puts LSC10 and LSC11 BETWEEN LSC1 and LSC2,
+    and that is not cosmetic: `allocate()` walks `codes_by_tag` in this order
+    and draws the pool down as it goes, so the order decides which system gets
+    scarce material first. The 2026-08 workbooks renumbered every code from
+    `1` to `LSC1`, which is what turned a numeric sort into a lexical one.
+
+    MIRROR: `frontend/src/sme/engine.ts` → `syscodeSortKey` / `syscodeCompare`.
+    Change both together or `npm run parity:sme` fails, by design.
+    """
     s = _s(code)
-    return (0, int(s), "") if s.isdigit() else (1, 0, s)
+    if s.isdigit():
+        return (0, "", int(s), "")
+    i = 0
+    while i < len(s) and not s[i].isdigit():
+        i += 1
+    j = i
+    while j < len(s) and s[j].isdigit():
+        j += 1
+    if i < j:                       # alpha prefix + numeric run (+ any tail)
+        return (1, s[:i].upper(), int(s[i:j]), s[j:])
+    return (2, s.upper(), 0, "")    # no digits at all
 
 
 # ─── Model ────────────────────────────────────────────────────────────────────

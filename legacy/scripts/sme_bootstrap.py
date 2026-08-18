@@ -81,8 +81,13 @@ def _clean_recipe(df_b: pd.DataFrame) -> pd.DataFrame:
     ).explode("Material_Code").reset_index(drop=True)
     df["Material_Code"] = df["Material_Code"].str.strip()
 
+    # Codes are STRINGS ("LSC1"), not integers. This used to be
+    # .astype(float).astype(int).astype(str), which raises ValueError on the
+    # 2026-08 workbooks. Strip only — and fold Excel's float-ified "1.0" back
+    # to "1" so a pre-renumbering file still matches rows written before it.
     df["Lining_System_Code"] = (
-        df["Lining_System_Code"].astype(float).astype(int).astype(str)
+        df["Lining_System_Code"].astype(str).str.strip()
+        .str.replace(r"^(\d+)\.0$", r"\1", regex=True)
     )
     df["For_1_SQM"] = pd.to_numeric(df["For_1_SQM"], errors="coerce").fillna(0.0)
 
@@ -182,19 +187,24 @@ def _clean_equipment(df_c: pd.DataFrame,
             if v is not None else v
         )
 
-    # Drop rows whose Lining_System_Code is not numeric. The 2026-06 file
-    # carries "To_Be_Confirmed_LSC" placeholder rows for equipment not yet
-    # assigned a lining system — they can't be material-estimated and would
-    # break the portal's integer code-sort. Skip them (and report the count).
-    _code_num = pd.to_numeric(df["Lining_System_Code"], errors="coerce")
-    _dropped = int(_code_num.isna().sum())
+    # Drop rows that name no lining system yet — "To_Be_Confirmed_LSC" for
+    # equipment not yet assigned one. They can't be material-estimated.
+    #
+    # ⚠️ This used to test `pd.to_numeric(...).notna()`, i.e. "is the code a
+    # number?". The 2026-08 workbooks renumbered every code from "1" to
+    # "LSC1", so that predicate became FALSE FOR EVERY ROW and this line
+    # silently discarded all 292 of them while printing a tidy "Skipping…"
+    # count. The test now names what it actually means to exclude.
+    _placeholder = df["Lining_System_Code"].map(D.is_placeholder_syscode)
+    _dropped = int(_placeholder.sum())
     if _dropped:
-        print(f"  Skipping {_dropped} row(s) with non-numeric "
-              f"Lining_System_Code (e.g. To_Be_Confirmed_LSC).")
-    df = df[_code_num.notna()].copy()
+        print(f"  Skipping {_dropped} row(s) whose Lining_System_Code is a "
+              f"placeholder (e.g. To_Be_Confirmed_LSC).")
+    df = df[~_placeholder].copy()
 
     df["Lining_System_Code"] = (
-        df["Lining_System_Code"].astype(float).astype(int).astype(str)
+        df["Lining_System_Code"].astype(str).str.strip()
+        .str.replace(r"^(\d+)\.0$", r"\1", regex=True)
     )
     df["Surface_Area_SQM"] = pd.to_numeric(
         df["Surface_Area_SQM"], errors="coerce",

@@ -76,9 +76,20 @@ def upgrade() -> None:
     #                        from ai_ocr_enabled so a site can keep
     #                        handwriting OCR while turning off the (slower,
     #                        heavier) purchase-document lane, or vice versa.
+    data_upgrade(op.get_bind())
+
+
+def data_upgrade(conn) -> None:
+    """DATA step — see cutover_migrate.run_data_migrations.
+
+    Seed rows, not schema: `create_all` builds the app_settings TABLE but
+    nothing puts these two keys in it, so a cut-over box would come up with
+    both features silently absent. ON CONFLICT DO NOTHING makes a re-run a
+    no-op and never overrides an operator's later choice.
+    """
     for key, value in (("auto_draft_dn", "1"),
                        ("ocr_purchase_scans", "1")):
-        op.execute(sa.text(
+        conn.execute(sa.text(
             "INSERT INTO app_settings (key, value) VALUES (:k, :v) "
             "ON CONFLICT (key) DO NOTHING").bindparams(k=key, v=value))
 

@@ -137,12 +137,17 @@ SME_KINDS = tuple(k for k in WORKBOOKS if k not in ERP_KINDS)
 # Verified against backend/models.py:
 #   inventory          PK  (SAP_Code)                       + UQ (Material_Code)
 #   sme_equipment      UQ  (Site_ID, Equipment_Tag_No, Lining_System_Code)
-#   sme_recipe         UQ  (Lining_System_Code, Material_Code, SAP_Code)
+#   sme_recipe         UQ  (Lining_System_Code, Execution_Sub_Activity_Code,
+#                            Material_Code, SAP_Code)   ← widened f1d3b7a24c60
 #   sme_inventory_seed PK  (Material_Code, SAP_Code)
 CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "inventory": ("SAP_Code",),
     "sme-equipment": ("Site_ID", "Equipment_Tag_No", "Lining_System_Code"),
-    "sme-recipes": ("Lining_System_Code", "Material_Code", "SAP_Code"),
+    # 2026-08 ESC: the sub-activity is part of the identity. LSC2's Resin A is
+    # 0.2700 under ESC21 (primer) and 1.4674 under ESC22 (screed); without ESC
+    # here the second row overwrites the first instead of joining it.
+    "sme-recipes": ("Lining_System_Code", "Execution_Sub_Activity_Code",
+                    "Material_Code", "SAP_Code"),
     # 2026-07-30 COMPONENT IDENTITY: one seed row per PHYSICAL component. Was
     # ("Material_Code",), which made the four Comp-A/B/C/D drums of a PU system
     # collide onto one row and overwrite each other.
@@ -442,6 +447,14 @@ async def run_reseed(session, kind: str, site: str, commit: bool) -> None:
                      + sql.replace("DELETE FROM", "SELECT 1 FROM", 1) + ") q")
             n = (await session.execute(text(probe), params)).scalar()
             print(f"      reseed (dry-run): would drop {n} {table} row(s)")
+            if n:
+                # The plan below is computed against rows this reseed WOULD
+                # have deleted but, being a dry-run, has not. So any warning
+                # about pre-existing rows ("not in the file", "remain
+                # unclassified") describes state that --commit removes first.
+                print(f"      note: the plan below still sees those {n} row(s) "
+                      f"— with --commit they are deleted BEFORE planning, so "
+                      f"warnings about them do not apply to a real run")
 
 
 # ─── main ────────────────────────────────────────────────────────────────────

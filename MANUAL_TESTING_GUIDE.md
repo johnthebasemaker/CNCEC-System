@@ -1062,6 +1062,116 @@ If you only have an hour, run these:
 
 ---
 
+## 14b. Master data — lining-system codes (`LSC*`)
+
+> Added 2026-08-18 (Phase 7, branch `feat/phase7-foundations`). Rule 13: this
+> section ships with the change it describes.
+
+The 2026-08 workbooks renumbered every `Lining_System_Code` from an integer
+(`1`, `2`) to a string (`LSC1`, `LSC2`). Three readers of that column stopped
+working **without failing**, which is what makes this section worth running by
+hand: none of the three raised, none appeared in a log as an error, and two of
+them reported success.
+
+### 14b.1 What to test
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-SYS-01** | Sync the SME workbooks (`tools/pg_excel_sync.py --site CNCEC`, no `--commit`) | The plan reports a **non-zero** row count for equipment and recipes. A run that reports `0 inserts, 0 updates` plus a "skipped N rows" warning is the bug this replaced — it used to complete *successfully* having written nothing. |
+| **TC-SYS-02** | Open the SME Execution Plan with systems LSC1, LSC2, LSC10, LSC11 present | Codes read **LSC1, LSC2, … LSC10, LSC11** — not LSC1, LSC10, LSC11, LSC2. |
+| **TC-SYS-03** | Export the SME workbook (Session Report / Execution Plan) | Blocks are in the same order as the screen. Before the fix every code sorted equal, so block order was whatever the dict happened to hold. |
+| **TC-SYS-04** | Put a `To_Be_Confirmed_LSC` row in the equipment sheet and sync | **That row alone** is skipped, and the warning names it as a *placeholder*. Every other row still lands. |
+| **TC-SYS-05** | Sync a pre-renumbering workbook with numeric codes (`1`, `2`) | Still accepted, still ordered numerically. The change is additive — old files must not break. |
+
+### 14b.2 The one that is not cosmetic
+
+**TC-SYS-06 — allocation order.** `sme_engine.allocate()` walks each tag's
+systems in code order and draws the material pool down as it goes, so **the
+sort decides which system gets scarce stock first**. With a tag carrying LSC2
+and LSC10 and not enough material for both, LSC2 must be served first. Lexical
+order served LSC10 first and the shortfall landed on the wrong system — a wrong
+*number*, not a wrong screen.
+
+### 14b.3 Where the ordering is defined
+
+Four places, and they must agree. Three are deliberate copies across trees that
+must not import from each other:
+
+* `backend/api/sme_engine.py` → `syscode_sort_key` — **the one implementation**;
+  `sme._syskey` and `sme_export_layouts._code_sort_key` delegate to it
+* `frontend/src/sme/engine.ts` → `syscodeSortKey` / `syscodeCompare` — the
+  parity mirror; change it in the **same commit** or `npm run parity:sme` fails
+* `legacy/database.py` → `syscode_sort_key` — legacy's copy (REPO_MAP forbids
+  legacy reaching into `backend/`)
+
+Suite **BY** asserts all three agree, and pins that a purely numeric dataset
+still sorts exactly as it did before — which is why the parity golden did not
+need regenerating.
+
+---
+
+## 14c. Execution sub-activity (`ESC*`) on the recipe line
+
+> Added 2026-08-18 (Phase 7, branch `feat/phase7-foundations`). Rule 13.
+
+`For_1_SQM.xlsx` now names an `Execution_Sub_Activity_Code` per benchmark line,
+and it is part of the recipe line's **identity**: unique
+`(Lining_System_Code, Execution_Sub_Activity_Code, Material_Code, SAP_Code)`.
+
+### 14c.1 The number this split
+
+Two LSC2 lines violated the old three-part key:
+
+| System | Material | SAP | ESC21 (primer) | ESC22 (screed) | old merged value |
+|---|---|---|---|---|---|
+| LSC2 | GI-6002243 | 1049 | 0.2700 | 1.4674 | 1.7374 |
+| LSC2 | GI-6002244 | 1050 | 0.1350 | 0.7326 | 0.8676 |
+
+`plan_sme_recipes` did not reject that collision — it **summed** it as a
+deliberate "coat merge". That was correct while a lining system was consumed as
+a whole. It is wrong the moment a supervisor reports actuals against **one**
+sub-activity: a correct primer draw measured against 1.7374 instead of 0.2700
+reads as 15.5 % of benchmark — an apparent 84.5 % under-consumption that would
+demand a written justification for a variance that does not exist.
+
+### 14c.2 What to test
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-ESC-01** | Master Data → Recipes, add a line for a system/material/SAP that already exists, under a **different** ESC | Accepted (201). |
+| **TC-ESC-02** | Repeat it under the **same** ESC | Refused 409, and the message names the sub-activity. |
+| **TC-ESC-03** | Sync `For_1_SQM.xlsx` | 46 recipe rows, and LSC2/GI-6002243 appears **twice** — 0.2700 and 1.4674, never once at 1.7374. |
+| **TC-ESC-04** | On a database upgraded but **not** reseeded, sync | Rows carrying `''` are **adopted** (ESC filled in place) and the sync says so. They must not be duplicated — an adopted row plus its sibling is two rows, not three. |
+| **TC-ESC-05** | Leave a recipe line the workbook no longer names | Reported as "remain unclassified", never deleted. A recipe row is master data; a sync does not decide it is obsolete. |
+
+> ⚠️ `''` is the "not yet classified" sentinel, deliberately **not** NULL:
+> Postgres treats NULLs as distinct, so a nullable column in the unique
+> constraint would stop the constraint constraining.
+
+### 14c.3 Cutover data steps — the gap closed here
+
+The cutover builds the schema from `models.py` with `create_all` and then
+**stamps** `alembic_version` to head. That is right for schema, but it means no
+migration ever *executes*, so every DATA step inside one was skipped: SAP comma
+lists left un-normalised, the two `app_settings` keys absent, blank rows
+unrepaired. A cut-over box came up schema-right and corrections-missing, and
+nothing said so.
+
+The contract: **a migration whose `upgrade()` carries DML exposes
+`data_upgrade(conn)`, and `upgrade()` calls it.** Both paths then run the same
+code — ordinary `alembic upgrade` through `upgrade()`, a cutover through
+`cutover_migrate.run_data_migrations` — so they cannot drift. Every step must be
+idempotent.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-CUT-01** | Run a cutover | Phase [3] prints `data steps run: 5 (…)` after the stamp. |
+| **TC-CUT-02** | Run it twice against the same target | Identical result, no error — every step is idempotent. |
+| **TC-CUT-03** | Add a migration with an `UPDATE` in `upgrade()` and no `data_upgrade` | **Pre-flight refuses**, before a single byte is written. |
+| **TC-CUT-04** | Check row-count parity after a cutover | `app_settings` shows an *expected post-load addition*, not a mismatch. A **shortfall** still fails — that is the direction no data step can cause. |
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

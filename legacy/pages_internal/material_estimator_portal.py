@@ -1630,7 +1630,7 @@ def _cached_cascade_allocate(tag_order_tuple: tuple) -> pd.DataFrame:
     for tag in tag_order_tuple:
         tag_dm = dm[dm["Equipment_Tag_No."] == tag].copy()
         # Process system codes in numeric order for consistency
-        for code in sorted(tag_dm["Lining_System_Code"].unique(), key=lambda x: int(x)):
+        for code in sorted(tag_dm["Lining_System_Code"].unique(), key=D.syscode_sort_key):
             code_rows = tag_dm[tag_dm["Lining_System_Code"] == code]
             for _, r in code_rows.iterrows():
                 mat     = r["Material_Code"]
@@ -2091,7 +2091,7 @@ def _equipment_report_excel(
             summary_df["Total SQM"] = summary_df["Total SQM"].round(2)
             summary_df = summary_df.sort_values(
                 "System Code",
-                key=lambda s: s.astype(str).map(lambda v: int(v) if str(v).isdigit() else 9999),
+                key=lambda s: s.astype(str).map(D.syscode_sort_key),
             ).reset_index(drop=True)
         else:
             summary_df = pd.DataFrame(columns=SUMMARY_COLS)
@@ -2107,7 +2107,7 @@ def _equipment_report_excel(
                 _src_cols = ["Equipment Name"] + _src_cols
             _ord = out_df[_src_cols].copy()
             _ord["_code_sort"] = _ord["System Code"].astype(str).map(
-                lambda v: int(v) if str(v).isdigit() else 9999)
+                D.syscode_sort_key)
             _ord = _ord.sort_values(["Equipment Tag No.", "_code_sort"])
             _agg_spec = {
                 "System Name": ("System Name",
@@ -2314,7 +2314,7 @@ def _equipment_report_excel(
             df["Total SQM"] = df["Total SQM"].round(2)
             df = df.sort_values(
                 "System Code",
-                key=lambda s: s.astype(str).map(lambda v: int(v) if str(v).isdigit() else 9999),
+                key=lambda s: s.astype(str).map(D.syscode_sort_key),
             ).reset_index(drop=True)
 
         # Append grand total row
@@ -2460,13 +2460,13 @@ def _location_report_excel(*, sheets: list) -> bytes:
             sys_sum = sys_sum.sort_values(
                 "Lining_System_Code",
                 key=lambda s: s.astype(str).map(
-                    lambda v: int(v) if str(v).isdigit() else 9999),
+                    D.syscode_sort_key),
             ).reset_index(drop=True)
             sys_sum.columns = SUMMARY_COLS
 
             tc = tag_code.copy()
             tc["_code_sort"] = tc["Lining_System_Code"].astype(str).map(
-                lambda v: int(v) if str(v).isdigit() else 9999)
+                D.syscode_sort_key)
             tc = tc.sort_values(["Equipment_Tag_No.", "_code_sort"])
             eq_sum = tc.groupby("Equipment_Tag_No.", as_index=False, sort=False).agg(
                 **{"System Name": ("Lining_System_Short_Name",
@@ -2833,7 +2833,7 @@ def _per_equipment_payload(
     mat_cols = ["Material Code","Material Name","UOM","Demand","Available",
                 "Allocated","Shortfall","Fulfil %","SQM"]
     for code in sorted(enriched["Lining_System_Code"].unique() if len(enriched) else [],
-                        key=lambda x: int(x) if str(x).isdigit() else 9999):
+                        key=D.syscode_sort_key):
         code_rows = enriched[enriched["Lining_System_Code"] == code]
         if code_rows.empty:
             continue
@@ -2923,7 +2923,7 @@ def _run_suggestion_engine(tag_list: list[str]) -> dict:
     for i, tag in enumerate(tag_list):
         if i == 0: continue
         tag_dm = dm[dm["Equipment_Tag_No."] == tag]
-        for code in sorted(tag_dm["Lining_System_Code"].unique(), key=lambda x: int(x)):
+        for code in sorted(tag_dm["Lining_System_Code"].unique(), key=D.syscode_sort_key):
             sname    = tag_dm[tag_dm["Lining_System_Code"]==code]["Lining_System_Short_Name"].iloc[0]
             base_pct = _sc_pct(baseline, tag, code)
             best_gain = 0; best_pos = i; best_new_pct = base_pct
@@ -3672,7 +3672,7 @@ letter-spacing:.08em;color:var(--t5);">
                 all_codes_d = (
                     _code_pool[["Lining_System_Code","Lining_System_Short_Name"]]
                     .drop_duplicates()
-                    .sort_values("Lining_System_Code", key=lambda x: x.astype(int))
+                    .sort_values("Lining_System_Code", key=lambda x: x.map(D.syscode_sort_key))
                 )
                 code_opts_d = [f"Code {r.Lining_System_Code} – {r.Lining_System_Short_Name}"
                                for _, r in all_codes_d.iterrows()]
@@ -4121,7 +4121,7 @@ letter-spacing:.08em;color:var(--t5);">
                         f'</div>', unsafe_allow_html=True)
 
                     # Per system code within this location
-                    for code in sorted(sel_codes, key=lambda x: int(x)):
+                    for code in sorted(sel_codes, key=D.syscode_sort_key):
                         code_dm = loc_dm[loc_dm["Lining_System_Code"]==code]
                         if code_dm.empty: continue
                         sname = code_dm["Lining_System_Short_Name"].iloc[0]
@@ -4290,7 +4290,7 @@ letter-spacing:.08em;color:var(--t5);">
                 _t1_tags = _t1_eq_pool["Equipment_Tag_No."].tolist()
                 all_codes_t1 = sorted(
                     dm[dm["Equipment_Tag_No."].isin(_t1_tags)]["Lining_System_Code"]
-                    .unique().tolist(), key=lambda x: int(x))
+                    .unique().tolist(), key=D.syscode_sort_key)
                 f_code = st.multiselect(
                     " System Code", options=all_codes_t1,
                     format_func=lambda c: f"Code {c} – "
@@ -4392,7 +4392,7 @@ letter-spacing:.08em;color:var(--t5);">
                             # Append system codes to session list display
                             _t_codes = sorted(
                                 dm[dm["Equipment_Tag_No."]==t]["Lining_System_Code"].unique(),
-                                key=lambda x: int(x))
+                                key=D.syscode_sort_key)
                             _codes_badges = "  ".join(
                                 f'<span style="font-family:\'JetBrains Mono\',monospace;'
                                 f'font-size:.58rem;background:rgba(245,158,11,.15);'
@@ -4436,7 +4436,7 @@ letter-spacing:.08em;color:var(--t5);">
                     row = eq_master[eq_master["Equipment_Tag_No."]==selected_tag].iloc[0]
                     tag_codes = dm[dm["Equipment_Tag_No."]==selected_tag][
                         ["Lining_System_Code","Lining_System_Short_Name","Total_SQM"]
-                    ].drop_duplicates().sort_values("Lining_System_Code", key=lambda x: x.astype(int))
+                    ].drop_duplicates().sort_values("Lining_System_Code", key=lambda x: x.map(D.syscode_sort_key))
 
                     # Info card
                     st.markdown(
@@ -4673,7 +4673,7 @@ letter-spacing:.08em;color:var(--t5);">
 
                         # Per system code tables
                         for code in sorted(tag_alloc["Lining_System_Code"].unique(),
-                                           key=lambda x: int(x)):
+                                           key=D.syscode_sort_key):
                             code_alloc = tag_alloc[tag_alloc["Lining_System_Code"]==code].copy()
                             sname = code_alloc["Lining_System_Short_Name"].iloc[0]
                             sqm   = code_alloc["Total_SQM"].iloc[0]
@@ -5005,7 +5005,7 @@ letter-spacing:.08em;color:var(--t5);">
                                 unsafe_allow_html=True,
                             )
 
-                        for code in sorted(tag_alloc_ae["Lining_System_Code"].unique(), key=lambda x: int(x)):
+                        for code in sorted(tag_alloc_ae["Lining_System_Code"].unique(), key=D.syscode_sort_key):
                             code_alloc_ae = tag_alloc_ae[tag_alloc_ae["Lining_System_Code"] == code].copy()
                             sname_ae = code_alloc_ae["Lining_System_Short_Name"].iloc[0]
                             sqm_ae   = code_alloc_ae["Total_SQM"].iloc[0]
@@ -5323,7 +5323,7 @@ letter-spacing:.08em;color:var(--t5);">
 
                         # Per system code
                         for code in sorted(tag_alloc["Lining_System_Code"].unique(),
-                                           key=lambda x: int(x)):
+                                           key=D.syscode_sort_key):
                             code_alloc = tag_alloc[tag_alloc["Lining_System_Code"]==code].copy()
                             sname = code_alloc["Lining_System_Short_Name"].iloc[0]
                             sqm   = code_alloc["Total_SQM"].iloc[0]
@@ -5548,7 +5548,7 @@ letter-spacing:.08em;color:var(--t5);">
             _er = _er.sort_values(
                 ["Location", "Equipment Tag No.", "System Code"],
                 key=lambda s: s.astype(str) if s.name != "System Code"
-                              else s.astype(str).map(lambda v: int(v) if str(v).isdigit() else 9999)
+                              else s.astype(str).map(D.syscode_sort_key)
             ).reset_index(drop=True)
 
             _er_eq_count = _er["Equipment Tag No."].nunique()
@@ -5781,7 +5781,7 @@ letter-spacing:.08em;color:var(--t5);">
                 _scr["Total SQM"] = _scr["Total SQM"].round(2)
 
                 def _scr_code_key(s):
-                    return s.map(lambda v: int(v) if str(v).isdigit() else 9999)
+                    return s.map(D.syscode_sort_key)
 
                 # Summary: one row per system code (distinct equipment count + SQM).
                 _scr_summary = (
@@ -6077,9 +6077,17 @@ WITH dynamic_done AS (
         LEFT JOIN equipment e
                ON sp.equipment_tag      = e.equipment_tag
               AND sp.lining_system_code = e.lining_system_code
-        ORDER BY e.location, sp.equipment_tag,
-                 CAST(sp.lining_system_code AS INTEGER)
+        ORDER BY e.location, sp.equipment_tag
             """, conn)
+                    # System code sorted here, not in SQL: SQLite answers
+                    # CAST('LSC1' AS INTEGER) with 0 rather than an error, so a
+                    # SQL cast would order every renumbered code identically.
+                    if not prog_df.empty:
+                        prog_df = prog_df.sort_values(
+                            ["Location", "Equipment Tag", "System Code"],
+                            key=lambda c: (c.map(D.syscode_sort_key)
+                                           if c.name == "System Code" else c),
+                            kind="stable")
 
                     # Pull all consumption rows once for the production-detail panels below.
                     cons_df = pd.read_sql("""
@@ -6093,9 +6101,17 @@ SELECT entry_date       AS "Date",
                uom              AS "UOM",
                consumed_qty     AS "Consumed Qty"
         FROM consumption_log
-        ORDER BY entry_date, equipment_tag,
-                 CAST(lining_system_code AS INTEGER)
+        ORDER BY entry_date, equipment_tag
             """, conn)
+                    # System code is sorted here, not in SQL: SQLite answers
+                    # CAST('LSC1' AS INTEGER) with 0 instead of an error, so a
+                    # SQL cast orders every renumbered code identically.
+                    if not cons_df.empty:
+                        cons_df = cons_df.sort_values(
+                            ["Date", "Equipment Tag", "System Code"],
+                            key=lambda c: (c.map(D.syscode_sort_key)
+                                           if c.name == "System Code" else c),
+                            kind="stable")
                     conn.close()
 
                     prog_df["Status"] = prog_df["Completion %"].apply(
@@ -6283,7 +6299,7 @@ SELECT entry_date       AS "Date",
 
                 tag_alloc = alloc_df[alloc_df["Equipment_Tag_No."]==sel_tag]
                 avail_codes = sorted(tag_alloc["Lining_System_Code"].unique(),
-                                     key=lambda x: int(x))
+                                     key=D.syscode_sort_key)
 
                 if not avail_codes:
                     st.warning("No system code data for this equipment.")
@@ -7098,8 +7114,12 @@ SELECT entry_date       AS "Date",
             if md_table_sel == "Equipment":
                 conn = get_db()
                 recipe_codes_df = pd.read_sql(
-                    "SELECT DISTINCT lining_system_code, lining_system_short_name, lining_type "
-                    "FROM recipe ORDER BY CAST(lining_system_code AS INTEGER)", conn)
+                    "SELECT DISTINCT lining_system_code, lining_system_short_name, "
+                    "lining_type FROM recipe", conn)
+                # Sorted here, not in SQL — SQLite CASTs 'LSC1' to 0 silently.
+                recipe_codes_df = recipe_codes_df.sort_values(
+                    "lining_system_code",
+                    key=lambda c: c.map(D.syscode_sort_key), kind="stable")
                 conn.close()
 
                 code_opts = [

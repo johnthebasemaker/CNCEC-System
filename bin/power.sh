@@ -36,7 +36,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PG_FORMULA="postgresql@16"
+# Overridable, and defaulted defensively: `set -u` turns a missing
+# assignment into a hard abort deep inside a function, which reads as a
+# bug in the caller rather than a missing constant.
+PG_FORMULA="${PG_FORMULA:-postgresql@16}"
 PG_HOST="127.0.0.1"
 PG_PORT="5433"
 CF_LABEL="com.cloudflare.cloudflared"

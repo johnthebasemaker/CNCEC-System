@@ -84,15 +84,22 @@ def upgrade() -> None:
     ):
         op.add_column("employees", col)
 
-    # The one authorised backfill (operator, 2026-08-09). Guarded on the value
-    # still being blank so a re-run, or a later correction by a human, is
-    # never overwritten.
-    op.execute("""
+    data_upgrade(op.get_bind())
+
+
+def data_upgrade(conn) -> None:
+    """DATA step — see cutover_migrate.run_data_migrations.
+
+    The one authorised backfill (operator, 2026-08-09). Guarded on the value
+    still being blank so a re-run, or a later correction by a human, is never
+    overwritten — which is also what makes it safe to run twice.
+    """
+    conn.execute(sa.text("""
         UPDATE employees
            SET "Site_ID" = 'CNCEC'
          WHERE "ID_Number" = '30816'
            AND COALESCE("Site_ID", '') = ''
-    """)
+    """))
 
 
 def downgrade() -> None:

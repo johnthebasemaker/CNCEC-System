@@ -156,6 +156,99 @@ def stamp_alembic(target_url: str) -> bool:
         engine.dispose()
 
 
+def run_data_migrations(target_url: str) -> dict:
+    """Run every migration's DATA step against a freshly loaded target.
+
+    ⚠️ THE GAP THIS CLOSES. The load builds the schema from `models.py` with
+    `create_all` and then STAMPS alembic_version to head. That is right for
+    SCHEMA — models.py is the contract — but it means no migration ever
+    *executes*, so every DATA step inside one is skipped. Those steps are not
+    decoration: they normalise comma-list SAP codes into the component identity
+    the whole SME layer pools on, seed the two app_settings keys that switch
+    procurement automation on, and repair rows the legacy database left blank.
+    A cut-over box was coming up with a correct schema and uncorrected data,
+    and nothing said so.
+
+    The contract: a migration whose upgrade() carries DML exposes
+    `data_upgrade(conn)`, and upgrade() calls it. Both paths then run the same
+    code — ordinary `alembic upgrade` through upgrade(), a cutover through
+    here — so the two cannot drift. Every step must be idempotent; this runs
+    AFTER a load that may already satisfy some of them.
+
+    `verify_data_migration_contract` (below) fails the run when a migration
+    carries DML and does not declare a step, so the gap cannot come back
+    quietly the next time somebody writes one.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(os.path.join(_ROOT, "backend", "alembic.ini"))
+    cfg.set_main_option("script_location", os.path.join(_ROOT, "backend", "alembic"))
+    script = ScriptDirectory.from_config(cfg)
+    # oldest → newest: a later step may depend on an earlier one's correction
+    revs = list(reversed(list(script.walk_revisions())))
+
+    ran, skipped, failed = [], [], []
+    engine = create_engine(target_url)
+    try:
+        for rev in revs:
+            mod = rev.module
+            fn = getattr(mod, "data_upgrade", None)
+            if fn is None:
+                skipped.append(rev.revision)
+                continue
+            try:
+                # One transaction per step: a failure names its own revision
+                # instead of rolling back every correction before it.
+                with engine.begin() as conn:
+                    fn(conn)
+                ran.append(rev.revision)
+            except Exception as e:
+                failed.append((rev.revision, f"{type(e).__name__}: {e}"))
+    finally:
+        engine.dispose()
+
+    if ran:
+        print(f"{GOOD} data steps run: {len(ran)} ({', '.join(ran)})")
+    if not ran and not failed:
+        print(f"{WARN} no migration declared a data step — expected at least one")
+    for rev, err in failed:
+        print(f"{BAD} data step {rev} FAILED: {err}")
+    return {"ran": ran, "skipped": skipped, "failed": failed}
+
+
+def verify_data_migration_contract(versions_dir: str | None = None) -> list[str]:
+    """Fail the cutover when a migration carries DML but declares no data step.
+
+    A source scan, not an import check: the point is to catch the migration
+    somebody writes next year, and the failure has to be loud on cutover day
+    rather than discovered in a stock report a week later.
+    """
+    import re
+
+    vdir = versions_dir or os.path.join(_ROOT, "backend", "alembic", "versions")
+    # DML inside upgrade() only — a downgrade's DML is not a cutover concern.
+    # NB: no trailing \b after the UPDATE arm — \w matches the table name's
+    # first letter and \b would then demand a boundary mid-word, so the arm
+    # could never fire. The table may also be quoted ("employees").
+    dml = re.compile(r'\b(?:INSERT\s+INTO|DELETE\s+FROM)\b|\bUPDATE\s+["\w]',
+                     re.I)
+    problems = []
+    for name in sorted(os.listdir(vdir)):
+        if not name.endswith(".py"):
+            continue
+        src = open(os.path.join(vdir, name), encoding="utf-8").read()
+        up = src.split("def upgrade(")
+        if len(up) < 2:
+            continue
+        body = up[1].split("\ndef ")[0]
+        if dml.search(body) and "def data_upgrade(" not in src:
+            problems.append(
+                f"{name}: upgrade() carries DML but declares no data_upgrade() "
+                f"— a cutover would skip it")
+    return problems
+
+
 def normalize_phones(target_url: str) -> dict:
     """users / pending_users / employees phone columns → +E.164. Values that
     cannot be normalised are LEFT UNTOUCHED and reported (no data destruction)."""
@@ -191,6 +284,15 @@ def normalize_phones(target_url: str) -> dict:
     return out
 
 
+# Tables a POST-LOAD data step legitimately adds rows to, so exact row-count
+# parity with the source is the wrong assertion for them. Each entry names the
+# step responsible; the check still fails on a SHORTFALL, which is what would
+# actually indicate a lost copy.
+POST_LOAD_ADDITIONS = {
+    "app_settings": "e6a91c37b208 seeds auto_draft_dn + ocr_purchase_scans",
+}
+
+
 def verify(source: str, target_url: str, strict: bool) -> bool:
     """Row-count parity + semantic aggregates + UOM + soft-FK orphan scan."""
     ok = True
@@ -202,17 +304,28 @@ def verify(source: str, target_url: str, strict: bool) -> bool:
             src_tables = {r[0] for r in src.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name NOT LIKE 'sqlite_%'")}
-            bad_tables = []
+            bad_tables, added = [], []
             for table in models.Base.metadata.sorted_tables:
                 if table.name not in src_tables:
                     continue
                 s = src.execute(f'SELECT COUNT(*) FROM "{table.name}"').fetchone()[0]
                 t = conn.execute(text(f'SELECT COUNT(*) FROM {table.name}')).scalar()
-                if int(s) != int(t):
+                why = POST_LOAD_ADDITIONS.get(table.name)
+                if why is not None:
+                    # A gain is expected and explained; only a LOSS is a bug.
+                    if int(t) < int(s):
+                        bad_tables.append(
+                            f"{table.name}: source={s} target={t} — FEWER rows "
+                            f"than the source, which no data step can cause")
+                    elif int(t) != int(s):
+                        added.append(f"{table.name} +{int(t) - int(s)} ({why})")
+                elif int(s) != int(t):
                     bad_tables.append(f"{table.name}: source={s} target={t}")
             print((GOOD if not bad_tables else BAD)
                   + f" table parity: {len(src_tables & set(models.Base.metadata.tables))} tables"
-                  + (f" · MISMATCH {bad_tables}" if bad_tables else " — all row counts match"))
+                  + (f" · MISMATCH {bad_tables}" if bad_tables else " — all row counts match")
+                  + (f" · expected post-load additions: {'; '.join(added)}"
+                     if added else ""))
             ok &= not bad_tables
 
             # 2. Semantic aggregates (same oracle dual_ci runs in CI).
@@ -306,6 +419,10 @@ def main(argv=None) -> int:
     print("== CUTOVER MIGRATION: legacy SQLite → PostgreSQL ==\n")
     print("[1] Pre-flight")
     problems = preflight(args.source, args.target, wipe=args.wipe or args.verify_only)
+    # Blocking, and it runs BEFORE any write: a migration that carries DML and
+    # declares no data step means this cutover would load a correct schema over
+    # uncorrected data. Better to refuse than to discover it in a stock report.
+    problems += verify_data_migration_contract()
     if problems:
         for p in problems:
             print(f"{BAD} {p}")
@@ -332,6 +449,13 @@ def main(argv=None) -> int:
 
         print("\n[3] Post-load")
         stamp_alembic(args.target)
+        # AFTER the stamp: the stamp declares "schema is at head", this makes
+        # the DATA match that claim.
+        _dm = run_data_migrations(args.target)
+        if _dm["failed"]:
+            print(f"{BAD} aborting — a data step failed, so the target holds a "
+                  f"correct schema over uncorrected data")
+            return 1
         normalize_phones(args.target)
         print()
 
