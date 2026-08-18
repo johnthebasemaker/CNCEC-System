@@ -273,12 +273,39 @@ const ukey = (tag: string, code: string) => `${tag}\u0000${code}`
 export const unitKey = ukey
 
 /** Numeric-first ordering for lining-system codes (mirrors syscode_sort_key). */
+/**
+ * Natural ordering key for lining-system codes.
+ *
+ * A pure-digit code keeps its historical leading slot and numeric order, so a
+ * numeric dataset sorts byte-identically to before this grew a natural tail.
+ * A code with an alpha prefix and a numeric tail ("LSC2", "LSC10") sorts on
+ * that tail — plain string order puts LSC10 and LSC11 BETWEEN LSC1 and LSC2,
+ * and that is not cosmetic: allocate() walks codesByTag in this order and
+ * draws the pool down as it goes, so the order decides which system gets
+ * scarce material first.
+ *
+ * MIRROR: backend/api/sme_engine.py → syscode_sort_key. Change both together
+ * or `npm run parity:sme` fails, by design.
+ */
+export function syscodeSortKey(code: string): [number, string, number, string] {
+  const s = String(code ?? '').trim()
+  if (s.length > 0 && /^\d+$/.test(s)) return [0, '', Number(s), '']
+  const isDigit = (c: string) => c >= '0' && c <= '9'
+  let i = 0
+  while (i < s.length && !isDigit(s[i])) i += 1
+  let j = i
+  while (j < s.length && isDigit(s[j])) j += 1
+  if (i < j) return [1, s.slice(0, i).toUpperCase(), Number(s.slice(i, j)), s.slice(j)]
+  return [2, s.toUpperCase(), 0, '']
+}
+
 export function syscodeCompare(a: string, b: string): number {
-  const ad = /^\d+$/.test(a)
-  const bd = /^\d+$/.test(b)
-  if (ad && bd) return Number(a) - Number(b)
-  if (ad !== bd) return ad ? -1 : 1
-  return a < b ? -1 : a > b ? 1 : 0
+  const ka = syscodeSortKey(a)
+  const kb = syscodeSortKey(b)
+  if (ka[0] !== kb[0]) return ka[0] - kb[0]
+  if (ka[1] !== kb[1]) return ka[1] < kb[1] ? -1 : 1
+  if (ka[2] !== kb[2]) return ka[2] - kb[2]
+  return ka[3] < kb[3] ? -1 : ka[3] > kb[3] ? 1 : 0
 }
 
 /** Code-point string compare (mirrors Python's str ordering, not locale). */

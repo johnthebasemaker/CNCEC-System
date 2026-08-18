@@ -1062,6 +1062,54 @@ If you only have an hour, run these:
 
 ---
 
+## 14b. Master data — lining-system codes (`LSC*`)
+
+> Added 2026-08-18 (Phase 7, branch `feat/phase7-foundations`). Rule 13: this
+> section ships with the change it describes.
+
+The 2026-08 workbooks renumbered every `Lining_System_Code` from an integer
+(`1`, `2`) to a string (`LSC1`, `LSC2`). Three readers of that column stopped
+working **without failing**, which is what makes this section worth running by
+hand: none of the three raised, none appeared in a log as an error, and two of
+them reported success.
+
+### 14b.1 What to test
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-SYS-01** | Sync the SME workbooks (`tools/pg_excel_sync.py --site CNCEC`, no `--commit`) | The plan reports a **non-zero** row count for equipment and recipes. A run that reports `0 inserts, 0 updates` plus a "skipped N rows" warning is the bug this replaced — it used to complete *successfully* having written nothing. |
+| **TC-SYS-02** | Open the SME Execution Plan with systems LSC1, LSC2, LSC10, LSC11 present | Codes read **LSC1, LSC2, … LSC10, LSC11** — not LSC1, LSC10, LSC11, LSC2. |
+| **TC-SYS-03** | Export the SME workbook (Session Report / Execution Plan) | Blocks are in the same order as the screen. Before the fix every code sorted equal, so block order was whatever the dict happened to hold. |
+| **TC-SYS-04** | Put a `To_Be_Confirmed_LSC` row in the equipment sheet and sync | **That row alone** is skipped, and the warning names it as a *placeholder*. Every other row still lands. |
+| **TC-SYS-05** | Sync a pre-renumbering workbook with numeric codes (`1`, `2`) | Still accepted, still ordered numerically. The change is additive — old files must not break. |
+
+### 14b.2 The one that is not cosmetic
+
+**TC-SYS-06 — allocation order.** `sme_engine.allocate()` walks each tag's
+systems in code order and draws the material pool down as it goes, so **the
+sort decides which system gets scarce stock first**. With a tag carrying LSC2
+and LSC10 and not enough material for both, LSC2 must be served first. Lexical
+order served LSC10 first and the shortfall landed on the wrong system — a wrong
+*number*, not a wrong screen.
+
+### 14b.3 Where the ordering is defined
+
+Four places, and they must agree. Three are deliberate copies across trees that
+must not import from each other:
+
+* `backend/api/sme_engine.py` → `syscode_sort_key` — **the one implementation**;
+  `sme._syskey` and `sme_export_layouts._code_sort_key` delegate to it
+* `frontend/src/sme/engine.ts` → `syscodeSortKey` / `syscodeCompare` — the
+  parity mirror; change it in the **same commit** or `npm run parity:sme` fails
+* `legacy/database.py` → `syscode_sort_key` — legacy's copy (REPO_MAP forbids
+  legacy reaching into `backend/`)
+
+Suite **BY** asserts all three agree, and pins that a purely numeric dataset
+still sorts exactly as it did before — which is why the parity golden did not
+need regenerating.
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

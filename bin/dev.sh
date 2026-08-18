@@ -33,7 +33,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="$ROOT/.dev"          # pidfiles + logs; gitignored
-PG_FORMULA="postgresql@16"
+# Overridable, and defaulted defensively: `set -u` turns a missing
+# assignment into a hard abort deep inside a function, which reads as a
+# bug in the caller rather than a missing constant.
+PG_FORMULA="${PG_FORMULA:-postgresql@16}"
 PG_HOST="127.0.0.1"
 PG_PORT="5433"
 API_PORT="8000"
@@ -227,7 +230,9 @@ preflight() {
 cmd_start() { # cmd_start <env>
   local env="$1"
   preflight
-  [ "$env" = "tunnel" ] && assert_no_foreign_connector
+  # NOT `[ … ] && assert_no_foreign_connector` — under `set -e` an AND-list
+  # that ends false is itself a non-zero command and aborts the script.
+  if [ "$env" = "tunnel" ]; then assert_no_foreign_connector; fi
   ensure_postgres
   start_api
   case "$env" in

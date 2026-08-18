@@ -14163,6 +14163,111 @@ async def test_strict_rbac_api_gates():
         await _qsep_cleanup()
 
 
+# --- Suite BY: the 2026-08 system-code renumbering -----------------------------
+async def test_system_code_renumbering():
+    """Suite BY — lining-system codes became strings, and three readers of them
+    failed WITHOUT failing.
+
+    The 2026-08 workbooks renumbered every `Lining_System_Code` from an integer
+    ("1") to a string ("LSC1"). Nothing raised. What happened instead:
+
+      · `bulk_import.plan_sme_equipment` ran `str(int(float(code)))`, caught the
+        ValueError as "this is a placeholder", and skipped ALL 292 rows —
+        reporting a warning, so `pg_excel_sync` completed having written nothing;
+      · `sme_export_layouts._code_sort_key` answered 9999 for every code, so the
+        exported workbook's block sort became a no-op;
+      · `sme._syskey` and the two engines bucketed every code together and
+        sorted them lexically, putting LSC10 and LSC11 BETWEEN LSC1 and LSC2.
+
+    The last one is not cosmetic. `sme_engine.allocate()` walks `codes_by_tag`
+    in this order and draws the material pool down as it goes, so the order
+    decides which system gets scarce stock first.
+
+    Every check below is a NEGATIVE that was true before the fix.
+    """
+    from pathlib import Path as _P
+
+    from . import sme_engine as _E
+    from . import sme_export_layouts as _X
+    from .bulk_import import _is_placeholder_code, plan_sme_equipment, plan_sme_recipes
+    from .sme import _syskey
+
+    # ── 1. natural order: LSC2 before LSC10, digits still first ─────────────
+    got = sorted(["LSC10", "LSC2", "LSC1", "7", "101", "LSC11"],
+                 key=_E.syscode_sort_key)
+    check("BY-01 natural order puts LSC2 before LSC10",
+          got == ["7", "101", "LSC1", "LSC2", "LSC10", "LSC11"], str(got))
+
+    # ── 2. a purely numeric dataset sorts EXACTLY as it always did ──────────
+    # This is what lets the parity golden stand unregenerated.
+    nums = ["999", "7", "102", "8", "101"]
+    check("BY-02 numeric codes keep their historical order",
+          sorted(nums, key=_E.syscode_sort_key) == sorted(nums, key=int),
+          str(sorted(nums, key=_E.syscode_sort_key)))
+
+    # ── 3. the two former copies now DELEGATE (they had drifted apart) ──────
+    for c in ("LSC1", "LSC2", "LSC10", "7", "X9", ""):
+        check(f"BY-03 _syskey delegates for {c!r}",
+              _syskey(c) == _E.syscode_sort_key(c), str(_syskey(c)))
+        check(f"BY-04 _code_sort_key delegates for {c!r}",
+              _X._code_sort_key(c) == _E.syscode_sort_key(c), str(_X._code_sort_key(c)))
+    check("BY-05 _code_sort_key no longer collapses every code to one value",
+          _X._code_sort_key("LSC1") != _X._code_sort_key("LSC2"), "")
+
+    # ── 4. placeholders are named, not inferred from "is it a number" ───────
+    for code in ("LSC1", "LSC11", "1", "7"):
+        check(f"BY-06 {code!r} is NOT a placeholder", not _is_placeholder_code(code), "")
+    for code in ("To_Be_Confirmed_LSC", "TBC", "", "   ", "-"):
+        check(f"BY-07 {code!r} IS a placeholder", _is_placeholder_code(code), "")
+
+    # ── 5. the planners accept the REAL workbooks ───────────────────────────
+    # The regression that mattered: a plan that writes nothing and calls it a
+    # warning. Asserting "> 0 rows" is the whole point of this suite.
+    root = _P(__file__).resolve().parents[2]
+    eq_xlsx, rc_xlsx = root / "Equipment.xlsx", root / "For_1_SQM.xlsx"
+    if eq_xlsx.exists():
+        async with SessionLocal() as s:
+            plan = await plan_sme_equipment(s, eq_xlsx.read_bytes(), "CNCEC")
+        planned = len(plan.get("inserts", [])) + len(plan.get("updates", [])) \
+            + int(plan.get("unchanged", 0) or 0)
+        check("BY-08 equipment planner PLANS rows from the LSC* workbook",
+              planned > 0, f"planned={planned} warnings={plan.get('warnings')}")
+        check("BY-09 equipment planner skips no row as a placeholder",
+              not any("placeholder" in str(w) for w in plan.get("warnings", [])),
+              str(plan.get("warnings")))
+        codes = {r.get("Lining_System_Code")
+                 for r in plan.get("inserts", []) + plan.get("updates", [])}
+        check("BY-10 planned codes are stored verbatim as LSC*",
+              any(str(c).startswith("LSC") for c in codes) if codes else True,
+              str(sorted(c for c in codes if c)[:6]))
+    if rc_xlsx.exists():
+        async with SessionLocal() as s:
+            plan = await plan_sme_recipes(s, rc_xlsx.read_bytes())
+        planned = len(plan.get("inserts", [])) + len(plan.get("updates", [])) \
+            + int(plan.get("unchanged", 0) or 0)
+        check("BY-11 recipe planner PLANS rows from the LSC* workbook",
+              planned > 0, f"planned={planned} rejects={plan.get('rejects')}")
+        check("BY-12 recipe planner rejects nothing for a non-numeric code",
+              not plan.get("rejects"), str(plan.get("rejects"))[:200])
+
+    # ── 6. legacy carries its own copy; it must AGREE ───────────────────────
+    import importlib.util as _ilu
+    legacy_db = root / "legacy" / "database.py"
+    if legacy_db.exists():
+        spec = _ilu.spec_from_file_location("_legacy_db_syscode", legacy_db)
+        try:
+            mod = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception:
+            mod = None  # legacy pulls streamlit; skip rather than fail the gate
+        if mod is not None and hasattr(mod, "syscode_sort_key"):
+            vocab = ["LSC10", "LSC2", "LSC1", "7", "101", "X9", "", "ABC"]
+            check("BY-13 legacy syscode_sort_key agrees with the engine",
+                  sorted(vocab, key=mod.syscode_sort_key)
+                  == sorted(vocab, key=_E.syscode_sort_key),
+                  str(sorted(vocab, key=mod.syscode_sort_key)))
+
+
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
 async def test_workflow_polish():
     """Suite BX — the operational refinements of 2026-08-13.
@@ -14870,6 +14975,9 @@ async def main() -> int:
     print("\n BX. Workflow polish — the system knew four things and said none "
           "of them, so a person had to hold them and eventually didn't")
     await test_workflow_polish()
+    print("\n BY. The 2026-08 system-code renumbering — three readers that "
+          "stopped working without ever failing")
+    await test_system_code_renumbering()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

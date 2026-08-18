@@ -323,9 +323,12 @@ async def consumption_comparison(site_id: Optional[str] = None,
 
 
 def _syskey(code) -> tuple:
-    """Numeric-first sort for lining-system codes (legacy sorted by int(code))."""
-    s = str(code or "")
-    return (0, int(s)) if s.isdigit() else (1, s)
+    """Sort key for lining-system codes — delegates to the engine's ONE
+    implementation. This used to be a second copy, and it had drifted: it read
+    `(1, s)` for anything non-numeric, so every `LSC*` code fell into one
+    bucket and sorted lexically (LSC1, LSC10, LSC11, LSC2). Do not re-inline it.
+    """
+    return sme_engine.syscode_sort_key(code)
 
 
 async def _demand_matrix(session: AsyncSession, site_id: str | None) -> dict:

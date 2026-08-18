@@ -33,6 +33,8 @@ import io
 import os
 from datetime import date, datetime
 
+from .sme_engine import syscode_sort_key
+
 # Legacy color schemes — verbatim from material_estimator_portal.py:1799.
 COLOR_SCHEMES = {
     "dashboard":   {"title_bg": "#1A2A3A", "header_bg": "#2D4A6A", "total_bg": "#F0C040", "total_fg": "#000000"},
@@ -147,10 +149,15 @@ def _num(v) -> float:
         return 0.0
 
 
-def _code_sort_key(v) -> int:
-    """Legacy numeric-first code sort (int(code) else 9999)."""
-    s = str(v)
-    return int(s) if s.isdigit() else 9999
+def _code_sort_key(v) -> tuple:
+    """Sort key for lining-system codes — delegates to the engine's ONE
+    implementation. This used to return a bare int and answered 9999 for
+    anything non-numeric, so once the workbooks renumbered `1` to `LSC1` EVERY
+    code returned 9999 and the sort became a no-op: the blocks in the exported
+    workbook came out in whatever order the dict happened to hold. Do not
+    re-inline it, and do not narrow it back to `int`.
+    """
+    return syscode_sort_key(v)
 
 
 def _write_block(ws, fmts, start_row: int, subtitle: str, cols: list[str],

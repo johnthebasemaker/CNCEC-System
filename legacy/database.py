@@ -15964,3 +15964,42 @@ def import_mh_attendance(site_id: str, parsed: dict, *, replace: bool = True,
     finally:
         if _owns:
             _c.close()
+
+
+# ─── Lining-system code ordering ──────────────────────────────────────────────
+# The 2026-08 workbooks renumbered every lining-system code from an integer
+# ("1", "2") to a string ("LSC1", "LSC2"). Every sort in the legacy estimator
+# used `int(code)` and would raise ValueError on the new codes; the two SQL
+# sorts used `CAST(lining_system_code AS INTEGER)`, which SQLite answers with
+# 0 rather than an error — so those two degraded silently instead of crashing.
+#
+# ⚠️ DELIBERATE DUPLICATION. This mirrors `backend/api/sme_engine.py`
+# `syscode_sort_key` and `frontend/src/sme/engine.ts` `syscodeSortKey`. It is
+# copied rather than imported because REPO_MAP.md makes `legacy/` and
+# `backend/` separate trees and legacy must not reach across. If you change
+# the ordering, change all three.
+def syscode_sort_key(code):
+    """Natural ordering for lining-system codes: '7' < 'LSC2' < 'LSC10'.
+
+    Pure-digit codes keep the leading slot and numeric order they always had,
+    so a pre-renumbering database sorts exactly as it did before.
+    """
+    s = "" if code is None else str(code).strip()
+    if s.isdigit():
+        return (0, "", int(s), "")
+    i = 0
+    while i < len(s) and not s[i].isdigit():
+        i += 1
+    j = i
+    while j < len(s) and s[j].isdigit():
+        j += 1
+    if i < j:
+        return (1, s[:i].upper(), int(s[i:j]), s[j:])
+    return (2, s.upper(), 0, "")
+
+
+def is_placeholder_syscode(code):
+    """True for a cell that names no lining system yet (To_Be_Confirmed_LSC)."""
+    c = ("" if code is None else str(code)).strip().lower()
+    return (not c) or c in ("tbc", "tbd", "-", "?", "nan", "none") \
+        or c.startswith("to_be_confirmed")

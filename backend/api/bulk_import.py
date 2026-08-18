@@ -106,6 +106,30 @@ CATEGORY_CANON = {"surface shield": "Surface Shields",
 
 _LOCATION_CANON = {c.lower(): c for c in ("Brown Field", "TRAIN J", "TRAIN K")}
 
+# Lining-system codes were integers ("1", "2") until the 2026-08 workbooks
+# renumbered every one of them to a string ("LSC1", "LSC2").
+#
+# ⚠️ Both planners below used to run `code = str(int(float(code)))` and treat
+# the ValueError as "this is a placeholder, skip it". Against the new workbooks
+# that predicate is true of EVERY row: the equipment planner skipped all 292
+# rows and reported a *warning*, so `tools/pg_excel_sync.py` completed
+# successfully having written nothing. Never re-introduce a numeric cast here —
+# the column is Text in `models.py` and both SME engines coerce to string.
+#
+# The placeholder test is now explicit, which is what the cast was only ever
+# approximating.
+# `_s` above already strips the cell, folds Excel's float-ified "1.0" back to
+# "1", and returns None for ''/nan/N/A — so this only has to name the markers
+# that ARE a value but name no system yet.
+_PLACEHOLDER_CODE_MARKERS = ("tbc", "tbd", "-", "?")
+
+
+def _is_placeholder_code(code: str) -> bool:
+    """True for a cell that names no system yet (To_Be_Confirmed_LSC, TBC, -)."""
+    c = (code or "").strip().lower()
+    return (not c) or c in _PLACEHOLDER_CODE_MARKERS or c.startswith("to_be_confirmed")
+
+
 
 def _s(v: Any) -> Optional[str]:
     """Cell → stripped string or None ('', 'nan', 'None', 'N/A' → None)."""
@@ -1274,7 +1298,7 @@ async def plan_sme_equipment(session: AsyncSession, data: bytes, site_id: str) -
             sn_map[r[0].strip()] = str(r[1]).strip()
 
     agg: dict[tuple[str, str], dict] = {}
-    warnings, skipped_nonnum, backfilled_tags = [], 0, 0
+    warnings, skipped_placeholder, backfilled_tags = [], 0, 0
     for row in rows:
         def cell(i):
             return row[i] if i is not None and i < len(row) else None
@@ -1289,10 +1313,8 @@ async def plan_sme_equipment(session: AsyncSession, data: bytes, site_id: str) -
         sqm = _f(cell(sqm_i))
         if not tag or not code:
             continue
-        try:
-            code = str(int(float(code)))
-        except (TypeError, ValueError):
-            skipped_nonnum += 1  # e.g. To_Be_Confirmed_LSC placeholders
+        if _is_placeholder_code(code):
+            skipped_placeholder += 1
             continue
         if sqm is None or sqm <= 0:
             continue
@@ -1313,9 +1335,10 @@ async def plan_sme_equipment(session: AsyncSession, data: bytes, site_id: str) -
                     v = _LOCATION_CANON.get(v.lower(), v)
             if v is not None and col not in a:
                 a[col] = v
-    if skipped_nonnum:
-        warnings.append(f"skipped {skipped_nonnum} row(s) with non-numeric "
-                        f"Lining_System_Code")
+    if skipped_placeholder:
+        warnings.append(f"skipped {skipped_placeholder} row(s) whose "
+                        f"Lining_System_Code is a placeholder (e.g. "
+                        f"To_Be_Confirmed_LSC)")
     if backfilled_tags:
         warnings.append(f"backfilled Equipment_Tag_No from Name for "
                         f"{backfilled_tags} area row(s)")
@@ -1404,10 +1427,8 @@ async def plan_sme_recipes(session: AsyncSession, data: bytes) -> dict:
         code, mat_cell = _s(row[code_i]), _s(row[mat_i])
         if not code or not mat_cell:
             continue
-        try:
-            code = str(int(float(code)))
-        except ValueError:
-            rejects.append({"row": n, "reason": f"non-numeric code {code!r}"})
+        if _is_placeholder_code(code):
+            rejects.append({"row": n, "reason": f"placeholder code {code!r}"})
             continue
         sap = _s(row[sap_i]) if sap_aware and sap_i < len(row) else None
         qty = _f(row[sqm_i]) or 0.0
