@@ -218,3 +218,110 @@ async def get_entry(entry_id: int, site_id: Optional[str] = None,
                     session: AsyncSession = Depends(get_session)):
     return await X.get_entry(session, entry_id,
                              resolve_site_param(user, site_id))
+
+
+# ─── Phase 6: reporting + exports ────────────────────────────────────────────
+# ⚠️ RULE 12. Every export routes through `reports.to_csv` / `reports.to_xlsx`,
+# which apply `_defuse` (csv) and `xl_val` (xlsx). These reports carry
+# `Material_Variance_Reason`, `Manpower_Variance_Reason` and
+# `HOD_Edit_Justification` — FREE TEXT typed by a supervisor and opened in
+# Excel by an HOD, which is exactly the shape the rule exists for. Never hand
+# rows to `csv.writer` or openpyxl directly here.
+_EXPORT_MEDIA = {
+    "csv": ("text/csv", "csv"),
+    "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+             "xlsx"),
+}
+
+
+def _export(fmt: str, title: str, columns: list[str], rows: list[list],
+            username: str):
+    from fastapi.responses import StreamingResponse
+
+    from .reports import to_csv, to_xlsx
+    fmt = (fmt or "xlsx").lower()
+    if fmt not in _EXPORT_MEDIA:
+        raise HTTPException(422, f"format must be one of {sorted(_EXPORT_MEDIA)}")
+    media, ext = _EXPORT_MEDIA[fmt]
+    data = (to_csv(title, columns, rows, username) if fmt == "csv"
+            else to_xlsx(title, columns, rows, username))
+    import io as _io
+    fname = f"{title.lower().replace(' ', '_')}.{ext}"
+    return StreamingResponse(_io.BytesIO(data), media_type=media,
+                             headers={"Content-Disposition":
+                                      f'attachment; filename="{fname}"'})
+
+
+_VARIANCE_COLUMNS = [
+    "Entry_No", "Work_Date", "Equipment_Tag_No", "Lining_System_Code",
+    "Execution_Sub_Activity_Code", "Variant_Key", "status", "Actual_SQM",
+    "Material_Actual", "Material_Benchmark", "Material_Variance",
+    "Material_Variance_Pct", "Manpower_Actual_Manhours",
+    "Manpower_Benchmark_Manhours", "Manpower_Variance_Manhours",
+    "Manpower_Variance_Pct", "Actual_Headcount", "Benchmark_Crew_Size",
+    "Material_Variance_Reason", "Manpower_Variance_Reason",
+    "supervisor_username", "hod_username", "hod_edited",
+    "HOD_Edit_Justification",
+]
+
+_REASON_COLUMNS = [
+    "Entry_No", "Work_Date", "Equipment_Tag_No",
+    "Execution_Sub_Activity_Code", "status", "supervisor_username",
+    "Material_Variance_Reason", "Manpower_Variance_Reason", "hod_username",
+    "hod_edited", "Changed", "HOD_Edit_Justification", "Reject_Reason",
+]
+
+_PREP_COLUMNS = [
+    "Equipment_Tag_No", "Execution_Sub_Activity_Code", "Variant_Key",
+    "Activity", "Done_SQM", "Equipment_Area_SQM", "Coverage_Pct",
+    "Entry_Count", "Last_Entry_No",
+]
+
+
+@router.get("/report/variance", summary="Actual vs benchmark, per entry")
+async def report_variance(date_from: Optional[str] = None,
+                          date_to: Optional[str] = None,
+                          status: Optional[str] = None,
+                          site_id: Optional[str] = None,
+                          format: Optional[str] = Query(default=None),
+                          user: dict = Depends(require_roles("hod", "supervisor",
+                                                             "auditor")),
+                          session: AsyncSession = Depends(get_session)):
+    statuses = [s.strip() for s in (status or "").split(",") if s.strip()]
+    data = await X.variance_report(
+        session, site_id=resolve_site_param(user, site_id),
+        date_from=date_from, date_to=date_to, statuses=statuses or None)
+    if not format:
+        return data
+    rows = [[r.get(c) for c in _VARIANCE_COLUMNS] for r in data["items"]]
+    return _export(format, "Execution Variance", _VARIANCE_COLUMNS, rows,
+                   user["username"])
+
+
+@router.get("/report/reasons", summary="Stated reasons and HOD corrections")
+async def report_reasons(site_id: Optional[str] = None,
+                         format: Optional[str] = Query(default=None),
+                         user: dict = Depends(require_roles("hod", "auditor")),
+                         session: AsyncSession = Depends(get_session)):
+    items = await X.reason_log(session,
+                               site_id=resolve_site_param(user, site_id))
+    if not format:
+        return {"items": items}
+    rows = [[r.get(c) for c in _REASON_COLUMNS] for r in items]
+    return _export(format, "Variance Reason Log", _REASON_COLUMNS, rows,
+                   user["username"])
+
+
+@router.get("/report/surface-prep", summary="Surface-prep area, kept apart "
+                                            "from lining progress")
+async def report_surface_prep(site_id: Optional[str] = None,
+                              format: Optional[str] = Query(default=None),
+                              user: dict = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_session)):
+    data = await X.surface_prep_report(
+        session, site_id=resolve_site_param(user, site_id))
+    if not format:
+        return data
+    rows = [[r.get(c) for c in _PREP_COLUMNS] for r in data["items"]]
+    return _export(format, "Surface Prep Progress", _PREP_COLUMNS, rows,
+                   user["username"])

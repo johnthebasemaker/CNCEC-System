@@ -1204,6 +1204,41 @@ class SmeExecutionEntry(Base):
     )
 
 
+class SmeSurfacePrepProgress(Base):
+    """Surface-prep area done, tracked SEPARATELY from lining progress.
+
+    ⚠️ THIS TABLE EXISTS SO THAT BLASTING CANNOT INFLATE COMPLETION. Blasting
+    100 m² of a tank is not 100 m² of lining done — the surface is merely ready
+    to be lined. Folding it into `sme_sqm_progress.Done_SQM` would report a
+    vessel as part-lined the moment it was cleaned, and every downstream
+    figure (Completion_Pct, SQM_Achievable_Now, the buy list) reads that column.
+
+    Keyed on the SUB-ACTIVITY, not a lining system, because that is exactly
+    what surface prep has none of. One tag can carry several prep activities
+    (blasting, then buffing) and each is tracked on its own line.
+
+    There is deliberately no `Original_SQM` twin here. Prep has no planned area
+    of its own — the area that needs preparing is the equipment's, which
+    `sme_equipment.Surface_Area_SQM` already states. Duplicating it would give
+    two numbers that drift.
+    """
+    __tablename__ = "sme_surface_prep_progress"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    Equipment_Tag_No = Column(Text, nullable=False)
+    Execution_Sub_Activity_Code = Column(Text, nullable=False)
+    Variant_Key = Column(Text, nullable=False, server_default=text("''"))
+    Activity = Column(Text)
+    Done_SQM = Column(Float, nullable=False, server_default=text('0'))
+    Entry_Count = Column(Integer, nullable=False, server_default=text('0'))
+    Last_Entry_No = Column(Text)
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "Equipment_Tag_No",
+                         "Execution_Sub_Activity_Code", "Variant_Key"),
+    )
+
+
 class SmeExecutionEntryMaterial(Base):
     """A material line on an execution entry — the store keeper's physical draw.
 

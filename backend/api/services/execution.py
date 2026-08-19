@@ -47,6 +47,8 @@ mat_t = _MD.tables["sme_execution_entry_material"]
 man_t = _MD.tables["sme_execution_entry_manpower"]
 norm_t = _MD.tables["sme_manpower_norm"]
 recipe_t = _MD.tables["sme_recipe"]
+prep_t = _MD.tables["sme_surface_prep_progress"]
+sqm_progress_t = _MD.tables["sme_sqm_progress"]
 
 DRAFT_SK = "DRAFT_SK"
 PENDING_SUPERVISOR = "PENDING_SUPERVISOR"
@@ -407,6 +409,79 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
     return await get_entry(session, entry_id, site_id)
 
 
+async def post_progress(session: AsyncSession, entry_id: int) -> dict:
+    """Post an approved entry's area to the ledger it belongs on.
+
+    ⚠️ SURFACE PREP IS NOT LINING PROGRESS. Blasting 100 m² of a tank is not
+    100 m² of lining done — the surface is merely ready to be lined. A
+    system-agnostic entry therefore lands on `sme_surface_prep_progress`, and
+    NEVER on `sme_sqm_progress.Done_SQM`, which drives Completion_Pct,
+    SQM_Achievable_Now, the shortfall and the buy list. Adding prep there would
+    report a vessel as part-lined the moment it was cleaned.
+
+    The test is the entry's OWN system code, not a lookup: an entry that stored
+    '' was opened as system-agnostic and stays that way even if a recipe line
+    for its sub-activity is added tomorrow.
+    """
+    row = (await session.execute(select(entry_t)
+           .where(entry_t.c["id"] == entry_id))).mappings().first()
+    if row is None:
+        return {"posted": None}
+    sqm = float(row["Actual_SQM"] or 0.0)
+    if sqm <= 0:
+        return {"posted": None}
+    code = (row["Lining_System_Code"] or "").strip()
+
+    if not code:
+        activity = (await session.execute(
+            select(norm_t.c["Activity"])
+            .where(norm_t.c["id"] == row["Norm_ID"]))).scalar() \
+            if row["Norm_ID"] else None
+        existing = (await session.execute(select(prep_t).where(
+            prep_t.c["Site_ID"] == row["Site_ID"],
+            prep_t.c["Equipment_Tag_No"] == row["Equipment_Tag_No"],
+            prep_t.c["Execution_Sub_Activity_Code"]
+            == row["Execution_Sub_Activity_Code"],
+            prep_t.c["Variant_Key"] == (row["Variant_Key"] or "")
+        ))).mappings().first()
+        if existing is None:
+            await session.execute(insert(prep_t).values(
+                Site_ID=row["Site_ID"], Equipment_Tag_No=row["Equipment_Tag_No"],
+                Execution_Sub_Activity_Code=row["Execution_Sub_Activity_Code"],
+                Variant_Key=row["Variant_Key"] or "", Activity=activity,
+                Done_SQM=sqm, Entry_Count=1, Last_Entry_No=row["Entry_No"],
+                updated_at=_now()))
+        else:
+            await session.execute(update(prep_t)
+                                  .where(prep_t.c["id"] == existing["id"])
+                                  .values(Done_SQM=float(existing["Done_SQM"] or 0) + sqm,
+                                          Entry_Count=int(existing["Entry_Count"] or 0) + 1,
+                                          Last_Entry_No=row["Entry_No"],
+                                          Activity=activity or existing["Activity"],
+                                          updated_at=_now()))
+        return {"posted": "surface_prep", "sqm": sqm}
+
+    # Lining work — the ordinary progress ledger. Only ever INCREMENTED here;
+    # Original_SQM belongs to the equipment master and is not ours to set.
+    existing = (await session.execute(select(sqm_progress_t).where(
+        sqm_progress_t.c["Site_ID"] == row["Site_ID"],
+        sqm_progress_t.c["Equipment_Tag_No"] == row["Equipment_Tag_No"],
+        sqm_progress_t.c["Lining_System_Code"] == code))).mappings().first()
+    if existing is None:
+        await session.execute(insert(sqm_progress_t).values(
+            Site_ID=row["Site_ID"], Equipment_Tag_No=row["Equipment_Tag_No"],
+            Lining_System_Code=code, Original_SQM=0.0, Done_SQM=sqm,
+            updated_at=_now()))
+    else:
+        await session.execute(update(sqm_progress_t).where(
+            sqm_progress_t.c["Site_ID"] == row["Site_ID"],
+            sqm_progress_t.c["Equipment_Tag_No"] == row["Equipment_Tag_No"],
+            sqm_progress_t.c["Lining_System_Code"] == code
+        ).values(Done_SQM=float(existing["Done_SQM"] or 0) + sqm,
+                 updated_at=_now()))
+    return {"posted": "lining", "sqm": sqm}
+
+
 # ─── HOD: approve (optionally correcting), or reject ─────────────────────────
 async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
                      site_id: Optional[str], approve: bool,
@@ -498,6 +573,9 @@ async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
                  + " — a justification is required, and the supervisor is "
                    "notified of it")
 
+    # ⚠️ APPROVAL IS WHERE AREA IS POSTED, and WHICH ledger it lands on is the
+    # whole point of the split. See post_progress.
+    await post_progress(session, entry_id)
     await session.execute(update(entry_t).where(entry_t.c["id"] == entry_id)
                           .values(status=APPROVED, hod_username=username,
                                   hod_decided_at=_now(),
@@ -553,3 +631,176 @@ async def list_entries(session: AsyncSession, *, site_id: Optional[str],
         r["manpower"] = mans.get(r["id"], [])
         r["variance"] = compute_variance(r, r["materials"], r["manpower"])
     return rows
+
+
+# ─── Phase 6: reporting ──────────────────────────────────────────────────────
+def _flatten_for_report(entry: dict) -> dict:
+    """One entry → one flat row of comparison figures.
+
+    Everything here comes from the entry's OWN snapshot, never from a fresh
+    read of master data, so a report run today and the same report run after
+    somebody corrects a benchmark answer identically.
+    """
+    v = entry.get("variance") or compute_variance(
+        entry, entry.get("materials") or [], entry.get("manpower") or [])
+    mt = v["material_total"]
+    mp = v["manpower"]
+    return {
+        "Entry_No": entry.get("Entry_No"),
+        "Work_Date": entry.get("Work_Date"),
+        "Site_ID": entry.get("Site_ID"),
+        "Equipment_Tag_No": entry.get("Equipment_Tag_No"),
+        # '' renders as a word, never a blank cell — a blank reads as missing
+        # data, and this is a real category.
+        "Lining_System_Code": entry.get("Lining_System_Code") or "(surface prep)",
+        "Execution_Sub_Activity_Code": entry.get("Execution_Sub_Activity_Code"),
+        "Variant_Key": entry.get("Variant_Key") or "",
+        "status": entry.get("status"),
+        "Actual_SQM": entry.get("Actual_SQM"),
+        "Material_Actual": mt["Actual"],
+        "Material_Benchmark": mt["Benchmark"],
+        "Material_Variance": mt["Variance"],
+        "Material_Variance_Pct": mt["Variance_Pct"],
+        "Manpower_Actual_Manhours": mp["Actual_Manhours"],
+        "Manpower_Benchmark_Manhours": mp["Benchmark_Manhours"],
+        "Manpower_Variance_Manhours": mp["Variance_Manhours"],
+        "Manpower_Variance_Pct": mp["Variance_Pct"],
+        "Actual_Headcount": mp["Actual_Headcount"],
+        "Benchmark_Crew_Size": mp["Benchmark_Crew_Size"],
+        "Material_Variance_Reason": entry.get("Material_Variance_Reason"),
+        "Manpower_Variance_Reason": entry.get("Manpower_Variance_Reason"),
+        "supervisor_username": entry.get("supervisor_username"),
+        "sk_username": entry.get("sk_username"),
+        "hod_username": entry.get("hod_username"),
+        "hod_edited": bool(entry.get("hod_edited")),
+        "HOD_Edit_Justification": entry.get("HOD_Edit_Justification"),
+        "Reject_Reason": entry.get("Reject_Reason"),
+    }
+
+
+async def variance_report(session: AsyncSession, *, site_id: Optional[str],
+                          date_from: Optional[str] = None,
+                          date_to: Optional[str] = None,
+                          statuses: list[str] | None = None) -> dict:
+    """Actual vs benchmark, per entry, plus the totals that matter.
+
+    ⚠️ The totals SUM the absolute figures and derive one percentage from the
+    sums — they do not average the per-entry percentages. Averaging percentages
+    weights a 2 m² entry the same as a 2,000 m² one, which is how a programme
+    that is 8% over reports itself as on target.
+    """
+    rows = await list_entries(session, site_id=site_id,
+                              statuses=statuses, limit=5000)
+    if date_from:
+        rows = [r for r in rows if str(r.get("Work_Date") or "") >= date_from]
+    if date_to:
+        rows = [r for r in rows if str(r.get("Work_Date") or "") <= date_to]
+    flat = [_flatten_for_report(r) for r in rows]
+
+    def _sum(key):
+        return round(sum(float(r[key] or 0) for r in flat), 4)
+
+    mat_a, mat_b = _sum("Material_Actual"), _sum("Material_Benchmark")
+    man_a, man_b = _sum("Manpower_Actual_Manhours"), _sum("Manpower_Benchmark_Manhours")
+    return {
+        "items": flat,
+        "totals": {
+            "Entries": len(flat),
+            "Actual_SQM": _sum("Actual_SQM"),
+            "Material_Actual": mat_a, "Material_Benchmark": mat_b,
+            "Material_Variance": round(mat_a - mat_b, 4),
+            "Material_Variance_Pct": (round((mat_a - mat_b) / mat_b * 100, 2)
+                                      if mat_b else None),
+            "Manpower_Actual_Manhours": man_a,
+            "Manpower_Benchmark_Manhours": man_b,
+            "Manpower_Variance_Manhours": round(man_a - man_b, 2),
+            "Manpower_Variance_Pct": (round((man_a - man_b) / man_b * 100, 2)
+                                      if man_b else None),
+        },
+    }
+
+
+async def reason_log(session: AsyncSession, *, site_id: Optional[str],
+                     limit: int = 1000) -> list[dict]:
+    """Every stated reason, and every HOD correction, as an audit trail.
+
+    Ships the ORIGINAL alongside the corrected value. An audit line saying a
+    quantity changed without saying from what is not an audit trail.
+    """
+    rows = await list_entries(session, site_id=site_id, limit=limit)
+    out = []
+    for r in rows:
+        if not (r.get("Material_Variance_Reason")
+                or r.get("Manpower_Variance_Reason")
+                or r.get("HOD_Edit_Justification") or r.get("Reject_Reason")):
+            continue
+        edits = []
+        for m in r.get("materials") or []:
+            if m.get("Original_Qty") is not None and \
+                    abs(float(m["Original_Qty"]) - float(m["Actual_Qty"] or 0)) > 1e-9:
+                edits.append(f"{m['Material_Code']}: "
+                             f"{m['Original_Qty']} → {m['Actual_Qty']}")
+        for c in r.get("manpower") or []:
+            if c.get("Original_Headcount") is not None and \
+                    abs(float(c["Original_Headcount"]) - float(c["Headcount"] or 0)) > 1e-9:
+                edits.append(f"{c['Role_Code']} head: "
+                             f"{c['Original_Headcount']} → {c['Headcount']}")
+            if c.get("Original_Hours") is not None and \
+                    abs(float(c["Original_Hours"]) - float(c["Hours"] or 0)) > 1e-9:
+                edits.append(f"{c['Role_Code']} hours: "
+                             f"{c['Original_Hours']} → {c['Hours']}")
+        out.append({
+            "Entry_No": r.get("Entry_No"), "Work_Date": r.get("Work_Date"),
+            "Equipment_Tag_No": r.get("Equipment_Tag_No"),
+            "Execution_Sub_Activity_Code": r.get("Execution_Sub_Activity_Code"),
+            "status": r.get("status"),
+            "supervisor_username": r.get("supervisor_username"),
+            "Material_Variance_Reason": r.get("Material_Variance_Reason"),
+            "Manpower_Variance_Reason": r.get("Manpower_Variance_Reason"),
+            "hod_username": r.get("hod_username"),
+            "hod_edited": bool(r.get("hod_edited")),
+            "HOD_Edit_Justification": r.get("HOD_Edit_Justification"),
+            "Changed": "; ".join(edits),
+            "Reject_Reason": r.get("Reject_Reason"),
+        })
+    return out
+
+
+async def surface_prep_report(session: AsyncSession, *,
+                              site_id: Optional[str]) -> dict:
+    """Prep area done per equipment + sub-activity, beside the area that EXISTS.
+
+    The denominator is `sme_equipment.Surface_Area_SQM` — the equipment's own
+    area — because prep has no planned figure of its own and inventing one
+    would give two numbers that drift. Coverage can legitimately exceed 100%:
+    a surface can be re-blasted, and clamping it would hide rework rather than
+    show it.
+    """
+    eq_t = _MD.tables["sme_equipment"]
+    stmt = select(prep_t)
+    if site_id is not None:
+        stmt = stmt.where(prep_t.c["Site_ID"] == site_id)
+    rows = [dict(r) for r in (await session.execute(
+        stmt.order_by(prep_t.c["Equipment_Tag_No"],
+                      prep_t.c["Execution_Sub_Activity_Code"]))).mappings().all()]
+
+    area_stmt = select(eq_t.c["Equipment_Tag_No"],
+                       func.sum(eq_t.c["Surface_Area_SQM"]))
+    if site_id is not None:
+        area_stmt = area_stmt.where(eq_t.c["Site_ID"] == site_id)
+    areas = {str(t): float(a or 0) for t, a in (await session.execute(
+        area_stmt.group_by(eq_t.c["Equipment_Tag_No"]))).all()}
+
+    for r in rows:
+        total = areas.get(str(r["Equipment_Tag_No"]), 0.0)
+        r["Equipment_Area_SQM"] = round(total, 2)
+        r["Coverage_Pct"] = (round(float(r["Done_SQM"] or 0) / total * 100, 2)
+                             if total else None)
+    return {
+        "items": rows,
+        "totals": {
+            "Activities": len(rows),
+            "Prep_SQM": round(sum(float(r["Done_SQM"] or 0) for r in rows), 2),
+            "Entries": sum(int(r["Entry_Count"] or 0) for r in rows),
+        },
+    }
