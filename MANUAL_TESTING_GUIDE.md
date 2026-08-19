@@ -1248,6 +1248,94 @@ rename was ours, so the old spelling must not 422.
 
 ---
 
+## 14e. The execution workflow — SK → Supervisor → HOD (Phase 5)
+
+> Added 2026-08-19 (branch `feat/phase7-workflow`). Rule 13.
+
+```
+DRAFT_SK ─┐
+          ├─→ PENDING_SUPERVISOR ─→ PENDING_HOD ─→ APPROVED
+(bypass) ─┘                                     └─→ REJECTED
+```
+
+Three people hold three different pieces of knowledge, and the controls exist
+so no one of them holds all of it.
+
+### 14e.1 The separation of duties
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-EX-01** | As a **supervisor**, open an entry for an activity that consumes material | **409.** Somebody has to have counted what left the store. |
+| **TC-EX-02** | As a **supervisor**, open a labour-only activity (blasting, buffing) | **201**, and it starts at `PENDING_SUPERVISOR` — the store keeper is skipped entirely. |
+| **TC-EX-03** | As a supervisor, look at an entry's material lines | **Read-only.** You are measured against that consumption; the person it reflects on must not be able to tidy it. The API payload has no material field at all — the control is the shape of the request, not a runtime check. |
+| **TC-EX-04** | As an **HOD**, approve an entry the supervisor has not filled in | **409.** No step may be skipped. |
+| **TC-EX-05** | As SK or supervisor, try the HOD decision endpoint | **403.** |
+
+### 14e.2 The two mandatory reasons
+
+**TC-EX-06** — submit as supervisor with either reason blank → **422**, even at
+zero variance.
+
+> Why always: a reason demanded only past a threshold teaches people to aim
+> just under it. A zero-variance entry carrying a stated reason is evidence the
+> supervisor actually looked at the comparison.
+
+### 14e.3 HOD edits cost a justification and a notification
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-EX-07** | As HOD, change a quantity and approve with no justification | **422**, and the message names *what* changed (`230 → 210`), not merely that something did. |
+| **TC-EX-08** | Supply a justification and approve | Lands. `hod_edited` is true, `Original_Qty` still holds what the store keeper wrote. |
+| **TC-EX-09** | Check the supervisor's bell | A `sme_exec_hod_edited` notification saying what changed and why. Without it they answer for numbers they never entered. |
+| **TC-EX-10** | Decide an already-approved entry | **409** — it is final. |
+| **TC-EX-11** | Reject with no reason | **422.** The supervisor has to know what to fix. |
+
+### 14e.4 ⚠️ The benchmark is a SNAPSHOT, not a join
+
+Every `Bench_*` column is copied onto the entry when the supervisor submits.
+
+**TC-EX-12** — approve an entry, then edit the underlying
+`sme_manpower_norm` productivity and the `sme_recipe` `For_1_SQM`. Re-open the
+entry: **the variance is unchanged.**
+
+> If it moved, the system would be rewriting history — last quarter's 12%
+> overrun quietly becoming 4%, with no edit to the entry and nothing to point
+> at. `Norm_ID` records *which* benchmark applied; the `Bench_*` columns record
+> what it *said*.
+
+### 14e.5 ⚠️ System-agnostic work stores `''`, not NULL
+
+Blasting and buffing belong to **no lining system**. Tying their hours to one
+would trap them there if the lining plan changed.
+
+* The activity picker marks them `manpower_only` / `system_agnostic`; the UI
+  **hides the lining-system field** and submits `''`.
+* `''` is a real value. NULL would break the key (Postgres treats NULLs as
+  distinct) and give every `GROUP BY` an untyped bucket that renders as a blank
+  row. Same ruling already taken for `sme_recipe.Execution_Sub_Activity_Code`.
+* The benchmark is still found — by **sub-activity**, because the workbook
+  files blasting under `ESC1`/`ESC2` in its system column.
+
+**TC-EX-13** — open a blasting entry, submit, confirm `Lining_System_Code` is
+`''`, the material variance is **"not comparable"** (not 0%), and the manpower
+benchmark still resolved.
+
+> "Cannot compare" and "matched perfectly" must never render the same. A zero
+> benchmark yields `None`, never a division by zero and never a green 0%.
+
+### 14e.6 Known gap — two blasting benchmarks are not loaded
+
+`Manpower_Hour_Details.xlsx` files **three** CV blasting rows under `ESC1`:
+one at crew 4 / 300 m² per shift and two identical ones at crew 2 / 40. All
+three currently carry the same `Activity` text, so the importer **rejects the
+two low-productivity rows** rather than let one silently overwrite the other.
+
+Until the workbook distinguishes them, a supervisor blasting for PU work will
+be measured against the 300 m²/shift benchmark and show a large false variance.
+The fix is one cell — see the sync's reject message, which names it.
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

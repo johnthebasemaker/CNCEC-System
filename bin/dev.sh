@@ -127,7 +127,7 @@ ensure_postgres() {
     ok "Postgres already up on :$PG_PORT"
     return 0
   fi
-  info "Postgres not answering on :$PG_PORT — starting $PG_FORMULA…"
+  info "Postgres not answering on :$PG_PORT — starting ${PG_FORMULA}…"
   brew services start "$PG_FORMULA" >/dev/null 2>&1 \
     || die "could not start $PG_FORMULA (try: brew services start $PG_FORMULA)"
   wait_for 25 "Postgres" pg_isready -q -h "$PG_HOST" -p "$PG_PORT" \

@@ -1113,6 +1113,143 @@ class SmeManpowerNorm(Base):
     )
 
 
+class SmeExecutionEntry(Base):
+    """One execution report: what was consumed, what area was done, by whom.
+
+    THE STATE MACHINE (Phase 5):
+
+        DRAFT_SK ─┐
+                  ├─→ PENDING_SUPERVISOR ─→ PENDING_HOD ─→ APPROVED
+        (bypass) ─┘                                     └─→ REJECTED
+
+    The store keeper records the physical material draw and the equipment. The
+    supervisor names the sub-activity and reports the actual area and crew. The
+    HOD approves — and approval is what deducts stock, so nothing before it
+    moves a quantity.
+
+    ⚠️ THE BYPASS IS NOT AN EXCEPTION, IT IS A SECOND FRONT DOOR. Blasting and
+    buffing consume no Surface Shield, so there is no material for a store
+    keeper to record and no draft for them to raise. A supervisor opens those
+    entries directly at PENDING_SUPERVISOR. Modelling that as "an SK draft with
+    zero materials" would put a signature on a step nobody performed.
+
+    ⚠️ `Lining_System_Code` CAN BE '' — surface prep belongs to no lining
+    system. It is the empty string and NOT NULL, matching the ruling already
+    taken for `sme_recipe.Execution_Sub_Activity_Code`: Postgres treats NULLs
+    as distinct, so a nullable column in a key stops the key constraining, and
+    every GROUP BY grows an untyped bucket. One sentinel convention across two
+    adjacent columns beats two conventions.
+
+    ⚠️ THE BENCHMARK IS SNAPSHOTTED, NOT JOINED. Every Bench_* column is copied
+    from `sme_manpower_norm` at the moment the supervisor submits. Master data
+    is editable by an HOD, and a variance report that re-derives its benchmark
+    would silently rewrite history the first time somebody corrects a
+    productivity figure — last quarter's 12% overrun becoming 4% with no edit
+    to the entry and nothing to point at. `Norm_ID` records WHICH benchmark was
+    used; the Bench_* columns record what it SAID.
+    """
+    __tablename__ = "sme_execution_entry"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    Entry_No = Column(Text, nullable=False)
+    Work_Date = Column(Text, nullable=False)
+    Equipment_Tag_No = Column(Text, nullable=False)
+    # '' = system-agnostic (surface prep). See the class docstring.
+    Lining_System_Code = Column(Text, nullable=False, server_default=text("''"))
+    Execution_Sub_Activity_Code = Column(Text, nullable=False)
+    Variant_Key = Column(Text, nullable=False, server_default=text("''"))
+    status = Column(Text, nullable=False, server_default=text("'DRAFT_SK'"))
+
+    # — store keeper —
+    sk_username = Column(Text)
+    sk_submitted_at = Column(DateTime)
+
+    # — supervisor —
+    Actual_SQM = Column(Float)
+    supervisor_username = Column(Text)
+    supervisor_submitted_at = Column(DateTime)
+    # ALWAYS required at submission, whatever the variance — the operator's
+    # ruling. A reason demanded only past a threshold trains people to aim just
+    # under it, and a zero-variance entry with a stated reason is evidence the
+    # supervisor looked.
+    Material_Variance_Reason = Column(Text)
+    Manpower_Variance_Reason = Column(Text)
+
+    # — benchmark snapshot (taken at supervisor submission) —
+    Norm_ID = Column(Integer, ForeignKey("sme_manpower_norm.id",
+                                         ondelete="SET NULL"))
+    Bench_Crew_Size = Column(Float)
+    Bench_Hours_Per_Shift = Column(Float)
+    Bench_Manhours_Per_Shift = Column(Float)
+    Bench_Productivity_Per_Shift = Column(Float)
+    Bench_SQM_Per_Hour_Per_Person = Column(Float)
+    Bench_Snapshot_At = Column(DateTime)
+
+    # — HOD —
+    hod_username = Column(Text)
+    hod_decided_at = Column(DateTime)
+    # Mandatory the moment an HOD changes any supervisor or store-keeper
+    # number. An approval that silently rewrote the figures would leave the
+    # supervisor answering for numbers they never entered.
+    HOD_Edit_Justification = Column(Text)
+    hod_edited = Column(Boolean, nullable=False, server_default=text("false"))
+    Reject_Reason = Column(Text)
+
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "Entry_No"),
+        Index("ix_sme_exec_entry_status", "Site_ID", "status"),
+    )
+
+
+class SmeExecutionEntryMaterial(Base):
+    """A material line on an execution entry — the store keeper's physical draw.
+
+    `Bench_For_1_SQM` is snapshotted from `sme_recipe` for the same reason the
+    manpower benchmark is: the recipe is editable master data.
+    """
+    __tablename__ = "sme_execution_entry_material"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Entry_ID = Column(Integer, ForeignKey("sme_execution_entry.id",
+                                          ondelete="CASCADE"), nullable=False)
+    Material_Code = Column(Text, nullable=False)
+    SAP_Code = Column(Text, nullable=False, server_default=text("''"))
+    Actual_Qty = Column(Float, nullable=False, server_default=text('0'))
+    UOM = Column(Text)
+    Lot_No = Column(Text)
+    Bench_For_1_SQM = Column(Float)
+    # What the store keeper originally wrote, kept when an HOD corrects the
+    # row. Without it the audit trail says a number changed but not from what.
+    Original_Qty = Column(Float)
+    __table_args__ = (
+        UniqueConstraint("Entry_ID", "Material_Code", "SAP_Code"),
+    )
+
+
+class SmeExecutionEntryManpower(Base):
+    """A crew line on an execution entry — the supervisor's actual headcount.
+
+    Hours are per PERSON, so man-hours = Headcount x Hours. Stored split rather
+    than pre-multiplied: a corrected headcount must not silently carry the old
+    hours with it.
+    """
+    __tablename__ = "sme_execution_entry_manpower"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Entry_ID = Column(Integer, ForeignKey("sme_execution_entry.id",
+                                          ondelete="CASCADE"), nullable=False)
+    Role_Code = Column(Text, nullable=False)
+    Headcount = Column(Float, nullable=False, server_default=text('0'))
+    Hours = Column(Float, nullable=False, server_default=text('0'))
+    Bench_Headcount = Column(Float)
+    Original_Headcount = Column(Float)
+    Original_Hours = Column(Float)
+    __table_args__ = (
+        UniqueConstraint("Entry_ID", "Role_Code"),
+    )
+
+
 class SmeManpowerNormRole(Base):
     """The crew composition of one norm — how many of each role.
 

@@ -45,7 +45,7 @@ staging_arg=""
 echo "### [1/6] Building images (api + web)…"
 $COMPOSE build
 
-echo "### [2/6] Seeding a throwaway self-signed cert for $DOMAIN…"
+echo "### [2/6] Seeding a throwaway self-signed cert for ${DOMAIN}…"
 $COMPOSE run --rm --entrypoint "sh -c \
   'mkdir -p $cert_path && openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
      -keyout $cert_path/privkey.pem -out $cert_path/fullchain.pem -subj /CN=$DOMAIN'" certbot

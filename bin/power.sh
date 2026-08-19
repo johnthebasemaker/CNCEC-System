@@ -107,7 +107,7 @@ cmd_sleep() {
   fi
 
   if pg_up; then
-    info "stopping $PG_FORMULA…"
+    info "stopping ${PG_FORMULA}…"
     brew services stop "$PG_FORMULA" >/dev/null 2>&1 \
       && ok "Postgres stopped" \
       || warn "could not stop $PG_FORMULA (brew services stop $PG_FORMULA)"
@@ -126,7 +126,7 @@ cmd_sleep() {
 
 cmd_wake() {
   if ! pg_up; then
-    info "starting $PG_FORMULA…"
+    info "starting ${PG_FORMULA}…"
     brew services start "$PG_FORMULA" >/dev/null 2>&1 \
       || die "could not start $PG_FORMULA"
     local i=0

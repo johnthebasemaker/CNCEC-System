@@ -251,6 +251,18 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
+    // Phase 5. One page, three roles — each sees the same entries and may
+    // change a different part of them, so the ACCESS is shared and the
+    // controls live in the API (a supervisor's payload has no material field).
+    id: 'execution',
+    label: 'Execution',
+    access: w({ anyRole: ['store_keeper', 'supervisor', 'hod'] }),
+    children: [
+      { key: '/execution', label: 'Execution Entries', icon: <SolutionOutlined />,
+        access: w({ anyRole: ['store_keeper', 'supervisor', 'hod'] }) },
+    ],
+  },
+  {
     // GRANTED TO LOGISTICS 2026-08-12 (operator ruling). `/warehouse/*` has
     // always been `require_roles("warehouse_user", "logistics")` on the
     // server, so Logistics could already receive goods and cut delivery notes
