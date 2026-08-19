@@ -923,9 +923,12 @@ async def test_manhours():
             check("roster upsert → 200", r.status_code == 200, f"got {r.status_code}")
             emps = (await ac.get("/mh/employees", headers=H(hod_t))).json()["items"]
             mine = [e for e in emps if e["Employee_Code"] == "SVC-EMP-1"]
+            # Posted as 'Supply' — the attendance workbook's word — and stored
+            # as NON_GI. The alias is the point: the 2026-08-18 rename was ours,
+            # so an integrator still sending the old spelling must not 422.
             check("re-upsert updates in place (1 row, new name/type)",
                   len(mine) == 1 and mine[0]["Name"] == "Svc One Renamed"
-                  and mine[0]["Worker_Type"] == "Supply", str(mine))
+                  and mine[0]["Worker_Type"] == "NON_GI", str(mine))
             r = await ac.patch(f"/mh/employees/{mine[0]['id']}/status",
                                headers=H(hod_t), params={"status": "inactive"})
             check("status flip → inactive", r.status_code == 200, f"got {r.status_code}")
@@ -1075,18 +1078,18 @@ async def test_manhours():
             emp_row = next((e for e in (await ac.get("/mh/employees", headers=H(hod_t)))
                             .json()["items"] if e["Employee_Code"] == "SVC-IMP-1"), None)
             check("ADD EMPLOYEE attributes land on the roster",
-                  emp_row is not None and emp_row["Worker_Type"] == "Supply"
+                  emp_row is not None and emp_row["Worker_Type"] == "NON_GI"
                   and emp_row["Company"] == "ACME", str(emp_row))
             r = await ac.post("/mh/import", headers=H(hod_t),
                               files={"file": ("junk.xlsx", b"not an xlsx", "application/octet-stream")})
             check("unparseable workbook → 422", r.status_code == 422, f"got {r.status_code}")
 
             # ---- Phase-11A: import fit + bulk-assign -----------------------
-            # Legend defaults: a SAR-only worker gets OWN→GI.
+            # Legend defaults: a SAR-only worker is GI, company GI.
             emp2 = next((e for e in (await ac.get("/mh/employees", headers=H(hod_t)))
                          .json()["items"] if e["Employee_Code"] == "SVC-IMP-2"), None)
-            check("legend default: SAR-only worker → OWN/GI",
-                  emp2 is not None and emp2["Worker_Type"] == "OWN"
+            check("legend default: SAR-only worker → GI",
+                  emp2 is not None and emp2["Worker_Type"] == "GI"
                   and emp2["Company"] == "GI", str(emp2))
 
             # Workbook 2: literal 'nan' junk cells, a duplicated (code,date)
@@ -8221,6 +8224,14 @@ async def test_pg_excel_sync():
     _MAT_H = ["Item", "Vendor/supplying plant", "Purchasing Document",
               "Document Date", "Material_Code", "SAP_Code", "Material_Name",
               "Nature", "UOM", "Available_Qty", "Ordered_Qty"]
+    # Manpower_Hour_Details.xlsx Block A header (the nine role
+    # columns are trimmed to the two this fixture uses).
+    _MP_H = ["Activity Code#", "Type", "System", "Lining_System_Code",
+             "Activity", "Execution_Sub_Activity_Code", "Sub-Activity",
+             "Blaster", "Potman", "Rubber Liner", "Coating applicator",
+             " Person/Crew", "Hrs./shift", "Manhr. / Shift",
+             "Standard Productivity /Shift", "SQ. Mtr/Hr./Person",
+             "Remarks", "Variant_Key"]
 
     def _books(tag: str) -> dict[str, bytes]:
         """The four root workbooks, miniaturised under a unique key prefix.
@@ -8249,6 +8260,15 @@ async def test_pg_excel_sync():
                 ["1", f"{tag} Vendor", "4700000009", "2026-03-01",
                  f"{tag}-MAT-1", f"{tag}-S1", f"{tag} Primer", "Liquid", "KG",
                  100, 40]]}),
+            # 2026-08-18: the manpower norms joined the SME set, so the sync
+            # requires this workbook like the other three. A fixture that omits
+            # it aborts at the "read every workbook up front" pre-flight, which
+            # is the sync working, not failing.
+            "Manpower_Hour_Details.xlsx": _xlsx({"Productivity Estimation": [
+                _MP_H,
+                ["1", "ME", "None", "9907", f"{tag} Lining", f"{tag}30",
+                 "Primer Application", 0, 0, 2, 1, 3, 11, 33, 130, 3.94,
+                 None, ""]]}),
         }
 
     def _stage(tag: str, books: dict[str, bytes] | None = None) -> str:
@@ -11773,6 +11793,8 @@ async def _qsep_seed_users() -> None:
         ("SVCQ-hod", "hod", "CNCEC", None),
         ("SVCQ-hod2", "hod", "SVCQ-SITE-B", None),
         ("SVCQ-sk", "store_keeper", "CNCEC", None),
+        # Phase 5: the middle of the SK → supervisor → HOD chain.
+        ("SVCQ-sup", "supervisor", "CNCEC", None),
         ("SVCQ-wh", "warehouse_user", None, "WH-01"),
         ("SVCQ-qc", "qc", "CNCEC", None),
         ("SVCQ-qcwh", "qc", None, "WH-01"),
@@ -14026,13 +14048,11 @@ async def test_strict_rbac_api_gates():
 
     await _qsep_seed_users()
 
-    # The seed has no supervisor and no auditor; both matter here. The auditor
-    # is the role that must KEEP its reads, and the supervisor is the only role
-    # below HOD that keeps the roster.
+    # The seed has no auditor — the role that must KEEP its reads. (It gained a
+    # supervisor in Phase 5, so that one is no longer defined twice.)
     h = _bc.hashpw(_QSEP_PW.encode(), _bc.gensalt(rounds=4)).decode()
     async with SessionLocal() as s:
-        for uname, role, site in (("SVCQ-sup", "supervisor", "CNCEC"),
-                                  ("SVCQ-aud", "auditor", None)):
+        for uname, role, site in (("SVCQ-aud", "auditor", None),):
             await s.execute(_sqt("DELETE FROM users WHERE username = :u"), {"u": uname})
             await s.execute(_sqt(
                 'INSERT INTO users (username, password_hash, role, "Site_ID") '
@@ -14447,6 +14467,580 @@ def _sme_recipe_workbook(rows: list[tuple]) -> bytes:
     buf = _io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# --- Suite CA: manpower norms and the roster ---------------------------------
+async def test_manpower_norms_and_roster():
+    """Suite CA — Phase 3 + 4: the benchmark master, and the two overtime
+    thresholds that replaced one.
+
+    The workbook files CV blasting under ESC1 TWICE — 300 m²/shift with a crew
+    of 4, and 40 m²/shift with a crew of 2 — and no other column separates
+    them. A three-part key keeps whichever row it read last, so a blasting
+    crew would be planned against a benchmark 7.5x wrong. The importer refuses
+    instead, and says what to type.
+
+    Phase 4's headline is that `Worker_Type` had TWO legacy values, not one.
+    The ruling named OWN→GI; the column's vocabulary was OWN | Supply and
+    `Supply` IS the non-GI case, so migrating only OWN would have left a third
+    value that every threshold lookup silently misses.
+    """
+    import io as _io
+
+    from sqlalchemy import text as _sqt
+
+    from .bulk_import import plan_sme_manpower_norms
+    from .manhours import (MH_OT_THRESHOLD_DEFAULTS, compute_mh_hours,
+                           normalize_worker_type, ot_thresholds)
+
+    # ── 1. the identity is five parts, and each one earns its place ─────────
+    def _wb(rows):
+        import openpyxl as _x
+        wb = _x.Workbook(); ws = wb.active
+        ws.append(["Activity Code#", "Type", "System", "Lining_System_Code",
+                   "Activity", "Execution_Sub_Activity_Code", "Sub-Activity",
+                   "Blaster", "Potman", "Mason", "Helper", " Person/Crew",
+                   "Hrs./shift", "Manhr. / Shift",
+                   "Standard Productivity /Shift", "SQ. Mtr/Hr./Person",
+                   "Remarks", "Variant_Key"])
+        for r in rows:
+            ws.append(list(r))
+        b = _io.BytesIO(); wb.save(b); return b.getvalue()
+
+    # two CV blasting rows under ESC1 with DIFFERENT numbers → REFUSED
+    collide = _wb([
+        (1, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 2, 4, 11, 44, 300, 6.82, "", ""),
+        (2, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", ""),
+    ])
+    async with SessionLocal() as s:
+        plan = await plan_sme_manpower_norms(s, collide)
+    check("CA-01 a real collision is REFUSED, not silently overwritten",
+          len(plan["rejects"]) == 1 and len(plan["inserts"]) == 1,
+          f"inserts={len(plan['inserts'])} rejects={plan['rejects']}")
+    check("CA-02 …and the refusal says what to type",
+          "Variant_Key" in str(plan["rejects"]), str(plan["rejects"])[:200])
+
+    # the SAME two rows, disambiguated → both land
+    fixed = _wb([
+        (1, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 2, 4, 11, 44, 300, 6.82, "", "OPEN-AREA"),
+        (2, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", "PU-AREA"),
+    ])
+    async with SessionLocal() as s:
+        plan = await plan_sme_manpower_norms(s, fixed)
+    check("CA-03 a Variant_Key resolves it and BOTH benchmarks land",
+          len(plan["inserts"]) == 2 and not plan["rejects"],
+          f"inserts={len(plan['inserts'])} rejects={plan['rejects']}")
+
+    # an IDENTICAL repeat is benign — the workbook lists blasting twice
+    same = _wb([
+        (1, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", ""),
+        (2, "CV", "None", "ESC1", "Blasting", "ESC1", "Blasting",
+         1, 1, 0, 0, 2, 11, 22, 40, 1.82, "", ""),
+    ])
+    async with SessionLocal() as s:
+        plan = await plan_sme_manpower_norms(s, same)
+    check("CA-04 an identical repeat collapses instead of failing",
+          len(plan["inserts"]) == 1 and not plan["rejects"]
+          and any("identical repeat" in w for w in plan["warnings"]),
+          f"inserts={len(plan['inserts'])} warnings={plan['warnings']}")
+
+    # ── 2. Block B is not master data ───────────────────────────────────────
+    root = __import__("pathlib").Path(__file__).resolve().parents[2]
+    mp = root / "Manpower_Hour_Details.xlsx"
+    if mp.exists():
+        async with SessionLocal() as s:
+            plan = await plan_sme_manpower_norms(s, mp.read_bytes())
+        planned = len(plan["inserts"]) + len(plan["updates"]) + plan["unchanged"]
+        check("CA-05 the real workbook plans its Block A benchmarks",
+              planned >= 20, f"planned={planned}")
+        check("CA-06 Block B (the day/night worked example) is NOT imported",
+              any("Block B" in w for w in plan["warnings"]),
+              str(plan["warnings"]))
+        codes = {r["Lining_System_Code"] for r in plan["inserts"]}
+        check("CA-07 blasting rows keep their ESC* code in the system column "
+              "(they belong to no lining system)",
+              any(str(c).startswith("ESC") for c in codes) if codes else True,
+              str(sorted(codes)))
+
+    # ── 3. the worker-type rename covers BOTH legacy values ─────────────────
+    check("CA-08 OWN normalises to GI", normalize_worker_type("OWN") == "GI", "")
+    check("CA-09 Supply normalises to NON_GI — the value the ruling did not "
+          "name, and the one a threshold lookup would otherwise miss",
+          normalize_worker_type("Supply") == "NON_GI", "")
+    check("CA-10 an unrecognised type returns None rather than a default",
+          normalize_worker_type("contractor?") is None, "")
+    async with SessionLocal() as s:
+        stray = (await s.execute(_sqt(
+            'SELECT count(*) FROM mh_employees '
+            "WHERE \"Worker_Type\" NOT IN ('GI', 'NON_GI')"))).scalar_one()
+    check("CA-11 no roster row is left on a pre-rename Worker_Type",
+          stray == 0, f"{stray} row(s)")
+
+    # ── 4. the two thresholds actually split hours differently ──────────────
+    # 11 worked hours: 8 + 3 for GI, 10 + 1 for non-GI.
+    tot_gi, nor_gi, ot_gi = compute_mh_hours("06:00", "18:00", 60,
+                                             MH_OT_THRESHOLD_DEFAULTS["GI"])
+    tot_ng, nor_ng, ot_ng = compute_mh_hours("06:00", "18:00", 60,
+                                             MH_OT_THRESHOLD_DEFAULTS["NON_GI"])
+    check("CA-12 a 12-hour shift is 11 net worked hours for both",
+          abs(tot_gi - 11.0) < 1e-9 and abs(tot_ng - 11.0) < 1e-9,
+          f"{tot_gi} / {tot_ng}")
+    check("CA-13 GI splits 8 normal + 3 OT",
+          abs(nor_gi - 8.0) < 1e-9 and abs(ot_gi - 3.0) < 1e-9,
+          f"{nor_gi} + {ot_gi}")
+    check("CA-14 Non-GI splits 10 normal + 1 OT",
+          abs(nor_ng - 10.0) < 1e-9 and abs(ot_ng - 1.0) < 1e-9,
+          f"{nor_ng} + {ot_ng}")
+    check("CA-15 the night shift's midnight rollover still nets 11",
+          abs(compute_mh_hours("18:00", "06:00", 60)[0] - 11.0) < 1e-9,
+          str(compute_mh_hours("18:00", "06:00", 60)))
+
+    # ── 5. thresholds are CONFIGURED, not compiled in ───────────────────────
+    async with SessionLocal() as s:
+        live = await ot_thresholds(s)
+    check("CA-16 the configured thresholds resolve to the operator's values",
+          live.get("GI") == 8.0 and live.get("NON_GI") == 10.0, str(live))
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            "INSERT INTO app_settings (key, value) VALUES "
+            "('mh_ot_threshold_non_gi', '9.5') ON CONFLICT (key) DO UPDATE "
+            "SET value = EXCLUDED.value"))
+        await s.commit()
+        changed = await ot_thresholds(s)
+    check("CA-17 changing the setting changes the threshold",
+          changed.get("NON_GI") == 9.5, str(changed))
+    async with SessionLocal() as s:
+        await s.execute(_sqt("UPDATE app_settings SET value = 'not-a-number' "
+                             "WHERE key = 'mh_ot_threshold_non_gi'"))
+        await s.commit()
+        corrupt = await ot_thresholds(s)
+    check("CA-18 a corrupt setting falls back to the default instead of "
+          "crashing every timesheet write",
+          corrupt.get("NON_GI") == MH_OT_THRESHOLD_DEFAULTS["NON_GI"],
+          str(corrupt))
+    async with SessionLocal() as s:
+        await s.execute(_sqt("UPDATE app_settings SET value = '10' "
+                             "WHERE key = 'mh_ot_threshold_non_gi'"))
+        await s.commit()
+
+    # ── 6. the API surfaces ─────────────────────────────────────────────────
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+        Hsk = await _qsep_login(ac, "SVCQ-sk")
+
+        r = await ac.get("/sme/master/manpower-norms", headers=H)
+        check("CA-19 the benchmark grid loads", r.status_code == 200,
+              f"{r.status_code} {r.text[:120]}")
+        body = r.json()
+        check("CA-20 …and marks the manpower-ONLY activities (no Surface "
+              "Shield recipe), which is a category, not missing data",
+              any(i.get("Manpower_Only") for i in body.get("items", []))
+              if body.get("items") else True,
+              str([i.get("Activity") for i in body.get("items", [])
+                   if i.get("Manpower_Only")][:4]))
+
+        rr = await ac.get("/sme/master/roles", headers=H)
+        check("CA-21 the role master loads with the workbook's nine",
+              rr.status_code == 200
+              and sum(1 for i in rr.json()["items"]
+                      if i.get("Source") == "workbook") == 9,
+              f"{rr.status_code} n={len(rr.json().get('items', []))}")
+        wb_role = next(i for i in rr.json()["items"]
+                       if i.get("Source") == "workbook")
+        pr = await ac.patch(f"/sme/master/roles/{wb_role['id']}",
+                            json={"Name": "Renamed"}, headers=H)
+        check("CA-22 a WORKBOOK role cannot be renamed — it is the vocabulary "
+              "the benchmarks are written in", pr.status_code == 409,
+              f"{pr.status_code} {pr.text[:120]}")
+        dr = await ac.delete(f"/sme/master/roles/{wb_role['id']}", headers=H)
+        check("CA-23 …nor deleted", dr.status_code == 409,
+              f"{dr.status_code} {dr.text[:120]}")
+
+        cr = await ac.post("/sme/master/roles",
+                           json={"Role_Code": "svcz scaffolder",
+                                 "Name": "Scaffolder"}, headers=H)
+        check("CA-24 an HOD can add a role, and the code is canonicalised",
+              cr.status_code == 201 and cr.json()["Role_Code"] == "SVCZ_SCAFFOLDER",
+              f"{cr.status_code} {cr.text[:140]}")
+        new_role_id = cr.json().get("id")
+
+        # A crew may only cite a role the master knows. The norm is CREATED
+        # here rather than borrowed from the grid: the throwaway database is
+        # built from legacy SQLite, which carries no benchmarks, so a
+        # borrow-if-present check would skip itself and look like a pass.
+        mk = await ac.post("/sme/master/manpower-norms", headers=H, json={
+            "Type": "CV", "Lining_System_Code": "SVCZ-LSC",
+            "Execution_Sub_Activity_Code": "SVCZ-ESC", "Activity": "svcz probe",
+            "Crew_Size": 2})
+        check("CA-25a an HOD can create a benchmark", mk.status_code == 201,
+              f"{mk.status_code} {mk.text[:140]}")
+        nid = mk.json().get("id")
+        bad = await ac.patch(f"/sme/master/manpower-norms/{nid}",
+                             json={"Crew": {"NO_SUCH_ROLE": 2}}, headers=H)
+        check("CA-25b a crew citing an unknown role is refused — a typo "
+              "would otherwise become an invisible zero in every plan",
+              bad.status_code == 422, f"{bad.status_code} {bad.text[:140]}")
+        good = await ac.patch(f"/sme/master/manpower-norms/{nid}",
+                              json={"Crew": {"MASON": 2, "HELPER": 0}},
+                              headers=H)
+        check("CA-25c …and a known one is accepted", good.status_code == 200,
+              f"{good.status_code} {good.text[:140]}")
+        back = (await ac.get("/sme/master/manpower-norms", headers=H)).json()
+        mine = next((i for i in back["items"] if i["id"] == nid), None)
+        check("CA-25d a zero headcount REMOVES the role rather than storing 0",
+              mine is not None and mine["Crew"] == {"MASON": 2.0},
+              str(mine and mine["Crew"]))
+        dupe = await ac.post("/sme/master/manpower-norms", headers=H, json={
+            "Type": "CV", "Lining_System_Code": "SVCZ-LSC",
+            "Execution_Sub_Activity_Code": "SVCZ-ESC", "Activity": "svcz probe"})
+        check("CA-25e the five-part identity is enforced by the API too",
+              dupe.status_code == 409, f"{dupe.status_code} {dupe.text[:140]}")
+        variant = await ac.post("/sme/master/manpower-norms", headers=H, json={
+            "Type": "CV", "Lining_System_Code": "SVCZ-LSC",
+            "Execution_Sub_Activity_Code": "SVCZ-ESC", "Activity": "svcz probe",
+            "Variant_Key": "PU-AREA"})
+        check("CA-25f …and a Variant_Key is what makes the second one legal",
+              variant.status_code == 201,
+              f"{variant.status_code} {variant.text[:140]}")
+        await ac.delete(f"/sme/master/manpower-norms/{nid}", headers=H)
+        if variant.status_code == 201:
+            await ac.delete(f"/sme/master/manpower-norms/{variant.json()['id']}",
+                            headers=H)
+
+        if new_role_id:
+            await ac.delete(f"/sme/master/roles/{new_role_id}", headers=H)
+
+        # RBAC: the masters are the {hod, admin} exact-lock, like the rest of S6
+        for path in ("/sme/master/manpower-norms", "/sme/master/roles"):
+            g = await ac.post(path, json={"Role_Code": "X", "Name": "X",
+                                          "Type": "CV",
+                                          "Lining_System_Code": "X",
+                                          "Execution_Sub_Activity_Code": "X",
+                                          "Activity": "X"}, headers=Hsk)
+            check(f"CA-26 a store keeper cannot write {path}",
+                  g.status_code == 403, f"{g.status_code}")
+
+        # the HOD owns the thresholds; a store keeper does not
+        gs = await ac.get("/mh/settings", headers=H)
+        check("CA-27 the HOD can read the overtime thresholds",
+              gs.status_code == 200 and gs.json()["thresholds"]["GI"] == 8.0,
+              f"{gs.status_code} {gs.text[:120]}")
+        ps = await ac.put("/mh/settings", json={"gi": 8.5}, headers=H)
+        check("CA-28 …and set them", ps.status_code == 200
+              and ps.json()["thresholds"]["GI"] == 8.5,
+              f"{ps.status_code} {ps.text[:140]}")
+        await ac.put("/mh/settings", json={"gi": 8}, headers=H)
+        bs = await ac.put("/mh/settings", json={"gi": 8}, headers=Hsk)
+        check("CA-29 a store keeper cannot", bs.status_code == 403,
+              f"{bs.status_code}")
+
+        # the roster carries the shift and the reason its OT starts where it does
+        emp = await ac.post("/mh/employees",
+                            json={"employee_code": "SVCZ-W1", "name": "Night hand",
+                                  "worker_type": "Supply", "shift": "Night"},
+                            headers=H)
+        check("CA-30 the roster accepts the workbook's word 'Supply' and "
+              "stores it as NON_GI", emp.status_code in (200, 201),
+              f"{emp.status_code} {emp.text[:140]}")
+        lst = await ac.get("/mh/employees", headers=H)
+        mine = [i for i in lst.json()["items"]
+                if i.get("Employee_Code") == "SVCZ-W1"]
+        if mine:
+            row = mine[0]
+            check("CA-31 …as NON_GI, on nights, with its own OT threshold",
+                  row.get("Worker_Type") == "NON_GI"
+                  and row.get("Shift") == "Night"
+                  and float(row.get("OT_After_Hours") or 0) == 10.0,
+                  str({k: row.get(k) for k in
+                       ("Worker_Type", "Shift", "OT_After_Hours")}))
+        bad_shift = await ac.post("/mh/employees",
+                                  json={"employee_code": "SVCZ-W2", "name": "x",
+                                        "worker_type": "GI", "shift": "Twilight"},
+                                  headers=H)
+        check("CA-32 an invented shift is refused", bad_shift.status_code == 422,
+              f"{bad_shift.status_code}")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM mh_employees WHERE \"Employee_Code\" "
+                             "LIKE 'SVCZ-%'"))
+        await s.commit()
+
+
+# --- Suite CB: the execution workflow (SK → Supervisor → HOD) ----------------
+async def test_execution_workflow():
+    """Suite CB — Phase 5. Three people, three pieces of knowledge, and the
+    controls that stop any one of them holding all of it.
+
+    The checks that matter most are the NEGATIVE ones:
+
+      * a supervisor cannot edit the material lines they are measured against;
+      * a supervisor cannot open a material-backed activity directly, because
+        somebody has to have counted what left the store;
+      * an HOD who changes a number cannot approve without saying why, and the
+        supervisor is told what changed;
+      * the benchmark is SNAPSHOTTED, so editing master data afterwards does
+        not rewrite a variance that was already reported.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import execution as X
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM sme_execution_entry WHERE "
+                             "\"Site_ID\" = 'CNCEC' AND \"Equipment_Tag_No\" "
+                             "LIKE 'SVCB-%'"))
+        # A material-backed recipe line and a manpower benchmark to measure
+        # against. Both are the REAL shapes: identity includes the ESC.
+        await s.execute(_sqt(
+            'DELETE FROM sme_recipe WHERE "Lining_System_Code" = \'SVCB-LSC\''))
+        await s.execute(_sqt(
+            'INSERT INTO sme_recipe ("Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+            '"For_1_SQM") VALUES (\'SVCB-LSC\', \'SVCB-ESC\', \'SVCB-MAT\', '
+            '\'SVCB-SAP\', 2.0)'))
+        await s.execute(_sqt(
+            'DELETE FROM sme_manpower_norm WHERE "Lining_System_Code" '
+            "IN ('SVCB-LSC', 'SVCB-BLAST')"))
+        await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+            '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+            '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+            "VALUES ('CV', 'SVCB-LSC', 'SVCB-ESC', 'svcb lining', '', "
+            "4, 11, 44, 100, 2.27)"))
+        # …and a system-agnostic one: blasting, filed under an ESC code in the
+        # system column exactly as the real workbook does.
+        await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+            '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+            '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+            "VALUES ('CV', 'SVCB-BLAST', 'SVCB-BLAST', 'svcb blasting', '', "
+            "2, 11, 22, 40, 1.82)"))
+        await s.commit()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        Hsk = await _qsep_login(ac, "SVCQ-sk")
+        Hsup = await _qsep_login(ac, "SVCQ-sup")
+        Hhod = await _qsep_login(ac, "SVCQ-hod")
+
+        # ── 1. the material-backed path: SK opens, supervisor cannot ────────
+        direct = await ac.post("/execution/entries", headers=Hsup, json={
+            "work_date": "2026-08-19", "equipment_tag": "SVCB-T1",
+            "lining_system_code": "SVCB-LSC",
+            "execution_sub_activity_code": "SVCB-ESC"})
+        check("CB-01 a supervisor CANNOT open a material-backed activity — "
+              "somebody has to have counted what left the store",
+              direct.status_code == 409, f"{direct.status_code} {direct.text[:140]}")
+
+        opened = await ac.post("/execution/entries", headers=Hsk, json={
+            "work_date": "2026-08-19", "equipment_tag": "SVCB-T1",
+            "lining_system_code": "SVCB-LSC",
+            "execution_sub_activity_code": "SVCB-ESC",
+            "materials": [{"Material_Code": "SVCB-MAT", "SAP_Code": "SVCB-SAP",
+                           "Actual_Qty": 230.0, "UOM": "KG"}]})
+        check("CB-02 the store keeper opens it as a draft",
+              opened.status_code == 201 and opened.json()["status"] == "DRAFT_SK",
+              f"{opened.status_code} {opened.text[:140]}")
+        eid = opened.json()["id"]
+
+        # ── 2. state machine: no skipping a step ────────────────────────────
+        early = await ac.post(f"/execution/entries/{eid}/decision", headers=Hhod,
+                              json={"approve": True})
+        check("CB-03 an HOD cannot approve an entry the supervisor has not "
+              "seen", early.status_code == 409,
+              f"{early.status_code} {early.text[:140]}")
+
+        sub = await ac.post(f"/execution/entries/{eid}/submit", headers=Hsk)
+        check("CB-04 SK submit moves it to the supervisor",
+              sub.status_code == 200
+              and sub.json()["status"] == "PENDING_SUPERVISOR",
+              f"{sub.status_code} {sub.text[:140]}")
+
+        # ── 3. both reasons are ALWAYS mandatory ────────────────────────────
+        for miss, label in (({"manpower_variance_reason": "ok"}, "material"),
+                            ({"material_variance_reason": "ok"}, "manpower")):
+            r = await ac.post(f"/execution/entries/{eid}/supervisor", headers=Hsup,
+                              json={"actual_sqm": 100,
+                                    "manpower": [{"Role_Code": "MASON",
+                                                  "Headcount": 4, "Hours": 11}],
+                                    **miss})
+            check(f"CB-05 a missing {label} variance reason is refused",
+                  r.status_code == 422, f"{r.status_code}")
+
+        # ── 4. the supervisor's submission snapshots the benchmark ──────────
+        sup = await ac.post(f"/execution/entries/{eid}/supervisor", headers=Hsup,
+                            json={"actual_sqm": 100,
+                                  "manpower": [{"Role_Code": "MASON",
+                                                "Headcount": 4, "Hours": 11}],
+                                  "material_variance_reason": "none — matched",
+                                  "manpower_variance_reason": "none — matched"})
+        check("CB-06 the supervisor's submission is accepted with both reasons",
+              sup.status_code == 200 and sup.json()["status"] == "PENDING_HOD",
+              f"{sup.status_code} {sup.text[:200]}")
+        body = sup.json()
+        check("CB-07 the benchmark is SNAPSHOTTED onto the row, not joined",
+              body.get("Bench_Productivity_Per_Shift") == 100.0
+              and body.get("Norm_ID") is not None
+              and body.get("Bench_Snapshot_At"),
+              str({k: body.get(k) for k in
+                   ("Norm_ID", "Bench_Productivity_Per_Shift", "Bench_Snapshot_At")}))
+        v = body["variance"]
+        # 100 m² x 2.0 per m² = 200 expected, 230 drawn → +15%
+        check("CB-08 material variance is measured against the snapshot",
+              v["material_total"]["Benchmark"] == 200.0
+              and v["material_total"]["Variance_Pct"] == 15.0,
+              str(v["material_total"]))
+        # 100 m² / 100 per shift = 1 shift x 44 = 44 expected; 4 x 11 = 44 actual
+        check("CB-09 manpower variance is 0% when the crew matches the norm",
+              v["manpower"]["Benchmark_Manhours"] == 44.0
+              and v["manpower"]["Actual_Manhours"] == 44.0
+              and v["manpower"]["Variance_Pct"] == 0.0,
+              str(v["manpower"]))
+
+        # ── 5. the supervisor cannot touch the material lines ───────────────
+        sup_fields = set((await ac.get("/openapi.json")).json()["components"]
+                         ["schemas"]["SupervisorIn"]["properties"])
+        check("CB-10 the supervisor's payload has NO material field — the "
+              "control is the shape of the request, not a runtime check",
+              not any("material" in f and "reason" not in f
+                      for f in sup_fields), str(sorted(sup_fields)))
+
+        # ── 6. an HOD edit demands a justification ──────────────────────────
+        entry = (await ac.get(f"/execution/entries/{eid}", headers=Hhod)).json()
+        mat_id = entry["materials"][0]["id"]
+        noj = await ac.post(f"/execution/entries/{eid}/decision", headers=Hhod,
+                            json={"approve": True,
+                                  "materials": [{"id": mat_id, "Actual_Qty": 210.0}]})
+        check("CB-11 an HOD who changes a number cannot approve silently",
+              noj.status_code == 422 and "justification" in noj.text.lower(),
+              f"{noj.status_code} {noj.text[:180]}")
+        check("CB-12 …and the refusal names WHAT changed, not just that it did",
+              "230" in noj.text and "210" in noj.text, noj.text[:200])
+
+        ok = await ac.post(f"/execution/entries/{eid}/decision", headers=Hhod,
+                           json={"approve": True,
+                                 "materials": [{"id": mat_id, "Actual_Qty": 210.0}],
+                                 "justification": "miscount at the store"})
+        check("CB-13 with a justification the approval lands",
+              ok.status_code == 200 and ok.json()["status"] == "APPROVED",
+              f"{ok.status_code} {ok.text[:180]}")
+        check("CB-14 the edit is flagged and the original quantity kept",
+              ok.json()["hod_edited"] is True
+              and ok.json()["materials"][0]["Original_Qty"] == 230.0
+              and ok.json()["materials"][0]["Actual_Qty"] == 210.0,
+              str(ok.json()["materials"][0]))
+
+        async with SessionLocal() as s:
+            note = (await s.execute(_sqt(
+                "SELECT count(*) FROM app_notifications WHERE event_key = "
+                "'sme_exec_hod_edited' AND related_ref = :r"),
+                {"r": str(eid)})).scalar_one()
+        check("CB-15 the supervisor is NOTIFIED that their entry was corrected",
+              note >= 1, f"{note} notification(s)")
+
+        check("CB-16 an approved entry is final — it cannot be decided twice",
+              (await ac.post(f"/execution/entries/{eid}/decision", headers=Hhod,
+                             json={"approve": True})).status_code == 409, "")
+
+        # ── 7. the snapshot survives a master-data edit ─────────────────────
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                'UPDATE sme_manpower_norm SET "Standard_Productivity_Per_Shift" '
+                "= 999 WHERE \"Lining_System_Code\" = 'SVCB-LSC'"))
+            await s.execute(_sqt(
+                'UPDATE sme_recipe SET "For_1_SQM" = 9.0 WHERE '
+                "\"Lining_System_Code\" = 'SVCB-LSC'"))
+            await s.commit()
+        after = (await ac.get(f"/execution/entries/{eid}", headers=Hhod)).json()
+        check("CB-17 editing the manpower benchmark AFTERWARDS does not "
+              "rewrite a variance already reported",
+              after["Bench_Productivity_Per_Shift"] == 100.0
+              and after["variance"]["manpower"]["Benchmark_Manhours"] == 44.0,
+              str(after["variance"]["manpower"]))
+        check("CB-18 …nor does editing the recipe",
+              after["variance"]["material_total"]["Benchmark"] == 200.0,
+              str(after["variance"]["material_total"]))
+
+        # ── 8. the manpower-only bypass, and the '' system sentinel ─────────
+        byp = await ac.post("/execution/entries", headers=Hsup, json={
+            "work_date": "2026-08-19", "equipment_tag": "SVCB-T2",
+            "lining_system_code": "",
+            "execution_sub_activity_code": "SVCB-BLAST"})
+        check("CB-19 a supervisor opens a labour-only activity DIRECTLY, "
+              "skipping the store keeper entirely",
+              byp.status_code == 201
+              and byp.json()["status"] == "PENDING_SUPERVISOR",
+              f"{byp.status_code} {byp.text[:160]}")
+        bid = byp.json()["id"]
+        bsup = await ac.post(f"/execution/entries/{bid}/supervisor", headers=Hsup,
+                             json={"actual_sqm": 80,
+                                   "manpower": [{"Role_Code": "BLASTER",
+                                                 "Headcount": 2, "Hours": 11}],
+                                   "material_variance_reason": "n/a — no material",
+                                   "manpower_variance_reason": "on benchmark"})
+        check("CB-20 it reaches the HOD with no material lines at all",
+              bsup.status_code == 200 and bsup.json()["materials"] == [],
+              f"{bsup.status_code} {bsup.text[:160]}")
+        bb = bsup.json()
+        check("CB-21 the system code stays '' — surface prep belongs to no "
+              "lining system, and '' is a real value where NULL would break "
+              "both the key and every GROUP BY",
+              bb["Lining_System_Code"] == "", repr(bb["Lining_System_Code"]))
+        check("CB-22 …and it still finds its benchmark, by sub-activity",
+              bb.get("Norm_ID") is not None
+              and bb["variance"]["manpower"]["Benchmark_Manhours"] == 44.0,
+              str(bb["variance"]["manpower"]))
+        check("CB-23 a material variance with no materials is None, not 0% — "
+              "'cannot compare' and 'matched perfectly' must not render alike",
+              bb["variance"]["material_total"]["Variance_Pct"] is None,
+              str(bb["variance"]["material_total"]))
+
+        # ── 9. rejection needs a reason and notifies the supervisor ─────────
+        norj = await ac.post(f"/execution/entries/{bid}/decision", headers=Hhod,
+                             json={"approve": False})
+        check("CB-24 a rejection without a reason is refused",
+              norj.status_code == 422, f"{norj.status_code}")
+        rj = await ac.post(f"/execution/entries/{bid}/decision", headers=Hhod,
+                           json={"approve": False,
+                                 "reject_reason": "area double-counted"})
+        check("CB-25 a rejection with a reason lands",
+              rj.status_code == 200 and rj.json()["status"] == "REJECTED",
+              f"{rj.status_code} {rj.text[:140]}")
+
+        # ── 10. RBAC ────────────────────────────────────────────────────────
+        check("CB-26 a store keeper cannot make the HOD's decision",
+              (await ac.post(f"/execution/entries/{eid}/decision", headers=Hsk,
+                             json={"approve": True})).status_code == 403, "")
+        check("CB-27 a supervisor cannot either",
+              (await ac.post(f"/execution/entries/{eid}/decision", headers=Hsup,
+                             json={"approve": True})).status_code == 403, "")
+
+    # ── 11. the pure variance calculator ────────────────────────────────────
+    z = X.compute_variance({"Actual_SQM": 50, "Bench_Productivity_Per_Shift": 0,
+                            "Bench_Manhours_Per_Shift": 44}, [], [])
+    check("CB-28 a zero benchmark yields None, never a division by zero",
+          z["manpower"]["Benchmark_Manhours"] is None
+          and z["manpower"]["Variance_Pct"] is None, str(z["manpower"]))
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM sme_execution_entry WHERE "
+                             "\"Equipment_Tag_No\" LIKE 'SVCB-%'"))
+        await s.execute(_sqt('DELETE FROM sme_recipe WHERE '
+                             "\"Lining_System_Code\" = 'SVCB-LSC'"))
+        await s.execute(_sqt('DELETE FROM sme_manpower_norm WHERE '
+                             "\"Lining_System_Code\" IN ('SVCB-LSC','SVCB-BLAST')"))
+        await s.commit()
 
 
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
@@ -15164,6 +15758,12 @@ async def main() -> int:
     print("\n BZ. The execution sub-activity joins the recipe identity — the "
           "number it splits was previously being summed")
     await test_execution_sub_activity_identity()
+    print("\n CA. Manpower norms and the roster — one blasting code, two "
+          "crews, and a worker type with two legacy spellings")
+    await test_manpower_norms_and_roster()
+    print("\n CB. The execution workflow — three people, three pieces of "
+          "knowledge, and the controls that stop one holding all of it")
+    await test_execution_workflow()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

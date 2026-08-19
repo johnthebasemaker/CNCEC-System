@@ -68,7 +68,7 @@ cmd_backup() {
   local stamp; stamp="$(date +%Y-%m-%d_%H%M%S)"
   local sql="$OUT_DIR/${PG_DB}_${stamp}.sql"
 
-  info "dumping $PG_DB from $PG_HOST:$PG_PORT…"
+  info "dumping $PG_DB from $PG_HOST:${PG_PORT}…"
   # Write to a .part first so an interrupted run can never leave a truncated
   # file sitting there looking like a good backup.
   if ! "$pg_dump" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \

@@ -289,7 +289,8 @@ def normalize_phones(target_url: str) -> dict:
 # step responsible; the check still fails on a SHORTFALL, which is what would
 # actually indicate a lost copy.
 POST_LOAD_ADDITIONS = {
-    "app_settings": "e6a91c37b208 seeds auto_draft_dn + ocr_purchase_scans",
+    "app_settings": ("e6a91c37b208 seeds auto_draft_dn + ocr_purchase_scans; "
+                     "a7e2c9d41b83 seeds the two overtime thresholds"),
 }
 
 

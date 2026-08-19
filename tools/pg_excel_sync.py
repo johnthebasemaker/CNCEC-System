@@ -119,6 +119,7 @@ WORKBOOKS: dict[str, str] = {
     "inventory": "CNCEC_Inventory.xlsx",
     "ledger": "CNCEC_Inventory.xlsx",
     "sme-recipes": "For_1_SQM.xlsx",
+    "sme-manpower": "Manpower_Hour_Details.xlsx",
     "sme-equipment": "Equipment.xlsx",
     "sme-materials": "Materials_DetailsAvailable_Qty.xlsx",
 }
@@ -148,6 +149,10 @@ CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     # here the second row overwrites the first instead of joining it.
     "sme-recipes": ("Lining_System_Code", "Execution_Sub_Activity_Code",
                     "Material_Code", "SAP_Code"),
+    # 2026-08 manpower norms. Five parts, because CV blasting is filed under
+    # ESC1 twice with different crews and nothing narrower separates them.
+    "sme-manpower": ("Type", "Lining_System_Code", "Execution_Sub_Activity_Code",
+                     "Activity", "Variant_Key"),
     # 2026-07-30 COMPONENT IDENTITY: one seed row per PHYSICAL component. Was
     # ("Material_Code",), which made the four Comp-A/B/C/D drums of a PU system
     # collide onto one row and overwrite each other.
@@ -159,6 +164,7 @@ AUDIT_ACTION = {
     "inventory": ("BULK_IMPORT_INVENTORY", "inventory"),
     "sme-equipment": ("BULK_IMPORT_SME_EQUIPMENT", "sme_equipment"),
     "sme-recipes": ("BULK_IMPORT_SME_RECIPES", "sme_recipe"),
+    "sme-manpower": ("BULK_IMPORT_SME_MANPOWER", "sme_manpower_norm"),
     "sme-materials": ("BULK_IMPORT_SME_MATERIALS", "sme_inventory_seed"),
 }
 
@@ -431,6 +437,10 @@ RESEED_SQL = {
                       ("sme_equipment",
                        'DELETE FROM sme_equipment WHERE "Site_ID" = :site')],
     "sme-recipes": [("sme_recipe", "DELETE FROM sme_recipe")],
+    # norm_role cascades off norm, but naming it keeps the dry-run count honest
+    "sme-manpower": [("sme_manpower_norm_role",
+                      "DELETE FROM sme_manpower_norm_role"),
+                     ("sme_manpower_norm", "DELETE FROM sme_manpower_norm")],
     "sme-materials": [("sme_inventory_seed", "DELETE FROM sme_inventory_seed")],
 }
 
@@ -582,6 +592,8 @@ async def main() -> int:
                 plan = await bi.plan_sme_equipment(session, data[kind], args.site)
             elif kind == "sme-recipes":
                 plan = await bi.plan_sme_recipes(session, data[kind])
+            elif kind == "sme-manpower":
+                plan = await bi.plan_sme_manpower_norms(session, data[kind])
             else:
                 plan = await bi.plan_sme_materials(session, data[kind])
 
@@ -669,6 +681,13 @@ async def main() -> int:
                         if refreshed:
                             print(f"      ↻ {refreshed} untouched asset(s) took "
                                   f"the workbook's new Location text")
+                elif kind == "sme-manpower":
+                    # Its own path, not apply_master's: a norm writes TWO
+                    # tables (the benchmark and its per-role crew), and the
+                    # generic native-upsert helper is single-table by design.
+                    await bi.apply_sme_manpower_norms(session, plan, args.user)
+                    totals[kind] = {"upserted": len(plan["inserts"]),
+                                    "updated": len(plan["updates"])}
                 else:
                     totals[kind] = await apply_master(session, kind, plan,
                                                       args.user, site=args.site)

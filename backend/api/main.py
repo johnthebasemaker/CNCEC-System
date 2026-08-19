@@ -46,6 +46,7 @@ from .entry_docs import router as entry_docs_router  # noqa: E402
 from .hod import router as hod_router  # noqa: E402
 from .logistics import router as logistics_router  # noqa: E402
 from .manhours import router as manhours_router  # noqa: E402
+from .execution import router as execution_router
 from .ai.router import router as ai_router  # noqa: E402
 from .notifications import router as notifications_router  # noqa: E402
 from .readonly import read_only_guard  # noqa: E402
@@ -355,6 +356,9 @@ app.include_router(console_public_router, dependencies=_auth)
 
 # Man-Hours & Labor Tracking — mh_* tables, exact-locked {hod, admin} (self-guarded).
 app.include_router(manhours_router)
+# Phase 5 — the SK → supervisor → HOD consumption workflow. Its own gates are
+# per-route (each step names the role that performs it), so no blanket dep here.
+app.include_router(execution_router)
 
 # Intelligence layer — /ai/health + the Hub Assistant SSE stream (self-guarded,
 # any authenticated user; role-gated context inside manual_qa).

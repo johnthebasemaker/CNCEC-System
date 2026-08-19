@@ -86,6 +86,9 @@ consumption_t = _MD.tables["consumption"]
 returns_t = _MD.tables["returns"]
 equipment_t = _MD.tables["sme_equipment"]
 recipe_t = _MD.tables["sme_recipe"]
+norm_t = _MD.tables["sme_manpower_norm"]
+norm_role_t = _MD.tables["sme_manpower_norm_role"]
+roles_t = _MD.tables["mh_roles"]
 seed_t = _MD.tables["sme_inventory_seed"]
 # 2026-08-05 — the workbook seeds where things live (see `plan_rack_locations`
 # and `plan_asset_units`). Both are CREATE-IF-ABSENT: the app owns a place once
@@ -1523,6 +1526,204 @@ async def apply_sme_recipes(session: AsyncSession, plan: dict, username: str) ->
                               .values(**u["diff"]))
     await write_audit(session, username, "BULK_IMPORT_SME_RECIPES", "sme_recipe",
                       f"+{len(plan['inserts'])} ~{len(plan['updates'])}")
+
+
+# ─── manpower norms (Manpower_Hour_Details.xlsx, Block A) ────────────────────
+# The nine role COLUMNS of the workbook, mapped to mh_roles.Role_Code. Header
+# spellings are matched case-insensitively and are exactly what the sheet ships
+# (note the lower-case 'mortar mixer' and 'brick cutter' — the workbook is not
+# consistent and normalising it here is cheaper than asking for a re-type).
+_NORM_ROLE_COLUMNS = [
+    ("BLASTER", "Blaster"), ("POTMAN", "Potman"),
+    ("RUBBER_LINER", "Rubber Liner"), ("COATING_APPLICATOR", "Coating applicator"),
+    ("SHEET_PREPARATOR", "Sheet Preparator"), ("MASON", "Mason"),
+    ("MORTAR_MIXER", "mortar mixer"), ("BRICK_CUTTER", "brick cutter"),
+    ("HELPER", "Helper"),
+]
+
+# The measured fields. Two rows that agree on the identity AND on every one of
+# these are the same benchmark written twice; two that disagree on any of them
+# are a real collision the operator has to resolve.
+_NORM_VALUE_FIELDS = ("Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift",
+                      "Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person")
+
+
+async def plan_sme_manpower_norms(session: AsyncSession, data: bytes) -> dict:
+    """Plan Block A of Manpower_Hour_Details.xlsx into sme_manpower_norm.
+
+    ⚠️ BLOCK B IS NOT READ. Rows 41-49 are a worked day/night example, not
+    master data (operator ruling, 2026-08-18). They are excluded structurally
+    rather than by row number: every Block A row names a `Type` and a
+    `Lining_System_Code` and no Block B row does, so a sheet that grows or
+    shifts does not silently start importing the example.
+
+    ⚠️ A COLLISION IS REJECTED, NOT MERGED. Where two rows share the identity
+    but disagree on the numbers, keeping either one plans a crew against a
+    benchmark that can be 7.5x wrong. The reject names the exact `Variant_Key`
+    to type, because "duplicate row" on its own is not actionable.
+    """
+    headers, rows = _sheet_rows(data, "Productivity Estimation",
+                                ("lining_system_code", "activity"),
+                                required=False)
+    if not headers:
+        headers, rows = _sheet_rows(data, None,
+                                    ("lining_system_code", "activity"))
+    ix = {
+        "Activity_Code": _col(headers, "Activity Code#", "Activity_Code"),
+        "Type": _col(headers, "Type"),
+        "System": _col(headers, "System"),
+        "Lining_System_Code": _col(headers, "Lining_System_Code"),
+        "Activity": _col(headers, "Activity"),
+        "Execution_Sub_Activity_Code": _col(headers, "Execution_Sub_Activity_Code"),
+        "Sub_Activity": _col(headers, "Sub-Activity", "Sub_Activity"),
+        "Variant_Key": _col(headers, "Variant_Key", "Variant Key"),
+        "Crew_Size": _col(headers, " Person/Crew", "Person/Crew", "Person / Crew"),
+        "Hours_Per_Shift": _col(headers, "Hrs./shift", "Hrs/shift"),
+        "Manhours_Per_Shift": _col(headers, "Manhr. / Shift", "Manhr./Shift"),
+        "Standard_Productivity_Per_Shift": _col(
+            headers, "Standard Productivity /Shift", "Standard Productivity/Shift"),
+        "SQM_Per_Hour_Per_Person": _col(headers, "SQ. Mtr/Hr./Person",
+                                        "SQ.Mtr/Hr./Person"),
+        "Remarks": _col(headers, "Remarks"),
+    }
+    for need in ("Type", "Lining_System_Code", "Execution_Sub_Activity_Code",
+                 "Activity"):
+        if ix[need] is None:
+            raise HTTPException(422, f"manpower sheet needs a {need} column")
+    role_ix = {code: _col(headers, name) for code, name in _NORM_ROLE_COLUMNS}
+
+    def cell(row, i):
+        return row[i] if i is not None and i < len(row) else None
+
+    existing = {}
+    for r in (await session.execute(select(norm_t))).mappings().all():
+        existing[(_s(r["Type"]) or "", _s(r["Lining_System_Code"]) or "",
+                  _s(r["Execution_Sub_Activity_Code"]) or "",
+                  _s(r["Activity"]) or "", _s(r.get("Variant_Key")) or "")] = dict(r)
+
+    agg: dict[tuple, dict] = {}
+    crews: dict[tuple, dict] = {}
+    rejects: list[dict] = []
+    dup_skips = 0
+    skipped_block_b = 0
+
+    for n, row in enumerate(rows, start=1):
+        typ = _s(cell(row, ix["Type"]))
+        code = _s(cell(row, ix["Lining_System_Code"]))
+        if not typ or not code:
+            # Count only rows that HOLD something. openpyxl hands back the
+            # sheet's trailing blank rows too, and folding those into the
+            # figure turns a precise "19 example rows ignored" into an
+            # alarming 62 that invites someone to go looking for data loss.
+            if any(_s(v) for v in row):
+                skipped_block_b += 1    # Block B, or a spacer row
+            continue
+        if _is_placeholder_code(code):
+            rejects.append({"row": n, "reason": f"placeholder code {code!r}"})
+            continue
+        esc = _s(cell(row, ix["Execution_Sub_Activity_Code"]))
+        act = _s(cell(row, ix["Activity"]))
+        if not esc or not act:
+            rejects.append({"row": n, "reason": "row names no sub-activity code "
+                                                "or activity"})
+            continue
+        variant = _s(cell(row, ix["Variant_Key"])) or ""
+        fields = {
+            "Activity_Code": _s(cell(row, ix["Activity_Code"])),
+            "Type": typ, "System": _s(cell(row, ix["System"])),
+            "Lining_System_Code": code, "Execution_Sub_Activity_Code": esc,
+            "Activity": act, "Sub_Activity": _s(cell(row, ix["Sub_Activity"])),
+            "Variant_Key": variant,
+            "Remarks": _s(cell(row, ix["Remarks"])),
+        }
+        for f in _NORM_VALUE_FIELDS:
+            fields[f] = _f(cell(row, ix[f])) or 0.0
+        crew = {rc: (_f(cell(row, i)) or 0.0)
+                for rc, i in role_ix.items()
+                if i is not None and (_f(cell(row, i)) or 0.0) > 0}
+
+        key = (typ, code, esc, act, variant)
+        prev = agg.get(key)
+        if prev is not None:
+            same = all(abs((prev.get(f) or 0.0) - (fields.get(f) or 0.0)) < 1e-9
+                       for f in _NORM_VALUE_FIELDS) and crews.get(key) == crew
+            if same:
+                dup_skips += 1          # the identical repeat — benign
+                continue
+            rejects.append({
+                "row": n,
+                "reason": (
+                    f"collision: {typ}/{code}/{esc}/{act!r} is already defined "
+                    f"with different numbers (crew {prev.get('Crew_Size')} @ "
+                    f"{prev.get('Standard_Productivity_Per_Shift')} /shift vs "
+                    f"crew {fields.get('Crew_Size')} @ "
+                    f"{fields.get('Standard_Productivity_Per_Shift')} /shift). "
+                    f"Give the two rows different Activity text, or add a "
+                    f"Variant_Key column and a distinct value in each"),
+            })
+            continue
+        agg[key] = fields
+        crews[key] = crew
+
+    inserts, updates, unchanged = [], [], 0
+    for key, fields in agg.items():
+        cur = existing.get(key)
+        if cur is None:
+            inserts.append({**fields, "_crew": crews[key]})
+        else:
+            diff = {k: v for k, v in fields.items() if cur.get(k) != v}
+            if diff:
+                updates.append({"id": cur["id"], "diff": diff,
+                                "_crew": crews[key]})
+            else:
+                unchanged += 1
+
+    warnings = []
+    if dup_skips:
+        warnings.append(f"{dup_skips} identical repeat(s) of an existing "
+                        f"benchmark collapsed — same identity, same numbers")
+    if skipped_block_b:
+        warnings.append(f"{skipped_block_b} non-blank row(s) skipped as "
+                        f"not-a-benchmark (no Type / Lining_System_Code) — "
+                        f"Block B's day/night worked example lives there and "
+                        f"is deliberately not imported")
+    unknown_roles = [c for c, i in role_ix.items() if i is None]
+    if unknown_roles:
+        warnings.append(f"no column found for role(s) {unknown_roles} — their "
+                        f"headcounts will be absent from every crew")
+    return {"inserts": inserts, "updates": updates, "unchanged": unchanged,
+            "rejects": rejects, "warnings": warnings}
+
+
+async def apply_sme_manpower_norms(session: AsyncSession, plan: dict,
+                                   username: str) -> None:
+    for row in plan["inserts"]:
+        crew = row.pop("_crew", {})
+        new_id = (await session.execute(
+            insert(norm_t).values(**row).returning(norm_t.c["id"]))).scalar_one()
+        await _write_norm_crew(session, new_id, crew)
+    for u in plan["updates"]:
+        crew = u.pop("_crew", {})
+        await session.execute(update(norm_t).where(norm_t.c["id"] == u["id"])
+                              .values(**u["diff"]))
+        await _write_norm_crew(session, u["id"], crew)
+    await write_audit(session, username, "BULK_IMPORT_SME_MANPOWER",
+                      "sme_manpower_norm",
+                      f"+{len(plan['inserts'])} ~{len(plan['updates'])}")
+
+
+async def _write_norm_crew(session: AsyncSession, norm_id: int,
+                           crew: dict) -> None:
+    """Replace a norm's crew wholesale.
+
+    Deleted-then-written rather than upserted: a role REMOVED from the workbook
+    has to disappear, and an upsert cannot express an absence.
+    """
+    await session.execute(delete(norm_role_t)
+                          .where(norm_role_t.c["Norm_ID"] == norm_id))
+    for role_code, headcount in crew.items():
+        await session.execute(insert(norm_role_t).values(
+            Norm_ID=norm_id, Role_Code=role_code, Headcount=headcount))
 
 
 async def plan_sme_materials(session: AsyncSession, data: bytes) -> dict:

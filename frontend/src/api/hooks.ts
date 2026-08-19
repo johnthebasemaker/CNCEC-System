@@ -1401,6 +1401,9 @@ function invalidateSmeFamily(qc: ReturnType<typeof useQueryClient>) {
 }
 
 export type SmeMasterKind = 'equipment' | 'recipes' | 'materials' | 'progress'
+  | 'manpower-norms' | 'roles'
+export type SmeMasterWritableKind = 'equipment' | 'recipes' | 'materials'
+  | 'manpower-norms' | 'roles'
 
 export function useSmeMasterList(kind: SmeMasterKind, siteId?: string) {
   const scoped = kind === 'equipment' || kind === 'progress'
@@ -1412,7 +1415,7 @@ export function useSmeMasterList(kind: SmeMasterKind, siteId?: string) {
   })
 }
 
-export function useSmeMasterCreate(kind: 'equipment' | 'recipes' | 'materials') {
+export function useSmeMasterCreate(kind: SmeMasterWritableKind) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: Row) => api.post(`/sme/master/${kind}`, body).then((r) => r.data),
@@ -1423,7 +1426,7 @@ export function useSmeMasterCreate(kind: 'equipment' | 'recipes' | 'materials') 
 // `params` carries the materials lane's required `sap_code` (2026-07-30
 // COMPONENT IDENTITY): one Material_Code can be four physical components, so
 // the server refuses a code-only edit rather than rewriting all four rows.
-export function useSmeMasterPatch(kind: 'equipment' | 'recipes' | 'materials') {
+export function useSmeMasterPatch(kind: SmeMasterWritableKind) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ id, body, params }: {
@@ -1435,7 +1438,7 @@ export function useSmeMasterPatch(kind: 'equipment' | 'recipes' | 'materials') {
   })
 }
 
-export function useSmeMasterDelete(kind: 'equipment' | 'recipes' | 'materials') {
+export function useSmeMasterDelete(kind: SmeMasterWritableKind) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ id, params }: {
