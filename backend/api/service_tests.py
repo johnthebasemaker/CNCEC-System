@@ -15315,6 +15315,277 @@ async def test_variance_reporting():
         await s.commit()
 
 
+# --- Suite CD: the manpower planner ------------------------------------------
+async def test_manpower_planner():
+    """Suite CD — Phase 7. The planner's arithmetic, checked against numbers
+    worked by hand.
+
+    The fixture is built so every figure is exact:
+
+        remaining area      600 m²
+        ESC-A  660 man-hours/shift ÷ 300 m²/shift = 2.2 man-hours per m²
+        ESC-B  330 man-hours/shift ÷ 300 m²/shift = 1.1 man-hours per m²
+        total               600 x 3.3 = 1,980 man-hours
+
+    Crew for ESC-A is 2 MASON : 1 HELPER, so its 1,320 man-hours split
+    880 / 440; ESC-B is all MASON, adding 660 → MASON 1,540, HELPER 440,
+    which sums back to 1,980.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import planner as P
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _reset():
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM sme_manpower_norm WHERE "
+                                 "\"Lining_System_Code\" IN "
+                                 "('SVCD-LSC', 'SVCD-PREP')"))
+            await s.execute(_sqt("DELETE FROM sme_recipe WHERE "
+                                 "\"Lining_System_Code\" = 'SVCD-LSC'"))
+            await s.execute(_sqt("DELETE FROM sme_sqm_progress WHERE "
+                                 "\"Equipment_Tag_No\" = 'SVCD-T1'"))
+            await s.execute(_sqt("DELETE FROM sme_equipment WHERE "
+                                 "\"Equipment_Tag_No\" = 'SVCD-T1'"))
+            await s.execute(_sqt("DELETE FROM sme_surface_prep_progress WHERE "
+                                 "\"Equipment_Tag_No\" = 'SVCD-T1'"))
+            await s.execute(_sqt("DELETE FROM mh_employees WHERE "
+                                 "\"Employee_Code\" LIKE 'SVCD-%'"))
+            await s.commit()
+
+    await _reset()
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO sme_sqm_progress ("Site_ID", "Equipment_Tag_No", '
+            '"Lining_System_Code", "Original_SQM", "Done_SQM") VALUES '
+            "('CNCEC', 'SVCD-T1', 'SVCD-LSC', 1000, 400)"))
+        await s.execute(_sqt(
+            'INSERT INTO sme_equipment ("Site_ID", "Equipment_Tag_No", '
+            '"Lining_System_Code", "Surface_Area_SQM") VALUES '
+            "('CNCEC', 'SVCD-T1', 'SVCD-LSC', 1000)"))
+        # A recipe line is what MAKES SVCD-LSC a lining system. Without one the
+        # planner is right to treat it as system-agnostic — that is the
+        # distinction CD-24 exists to check.
+        await s.execute(_sqt(
+            'INSERT INTO sme_recipe ("Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+            '"For_1_SQM") VALUES (\'SVCD-LSC\', \'SVCD-A\', \'SVCD-MAT\', '
+            "'SVCD-SAP', 1.0)"))
+        for esc, mh, crew in (("SVCD-A", 660, {"MASON": 2, "HELPER": 1}),
+                              ("SVCD-B", 330, {"MASON": 1})):
+            nid = (await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+                '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+                '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+                "VALUES ('CV', 'SVCD-LSC', :e, 'svcd', '', :c, 11, :m, 300, 0.45) "
+                "RETURNING id"),
+                {"e": esc, "m": mh, "c": sum(crew.values())})).scalar_one()
+            for rc, head in crew.items():
+                await s.execute(_sqt(
+                    'INSERT INTO sme_manpower_norm_role ("Norm_ID", '
+                    '"Role_Code", "Headcount") VALUES (:n, :r, :h)'),
+                    {"n": nid, "r": rc, "h": head})
+        await s.commit()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+        Hsk = await _qsep_login(ac, "SVCQ-sk")
+
+        async def _plan(hours=11.0, code="SVCD-LSC"):
+            r = await ac.post("/mh/planner", headers=H, json={
+                "equipment_tag": "SVCD-T1", "lining_system_code": code,
+                "deadline_hours": hours})
+            return r
+
+        r = await _plan()
+        check("CD-01 the planner answers", r.status_code == 200,
+              f"{r.status_code} {r.text[:160]}")
+        d = r.json()
+
+        check("CD-02 remaining area is Original - Done (1000 - 400)",
+              d["workload"]["remaining_sqm"] == 600.0, str(d["workload"]))
+        check("CD-03 required man-hours are 600 x 3.3 = 1,980",
+              abs(d["requirement"]["Total_Required_Manhours"] - 1980.0) < 1e-6,
+              str(d["requirement"]))
+        check("CD-04 …and the per-activity hours sum to that total",
+              abs(sum(a["Required_Manhours"] for a in d["activities"]) - 1980.0)
+              < 1e-6, str([a["Required_Manhours"] for a in d["activities"]]))
+
+        # THE PRECISION CHECK. 660/300 = 2.2 exactly; the workbook's rounded
+        # SQ.Mtr/Hr./Person column (0.45) would give 1/0.45 = 2.222 — a 1%
+        # overstatement on every plan.
+        a1 = next(a for a in d["activities"]
+                  if a["Execution_Sub_Activity_Code"] == "SVCD-A")
+        check("CD-05 man-hours per m² come from the EXACT pair, not the "
+              "workbook's rounded per-person column",
+              abs(a1["Manhours_Per_SQM"] - 2.2) < 1e-9, str(a1["Manhours_Per_SQM"]))
+
+        by_role = {g["Role_Code"]: g for g in d["gap"]}
+        check("CD-06 crew proportions split the hours: MASON 1,540",
+              abs(by_role["MASON"]["Required_Manhours"] - 1540.0) < 1e-6,
+              str(by_role["MASON"]))
+        check("CD-07 …HELPER 440",
+              abs(by_role["HELPER"]["Required_Manhours"] - 440.0) < 1e-6,
+              str(by_role["HELPER"]))
+        check("CD-08 …and the role hours reconcile to the total",
+              abs(sum(g["Required_Manhours"] for g in d["gap"]) - 1980.0) < 1e-6,
+              str([g["Required_Manhours"] for g in d["gap"]]))
+
+        # headcount = manhours / deadline_hours
+        check("CD-09 required headcount is man-hours ÷ deadline hours "
+              "(1540/11 = 140 masons)",
+              abs(by_role["MASON"]["Required_Headcount"] - 140.0) < 1e-6,
+              str(by_role["MASON"]["Required_Headcount"]))
+
+        # ── the roster is empty of matching designations ────────────────────
+        check("CD-10 with nobody rostered, the gap IS the requirement",
+              by_role["MASON"]["To_Procure"] == 140
+              and by_role["MASON"]["Available_Headcount"] == 0,
+              str(by_role["MASON"]))
+        check("CD-11 an unmatched designation is REPORTED, not silently "
+              "counted as zero — 'nobody wrote it down' and 'nobody has it' "
+              "need different actions",
+              any("match no role" in w for w in d["warnings"])
+              or not d["roster"]["Unmapped"], str(d["warnings"])[:200])
+
+        # ── now staff it, and watch overtime behave ─────────────────────────
+        async with SessionLocal() as s:
+            for i in range(10):
+                await s.execute(_sqt(
+                    'INSERT INTO mh_employees ("Site_ID", "Employee_Code", '
+                    '"Name", "Designation", "Worker_Type", "Shift", status) '
+                    "VALUES ('CNCEC', :c, :n, 'Mason', :w, 'Day', 'active')"),
+                    {"c": f"SVCD-{i}", "n": f"svcd {i}",
+                     "w": "GI" if i < 5 else "NON_GI"})
+            await s.commit()
+
+        d2 = (await _plan()).json()
+        # 5 GI x 8 + 5 NON_GI x 10 = 90 normal hours in an 11-hour window
+        st = d2["strategy"]
+        check("CD-12 normal capacity is Σ thresholds (5x8 + 5x10 = 90)",
+              abs(st["Normal_Capacity_Manhours"] - 90.0) < 1e-6, str(st))
+        check("CD-13 overtime capacity is the rest of the shift "
+              "(5x3 + 5x1 = 20)",
+              abs(st["Overtime_Capacity_Manhours"] - 20.0) < 1e-6, str(st))
+        check("CD-14 normal + overtime capacity = everyone's full shift "
+              "(10 x 11 = 110)",
+              abs(st["Normal_Capacity_Manhours"]
+                  + st["Overtime_Capacity_Manhours"] - 110.0) < 1e-6, str(st))
+        check("CD-15 1,980 man-hours against 110 of capacity is NOT feasible, "
+              "and says so rather than quietly reporting a plan",
+              st["Feasible"] is False and st["Unmet_Manhours"] > 0,
+              str(st))
+        check("CD-16 …and the recommendation says the deadline is unreachable",
+              "not reachable" in st["Recommendation"], st["Recommendation"])
+
+        # A workload that FITS, so the overtime arithmetic is visible.
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                'UPDATE sme_sqm_progress SET "Done_SQM" = 970 WHERE '
+                "\"Equipment_Tag_No\" = 'SVCD-T1'"))
+            await s.commit()
+        d3 = (await _plan()).json()   # 30 m² x 3.3 = 99 man-hours
+        st3 = d3["strategy"]
+        check("CD-17 99 man-hours against 90 normal + 20 OT is feasible",
+              st3["Feasible"] is True and st3["Unmet_Manhours"] == 0.0, str(st3))
+        check("CD-18 …using all 90 normal hours and exactly 9 of overtime",
+              abs(st3["Normal_Hours_Used"] - 90.0) < 1e-6
+              and abs(st3["Overtime_Hours_Incurred"] - 9.0) < 1e-6, str(st3))
+        check("CD-19 clearing that 9-hour overflow needs ONE non-GI worker "
+              "(10 normal hours) but TWO GI (8 each) — the whole of the "
+              "'prefer non-GI' advice, as arithmetic",
+              st3["Hire_NON_GI_To_Clear_Overtime"] == 1
+              and st3["Hire_GI_To_Clear_Overtime"] == 2, str(st3))
+
+        # …and when it all fits inside normal time, no advice to hire.
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                'UPDATE sme_sqm_progress SET "Done_SQM" = 990 WHERE '
+                "\"Equipment_Tag_No\" = 'SVCD-T1'"))
+            await s.commit()
+        st4 = (await _plan()).json()["strategy"]   # 10 m² → 33 man-hours
+        check("CD-20 a workload inside normal capacity incurs NO overtime",
+              st4["Overtime_Hours_Incurred"] == 0.0
+              and st4["Hire_NON_GI_To_Clear_Overtime"] == 0, str(st4))
+        check("CD-21 …and the recommendation says so plainly",
+              "No overtime" in st4["Recommendation"], st4["Recommendation"])
+
+        # ── a longer deadline buys capacity proportionally ──────────────────
+        st5 = (await _plan(hours=22.0)).json()["strategy"]
+        check("CD-22 doubling the deadline doubles capacity (2 shifts)",
+              abs(st5["Normal_Capacity_Manhours"] - 180.0) < 1e-6, str(st5))
+
+        # ── surface prep: system-agnostic, and a different workload source ──
+        async with SessionLocal() as s:
+            nid = (await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+                '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+                '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+                "VALUES ('CV', 'SVCD-PREP', 'SVCD-BLAST', 'svcd blast', '', "
+                "2, 11, 22, 40, 1.82) RETURNING id"))).scalar_one()
+            await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm_role ("Norm_ID", "Role_Code", '
+                '"Headcount") VALUES (:n, \'BLASTER\', 2)'), {"n": nid})
+            await s.commit()
+        prep = (await _plan(code="")).json()
+        check("CD-23 surface prep takes its area from the EQUIPMENT, not from "
+              "lining progress (1000 m², none prepped)",
+              prep["workload"]["remaining_sqm"] == 1000.0
+              and "sme_equipment" in prep["workload"]["source"],
+              str(prep["workload"]))
+        check("CD-24 …and it plans against the system-agnostic benchmarks only",
+              any(a["Execution_Sub_Activity_Code"] == "SVCD-BLAST"
+                  for a in prep["activities"])
+              and not any(a["Execution_Sub_Activity_Code"].startswith("SVCD-A")
+                          for a in prep["activities"]),
+              str([a["Execution_Sub_Activity_Code"] for a in prep["activities"]]))
+        check("CD-25 the inputs echo that this plan is system-agnostic",
+              prep["inputs"]["system_agnostic"] is True, str(prep["inputs"]))
+
+        # ── guards and access ───────────────────────────────────────────────
+        bad = await ac.post("/mh/planner", headers=H, json={
+            "equipment_tag": "SVCD-T1", "lining_system_code": "SVCD-LSC",
+            "deadline_hours": 0})
+        check("CD-26 a zero deadline is refused rather than dividing by it",
+              bad.status_code == 422, f"{bad.status_code}")
+        missing = await ac.post("/mh/planner", headers=H, json={
+            "equipment_tag": "SVCD-NOPE", "lining_system_code": "SVCD-LSC",
+            "deadline_hours": 11})
+        check("CD-27 planning unknown equipment WARNS instead of reporting a "
+              "confident zero", missing.status_code == 200
+              and any("no progress row" in w
+                      for w in missing.json()["warnings"]),
+              str(missing.json().get("warnings"))[:160])
+        check("CD-28 a store keeper cannot run the planner",
+              (await ac.post("/mh/planner", headers=Hsk, json={
+                  "equipment_tag": "SVCD-T1", "deadline_hours": 11}
+              )).status_code == 403, "")
+        tg = await ac.get("/mh/planner/targets", headers=H)
+        check("CD-29 the targets list offers what still has area outstanding",
+              tg.status_code == 200 and "items" in tg.json(),
+              f"{tg.status_code}")
+
+    # ── the pure conversion, without HTTP ───────────────────────────────────
+    check("CD-30 manhours_per_sqm prefers the exact pair over the rounded one",
+          abs(P.manhours_per_sqm({"Standard_Productivity_Per_Shift": 13.33,
+                                  "Manhours_Per_Shift": 99,
+                                  "SQM_Per_Hour_Per_Person": 0.13}) - 7.4268)
+          < 1e-3, str(P.manhours_per_sqm({"Standard_Productivity_Per_Shift": 13.33,
+                                          "Manhours_Per_Shift": 99,
+                                          "SQM_Per_Hour_Per_Person": 0.13})))
+    check("CD-31 …and falls back to it when the exact pair is missing",
+          abs(P.manhours_per_sqm({"SQM_Per_Hour_Per_Person": 0.5}) - 2.0) < 1e-9, "")
+    check("CD-32 …and returns None rather than 0 when neither exists, so a "
+          "missing benchmark cannot read as 'free labour'",
+          P.manhours_per_sqm({}) is None, "")
+
+    await _reset()
+
+
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
 async def test_workflow_polish():
     """Suite BX — the operational refinements of 2026-08-13.
@@ -16039,6 +16310,9 @@ async def main() -> int:
     print("\n CC. Variance reporting — the arithmetic, and the two places a "
           "wrong number looks right")
     await test_variance_reporting()
+    print("\n CD. The manpower planner — workload, gap, and the overtime "
+          "arithmetic behind 'prefer non-GI'")
+    await test_manpower_planner()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

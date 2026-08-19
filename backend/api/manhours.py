@@ -284,6 +284,63 @@ async def put_ot_settings(body: OtSettingsIn = Body(...),
     return {"updated": True, "thresholds": await ot_thresholds(session)}
 
 
+# --- The planner (Phase 7) ----------------------------------------------------
+class PlannerIn(BaseModel):
+    equipment_tag: str = Field(min_length=1)
+    # '' = surface prep. Sent as the empty string, never null — the same
+    # sentinel the execution entries use (see models.SmeExecutionEntry).
+    lining_system_code: str = ""
+    deadline_hours: float = Field(gt=0, le=24 * 365)
+    site_id: Optional[str] = None
+
+
+@router.post("/planner", summary="Manpower plan: workload → gap → OT strategy")
+async def planner(body: PlannerIn = Body(...),
+                  user: dict = Depends(require_roles("hod")),
+                  session: AsyncSession = Depends(get_session)):
+    """READ-ONLY BY DESIGN. It mutates nothing — the operator's ruling is that
+    this is an analytical suggestion, never a forced assignment. It is a POST
+    only because the inputs are a body, not because it writes."""
+    from .services.planner import plan as _plan
+    sid = _write_site(user, body.site_id)
+    return await _plan(session, site_id=sid, equipment_tag=body.equipment_tag,
+                       lining_system_code=body.lining_system_code,
+                       deadline_hours=body.deadline_hours)
+
+
+@router.get("/planner/targets", summary="What the planner can be pointed at")
+async def planner_targets(site_id: Optional[str] = None,
+                          user: dict = Depends(require_roles("hod")),
+                          session: AsyncSession = Depends(get_session)):
+    """Equipment + system pairs that still have area outstanding, plus the
+    surface-prep option for each tag. Sorted so the biggest job is first —
+    the planner is used when something is behind, not to browse."""
+    from sqlalchemy import func as _f
+
+    sid = resolve_site_param(user, site_id)
+    p = _MD.tables["sme_sqm_progress"]
+    stmt = select(p.c["Equipment_Tag_No"], p.c["Lining_System_Code"],
+                  p.c["Original_SQM"], p.c["Done_SQM"])
+    if sid is not None:
+        stmt = stmt.where(p.c["Site_ID"] == sid)
+    out = []
+    tags = set()
+    for tag, code, orig, done in (await session.execute(stmt)).all():
+        remaining = max(float(orig or 0) - float(done or 0), 0.0)
+        tags.add(str(tag))
+        if remaining <= 0:
+            continue
+        out.append({"Equipment_Tag_No": str(tag),
+                    "Lining_System_Code": str(code),
+                    "Remaining_SQM": round(remaining, 2),
+                    "system_agnostic": False})
+    out.sort(key=lambda r: -r["Remaining_SQM"])
+    prep = [{"Equipment_Tag_No": t, "Lining_System_Code": "",
+             "Remaining_SQM": None, "system_agnostic": True}
+            for t in sorted(tags)]
+    return {"items": out, "surface_prep": prep}
+
+
 # --- Employees (labor roster — logically separate from the system users table) --
 class EmployeeIn(BaseModel):
     employee_code: str

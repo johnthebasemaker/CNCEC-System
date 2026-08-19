@@ -15,6 +15,7 @@ import { useAuth } from '../auth/AuthContext'
 import { useSites, downloadDocument } from '../api/hooks'
 import { HodApprovalQueueTab } from './ExecutionPage'
 import { ExecVarianceTab, ReasonLogTab, SurfacePrepTab } from './ExecutionReportTabs'
+import ManpowerPlanner from './ManpowerPlanner'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -990,6 +991,8 @@ export default function ManHoursPage() {
             children: <ReasonLogTab /> },
           { key: 'exec-prep', label: '🧱 Surface Prep Progress',
             children: <SurfacePrepTab /> },
+          { key: 'planner', label: '🧠 Manpower Planner',
+            children: <ManpowerPlanner /> },
         ]}
       />
     </div>
