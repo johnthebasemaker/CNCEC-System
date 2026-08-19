@@ -13,6 +13,8 @@ import { api } from '../api/client'
 import type { Row as ApiRow } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { useSites, downloadDocument } from '../api/hooks'
+import { HodApprovalQueueTab } from './ExecutionPage'
+import { ExecVarianceTab, ReasonLogTab, SurfacePrepTab } from './ExecutionReportTabs'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -977,6 +979,17 @@ export default function ManHoursPage() {
           { key: 'variance', label: '📊 Estimate vs Actual', children: <VarianceTab site={effSite} /> },
           { key: 'scorecard', label: '🔗 Scorecard', children: <ScorecardTab site={effSite} /> },
           { key: 'employee-wise', label: '🧑‍🔧 Employee-wise', children: <EmployeeWiseTab site={effSite} /> },
+          // Phase 6 — the execution side. Four views over the SAME entries,
+          // because one table cannot answer the four different questions
+          // people bring to this data.
+          { key: 'exec-queue', label: '✅ HOD Approval Queue',
+            children: <HodApprovalQueueTab /> },
+          { key: 'exec-variance', label: '⚖️ Actual vs Benchmark',
+            children: <ExecVarianceTab /> },
+          { key: 'exec-reasons', label: '📝 Reason Audit Log',
+            children: <ReasonLogTab /> },
+          { key: 'exec-prep', label: '🧱 Surface Prep Progress',
+            children: <SurfacePrepTab /> },
         ]}
       />
     </div>

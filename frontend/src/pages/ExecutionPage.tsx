@@ -476,6 +476,52 @@ function HodModal({ entry, onClose }: { entry: Row | null; onClose: () => void }
   )
 }
 
+/**
+ * The HOD's approval queue, as a standalone tab.
+ *
+ * Exported so the Man-Hours portal can host it directly rather than growing a
+ * second review modal — one implementation of "correct a figure, justify it,
+ * notify the supervisor" is the whole point.
+ */
+export function HodApprovalQueueTab() {
+  const { data, isFetching } = useEntries('PENDING_HOD')
+  const [row, setRow] = useState<Row | null>(null)
+  const rows = data ?? []
+  const columns: ColumnsType<Row> = [
+    { title: 'Entry', dataIndex: 'Entry_No', width: 150 },
+    { title: 'Date', dataIndex: 'Work_Date', width: 105 },
+    { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 165 },
+    { title: 'System', dataIndex: 'Lining_System_Code', width: 125,
+      render: (v: string) => v || <Tag color="gold">surface prep</Tag> },
+    { title: 'Sub-activity', dataIndex: 'Execution_Sub_Activity_Code', width: 120 },
+    { title: 'Area', dataIndex: 'Actual_SQM', width: 90, align: 'right',
+      render: (v) => (v == null ? '—' : `${Number(v)} m²`) },
+    { title: 'Material', key: 'mv', width: 105, align: 'right',
+      render: (_: unknown, r: Row) =>
+        <VarianceTag value={((r.variance as Row)?.material_total as Row)?.Variance_Pct} /> },
+    { title: 'Manpower', key: 'pv', width: 105, align: 'right',
+      render: (_: unknown, r: Row) =>
+        <VarianceTag value={((r.variance as Row)?.manpower as Row)?.Variance_Pct} /> },
+    { title: 'Supervisor', dataIndex: 'supervisor_username', width: 120 },
+    { title: '', key: 'a', fixed: 'right', width: 110,
+      render: (_: unknown, r: Row) => (
+        <Button size="small" type="primary" onClick={() => setRow(r)}>Review</Button>) },
+  ]
+  return (
+    <div>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+        Entries waiting on you. Approval is what deducts stock — nothing before
+        it moves a quantity, which is what makes correcting a figure here safe.
+      </Typography.Paragraph>
+      <Table sticky={{ offsetHeader: 64 }} size="small" loading={isFetching}
+        columns={columns} dataSource={rows} rowKey={(r) => String(r.id)}
+        scroll={{ x: 'max-content' }}
+        pagination={{ pageSize: 20, showTotal: (t) => `${t} awaiting approval` }} />
+      <HodModal entry={row} onClose={() => setRow(null)} />
+    </div>
+  )
+}
+
 // ─── the page ────────────────────────────────────────────────────────────────
 export default function ExecutionPage() {
   const { user } = useAuth()

