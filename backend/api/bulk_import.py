@@ -1561,6 +1561,12 @@ async def plan_sme_manpower_norms(session: AsyncSession, data: bytes) -> dict:
     but disagree on the numbers, keeping either one plans a crew against a
     benchmark that can be 7.5x wrong. The reject names the exact `Variant_Key`
     to type, because "duplicate row" on its own is not actionable.
+
+    ⚠️ ORPHANS ARE REPORTED (Phase 8). The plan carries an `orphans` list —
+    benchmarks the database holds that no row in THIS workbook names. Before
+    this existed the sync could only see rows that arrived, never rows that
+    left, so a rename read as a clean insert and the superseded row stayed
+    forever. Reported, never deleted; see the comment at the report itself.
     """
     headers, rows = _sheet_rows(data, "Productivity Estimation",
                                 ("lining_system_code", "activity"),
@@ -1678,7 +1684,44 @@ async def plan_sme_manpower_norms(session: AsyncSession, data: bytes) -> dict:
             else:
                 unchanged += 1
 
+    # ── orphans: benchmarks the database holds that the workbook no longer
+    # claims. `Activity`, `Type` and `Variant_Key` are all part of the identity,
+    # so RENAMING any of them in the workbook is an INSERT, not an update: the
+    # new row appears, the old one stays, and every workbook row still matches.
+    # That is exactly how 'Blasting Civil PU Area' survived its own rename to
+    # 'Blasting Civil PU 4mm Area' and went on adding 0.825 man-hours per m² to
+    # every surface-prep plan while the sync reported "0 rejections" — which was
+    # true, and told nobody anything.
+    #
+    # ⚠️ REPORTED, NEVER DELETED HERE. A planner is a dry run; deleting inside
+    # one would be a mutation the caller never asked for, and an operator who
+    # imports a partial sheet by mistake must not silently lose the rows it
+    # omits. The decision belongs to whoever reads the report.
+    orphans = [
+        {"id": cur["id"], "Type": key[0], "Lining_System_Code": key[1],
+         "Execution_Sub_Activity_Code": key[2], "Activity": key[3],
+         "Variant_Key": key[4],
+         "Crew_Size": cur.get("Crew_Size"),
+         "Standard_Productivity_Per_Shift": cur.get(
+             "Standard_Productivity_Per_Shift")}
+        for key, cur in existing.items() if key not in agg
+    ]
+    orphans.sort(key=lambda o: (o["Lining_System_Code"],
+                                o["Execution_Sub_Activity_Code"],
+                                o["Type"], o["Activity"]))
+
     warnings = []
+    if orphans:
+        warnings.append(
+            f"{len(orphans)} benchmark(s) in the database are named by no row "
+            f"in this workbook: "
+            + "; ".join(f"{o['Type']}/{o['Lining_System_Code']}/"
+                        f"{o['Execution_Sub_Activity_Code']}/{o['Activity']!r}"
+                        for o in orphans[:6])
+            + (f" (+{len(orphans) - 6} more)" if len(orphans) > 6 else "")
+            + ". Renaming a benchmark ADDS a row rather than updating one, so a "
+              "leftover here usually means an earlier rename. Nothing was "
+              "deleted — check each before removing it.")
     if dup_skips:
         warnings.append(f"{dup_skips} identical repeat(s) of an existing "
                         f"benchmark collapsed — same identity, same numbers")
@@ -1692,7 +1735,7 @@ async def plan_sme_manpower_norms(session: AsyncSession, data: bytes) -> dict:
         warnings.append(f"no column found for role(s) {unknown_roles} — their "
                         f"headcounts will be absent from every crew")
     return {"inserts": inserts, "updates": updates, "unchanged": unchanged,
-            "rejects": rejects, "warnings": warnings}
+            "rejects": rejects, "warnings": warnings, "orphans": orphans}
 
 
 async def apply_sme_manpower_norms(session: AsyncSession, plan: dict,

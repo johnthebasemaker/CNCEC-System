@@ -706,6 +706,50 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-20 — Phase 8 slice 8a (`feat/phase8-planner-math`).**
+> The planner's arithmetic. Baselines move to **service tests 1,698** (+31,
+> suite CE), alembic head **`d4b8c1e63a27`**; E2E 90, legacy 599, parity 1,313,
+> UI math 33, nav 47 all unchanged.
+>
+> **Three additions to the LOCKED set:**
+>
+> * **SELECTION AND SUMMATION ARE DIFFERENT STEPS, AND THE PLANNER DOES BOTH,
+>   IN THAT ORDER.** Benchmarks under DIFFERENT `Execution_Sub_Activity_Code`s
+>   are sequential and their man-hours ADD; benchmarks under the SAME one are
+>   alternatives and COMPETE. Adding the second kind is how surface prep came
+>   to charge 3.6967 man-hours/m² where a concrete floor costs 0.1467 — 25×.
+>   `services/planner.py` now gathers, then SELECTS (shares summing to 1), then
+>   sums across distinct sub-activities only, and REPORTS every choice in
+>   `benchmark_selection`. Where nothing in the data decides, it takes the
+>   DEAREST candidate and flags `needs_operator` — **never the sum**.
+>
+> * **CV/ME IS A PROPERTY OF THE EQUIPMENT, NOT OF THE SYSTEM CODE.** `LSC1` is
+>   CV on nine concrete rows and ME on nineteen tank/vessel rows in the live
+>   master, so a chip reading `LSC1 [CV]` on any screen that aggregates across
+>   equipment is false. `sme_equipment.Type` for that (tag, code) is what
+>   resolves the twin benchmarks (LSC4, LSC5) — and it is what any future
+>   CV/ME tag must read.
+>
+> * **A RENAME IN A WORKBOOK IS AN INSERT, NOT AN UPDATE.** `Activity`, `Type`
+>   and `Variant_Key` are all part of `sme_manpower_norm`'s identity, so
+>   renaming any of them creates a row and orphans the old one — and every
+>   workbook row still matches, so the sync truthfully reports "0 rejections"
+>   and mentions the leftover nowhere. `plan_sme_manpower_norms` now returns an
+>   `orphans` list and `pg_excel_sync` prints it. **Reported, never deleted:** a
+>   dry run that mutates is not a dry run, and an operator who imports a partial
+>   sheet must not lose the rows it omits.
+>
+> ⚠️ **The planner's numbers move DOWNWARDS in this slice.** Any plan printed
+> before 2026-08-20 overstates the labour required; do not reconcile a new one
+> against an old printout.
+>
+> ⚠️ **OPEN — surfaces described twice are reported, not deduplicated.** J027
+> files LSC1 and LSC2 at 504 m² each against an identical
+> `Lining_Area_Location`: one surface, two systems, counted twice in the prep
+> area. The plan publishes `gross_sqm` / `deduplicated_sqm` /
+> `double_counted_sqm`, **uses the gross**, and warns. Whether such a surface is
+> blasted once or twice is an operator ruling and has not been made.
+
 > **Updated 2026-08-19 — the Phase 7 programme (branches `feat/phase7-*`).**
 > Six merged slices: the LSC/ESC master-data migration, the manpower benchmark
 > master, the roster extension, the execution workflow, variance reporting, and

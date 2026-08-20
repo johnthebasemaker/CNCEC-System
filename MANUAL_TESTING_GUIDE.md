@@ -1521,6 +1521,119 @@ name.
 
 ---
 
+## 14h. Selection, not summation (Phase 8 · slice 8a)
+
+> Added 2026-08-20 (branch `feat/phase8-planner-math`). Rule 13.
+
+**⚠️ THE PLANNER'S NUMBERS CHANGE IN THIS RELEASE, DOWNWARDS, AND THAT IS THE
+FIX.** Anything printed before 2026-08-20 overstates the labour required. Do
+not reconcile a new plan against an old printout.
+
+### 14h.1 What was wrong
+
+The planner gathered every benchmark filed under a system code and **added
+them up**. That is correct for *sequential* sub-activities — finishing a system
+means doing the primer AND the screed AND the buffing — and wrong for
+*alternative* benchmarks for **one** sub-activity, which compete. The workbook
+has both shapes and nothing told them apart.
+
+| Case | Why two rows exist | Was | Should be | Error |
+|---|---|---|---|---|
+| LSC4 / ESC41 | Same brick lining, filed once CV and once ME — identical crew, identical productivity | 13.1974 | 6.5987 | **2.00×** |
+| LSC5 / ESC51 | The same, 63 mm | 16.0855 | 8.0427 | **2.00×** |
+| LSC10 / ESC101 | One seal coat serving the 4 mm (70 m²/shift) and 6 mm (90 m²/shift) systems | 3.3524 | split | **2.29×** |
+| Surface prep | Four blasting variants plus the steel one, all summed | 3.6967 | 0.1467 on plain concrete | **25×** |
+
+### 14h.2 The three rules, in the order they are tried
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-SEL-01** | Plan a tag whose system is filed under both CV and ME (LSC4, LSC5) | **One** activity row, matching the **equipment's own Type** from the master. The discarded twin is listed under `benchmark_selection.rules_applied[].rejected`. |
+| **TC-SEL-02** | Plan LSC10 on a tag carrying LSC8 and LSC9 | **Two** rows sharing the area in the **LSC8 : LSC9 ratio**. On J027 that is 982 : 2,565 → shares 0.2769 / 0.7231, and 5,614 man-hours rather than 11,891. |
+| **TC-SEL-03** | Read the `why` on that rule | It names the systems and their areas. The split is derived from `Activity` text matching, so a new "PU lining 8 mm" system works with **no code change**. |
+| **TC-SEL-04** | Create two benchmarks under one sub-activity that nothing distinguishes | The **dearest** is used, one row only, `needs_operator: true`, and a warning. **Never their sum** — overstating one benchmark is recoverable, silently doubling is not. |
+
+### 14h.3 Surface prep is partitioned, not summed
+
+Each surface on the tag is charged to the **one** benchmark that prepares it.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-SEL-05** | Prep-plan a concrete tag (J027) | Floor & Wall for the plain systems, PU 4 mm for LSC8, PU 6 mm for LSC9 — **3,853** man-hours, not the old 31,817. |
+| **TC-SEL-06** | Prep-plan a steel tag (513-37213-AGI-501) | Everything routes to **Blasting Steel Surface** because the equipment is `Type = ME`. The word "steel" in the benchmark name is *not* what decides it. |
+| **TC-SEL-07** | Check the Floor & Wall row on a tag with four plain systems | **One** row carrying the summed area and all four codes in `Applies_To`, not four identical rows. |
+| **TC-SEL-08** | Read `benchmark_selection.surface_prep_partition` | One entry per system: its area, its Type, the benchmark chosen and **why**. |
+
+### 14h.4 Topcoats are blasted once
+
+**TC-SEL-09** — LSC10's area on every tag equals LSC8 + LSC9 **exactly**
+(J027: 982 + 2,565 = 3,547). It is the seal over both, so the concrete beneath
+it is blasted once, before the screed. LSC10 is therefore **excluded from the
+prep area**, and the exclusion is reported with the arithmetic that justified
+it.
+
+**TC-SEL-10** — the test is directional and needs **both** halves: the code's
+benchmarks must name the systems it covers, **and** its area must equal their
+sum. When the areas disagree the exclusion is **refused** and reported — an
+area that does not add up is a data question, not a licence to drop a surface.
+
+### 14h.5 ⚠️ Overlapping surfaces are reported, NOT deduplicated
+
+**TC-SEL-11** — J027 files LSC1 and LSC2 at **504 m² each against an identical
+`Lining_Area_Location`**. Physically that is one 504 m² surface carrying two
+systems. The plan publishes both figures —
+
+```
+gross_sqm 5,059    deduplicated_sqm 4,555    double_counted_sqm 504
+```
+
+— **uses the gross**, and warns. Whether a surface carrying two systems is
+blasted once or twice is an operator ruling that has not been made. Nothing is
+assumed here.
+
+### 14h.6 The sync now reports rows that left
+
+**TC-SEL-12** — rename a benchmark's `Activity` in `Manpower_Hour_Details.xlsx`
+and run `tools/pg_excel_sync.py --dry-run --kinds sme-manpower`.
+
+`Activity` is part of the five-part identity, so a **rename is an insert**: the
+new row appears and the old one stays. Before this release the run reported
+`+1 ~0 rejected=0` and mentioned the leftover nowhere, because there was no
+pass for rows that *vanish* from the workbook. It now prints them:
+
+```
+⚠ 1 row(s) in the database that this workbook does not name — NOT deleted:
+  · id 49  CV/ESC1/ESC1  'Blasting Civil PU Area'  crew 3.0 @ 40.0 /shift
+```
+
+**TC-SEL-13** — confirm the dry run **did not delete it**. Reporting is not
+pruning; an operator who imports a partial sheet by mistake must not lose the
+rows it omits.
+
+**TC-SEL-14** — alembic `d4b8c1e63a27` deletes the one known leftover
+(`Blasting Civil PU Area`, superseded by `Blasting Civil PU 4mm Area`). Re-run
+it: it is idempotent and prints *"nothing to do"*. It names one identity and
+does **not** prune orphans in general.
+
+### 14h.7 Crew-shifts — a free self-check
+
+**TC-SEL-15** — every activity now publishes `Crew_Shifts`, and the two ways of
+computing it must agree:
+
+```
+sqm ÷ Standard_Productivity_Per_Shift  ==  man-hours ÷ Manhours_Per_Shift
+```
+
+They are algebraically identical, so a disagreement means a corrupt benchmark
+row. Suite CE asserts it on every activity in a plan.
+
+> **This is WORKLOAD, not elapsed time** — how many shifts of the benchmark
+> crew the job contains, independent of who you deploy. Elapsed shifts are
+> `man-hours ÷ (deployed headcount × 11)` and coincide only when the crew you
+> send is the benchmark crew.
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

@@ -15586,6 +15586,343 @@ async def test_manpower_planner():
     await _reset()
 
 
+# --- Suite CE: selection, not summation ---------------------------------------
+async def test_planner_selection():
+    """Suite CE — Phase 8 slice 8a. Which benchmark applies, and to how much.
+
+    The bug this suite exists to keep dead: the planner summed every benchmark
+    filed under a system code. That is right for SEQUENTIAL sub-activities
+    (primer AND screed AND buffing) and wrong for ALTERNATIVE benchmarks for
+    ONE sub-activity, which compete. Both shapes are in the live workbook, and
+    the arithmetic was wrong by 2x on brick lining and 25x on surface prep.
+
+    EVERY NUMBER BELOW IS HAND-CHECKABLE. Productivity is 100 m²/shift almost
+    everywhere so man-hours per m² is `Manhours_Per_Shift / 100` and the
+    expected totals can be read straight off the fixture:
+
+        SVCE-T1   SVCE-A 400 m² CV   3.0 mh/m²   (Manhours_Per_Shift 300)
+                  SVCE-B 600 m² CV   2.0         (200)
+                  SVCE-C 1000 m² CV  — the TOPCOAT, area == 400 + 600 exactly,
+                                        filed twice: 4.0 for the surface that
+                                        carries SVCE-A, 1.0 for SVCE-B's
+        SVCE-T2   SVCE-D 200 m² CV   5.0, filed once for CV and once for ME
+        SVCE-T3   SVCE-E 300 m² ME
+        SVCE-T4   SVCE-F 100 m² CV   two benchmarks nothing chooses between
+        SVCE-T5   SVCE-G + SVCE-H, 250 m² each at the SAME location
+
+    So the headline expectations are:
+
+        SVCE-C lining   400 x 4.0 + 600 x 1.0 = 2,200      (summed: 5,000)
+        SVCE-T1 prep    400 x 2.0 + 600 x 0.5 = 1,100      (summed: 7,000)
+        SVCE-D lining   200 x 5.0             = 1,000      (summed: 2,000)
+    """
+    import io as _io
+
+    from sqlalchemy import text as _sqt
+
+    from . import bulk_import as BI
+    from .services import planner as P
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _reset():
+        async with SessionLocal() as s:
+            for tbl, col in (("sme_manpower_norm", "Lining_System_Code"),
+                             ("sme_recipe", "Lining_System_Code")):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE "{col}" '
+                                     f"LIKE 'SVCE-%'"))
+            for tbl in ("sme_sqm_progress", "sme_equipment",
+                        "sme_surface_prep_progress"):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE '
+                                     f'"Equipment_Tag_No" LIKE \'SVCE-%\''))
+            await s.commit()
+
+    await _reset()
+
+    # ── the fixture ─────────────────────────────────────────────────────────
+    EQUIP = [
+        # tag,        code,     type, area,  location
+        ("SVCE-T1", "SVCE-A", "CV", 400.0, "SVCE Floor"),
+        ("SVCE-T1", "SVCE-B", "CV", 600.0, "SVCE Wall"),
+        ("SVCE-T1", "SVCE-C", "CV", 1000.0, "SVCE Floor+Wall"),
+        ("SVCE-T2", "SVCE-D", "CV", 200.0, "SVCE Shell"),
+        ("SVCE-T3", "SVCE-E", "ME", 300.0, "SVCE Tank"),
+        ("SVCE-T4", "SVCE-F", "CV", 100.0, "SVCE Pit"),
+        # The same 250 m² deck described twice — one surface, two systems.
+        ("SVCE-T5", "SVCE-G", "CV", 250.0, "SVCE Deck"),
+        ("SVCE-T5", "SVCE-H", "CV", 250.0, "SVCE Deck"),
+    ]
+    NORMS = [
+        # code,     esc,      type, activity,                mh/shift, crew
+        ("SVCE-A", "ESCA1", "CV", "svcefour lining", 300, {"MASON": 2, "HELPER": 1}),
+        ("SVCE-B", "ESCB1", "CV", "svcesix lining", 200, {"MASON": 1}),
+        # THE PAIRED VARIANTS. Same code, same sub-activity, and the only thing
+        # separating them is which system each names — which is exactly what
+        # LSC10's 4 mm and 6 mm seal-coat rows do in the live workbook.
+        ("SVCE-C", "ESCC1", "CV", "svcefour lining", 400, {"MASON": 1}),
+        ("SVCE-C", "ESCC1", "CV", "svcesix lining", 100, {"MASON": 1}),
+        # THE CV/ME TWIN — identical work, filed once per discipline.
+        ("SVCE-D", "ESCD1", "CV", "svce twin", 500, {"MASON": 1}),
+        ("SVCE-D", "ESCD1", "ME", "svce twin", 500, {"MASON": 1}),
+        ("SVCE-E", "ESCE1", "ME", "svce steel lining", 100, {"MASON": 1}),
+        # NOTHING CHOOSES BETWEEN THESE. Same type, same sub-activity, and
+        # neither Activity names a system on the tag.
+        ("SVCE-F", "ESCF1", "CV", "svce alpha", 100, {"HELPER": 1}),
+        ("SVCE-F", "ESCF1", "CV", "svce beta", 300, {"HELPER": 1}),
+        ("SVCE-G", "ESCG1", "CV", "svce deck lining", 100, {"HELPER": 1}),
+        ("SVCE-H", "ESCH1", "CV", "svce deck coating", 100, {"HELPER": 1}),
+        # System-agnostic (no recipe names SVCE-PREP), so these are surface prep.
+        # 'Blasting Civil Floor & Wall' specifies NOTHING after the generic
+        # blasting words come out, which is what makes it the catch-all.
+        ("SVCE-PREP", "ESCP1", "CV", "Blasting Civil Floor & Wall", 50, {"BLASTER": 1}),
+        ("SVCE-PREP", "ESCP1", "CV", "Blasting Civil svcefour Area", 200, {"BLASTER": 2}),
+        ("SVCE-PREP", "ESCP1", "ME", "Blasting Steel Surface", 100, {"BLASTER": 1}),
+    ]
+
+    async with SessionLocal() as s:
+        for tag, code, typ, area, loc in EQUIP:
+            await s.execute(_sqt(
+                'INSERT INTO sme_equipment ("Site_ID", "Equipment_Tag_No", '
+                '"Lining_System_Code", "Type", "Surface_Area_SQM", '
+                '"Lining_Area_Location") VALUES '
+                "('CNCEC', :t, :c, :y, :a, :l)"),
+                {"t": tag, "c": code, "y": typ, "a": area, "l": loc})
+            await s.execute(_sqt(
+                'INSERT INTO sme_sqm_progress ("Site_ID", "Equipment_Tag_No", '
+                '"Lining_System_Code", "Original_SQM", "Done_SQM") VALUES '
+                "('CNCEC', :t, :c, :a, 0)"), {"t": tag, "c": code, "a": area})
+            # A recipe line is what MAKES a code a lining system. SVCE-PREP has
+            # none, which is the only reason it reads as surface prep — the
+            # test is on the data, never on how the code is spelt.
+            await s.execute(_sqt(
+                'INSERT INTO sme_recipe ("Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+                '"For_1_SQM") VALUES (:c, :e, :m, :m, 1.0)'),
+                {"c": code, "e": f"{code}-R", "m": f"SVCE-MAT-{code}"})
+        for code, esc, typ, act, mh, crew in NORMS:
+            nid = (await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+                '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+                '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+                "VALUES (:y, :c, :e, :a, '', :n, 11, :m, 100, 0) RETURNING id"),
+                {"y": typ, "c": code, "e": esc, "a": act,
+                 "n": sum(crew.values()), "m": mh})).scalar_one()
+            for rc, head in crew.items():
+                await s.execute(_sqt(
+                    'INSERT INTO sme_manpower_norm_role ("Norm_ID", '
+                    '"Role_Code", "Headcount") VALUES (:n, :r, :h)'),
+                    {"n": nid, "r": rc, "h": head})
+        await s.commit()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+
+        async def _plan(tag, code="", hours=11.0):
+            r = await ac.post("/mh/planner", headers=H, json={
+                "equipment_tag": tag, "lining_system_code": code,
+                "deadline_hours": hours})
+            assert r.status_code == 200, f"{r.status_code} {r.text[:200]}"
+            return r.json()
+
+        # ── the paired split (the LSC10 shape) ──────────────────────────────
+        c = await _plan("SVCE-T1", "SVCE-C")
+        check("CE-01 a sub-activity filed twice is SPLIT by the area of the "
+              "systems each variant names, not summed",
+              abs(c["requirement"]["Total_Required_Manhours"] - 2200.0) < 1e-6,
+              str(c["requirement"]))
+        check("CE-02 …and the summed answer (5,000) is NOT what comes out — "
+              "this is the LSC10 regression, named so it cannot come back",
+              abs(c["requirement"]["Total_Required_Manhours"] - 5000.0) > 1.0,
+              str(c["requirement"]))
+        shares = sorted(round(a["Share"], 4) for a in c["activities"])
+        check("CE-03 the shares are the systems' area ratio (400:600) and sum "
+              "to exactly one", shares == [0.4, 0.6]
+              and abs(sum(shares) - 1.0) < 1e-9, str(shares))
+        check("CE-04 …and each variant is charged only its own share of the area",
+              sorted(a["Applied_SQM"] for a in c["activities"]) == [400.0, 600.0],
+              str([a["Applied_SQM"] for a in c["activities"]]))
+        rule = next((r for r in c["benchmark_selection"]["rules_applied"]
+                     if r["sub_activity"].endswith("ESCC1")), None)
+        check("CE-05 the split is REPORTED, with the rule that produced it",
+              rule is not None and rule["rule"] == "paired system area",
+              str(rule))
+
+        # ── the CV/ME twin ──────────────────────────────────────────────────
+        d = await _plan("SVCE-T2", "SVCE-D")
+        check("CE-06 a benchmark filed once for CV and once for ME is resolved "
+              "by the EQUIPMENT's own Type (200 x 5.0)",
+              abs(d["requirement"]["Total_Required_Manhours"] - 1000.0) < 1e-6,
+              str(d["requirement"]))
+        check("CE-07 …to exactly ONE activity row, not two",
+              len(d["activities"]) == 1
+              and d["activities"][0]["Type"] == "CV",
+              str([(a["Type"], a["Required_Manhours"]) for a in d["activities"]]))
+        check("CE-08 …and 2,000 — the exactly-doubled figure the live LSC4 and "
+              "LSC5 rows were producing — is not reachable",
+              abs(d["requirement"]["Total_Required_Manhours"] - 2000.0) > 1.0,
+              str(d["requirement"]))
+        drule = d["benchmark_selection"]["rules_applied"][0]
+        check("CE-09 the discarded twin is named, not silently dropped",
+              drule["rule"] == "equipment Type" and len(drule["rejected"]) == 1
+              and drule["rejected"][0]["Type"] == "ME", str(drule))
+
+        # ── surface prep: partitioned, not summed ───────────────────────────
+        p1 = await _plan("SVCE-T1", "")
+        check("CE-10 surface prep charges each surface to the ONE benchmark "
+              "that prepares it (400 x 2.0 + 600 x 0.5)",
+              abs(p1["requirement"]["Total_Required_Manhours"] - 1100.0) < 1e-6,
+              str(p1["requirement"]))
+        check("CE-11 …and not the sum of every blasting benchmark (7,000) — "
+              "this is the 25x regression",
+              abs(p1["requirement"]["Total_Required_Manhours"] - 7000.0) > 1.0,
+              str(p1["requirement"]))
+        parts = {pp["code"]: pp["benchmark"]["Activity"]
+                 for pp in p1["benchmark_selection"]["surface_prep_partition"]}
+        check("CE-12 a system whose activity names the variant gets that "
+              "variant; everything else gets the catch-all",
+              parts.get("SVCE-A") == "Blasting Civil svcefour Area"
+              and parts.get("SVCE-B") == "Blasting Civil Floor & Wall",
+              str(parts))
+        check("CE-13 the catch-all is chosen because its name specifies NO "
+              "surface once the generic blasting words come out",
+              P._specific_tokens("Blasting Civil Floor & Wall") == frozenset()
+              and P._specific_tokens("Blasting Civil svcefour Area")
+              == frozenset({"svcefour"}), "")
+
+        # ── the topcoat ─────────────────────────────────────────────────────
+        check("CE-14 a coat whose area is EXACTLY the sum of the surfaces it "
+              "covers is blasted once, not again on top",
+              "SVCE-C" not in parts, str(parts))
+        top = [t for t in p1["benchmark_selection"]["topcoats"] if t["excluded"]]
+        check("CE-15 …and the exclusion is reported with the arithmetic that "
+              "justified it",
+              len(top) == 1 and top[0]["code"] == "SVCE-C"
+              and sorted(top[0]["covers"]) == ["SVCE-A", "SVCE-B"], str(top))
+        check("CE-16 the prep area is the tag's surface LESS the topcoat "
+              "(1000, not 2000)",
+              p1["workload"]["remaining_sqm"] == 1000.0, str(p1["workload"]))
+        check("CE-17 covering is DIRECTIONAL — the systems the topcoat covers "
+              "are not themselves reported as unresolved overlaps",
+              not any(t.get("needs_operator") for t in
+                      p1["benchmark_selection"]["topcoats"]),
+              str(p1["benchmark_selection"]["topcoats"]))
+
+        # ── ME routes to the steel benchmark ────────────────────────────────
+        p3 = await _plan("SVCE-T3", "")
+        check("CE-18 a steel (ME) tag is prepared by the ME benchmark, whatever "
+              "its activity is called (300 x 1.0)",
+              abs(p3["requirement"]["Total_Required_Manhours"] - 300.0) < 1e-6
+              and p3["activities"][0]["Type"] == "ME",
+              str(p3["requirement"]))
+
+        # ── unresolved: dearest, never the sum ──────────────────────────────
+        f = await _plan("SVCE-T4", "SVCE-F")
+        check("CE-19 when nothing chooses between two benchmarks the DEAREST "
+              "is taken (100 x 3.0), so the plan overstates rather than "
+              "understates",
+              abs(f["requirement"]["Total_Required_Manhours"] - 300.0) < 1e-6,
+              str(f["requirement"]))
+        check("CE-20 …and never their sum (400), which is the whole bug",
+              abs(f["requirement"]["Total_Required_Manhours"] - 400.0) > 1e-6
+              and len(f["activities"]) == 1, str(f["requirement"]))
+        check("CE-21 …and it says out loud that a human has to decide",
+              any(r.get("needs_operator")
+                  for r in f["benchmark_selection"]["rules_applied"])
+              and any("nothing in the data chooses" in w for w in f["warnings"]),
+              str(f["warnings"]))
+
+        # ── the overlap diagnostic: reported, never applied ─────────────────
+        p5 = await _plan("SVCE-T5", "")
+        ov = p5["workload"]["overlap"]
+        check("CE-22 two systems on the SAME location and area are one surface "
+              "counted twice, and the diagnostic says by how much",
+              ov["gross_sqm"] == 500.0 and ov["deduplicated_sqm"] == 250.0
+              and ov["double_counted_sqm"] == 250.0, str(ov))
+        check("CE-23 …the plan still uses the GROSS figure — deduplicating is "
+              "an operator ruling, not something the planner may assume",
+              p5["workload"]["remaining_sqm"] == 500.0, str(p5["workload"]))
+        check("CE-24 …and it warns, naming both codes and both figures",
+              any("described more than once" in w and "SVCE-G+SVCE-H" in w
+                  for w in p5["warnings"]), str(p5["warnings"]))
+
+        # ── crew-shifts: the free self-check ────────────────────────────────
+        check("CE-25 crew-shifts reconcile two ways — sqm/productivity equals "
+              "manhours/manhours-per-shift, for every activity in the plan",
+              all(abs(a["Crew_Shifts"] - a["Required_Manhours"]
+                      / (a["Manhours_Per_SQM"]
+                         * a["Standard_Productivity_Per_Shift"])) < 1e-6
+                  for a in c["activities"] if a["Crew_Shifts"]),
+              str([(a["Crew_Shifts"], a["Required_Manhours"])
+                   for a in c["activities"]]))
+        check("CE-26 …and the plan publishes their total",
+              abs(c["requirement"]["Total_Crew_Shifts"] - 10.0) < 1e-6,
+              str(c["requirement"]))
+
+        # ── the role split still sums back ──────────────────────────────────
+        role_total = sum(g["Required_Manhours"] for g in c["gap"])
+        check("CE-27 the per-role hours still sum back to the total after "
+              "splitting — selection must not lose hours",
+              abs(role_total - c["requirement"]["Total_Required_Manhours"])
+              < 1e-6, f"{role_total} vs {c['requirement']}")
+
+    # ── the orphan report (the rename that looked like a clean sync) ────────
+    import openpyxl
+
+    def _mini_workbook(rows):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Productivity Estimation"
+        ws.append(["Activity Code#", "Type", "System", "Lining_System_Code",
+                   "Activity", "Execution_Sub_Activity_Code", "Sub-Activity",
+                   " Person/Crew", "Hrs./shift", "Manhr. / Shift",
+                   "Standard Productivity /Shift", "SQ. Mtr/Hr./Person",
+                   "Blaster", "Potman", "Rubber Liner", "Coating applicator",
+                   "Sheet Preparator", "Mason", "mortar mixer", "brick cutter",
+                   "Helper"])
+        for r in rows:
+            ws.append(r)
+        buf = _io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    # A workbook naming exactly ONE of the fixture's benchmarks. Everything
+    # else the database holds is, by definition, a row this workbook does not
+    # claim — which is the shape a rename leaves behind.
+    data = _mini_workbook([
+        ["1", "CV", "None", "SVCE-A", "svcefour lining", "ESCA1", "x",
+         3, 11, 300, 100, 0, 0, 0, 0, 0, 0, 2, 0, 0, 1],
+    ])
+    async with SessionLocal() as s:
+        plan_res = await BI.plan_sme_manpower_norms(s, data)
+    orphan_keys = {(o["Lining_System_Code"], o["Activity"])
+                   for o in plan_res["orphans"]}
+    check("CE-28 the planner reports benchmarks the database holds that the "
+          "workbook does not name — the pass that did not exist when a rename "
+          "left 'Blasting Civil PU Area' behind",
+          ("SVCE-B", "svcesix lining") in orphan_keys
+          and ("SVCE-C", "svcefour lining") in orphan_keys, str(orphan_keys))
+    check("CE-29 …the row the workbook DOES name is not among them",
+          ("SVCE-A", "svcefour lining") not in orphan_keys, str(orphan_keys))
+    check("CE-30 …and it warns in words, not just in a key nobody reads",
+          any("named by no row in this workbook" in w
+              for w in plan_res["warnings"]), str(plan_res["warnings"]))
+    check("CE-31 reporting an orphan does NOT delete it — a dry run that "
+          "mutates is not a dry run",
+          (await _svce_norm_count()) == len(NORMS), "")
+
+    await _reset()
+
+
+async def _svce_norm_count() -> int:
+    from sqlalchemy import text as _sqt
+    async with SessionLocal() as s:
+        return (await s.execute(_sqt(
+            'SELECT COUNT(*) FROM sme_manpower_norm '
+            "WHERE \"Lining_System_Code\" LIKE 'SVCE-%'"))).scalar_one()
+
+
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
 async def test_workflow_polish():
     """Suite BX — the operational refinements of 2026-08-13.
@@ -16313,6 +16650,9 @@ async def main() -> int:
     print("\n CD. The manpower planner — workload, gap, and the overtime "
           "arithmetic behind 'prefer non-GI'")
     await test_manpower_planner()
+    print("\n CE. Selection, not summation — which benchmark applies, and to "
+          "how much of the area")
+    await test_planner_selection()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()
