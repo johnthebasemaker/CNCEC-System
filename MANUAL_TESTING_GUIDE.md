@@ -1420,6 +1420,107 @@ perfectly" must never render the same.
 
 ---
 
+## 14g. The manpower planner (Phase 7)
+
+> Added 2026-08-19 (branch `feat/phase7-planner`). Rule 13.
+
+**Man-Hours & Labour → 🧠 Manpower Planner.** It answers: to finish this job by
+the deadline, how many of each role do I need, how many do I have, and what
+should I hire? **It mutates nothing** — advice, never an assignment.
+
+### 14g.1 The model, so the arithmetic can be checked
+
+```
+shifts     = deadline_hours ÷ 11          (11 worked hours in a 12-hour shift)
+per person = threshold × shifts           NORMAL hours
+           + (11 − threshold) × shifts    OVERTIME hours
+           = 11 × shifts = deadline_hours (they reconcile)
+```
+
+`deadline_hours` is **hours available per person**, which is what makes
+`headcount = man-hours ÷ deadline_hours` come out right.
+
+### 14g.2 Worked example to check against
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-PL-01** | A job with 1,000 m² planned and 400 done | Remaining **600 m²**. |
+| **TC-PL-02** | Two sub-activities at 660 and 330 man-hours per 300 m²/shift | 2.2 + 1.1 = 3.3 man-hrs/m² → **1,980 man-hours**. |
+| **TC-PL-03** | Check the per-activity rows | They **sum** to the total — every activity must be done, so their hours add. |
+| **TC-PL-04** | Crew 2 MASON : 1 HELPER on the first, all MASON on the second | MASON 1,540 · HELPER 440, summing back to 1,980. |
+| **TC-PL-05** | Deadline 11 h | MASON required headcount = 1540 ÷ 11 = **140**. |
+
+### 14g.3 ⚠️ Precision — man-hours per m² is derived, not read
+
+The planner computes `Manhours_Per_Shift ÷ Standard_Productivity_Per_Shift`,
+**not** the workbook's `SQ. Mtr/Hr./Person` column.
+
+**TC-PL-06** — AR tile lining ships `0.13` in that column. The exact figure is
+99 ÷ 13.33 = **7.427** man-hours/m²; the rounded one gives **7.692** — a 3.6%
+overstatement on every tile plan. The rounded column is used only when the
+exact pair is missing, and when neither exists the activity is **excluded with
+a warning** rather than counted as free labour.
+
+### 14g.4 Overtime, and why "prefer Non-GI" is arithmetic
+
+With 5 GI + 5 Non-GI over an 11-hour window:
+
+| | Calculation | Result |
+|---|---|---|
+| Normal capacity | 5×8 + 5×10 | **90** man-hrs |
+| Overtime capacity | 5×3 + 5×1 | **20** man-hrs |
+| Total | 10 × 11 | **110** man-hrs |
+
+| ID | Workload | Expected |
+|---|---|---|
+| **TC-PL-07** | 99 man-hours | Feasible: 90 normal + **9 overtime**. |
+| **TC-PL-08** | Clearing that 9 h | **1 Non-GI** (10 normal h) or **2 GI** (8 h each). Both shown side by side. |
+| **TC-PL-09** | 33 man-hours | No overtime, no hiring advice. |
+| **TC-PL-10** | 1,980 man-hours | **Not feasible** — and it says the deadline is unreachable rather than quietly reporting a plan. |
+| **TC-PL-11** | Deadline 22 h | Capacity doubles to 180 normal. |
+
+> Overtime is whatever will not fit inside **normal** capacity, so the way to
+> reduce it is to raise that capacity. A Non-GI worker brings 10 normal hours
+> where a GI brings 8 — 25% more. That is the entire basis of the
+> recommendation; it is not a policy about who to employ. Thresholds come from
+> the HOD's settings, not from constants.
+
+### 14g.5 Surface prep
+
+**TC-PL-12** — plan a tag with **no lining system**. The area comes from
+`sme_equipment.Surface_Area_SQM` minus `sme_surface_prep_progress`, *not* from
+lining progress, and only the system-agnostic benchmarks are used.
+
+> ⚠️ "System-agnostic" is decided by **data**, not spelling: a benchmark is
+> system-agnostic when **no recipe line names its system**. This first read as
+> `NOT LIKE 'LSC%'`, which would silently plan any differently-named lining
+> system as surface prep. Same test `/execution/activities` uses for
+> `manpower_only` — one definition, two callers.
+
+### 14g.6 ⚠️ Unmatched designations are reported, never assumed absent
+
+The roster stores a free-text `Designation`; benchmarks cite a `Role_Code`.
+Matching is case- and separator-insensitive on both the code and the printed
+name.
+
+**TC-PL-13** — give a worker a designation matching no role. They appear under
+**Unmapped** with a warning, and are **not** counted as available.
+
+> "Nobody wrote down that they are masons" and "there are no masons" call for
+> completely different actions. Today **every active employee has a blank
+> Designation**, so the available column reads 0 across the board until the
+> roster is filled in — that is the warning working, not a bug.
+
+### 14g.7 Guards
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-PL-14** | Deadline 0 | 422 — it refuses rather than dividing by zero. |
+| **TC-PL-15** | Unknown equipment | 200 **with a warning**, never a confident zero. |
+| **TC-PL-16** | Store keeper runs the planner | 403 — it is the HOD's tool. |
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

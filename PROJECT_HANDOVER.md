@@ -706,6 +706,77 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-19 — the Phase 7 programme (branches `feat/phase7-*`).**
+> Six merged slices: the LSC/ESC master-data migration, the manpower benchmark
+> master, the roster extension, the execution workflow, variance reporting, and
+> the planner. Baselines below move to **service tests 1,667 / E2E 90 /
+> legacy 599 / parity 1,313 / nav 47**, alembic head `e5b2d7c94a16`.
+>
+> **Six additions to the LOCKED set:**
+>
+> * **Lining-system codes are STRINGS and sort NATURALLY.** `LSC2` before
+>   `LSC10`. There is ONE implementation, `sme_engine.syscode_sort_key`;
+>   `sme._syskey` and `sme_export_layouts._code_sort_key` delegate,
+>   `engine.ts` mirrors it and `legacy/database.py` carries a documented copy.
+>   This is not cosmetic — `allocate()` walks `codes_by_tag` in this order and
+>   draws the pool down as it goes, so it decides which system gets scarce
+>   material first.
+>
+> * **`Execution_Sub_Activity_Code` is part of the recipe identity**
+>   (`Lining_System_Code, ESC, Material_Code, SAP_Code`). Adding it SPLIT a
+>   number that was being summed: LSC2's Resin A is 0.2700 under ESC21 and
+>   1.4674 under ESC22, and the old key merged them to 1.7374. A correct primer
+>   draw measured against the merged figure reads as 15.5% of benchmark.
+>
+> * **`''` IS THE SENTINEL, NEVER NULL** — for `sme_recipe
+>   .Execution_Sub_Activity_Code`, for `sme_execution_entry
+>   .Lining_System_Code`, and for every key that follows. Postgres treats NULLs
+>   as distinct, so a nullable column inside a key stops the key constraining,
+>   and every `GROUP BY` over it grows an untyped bucket that renders as a
+>   blank row.
+>
+> * **A migration carrying DML must expose `data_upgrade(conn)`.** The cutover
+>   builds the schema from `models.py` and STAMPS alembic, so no migration ever
+>   executes and every DATA step was being skipped — a box came up schema-right
+>   and corrections-missing. `cutover_migrate.run_data_migrations` replays them,
+>   and `verify_data_migration_contract` REFUSES in pre-flight when a migration
+>   forgets. Both paths run the same code, so they cannot drift.
+>
+> * **`Worker_Type` is `GI | NON_GI`** (was `OWN | Supply` — both mapped;
+>   `Supply` *is* the non-GI case). Overtime starts at a threshold that belongs
+>   to the WORKER, not the shift: 11 worked hours split 8+3 for GI and 10+1 for
+>   Non-GI. Thresholds live in `app_settings` and are the HOD's to set through
+>   `/mh/settings`, deliberately not behind the admin gate.
+>
+> * **SURFACE PREP IS NOT LINING PROGRESS.** Blasting 100 m² of a tank is not
+>   100 m² of lining done. Approval posts area to `sme_surface_prep_progress`
+>   OR `sme_sqm_progress`, never both, decided by the entry's own stored system
+>   code. `Done_SQM` drives Completion_Pct, SQM_Achievable_Now, the shortfall
+>   and the buy list, so folding prep into it would report a vessel as
+>   part-lined the moment it was cleaned.
+>
+> **Two things that look like bugs and are not:**
+>
+> * A **null variance is not a zero variance.** A missing benchmark renders
+>   `n/a`, never a green 0% — "cannot compare" and "matched perfectly" must not
+>   look the same.
+> * **Report totals sum absolutes** and derive one percentage from the sums.
+>   Averaging per-entry percentages weights a 2 m² entry like a 2,000 m² one,
+>   which is how a programme 8% over reports itself as on target.
+>
+> **The planner (`/mh/planner`) mutates nothing** — advice, never an
+> assignment. It derives man-hours per m² from `Manhours_Per_Shift ÷
+> Standard_Productivity_Per_Shift`, NOT from the workbook's rounded
+> `SQ. Mtr/Hr./Person` column, which overstates tile lining by 3.6%. It decides
+> "system-agnostic" from DATA (no recipe line names the system), not from a
+> `LIKE 'LSC%'` spelling convention. Unmatched roster designations are reported,
+> never assumed absent.
+>
+> ⚠️ **Known data gap:** every active `mh_employees` row has a blank
+> `Designation`, so the planner's "available" column reads 0 across every role
+> until the roster is filled in. That is the warning working.
+
+
 All green locally on **`main`**, verified **2026-08-04** at commit `2877888`
 (PR #25 merged). These are the LOCKED baselines — a change that lowers any
 of them is a regression, not a new normal.
