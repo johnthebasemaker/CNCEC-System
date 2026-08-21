@@ -19,6 +19,7 @@
  * key and every GROUP BY over it).
  */
 import { PlusOutlined } from '@ant-design/icons'
+import SystemCode from '../sme/SystemCode'
 import {
   Alert, App, Button, Card, Col, Descriptions, Divider, Form, Input, InputNumber,
   Modal, Popconfirm, Row, Select, Space, Statistic, Table, Tag, Tooltip, Typography,
@@ -491,8 +492,10 @@ export function HodApprovalQueueTab() {
     { title: 'Entry', dataIndex: 'Entry_No', width: 150 },
     { title: 'Date', dataIndex: 'Work_Date', width: 105 },
     { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 165 },
-    { title: 'System', dataIndex: 'Lining_System_Code', width: 125,
-      render: (v: string) => v || <Tag color="gold">surface prep</Tag> },
+    { title: 'System', dataIndex: 'Lining_System_Code', width: 145,
+      render: (v: string, r: Row) => v
+        ? <SystemCode code={v} type={String(r.Type ?? '')} plain />
+        : <Tag color="gold">surface prep{r.Type ? ` [${r.Type}]` : ''}</Tag> },
     { title: 'Sub-activity', dataIndex: 'Execution_Sub_Activity_Code', width: 120 },
     { title: 'Area', dataIndex: 'Actual_SQM', width: 90, align: 'right',
       render: (v) => (v == null ? '—' : `${Number(v)} m²`) },
@@ -552,8 +555,10 @@ export default function ExecutionPage() {
     { title: 'Entry', dataIndex: 'Entry_No', width: 150 },
     { title: 'Date', dataIndex: 'Work_Date', width: 110 },
     { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 170 },
-    { title: 'System', dataIndex: 'Lining_System_Code', width: 120,
-      render: (v: string) => v || <Tag>surface prep</Tag> },
+    { title: 'System', dataIndex: 'Lining_System_Code', width: 145,
+      render: (v: string, r: Row) => v
+        ? <SystemCode code={v} type={String(r.Type ?? '')} plain />
+        : <Tag>surface prep{r.Type ? ` [${r.Type}]` : ''}</Tag> },
     { title: 'Sub-activity', dataIndex: 'Execution_Sub_Activity_Code', width: 130 },
     { title: 'Area', dataIndex: 'Actual_SQM', width: 90, align: 'right',
       render: (v) => (v == null ? '—' : `${Number(v)} m²`) },

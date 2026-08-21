@@ -284,13 +284,29 @@ async def put_ot_settings(body: OtSettingsIn = Body(...),
     return {"updated": True, "thresholds": await ot_thresholds(session)}
 
 
-# --- The planner (Phase 7) ----------------------------------------------------
+# --- The planner (Phase 7; multi-job + target days in Phase 8 slice 8b) -------
 class PlannerIn(BaseModel):
-    equipment_tag: str = Field(min_length=1)
+    # Singular form — one job. Kept alongside the plural so a client mid-deploy
+    # (or a saved link) does not break; the plural wins when both are sent.
+    equipment_tag: str = ""
     # '' = surface prep. Sent as the empty string, never null — the same
     # sentinel the execution entries use (see models.SmeExecutionEntry).
     lining_system_code: str = ""
-    deadline_hours: float = Field(gt=0, le=24 * 365)
+
+    # Plural form — a multi-select. Tags x codes is resolved against the
+    # progress master, NOT expanded into a cross product; see
+    # services.planner.resolve_jobs for why that distinction matters.
+    equipment_tags: list[str] = Field(default_factory=list, max_length=500)
+    lining_system_codes: list[str] = Field(default_factory=list, max_length=200)
+    include_surface_prep: bool = False
+
+    # The deadline, in either of its two spellings. Exactly one, because they
+    # are the same quantity: deadline_hours = target_days x 11.
+    deadline_hours: Optional[float] = Field(default=None, gt=0, le=24 * 365)
+    target_days: Optional[float] = Field(default=None, gt=0, le=365)
+    # 1 = day only, 2 = day and night. None asks the roster (operator ruling Q6:
+    # auto-detect, but the HOD may force two shifts even with no night crew).
+    shifts_per_day: Optional[int] = Field(default=None, ge=1, le=2)
     site_id: Optional[str] = None
 
 
@@ -301,11 +317,31 @@ async def planner(body: PlannerIn = Body(...),
     """READ-ONLY BY DESIGN. It mutates nothing — the operator's ruling is that
     this is an analytical suggestion, never a forced assignment. It is a POST
     only because the inputs are a body, not because it writes."""
-    from .services.planner import plan as _plan
+    from .services.planner import plan_many, resolve_jobs
     sid = _write_site(user, body.site_id)
-    return await _plan(session, site_id=sid, equipment_tag=body.equipment_tag,
-                       lining_system_code=body.lining_system_code,
-                       deadline_hours=body.deadline_hours)
+
+    extra: list[str] = []
+    if body.equipment_tags:
+        jobs, extra = await resolve_jobs(
+            session, site_id=sid, equipment_tags=body.equipment_tags,
+            lining_system_codes=body.lining_system_codes,
+            include_surface_prep=body.include_surface_prep)
+    elif body.equipment_tag.strip():
+        jobs = [(body.equipment_tag.strip(), body.lining_system_code.strip())]
+    else:
+        raise HTTPException(422, "select at least one equipment tag")
+    if not jobs:
+        raise HTTPException(422, extra[0] if extra
+                            else "nothing to plan for this selection")
+
+    out = await plan_many(session, site_id=sid, jobs=jobs,
+                          deadline_hours=body.deadline_hours,
+                          target_days=body.target_days,
+                          shifts_per_day=body.shifts_per_day)
+    # Selection warnings first: "3 combinations were dropped" changes how every
+    # number below it should be read.
+    out["warnings"] = extra + out["warnings"]
+    return out
 
 
 @router.get("/planner/targets", summary="What the planner can be pointed at")
@@ -314,8 +350,13 @@ async def planner_targets(site_id: Optional[str] = None,
                           session: AsyncSession = Depends(get_session)):
     """Equipment + system pairs that still have area outstanding, plus the
     surface-prep option for each tag. Sorted so the biggest job is first —
-    the planner is used when something is behind, not to browse."""
-    from sqlalchemy import func as _f
+    the planner is used when something is behind, not to browse.
+
+    Each row carries its assembled `Job_Label` and `Code_Chip` (Phase 8): the
+    label is built ONCE, in `services/jobs.py`, so the select option, the plan
+    header and the exports cannot drift into three spellings of one job.
+    """
+    from .services.jobs import code_chip, equipment_types, job_label, system_names
 
     sid = resolve_site_param(user, site_id)
     p = _MD.tables["sme_sqm_progress"]
@@ -323,22 +364,47 @@ async def planner_targets(site_id: Optional[str] = None,
                   p.c["Original_SQM"], p.c["Done_SQM"])
     if sid is not None:
         stmt = stmt.where(p.c["Site_ID"] == sid)
+    names = await system_names(session)
+    types = await equipment_types(session, sid)
     out = []
     tags = set()
+    codes: dict[str, set] = {}
     for tag, code, orig, done in (await session.execute(stmt)).all():
         remaining = max(float(orig or 0) - float(done or 0), 0.0)
         tags.add(str(tag))
         if remaining <= 0:
             continue
+        t = types.get((str(tag), str(code)), "")
+        if t:
+            codes.setdefault(str(code), set()).add(t)
+        else:
+            codes.setdefault(str(code), set())
+        lbl = job_label(str(tag), str(code), names, t)
         out.append({"Equipment_Tag_No": str(tag),
                     "Lining_System_Code": str(code),
+                    "Type": t, "Code_Chip": lbl["Code_Chip"],
+                    "System_Name": lbl["System_Name"],
+                    "Job_Label": lbl["Short"],
                     "Remaining_SQM": round(remaining, 2),
                     "system_agnostic": False})
     out.sort(key=lambda r: -r["Remaining_SQM"])
-    prep = [{"Equipment_Tag_No": t, "Lining_System_Code": "",
-             "Remaining_SQM": None, "system_agnostic": True}
-            for t in sorted(tags)]
-    return {"items": out, "surface_prep": prep}
+    prep = []
+    for t in sorted(tags):
+        typ = types.get((t, ""), "")
+        prep.append({"Equipment_Tag_No": t, "Lining_System_Code": "",
+                     "Type": typ,
+                     "Job_Label": job_label(t, "", names, typ)["Short"],
+                     "Remaining_SQM": None, "system_agnostic": True})
+    return {"items": out, "surface_prep": prep,
+            "equipment": sorted(tags),
+            # For the code multi-select: the chip is per CODE here, so it prints
+            # CV/ME where a code spans both rather than picking one.
+            "codes": [{"Lining_System_Code": c,
+                       "Code_Chip": code_chip(c, sorted(v)),
+                       "System_Name": names.get(c, ""),
+                       "Types": sorted(v)}
+                      for c, v in sorted(codes.items())],
+            "system_names": names}
 
 
 # --- Employees (labor roster — logically separate from the system users table) --

@@ -626,11 +626,45 @@ async def list_entries(session: AsyncSession, *, site_id: Optional[str],
     for m in (await session.execute(
             select(man_t).where(man_t.c["Entry_ID"].in_(ids)))).mappings().all():
         mans.setdefault(m["Entry_ID"], []).append(dict(m))
+    # The discipline (CV/ME) each entry belongs to, read from the equipment
+    # master (Phase 8). It is a property of the (tag, code) ROW, not of the
+    # code — LSC1 is CV on concrete and ME on tanks — so it is looked up per
+    # pair rather than per code. One query for the whole page.
+    types = await _entry_types(session, rows)
     for r in rows:
         r["materials"] = mats.get(r["id"], [])
         r["manpower"] = mans.get(r["id"], [])
         r["variance"] = compute_variance(r, r["materials"], r["manpower"])
+        r["Type"] = types.get((str(r.get("Equipment_Tag_No") or ""),
+                               str(r.get("Lining_System_Code") or "")), "")
     return rows
+
+
+async def _entry_types(session: AsyncSession, rows: list[dict]) -> dict:
+    """`(tag, code)` → CV/ME for the tags these entries name.
+
+    Surface-prep entries carry code '' and take the tag's set, printed 'CV/ME'
+    where a tag spans both — never whichever row was read first, which would
+    be an invented aggregate presented as fact.
+    """
+    eq = _MD.tables["sme_equipment"]
+    tags = {str(r.get("Equipment_Tag_No") or "") for r in rows}
+    tags.discard("")
+    if not tags:
+        return {}
+    out: dict = {}
+    by_tag: dict[str, set] = {}
+    for tag, code, typ in (await session.execute(
+            select(eq.c["Equipment_Tag_No"], eq.c["Lining_System_Code"],
+                   eq.c["Type"]).where(eq.c["Equipment_Tag_No"].in_(tags)))).all():
+        t = str(typ or "").strip().upper()
+        if not t:
+            continue
+        out[(str(tag), str(code))] = t
+        by_tag.setdefault(str(tag), set()).add(t)
+    for tag, ts in by_tag.items():
+        out[(tag, "")] = "/".join(sorted(ts))
+    return out
 
 
 # ─── Phase 6: reporting ──────────────────────────────────────────────────────
@@ -653,6 +687,10 @@ def _flatten_for_report(entry: dict) -> dict:
         # '' renders as a word, never a blank cell — a blank reads as missing
         # data, and this is a real category.
         "Lining_System_Code": entry.get("Lining_System_Code") or "(surface prep)",
+        # CV/ME, from the equipment master. Stamped in list_entries so exports
+        # carry it too — a printed variance sheet that does not say which
+        # discipline a row belongs to cannot be checked against a crew.
+        "Type": entry.get("Type") or "",
         "Execution_Sub_Activity_Code": entry.get("Execution_Sub_Activity_Code"),
         "Variant_Key": entry.get("Variant_Key") or "",
         "status": entry.get("status"),

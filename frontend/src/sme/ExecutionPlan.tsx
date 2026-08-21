@@ -20,6 +20,7 @@ import { postDownloadDocument, useSmeProductionLog, useSmeSnapshot } from '../ap
 import type { SmeLogRow } from '../api/hooks'
 import { ScopedExport } from './MatrixReports'
 import { buildModel, runPlan, syscodeCompare, unitKey } from './engine'
+import SystemCode from './SystemCode'
 import type { AllocationLine, SmeModel, SmeSnapshot } from './engine'
 import { fc } from './insights'
 import KpiDrill from './KpiDrill'
@@ -328,7 +329,7 @@ function ProgressList({ model, snap, siteId }: { model: SmeModel; snap: SmeSnaps
       return {
         key: `${unitKey(tag, code)}#${i}`,
         Location: meta?.Location || '—', Tag: tag, Name: meta?.Name ?? '',
-        Code: code, System: shortNames.get(code) ?? '',
+        Code: code, Type: meta?.Type ?? '', System: shortNames.get(code) ?? '',
         Total_SQM: Math.round(total * 100) / 100,
         Completed_SQM: Math.round(done * 100) / 100,
         Remaining_SQM: Math.round(Math.max(total - done, 0) * 100) / 100,
@@ -349,7 +350,9 @@ function ProgressList({ model, snap, siteId }: { model: SmeModel; snap: SmeSnaps
     { title: 'Location', dataIndex: 'Location', key: 'l' },
     { title: 'Equipment Tag', dataIndex: 'Tag', key: 't', render: (v: string) => <b style={mono}>{v}</b> },
     { title: 'Name', dataIndex: 'Name', key: 'n', ellipsis: true },
-    { title: 'Code', dataIndex: 'Code', key: 'c', width: 70 },
+    { title: 'Code', dataIndex: 'Code', key: 'c', width: 112,
+      render: (v: string, r: { Type?: string }) => (
+        <SystemCode code={v} type={r.Type} plain />) },
     { title: 'System', dataIndex: 'System', key: 'sy', ellipsis: true },
     { title: 'Total SQM', dataIndex: 'Total_SQM', key: 'ts', align: 'right', render: (v: number) => nf(v, 1) },
     { title: 'Completed', dataIndex: 'Completed_SQM', key: 'cs', align: 'right', render: (v: number) => nf(v, 1) },
@@ -472,6 +475,7 @@ function ConsumptionComparison({ model, siteId }: { model: SmeModel; siteId?: st
       return {
         key: `${t.tag}|${t.code}|${t.mat}`,
         Location: meta?.Location ?? '—', Tag: t.tag, Code: t.code,
+        Type: meta?.Type ?? '',
         SQM_Done: Math.round((sqmByUnit.get(`${t.tag}|${t.code}`) ?? 0) * 100) / 100,
         Material: t.mat,
         Name: matName.get(t.mat)?.name ?? '', UOM: matName.get(t.mat)?.uom ?? '',
@@ -527,7 +531,9 @@ function ConsumptionComparison({ model, siteId }: { model: SmeModel; siteId?: st
   const cols: ColumnsType<(typeof agg)[number]> = [
     { title: 'Location', dataIndex: 'Location', key: 'l' },
     { title: 'Tag', dataIndex: 'Tag', key: 't', render: (v: string) => <b style={mono}>{v}</b> },
-    { title: 'Code', dataIndex: 'Code', key: 'c', width: 70 },
+    { title: 'Code', dataIndex: 'Code', key: 'c', width: 112,
+      render: (v: string, r: { Type?: string }) => (
+        <SystemCode code={v} type={r.Type} plain />) },
     { title: 'SQM Done', dataIndex: 'SQM_Done', key: 'sq', align: 'right', render: (v: number) => nf(v, 2) },
     { title: 'Material', dataIndex: 'Material', key: 'm' },
     { title: 'Name', dataIndex: 'Name', key: 'n', ellipsis: true },
