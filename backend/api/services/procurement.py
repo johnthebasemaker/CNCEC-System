@@ -15,12 +15,14 @@ from __future__ import annotations
 import datetime as _dt
 
 from sqlalchemy import func, insert, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .ledger import _MD, attach_material_names, write_audit  # metadata + audit writer
 from .notifications import dispatch, notify
 
 pr_master_t = _MD.tables["pr_master"]
+pr_registry_t = _MD.tables["pr_registry"]
 purchase_orders_t = _MD.tables["purchase_orders"]
 po_items_t = _MD.tables["po_items"]
 po_assignments_t = _MD.tables["po_assignments"]
@@ -50,24 +52,66 @@ def _rows(res):
     return [dict(m) for m in res.mappings().all()]
 
 
-async def _next_pr_number(session: AsyncSession) -> str:
-    """Auto-generate a site PR number: PR-YYYYMMDD-NNNN (sequence resets daily).
+async def _next_pr_number(session: AsyncSession, *, site_id: str,
+                          username: str) -> str:
+    """Reserve the next site PR number: PR-YYYYMMDD-NNNN (resets daily).
 
-    Mirrors the SMR numbering in services/supervisor.py — take the newest row
-    with today's prefix and increment its suffix.
+    ⚠️ THE DATABASE DECIDES WHO GOT THE NUMBER, NOT WHOEVER READ LAST. This was
+    a read-then-write with nothing behind it —
+
+        last = SELECT ... LIKE 'PR-20260822-%' ORDER BY id DESC LIMIT 1
+        nxt  = int(last.split('-')[-1]) + 1
+
+    — and `pr_master."PR_Number"` cannot be unique because a PR is MANY LINES.
+    Two HODs creating a PR in the same second both read `0003` and both wrote
+    `0004`, and from that moment two different purchase requests were one PR to
+    every query in the system: the Logistics queue, the PO, the audit trail.
+    Nothing raised. It was simply wrong, quietly, forever.
+
+    `pr_registry` is the table where a PR number appears ONCE and can therefore
+    carry a primary key. The insert is the reservation; a conflict means
+    somebody else took that number in the microsecond between, so we look again
+    and try the next one.
+
+    The scan reads the HIGHEST number in EITHER table, and both halves matter:
+
+      · the registry holds numbers RESERVED but whose lines are not written
+        yet — the window the old version fell straight through;
+      · `pr_master` holds numbers that exist but were never registered, which
+        is any row an import, a fixture or a pre-migration path wrote.
+
+    Reserving alone would not be enough on its own: an unregistered number in
+    `pr_master` would be handed out again and the INSERT would happily succeed.
     """
     today = _dt.date.today().strftime("%Y%m%d")
     prefix = f"PR-{today}-"
-    last = (await session.execute(select(pr_master_t.c["PR_Number"]).where(
-        pr_master_t.c["PR_Number"].like(prefix + "%")
-    ).order_by(pr_master_t.c["id"].desc()).limit(1))).scalar_one_or_none()
-    nxt = 1
-    if last:
-        try:
-            nxt = int(str(last).split("-")[-1]) + 1
-        except (ValueError, IndexError):
-            nxt = 1
-    return f"{prefix}{nxt:04d}"
+    for _ in range(60):
+        last = (await session.execute(text(
+            'SELECT MAX(n) FROM ('
+            '  SELECT "PR_Number" AS n FROM pr_registry WHERE "PR_Number" LIKE :p'
+            '  UNION ALL'
+            '  SELECT "PR_Number" AS n FROM pr_master   WHERE "PR_Number" LIKE :p'
+            ") x"), {"p": prefix + "%"})).scalar_one_or_none()
+        nxt = 1
+        if last:
+            try:
+                nxt = int(str(last).split("-")[-1]) + 1
+            except (ValueError, IndexError):
+                nxt = 1
+        candidate = f"{prefix}{nxt:04d}"
+        taken = (await session.execute(
+            pg_insert(pr_registry_t)
+            .values(PR_Number=candidate, Site_ID=site_id, created_by=username)
+            .on_conflict_do_nothing(index_elements=["PR_Number"])
+            .returning(pr_registry_t.c["PR_Number"]))).scalar_one_or_none()
+        if taken is not None:
+            return candidate
+    # 60 collisions in one call means something other than contention — a
+    # corrupted registry, or a clock that has stopped. Refuse loudly rather
+    # than spinning or handing back a number we could not reserve.
+    raise RuntimeError(
+        f"could not reserve a PR number under {prefix} after 60 attempts — "
+        f"check pr_registry for corrupt rows")
 
 
 # --- reads -------------------------------------------------------------------
@@ -78,10 +122,24 @@ async def hod_prs(session: AsyncSession, site_id: str | None):
     if site_id:
         where += " AND COALESCE(\"Site_ID\",'HQ') = :site"
         params["site"] = site_id
+    # `draft_lines` is what the Submit button is allowed to depend on. The
+    # aggregated `logistics_status` is a MAX over the group, and MAX is
+    # LEXICOGRAPHIC: a PR holding both site_draft and submitted lines reports
+    # 'submitted', which would hide the button while real draft lines were
+    # still waiting. A count cannot lie in that direction.
     sql = text(f'''
         SELECT "PR_Number", COALESCE("Site_ID",'HQ') AS "Site_ID",
                COUNT(*) AS line_count, SUM("Requested_Qty") AS total_qty,
-               MAX(COALESCE(logistics_status,'site_draft')) AS logistics_status
+               MAX(COALESCE(logistics_status,'site_draft')) AS logistics_status,
+               COUNT(*) FILTER (
+                   WHERE COALESCE(logistics_status,'site_draft') = 'site_draft'
+               ) AS draft_lines,
+               COUNT(*) FILTER (
+                   WHERE COALESCE(logistics_status,'site_draft') = 'submitted'
+               ) AS submitted_lines,
+               COUNT(*) FILTER (
+                   WHERE COALESCE(logistics_status,'site_draft') = 'in_po'
+               ) AS in_po_lines
         FROM pr_master WHERE {where}
         GROUP BY "PR_Number", COALESCE("Site_ID",'HQ')
         ORDER BY "PR_Number" DESC''')
@@ -252,7 +310,8 @@ async def create_pr(session: AsyncSession, *, username: str, site_id: str,
     except ValueError as e:
         return {"error": str(e)}
 
-    pr_number = await _next_pr_number(session)
+    pr_number = await _next_pr_number(session, site_id=site_id,
+                                      username=username)
     for ln in prepared:
         await session.execute(insert(pr_master_t).values(
             PR_Number=pr_number, Site_ID=site_id, SAP_Code=ln["SAP_Code"],
@@ -276,15 +335,78 @@ async def create_pr(session: AsyncSession, *, username: str, site_id: str,
             "lines": len(prepared), "source_attachment_id": scan_id}
 
 
+# The PR line's journey. Stated as data so the guards below and any future
+# transition read from ONE definition rather than each carrying its own idea of
+# what may follow what.
+#
+#   site_draft ──submit──> submitted ──po_raised──> in_po ──> closed
+#        │                     │                      │
+#        └──────────── force_closed ─────────────────-┘
+PR_TRANSITIONS = {
+    "submit":    ("site_draft",),
+    "po_raised": ("submitted",),
+}
+
+
+async def _pr_states(session: AsyncSession, pr_number: str,
+                     site_id: str) -> dict[str, int]:
+    """How many lines of this PR sit in each state — the diagnosis behind a
+    refusal. "No eligible lines" is not actionable; "already submitted" is."""
+    # ⚠️ RAW SQL, on purpose. Built through the ORM, the same
+    # `func.coalesce(logistics_status, 'site_draft')` written in both the
+    # SELECT and the GROUP BY renders as two DIFFERENT bind parameters
+    # ($1 and $5), and Postgres then refuses the statement — it cannot see that
+    # the two expressions are the same one. A literal is the shortest honest
+    # fix; the alternative is a labelled subquery for a two-column aggregate.
+    rows = (await session.execute(text(
+        "SELECT COALESCE(logistics_status, 'site_draft') AS st, COUNT(*) "
+        'FROM pr_master '
+        'WHERE "PR_Number" = :pr AND COALESCE("Site_ID", \'HQ\') = :site '
+        "GROUP BY COALESCE(logistics_status, 'site_draft')"),
+        {"pr": pr_number, "site": site_id})).all()
+    return {str(s): int(n) for s, n in rows}
+
+
+def _state_refusal(pr_number: str, states: dict, wanted: tuple) -> str:
+    """Why the transition was refused, in the words of what IS there."""
+    if not states:
+        return f"PR {pr_number} has no lines at this site"
+    named = ", ".join(f"{n} line(s) {s}" for s, n in sorted(states.items()))
+    return (f"PR {pr_number} has nothing in state "
+            f"{' or '.join(wanted)} — it holds {named}")
+
+
 async def submit_pr(session: AsyncSession, *, username: str, pr_number: str, site_id: str) -> dict:
+    """Draft → submitted, ONCE.
+
+    ⚠️ THIS USED TO ACCEPT `logistics_status IN ('site_draft', 'submitted')`,
+    which made a second submit a silent success: the UPDATE matched the already
+    submitted rows, rewrote their timestamp, and fired a SECOND
+    `pr_submitted_to_logistics` notification. Logistics saw one PR arrive twice
+    and had no way to tell which was real.
+
+    Now the transition is read, then attempted against its expected state, and
+    a zero rowcount is an ERROR rather than a shrug — the two halves of the
+    guard, because the read alone loses a race and the UPDATE alone cannot say
+    why it matched nothing.
+    """
+    states = await _pr_states(session, pr_number, site_id)
+    wanted = PR_TRANSITIONS["submit"]
+    if not any(states.get(s) for s in wanted):
+        return {"error": _state_refusal(pr_number, states, wanted)}
+
     res = await session.execute(update(pr_master_t).where(
         (pr_master_t.c["PR_Number"] == pr_number)
         & (func.coalesce(pr_master_t.c["Site_ID"], "HQ") == site_id)
-        & (func.coalesce(pr_master_t.c["logistics_status"], "site_draft").in_(["site_draft", "submitted"]))
+        & (func.coalesce(pr_master_t.c["logistics_status"], "site_draft").in_(wanted))
     ).values(logistics_status="submitted", submitted_to_logistics_at=func.now(),
              submitted_to_logistics_by=username))
     if res.rowcount == 0:
-        return {"error": f"PR {pr_number} has no eligible lines to submit"}
+        # The read said there was work and the write found none, so somebody
+        # else moved it in between. Refusing is right: the other caller has
+        # already sent Logistics their notification.
+        return {"error": f"PR {pr_number} was submitted by somebody else while "
+                         f"this request was in flight"}
     await write_audit(session, username, "SUBMIT_PR_TO_LOGISTICS", "pr_master",
                       f"PR={pr_number} site={site_id} lines={res.rowcount}")
     await dispatch(session, event_key="pr_submitted_to_logistics", recipient_role="logistics",
@@ -299,14 +421,44 @@ async def create_po_from_pr(session: AsyncSession, *, username: str, pr_number: 
                             site_id: str, po_number: str, vendor_code: str | None = None,
                             vendor_name: str | None = None,
                             expected_delivery: str | None = None,
-                            source_attachment_id: int | None = None) -> dict:
-    lines = (await session.execute(select(pr_master_t).where(
+                            source_attachment_id: int | None = None,
+                            line_ids: list[int] | None = None) -> dict:
+    """Submitted lines → a PO, and those lines only.
+
+    ⚠️ A PR MAY CARRY SEVERAL POs (operator ruling Q7, 2026-08-20). Partial
+    fulfilment splits one request across vendors or deliveries, so the lock is
+    NOT one PO per PR — it is per LINE. `line_ids` selects which submitted lines
+    this PO covers; omitting it takes all of them, which is what every existing
+    caller does and means. Lines this PO does not cover stay `submitted` and
+    remain available to the next one.
+
+    ⚠️ THE FLIP TO `in_po` IS ASSERTED, NOT ASSUMED. It used to be a fire-and-
+    forget UPDATE whose rowcount nobody read, so a second PO raised against the
+    same PR matched ZERO rows and passed silently — the PO was created, the PR
+    was left exactly as it was, and only the vendor eventually noticed that the
+    same material had been ordered twice.
+    """
+    stmt = select(pr_master_t).where(
         (pr_master_t.c["PR_Number"] == pr_number)
         & (func.coalesce(pr_master_t.c["Site_ID"], "HQ") == site_id)
-        & (func.coalesce(pr_master_t.c["logistics_status"], "site_draft") == "submitted")
-    ))).mappings().all()
+        & (func.coalesce(pr_master_t.c["logistics_status"], "site_draft") == "submitted"))
+    if line_ids:
+        stmt = stmt.where(pr_master_t.c["id"].in_(list(line_ids)))
+    lines = (await session.execute(stmt)).mappings().all()
     if not lines:
-        return {"error": "no submitted PR lines for this PR/site"}
+        states = await _pr_states(session, pr_number, site_id)
+        if line_ids:
+            return {"error": f"none of the {len(line_ids)} selected line(s) of "
+                             f"PR {pr_number} are submitted and still free — "
+                             f"the PR holds "
+                             + (", ".join(f"{n} {s}" for s, n
+                                          in sorted(states.items())) or "nothing")}
+        return {"error": _state_refusal(pr_number, states,
+                                        PR_TRANSITIONS["po_raised"])}
+    if line_ids and len(lines) != len(set(line_ids)):
+        return {"error": f"{len(set(line_ids)) - len(lines)} of the selected "
+                         f"line(s) are not submitted lines of PR {pr_number} at "
+                         f"this site — nothing was ordered"}
 
     exists = (await session.execute(select(func.count()).select_from(purchase_orders_t)
               .where(purchase_orders_t.c["PO_Number"] == po_number))).scalar_one()
@@ -341,11 +493,19 @@ async def create_po_from_pr(session: AsyncSession, *, username: str, pr_number: 
             PR_Number=pr_number, WBS_Number=ln.get("WBS_Number"), Network=ln.get("Network"),
             Plant=ln.get("Plant"), rl_bl_family=classify_rl_bl_family(mat, desc), line_status="open"))
 
-    await session.execute(update(pr_master_t).where(
-        (pr_master_t.c["PR_Number"] == pr_number)
-        & (func.coalesce(pr_master_t.c["Site_ID"], "HQ") == site_id)
+    # THE TRANSITION, asserted. Exactly the lines this PO covers move to
+    # `in_po`; a mismatch means somebody else consumed one while we were
+    # building the PO, and the whole thing must fail rather than ship a PO
+    # whose lines are already on another.
+    flipped = await session.execute(update(pr_master_t).where(
+        (pr_master_t.c["id"].in_([ln["id"] for ln in lines]))
         & (func.coalesce(pr_master_t.c["logistics_status"], "site_draft") == "submitted")
     ).values(logistics_status="in_po"))
+    if flipped.rowcount != len(lines):
+        raise RuntimeError(
+            f"PR {pr_number}: expected to move {len(lines)} line(s) to in_po "
+            f"but moved {flipped.rowcount} — another PO claimed them while "
+            f"this one was being built. Nothing has been committed.")
 
     await write_audit(session, username, "CREATE_PO", "purchase_orders",
                       f"PO={po_number} PR={pr_number} site={site_id} lines={len(lines)}")
@@ -473,8 +633,22 @@ async def rename_pr(session: AsyncSession, *, username: str, old_pr: str,
         return {"error": "a new PR number is required"}
     if new_pr == old_pr:
         return {"error": "the new PR number is the same as the old one"}
-    exists = (await session.execute(select(func.count()).select_from(pr_master_t)
-              .where(pr_master_t.c["PR_Number"] == new_pr))).scalar_one()
+    # ⚠️ BOTH TABLES, and each catches something the other cannot.
+    #
+    #   · `pr_registry` knows numbers that are RESERVED — including one a
+    #     transaction has taken but not yet written lines for, which is exactly
+    #     the window the reservation exists to close and which `pr_master`
+    #     cannot see;
+    #   · `pr_master` knows numbers that EXIST — including rows written by a
+    #     path that never went through `create_pr` (an import, a fixture, a
+    #     migration), which the registry has no record of.
+    #
+    # Checking only the registry would let a rename walk straight onto a real
+    # PR that had never been registered.
+    exists = (await session.execute(text(
+        'SELECT (SELECT COUNT(*) FROM pr_registry WHERE "PR_Number" = :n) '
+        '     + (SELECT COUNT(*) FROM pr_master   WHERE "PR_Number" = :n)'),
+        {"n": new_pr})).scalar_one()
     if exists:
         return {"error": f"PR {new_pr} already exists"}
     res = await session.execute(update(pr_master_t).where(
@@ -484,6 +658,12 @@ async def rename_pr(session: AsyncSession, *, username: str, old_pr: str,
     ).values(PR_Number=new_pr))
     if res.rowcount == 0:
         return {"error": f"PR {old_pr} has no draft lines to rename at {site_id}"}
+    # Move the reservation with the PR. Renaming without this would leave the
+    # old number reserved forever AND the new one unreserved — so a later PR
+    # could be issued the number this one now carries.
+    await session.execute(update(pr_registry_t)
+                          .where(pr_registry_t.c["PR_Number"] == old_pr)
+                          .values(PR_Number=new_pr))
     await write_audit(session, username, "PR_RENAME", "pr_master",
                       f"{old_pr}→{new_pr} site={site_id} lines={res.rowcount}")
     return {"renamed": True, "old_pr": old_pr, "new_pr": new_pr, "lines": res.rowcount}
@@ -867,9 +1047,30 @@ async def assign_po(session: AsyncSession, *, username: str, po_number: str, war
                          f"({prior[1]}) — it cannot be assigned to "
                          f"{warehouse_id} as well"}
 
-    await session.execute(insert(po_assignments_t).values(
-        PO_Number=po_number, Warehouse_ID=warehouse_id, Expected_Delivery=expected_delivery,
-        assigned_by=username, notes=notes or "", status="assigned"))
+    # THE CLAIM, asserted. The `prior` read above loses a race by construction —
+    # two Logistics users clicking Assign in the same instant both see None.
+    # This INSERT is conditional on there STILL being no assignment, so exactly
+    # one of them writes a row and the other is told who won.
+    claimed = (await session.execute(text(
+        'INSERT INTO po_assignments ("PO_Number", "Warehouse_ID", '
+        '                            "Expected_Delivery", assigned_by, notes, status) '
+        "SELECT :po, :wh, :exp, :by, :notes, 'assigned' "
+        'WHERE NOT EXISTS (SELECT 1 FROM po_assignments WHERE "PO_Number" = :po) '
+        "RETURNING id"),
+        {"po": po_number, "wh": warehouse_id, "exp": expected_delivery,
+         "by": username, "notes": notes or ""},
+    )).scalar_one_or_none()
+    if claimed is None:
+        winner = (await session.execute(select(
+            po_assignments_t.c["Warehouse_ID"])
+            .where(po_assignments_t.c["PO_Number"] == po_number)
+            .order_by(po_assignments_t.c["id"].desc()).limit(1))).scalar()
+        if winner == warehouse_id:
+            return {"assigned": True, "po_number": po_number,
+                    "warehouse_id": warehouse_id, "already": True}
+        return {"error": f"PO {po_number} was assigned to {winner} while this "
+                         f"request was in flight — it cannot go to "
+                         f"{warehouse_id} as well"}
     if expected_delivery:
         await session.execute(update(purchase_orders_t).where(
             purchase_orders_t.c["PO_Number"] == po_number).values(

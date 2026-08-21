@@ -16229,6 +16229,310 @@ async def test_planner_ux():
     await _reset()
 
 
+# --- Suite CG: procurement locks ----------------------------------------------
+async def test_procurement_locks():
+    """Suite CG — Phase 8 slice 8c. The PR number, the state, and the retry.
+
+    Three classes of failure, all of which used to succeed silently:
+
+      · TWO PRs WITH ONE NUMBER. `_next_pr_number` read the newest row and
+        added one, with no lock and nothing unique behind it, so two HODs in
+        the same second both got `0004`.
+      · A SECOND SUBMIT. `submit_pr` accepted lines that were ALREADY
+        submitted, rewrote their timestamp and fired a SECOND notification to
+        Logistics.
+      · A SECOND PO. `create_po_from_pr` flipped the PR to `in_po` with an
+        UPDATE whose rowcount nobody read, so a second PO over the same lines
+        matched zero rows and passed.
+
+    ⚠️ A PR MAY STILL CARRY SEVERAL POs (operator ruling Q7). The lock is per
+    LINE, not per PR — partial fulfilment splits one request across vendors,
+    and CG-12/13 exist to keep that possible.
+    """
+    import asyncio as _aio
+
+    from fastapi import HTTPException
+    from sqlalchemy import text as _sqt
+
+    from .services import idempotency as _idem
+    from .services import procurement as _proc
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _cleanup():
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM po_assignments WHERE \"PO_Number\" "
+                                 "LIKE 'SVCG-%'"))
+            await s.execute(_sqt("DELETE FROM po_items WHERE \"PO_Number\" "
+                                 "LIKE 'SVCG-%'"))
+            await s.execute(_sqt("DELETE FROM purchase_orders WHERE \"PO_Number\" "
+                                 "LIKE 'SVCG-%'"))
+            await s.execute(_sqt("DELETE FROM procurement_idempotency WHERE "
+                                 "idem_key LIKE '%SVCG-%'"))
+            await s.commit()
+
+    await _cleanup()
+
+    # ── the race: two PRs created at the same instant ───────────────────────
+    # Separate SESSIONS, not just separate calls — one session would serialise
+    # them itself and prove nothing. This is the exact shape of two HODs
+    # pressing Create at the same moment.
+    async def _make_pr(site: str):
+        async with SessionLocal() as s:
+            async with s.begin():
+                return await _proc.create_pr(
+                    s, username="svc_hod", site_id=site,
+                    lines=[{"SAP_Code": "1001", "Requested_Qty": 1}])
+
+    made = await _aio.gather(_make_pr("CNCEC"), _make_pr("CNCEC"),
+                             _make_pr("CNCEC"), return_exceptions=True)
+    errs = [m for m in made if isinstance(m, Exception)]
+    numbers = [m.get("pr_number") for m in made if isinstance(m, dict)]
+    check("CG-01 three PRs created concurrently get three DISTINCT numbers — "
+          "the read-then-write race that made two purchase requests one PR",
+          not errs and len(numbers) == 3 and len(set(numbers)) == 3,
+          f"errors={errs} numbers={numbers}")
+
+    async with SessionLocal() as s:
+        reg = [r[0] for r in (await s.execute(_sqt(
+            'SELECT "PR_Number" FROM pr_registry WHERE "PR_Number" = ANY(:n)'),
+            {"n": numbers})).all()]
+    check("CG-02 …and every one of them is reserved in the registry, which is "
+          "what makes the number unique at all",
+          sorted(reg) == sorted(numbers), f"{sorted(reg)} vs {sorted(numbers)}")
+
+    pr_a, pr_b = numbers[0], numbers[1]
+
+    # ── the state machine ───────────────────────────────────────────────────
+    async with SessionLocal() as s:
+        async with s.begin():
+            first = await _proc.submit_pr(s, username="svc_hod",
+                                          pr_number=pr_a, site_id="CNCEC")
+        check("CG-03 a draft PR submits", first.get("submitted") is True,
+              str(first))
+        async with s.begin():
+            second = await _proc.submit_pr(s, username="svc_hod",
+                                           pr_number=pr_a, site_id="CNCEC")
+        check("CG-04 a SECOND submit is refused, naming the state it found — "
+              "it used to succeed and fire a second notification to Logistics",
+              second.get("error") and "submitted" in second["error"],
+              str(second))
+        async with s.begin():
+            n_notif = (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM app_notifications WHERE event_key = "
+                "'pr_submitted_to_logistics' AND related_ref = :p"),
+                {"p": pr_a})).scalar_one()
+        check("CG-05 …and Logistics was told EXACTLY ONCE. Counting the "
+              "notification is what catches this; the refusal alone does not",
+              n_notif == 1, f"got {n_notif}")
+
+        async with s.begin():
+            skipped = await _proc.create_po_from_pr(
+                s, username="svc_log", pr_number=pr_b, site_id="CNCEC",
+                po_number="SVCG-PO-SKIP")
+        check("CG-06 a PO cannot be raised over a PR nobody submitted — the "
+              "refusal names what the PR actually holds",
+              skipped.get("error") and "site_draft" in skipped["error"],
+              str(skipped))
+
+    # ── one PR, several POs, but each line only once ────────────────────────
+    async with SessionLocal() as s:
+        async with s.begin():
+            multi = await _proc.create_pr(
+                s, username="svc_hod", site_id="CNCEC",
+                lines=[{"SAP_Code": "1001", "Requested_Qty": 5},
+                       {"SAP_Code": "1002", "Requested_Qty": 7}])
+            pr_m = multi["pr_number"]
+            await _proc.submit_pr(s, username="svc_hod", pr_number=pr_m,
+                                  site_id="CNCEC")
+        async with s.begin():
+            line_ids = [r[0] for r in (await s.execute(_sqt(
+                'SELECT id FROM pr_master WHERE "PR_Number" = :p ORDER BY id'),
+                {"p": pr_m})).all()]
+
+        async with s.begin():
+            po1 = await _proc.create_po_from_pr(
+                s, username="svc_log", pr_number=pr_m, site_id="CNCEC",
+                po_number="SVCG-PO-1", line_ids=[line_ids[0]])
+        check("CG-07 a PO may cover SOME of a PR's lines", po1.get("created")
+              and po1.get("lines") == 1, str(po1))
+
+        async with s.begin():
+            po2 = await _proc.create_po_from_pr(
+                s, username="svc_log", pr_number=pr_m, site_id="CNCEC",
+                po_number="SVCG-PO-2", line_ids=[line_ids[1]])
+        check("CG-08 …and a SECOND PO covers the rest — a PR carries several "
+              "POs, because partial fulfilment splits one request (ruling Q7)",
+              po2.get("created") and po2.get("lines") == 1, str(po2))
+
+        async with s.begin():
+            po3 = await _proc.create_po_from_pr(
+                s, username="svc_log", pr_number=pr_m, site_id="CNCEC",
+                po_number="SVCG-PO-3", line_ids=[line_ids[0]])
+        check("CG-09 …but a line already on a PO cannot be ordered again — "
+              "that is the lock, and it is per LINE, not per PR",
+              po3.get("error") and "selected line" in po3["error"], str(po3))
+
+        async with s.begin():
+            n_po = (await s.execute(_sqt(
+                'SELECT COUNT(*) FROM purchase_orders WHERE "PR_Number" = :p'),
+                {"p": pr_m})).scalar_one()
+        check("CG-10 …leaving TWO purchase orders against one PR, which is "
+              "legal, and not a third",
+              n_po == 2, f"got {n_po}")
+        async with s.begin():
+            states = (await s.execute(_sqt(
+                'SELECT COUNT(*) FROM pr_master WHERE "PR_Number" = :p '
+                "AND COALESCE(logistics_status,'') = 'in_po'"),
+                {"p": pr_m})).scalar_one()
+        check("CG-11 …and both lines really moved to in_po. The flip used to "
+              "be an UPDATE whose rowcount nobody read",
+              states == 2, f"got {states}")
+
+    # ── assignment: one PO, one warehouse ───────────────────────────────────
+    # SEEDED, never skipped. This needs two active warehouses and the frozen
+    # snapshot ships one, so an earlier draft guarded the block with
+    # `if len(whs) >= 2` — and quietly tested nothing. A test that decides for
+    # itself whether to run is worse than no test: it reports green either way.
+    whs = ["SVCG-WH-A", "SVCG-WH-B"]
+    async with SessionLocal() as s:
+        for w in whs:
+            await s.execute(_sqt(
+                'INSERT INTO warehouses ("Warehouse_ID", "Name", status) '
+                "VALUES (:w, :w, 'active') ON CONFLICT DO NOTHING"), {"w": w})
+        await s.commit()
+    if True:
+        async with SessionLocal() as s:
+            async with s.begin():
+                a1 = await _proc.assign_po(s, username="svc_log",
+                                           po_number="SVCG-PO-1",
+                                           warehouse_id=whs[0])
+            check("CG-12 a PO assigns to a warehouse", a1.get("assigned") is True,
+                  str(a1))
+            async with s.begin():
+                a2 = await _proc.assign_po(s, username="svc_log",
+                                           po_number="SVCG-PO-1",
+                                           warehouse_id=whs[0])
+            check("CG-13 …the SAME warehouse twice is a double-click, not a "
+                  "conflict — idempotent success, and no second notification",
+                  a2.get("assigned") is True and a2.get("already") is True,
+                  str(a2))
+            async with s.begin():
+                a3 = await _proc.assign_po(s, username="svc_log",
+                                           po_number="SVCG-PO-1",
+                                           warehouse_id=whs[1])
+            check("CG-14 …and a DIFFERENT warehouse is refused, naming who "
+                  "actually has it. Two warehouses each told the goods are "
+                  "theirs is how this failed silently",
+                  a3.get("error") and whs[0] in a3["error"], str(a3))
+            async with s.begin():
+                n_asg = (await s.execute(_sqt(
+                    'SELECT COUNT(*) FROM po_assignments WHERE "PO_Number" = '
+                    "'SVCG-PO-1'"))).scalar_one()
+            check("CG-15 …leaving exactly one assignment row",
+                  n_asg == 1, f"got {n_asg}")
+
+    # ── idempotency, over HTTP where the header lives ───────────────────────
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+        key = "SVCG-key-001"
+        body = {"site_id": "CNCEC",
+                "lines": [{"SAP_Code": "1001", "Requested_Qty": 4}]}
+
+        r1 = await ac.post("/hod/prs", headers={**H, "Idempotency-Key": key},
+                           json=body)
+        check("CG-16 a PR with an Idempotency-Key is created normally",
+              r1.status_code == 201 and r1.json().get("created") is True,
+              f"{r1.status_code} {r1.text[:160]}")
+        r2 = await ac.post("/hod/prs", headers={**H, "Idempotency-Key": key},
+                           json=body)
+        check("CG-17 …the same key and the same body REPLAYS that answer "
+              "rather than raising a second purchase request",
+              r2.status_code == 201
+              and r2.json().get("pr_number") == r1.json().get("pr_number")
+              and r2.json().get("replayed") is True,
+              f"{r2.status_code} {r2.text[:200]}")
+
+        async with SessionLocal() as s:
+            n = (await s.execute(_sqt(
+                'SELECT COUNT(*) FROM pr_master WHERE "PR_Number" = :p'),
+                {"p": r1.json()["pr_number"]})).scalar_one()
+        check("CG-18 …and the database holds ONE line, not two. Counting the "
+              "side effect is the check that matters; the status code alone "
+              "would pass either way",
+              n == 1, f"got {n}")
+
+        r3 = await ac.post("/hod/prs", headers={**H, "Idempotency-Key": key},
+                           json={"site_id": "CNCEC",
+                                 "lines": [{"SAP_Code": "1002",
+                                            "Requested_Qty": 99}]})
+        check("CG-19 the same key with a DIFFERENT body is 409 — that is a "
+              "client bug, and replaying the first answer would hide it",
+              r3.status_code == 409 and "DIFFERENT" in r3.text,
+              f"{r3.status_code} {r3.text[:200]}")
+
+        r4 = await ac.post("/hod/prs", headers={**H, "Idempotency-Key": "SVCG-b"},
+                           json=body)
+        check("CG-20 …while a NEW key with the same body is a new PR, because "
+              "asking twice on purpose is allowed",
+              r4.status_code == 201
+              and r4.json().get("pr_number") != r1.json().get("pr_number"),
+              f"{r4.status_code} {r4.text[:160]}")
+
+        no_key = await ac.post("/hod/prs", headers=H, json=body)
+        check("CG-21 omitting the header still works — the guard is opt-in, so "
+              "an existing integration is not broken by adding it",
+              no_key.status_code == 201, f"{no_key.status_code}")
+
+        # The key is scoped by USER, so one browser's UUID cannot replay
+        # another account's order.
+        A = await _qsep_login(ac, "SVCQ-admin")
+        other = await ac.post("/hod/prs", headers={**A, "Idempotency-Key": key},
+                              json=body)
+        check("CG-22 a key is scoped to the user who used it — a UUID from one "
+              "browser cannot replay another account's purchase request",
+              other.status_code == 201
+              and other.json().get("replayed") is not True,
+              f"{other.status_code} {other.text[:160]}")
+
+    # ── the pure helpers ────────────────────────────────────────────────────
+    check("CG-23 the body hash ignores key ORDER — a client that reorders its "
+          "JSON is still sending the same request",
+          _idem.body_hash({"a": 1, "b": 2}) == _idem.body_hash({"b": 2, "a": 1}),
+          "")
+    check("CG-24 …but not values. A changed quantity is a different request",
+          _idem.body_hash({"qty": 1}) != _idem.body_hash({"qty": 2}), "")
+
+    async with SessionLocal() as s:
+        async with s.begin():
+            inflight = await _idem.claim(s, key="SVCG-inflight",
+                                         action="hod_pr_create",
+                                         body={"x": 1}, username="svc_hod")
+            check("CG-25 an unclaimed key is free to use",
+                  inflight is None, str(inflight))
+            try:
+                await _idem.claim(s, key="SVCG-inflight",
+                                  action="hod_pr_create", body={"x": 1},
+                                  username="svc_hod")
+                caught = "no error"
+            except HTTPException as e:
+                caught = f"{e.status_code}:{e.detail}"
+            check("CG-26 …and a repeat while the first is STILL IN FLIGHT is "
+                  "409, not a replay of an answer that does not exist yet",
+                  caught.startswith("409") and "still being processed" in caught,
+                  caught)
+            await s.rollback()
+
+    await _cleanup()
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM procurement_idempotency WHERE "
+                             "idem_key LIKE '%SVCG-%'"))
+        await s.execute(_sqt("DELETE FROM warehouses WHERE \"Warehouse_ID\" "
+                             "LIKE 'SVCG-%'"))
+        await s.commit()
+
+
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
 async def test_workflow_polish():
     """Suite BX — the operational refinements of 2026-08-13.
@@ -16962,6 +17266,8 @@ async def main() -> int:
     print("\n CF. Many jobs, one deadline — the multi-select, Target Days, and "
           "the label every screen shares")
     await test_planner_ux()
+    print("\n CG. Procurement locks — the PR number, the state, and the retry")
+    await test_procurement_locks()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

@@ -48,8 +48,9 @@ have been rewritten to match; the rest confirmed the recommendations.
 |---|---|---|
 | **8a** | `feat/phase8-planner-math` | ✅ **merged** — see §0.1–0.3. Gates 1,698 / 0 · alembic head `d4b8c1e63a27` |
 | **8b** | `feat/phase8-planner-ux` | ✅ **shipped** — dedup (Q13), job label, CV/ME, Target Days, multi-select, per-role dashboard. Gates 1,725 / 0 · E2E 96. No migration |
-| 8c | `feat/phase8-procurement-lock` | awaiting green light |
-| 8d–8f | — | queued |
+| **8c** | `feat/phase8-procurement-lock` | ✅ **shipped** — pr_registry, asserted transitions, per-LINE PO lock, idempotency keys. Gates 1,751 / 0 · alembic head `a9f2c6b40d18` |
+| 8d | `feat/phase8-qc-hod` | awaiting green light |
+| 8e–8f | — | queued |
 
 **Q13 — ANSWERED 2026-08-21.** A surface carrying two stacked systems is
 blasted **ONCE**. The prep area is deduplicated on an exact (location, area)

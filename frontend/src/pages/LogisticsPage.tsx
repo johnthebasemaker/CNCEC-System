@@ -14,6 +14,7 @@ import {
   useLogisticsPrs, usePoItems, useRaiseVendorReturn, useReschedules, useSites,
   useUndoForceClose, useVendorReturns,
 } from '../api/hooks'
+import { useIdempotencyKey } from '../api/idempotency'
 import { api } from '../api/client'
 import type { Row } from '../api/client'
 import DnApprovalQueue from '../components/DnApprovalQueue'
@@ -29,7 +30,8 @@ function IncomingPRs() {
   const { data: sites } = useSites()
   const [siteId, setSiteId] = useState<string | undefined>(undefined)
   const { data: rows, isFetching } = useLogisticsPrs(siteId)
-  const createPo = useCreatePo()
+  const poIdem = useIdempotencyKey()
+  const createPo = useCreatePo(poIdem)
   const [pr, setPr] = useState<Row | null>(null)
   const [form] = Form.useForm<{ po_number: string; vendor_name?: string; expected_delivery?: Dayjs }>()
 
@@ -123,7 +125,8 @@ function ImportPoPdf() {
   const [preview, setPreview] = useState<PoPreview | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [form] = Form.useForm<{ pr_number: string; site_id: string; po_number: string; vendor_code?: string; vendor_name?: string }>()
-  const createPo = useCreatePo()
+  const scanPoIdem = useIdempotencyKey()
+  const createPo = useCreatePo(scanPoIdem)
 
   const openConfirm = () => {
     const h = preview?.header ?? {}
@@ -388,7 +391,8 @@ function PurchaseOrders() {
   const { message } = App.useApp()
   const { data: rows, isFetching } = useLogisticsPos()
   const warehouses = useList('/warehouses', { limit: 200 })
-  const assign = useAssignPo()
+  const assignIdem = useIdempotencyKey()
+  const assign = useAssignPo(assignIdem)
   const [po, setPo] = useState<Row | null>(null)
   const [kpi, setKpi] = useState<string | null>(null)
   const [form] = Form.useForm<{ warehouse_id: string; expected_delivery?: Dayjs; notes?: string }>()
