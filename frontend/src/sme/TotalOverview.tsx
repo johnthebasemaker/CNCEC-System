@@ -15,6 +15,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { postDownloadDocument, useSmeSnapshot } from '../api/hooks'
 import { buildModel, matKey, runPlan, syscodeCompare, unitKey } from './engine'
 import { allUnits, fc, fcBg } from './insights'
+import SystemCode from './SystemCode'
 import { codeStats } from './session'
 import KpiDrill from './KpiDrill'
 import { ScopedExport } from './MatrixReports'
@@ -146,7 +147,12 @@ export default function TotalOverview({ siteId }: { siteId?: string }) {
     { title: 'Substrate', dataIndex: 'substrate', key: 'sub', width: 100, render: (v: string) => v || '—' },
     { title: 'Type', dataIndex: 'type', key: 'ty', width: 100, render: (v: string) => v || '—' },
     { title: 'Location', dataIndex: 'location', key: 'l', width: 110 },
-    { title: 'Code', dataIndex: 'code', key: 'c', width: 70 },
+    // The discipline rides WITH the code (Phase 8). This row is one
+    // (tag, code), so the Type is that row's own — exact, never an
+    // aggregate guess.
+    { title: 'Code', dataIndex: 'code', key: 'c', width: 112,
+      render: (v: string, r: OverviewRow) => (
+        <SystemCode code={v} type={r.type} name={r.system} plain />) },
     { title: 'System', dataIndex: 'system', key: 'sy', width: 110, ellipsis: true },
     { title: 'Total SQM', dataIndex: 'totalSqm', key: 'ts', width: 100, align: 'right', render: (v: number) => nf(v) },
     { title: 'Done SQM', dataIndex: 'doneSqm', key: 'ds', width: 100, align: 'right', render: (v: number) => nf(v) },

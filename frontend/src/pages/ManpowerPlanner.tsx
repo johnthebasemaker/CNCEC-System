@@ -1,5 +1,5 @@
 /**
- * Phase 7 — the manpower planner.
+ * Phase 7 — the manpower planner. Phase 8 slice 8b — multi-job and Target Days.
  *
  * Three questions, in the order a planner actually asks them:
  *   1. WORKLOAD    — how much is left, and how many man-hours is that?
@@ -9,6 +9,12 @@
  * ⚠️ IT MUTATES NOTHING. This is advice: the operator's ruling is that the
  * planner suggests, never assigns. Nothing here writes to the roster.
  *
+ * ⚠️ TWO SHIFTS SPLITS THE CREW; IT DOES NOT ADD CAPACITY. Nobody works both a
+ * day and a night shift, so a two-shift plan needs the SAME total headcount and
+ * only halves the per-shift figure. The natural reading — "two shifts, so half
+ * the people" — under-hires by half, which is why the page says so in words
+ * next to the number rather than leaving it to be inferred.
+ *
  * ⚠️ "Prefer non-GI" is arithmetic, not a policy about who to employ. Overtime
  * is whatever will not fit inside NORMAL capacity, and a non-GI worker brings
  * 10 normal hours where a GI worker brings 8 — so fewer of them clear the same
@@ -17,14 +23,16 @@
  */
 import { ThunderboltOutlined } from '@ant-design/icons'
 import {
-  Alert, Button, Card, Col, Descriptions, Empty, Form, InputNumber, Row,
-  Select, Statistic, Table, Tag, Tooltip, Typography,
+  Alert, Button, Card, Col, Collapse, Descriptions, Empty, Form, InputNumber,
+  Radio, Row, Segmented, Statistic, Switch, Table, Tag, Tooltip, Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { api } from '../api/client'
+import MultiSelectAll from '../sme/MultiSelectAll'
+import SystemCode from '../sme/SystemCode'
 
 type Row = Record<string, unknown>
 
@@ -35,14 +43,23 @@ const errMsg = (e: unknown): string => {
 const n2 = (v: unknown) => (v == null ? '—' : Number(v).toFixed(2))
 const n0 = (v: unknown) => (v == null ? '—' : Math.round(Number(v)).toLocaleString())
 
+interface Targets {
+  items: Row[]
+  surface_prep: Row[]
+  equipment: string[]
+  codes: { Lining_System_Code: string; Code_Chip: string; System_Name: string; Types: string[] }[]
+  system_names: Record<string, string>
+}
+
 export default function ManpowerPlanner() {
   const [form] = Form.useForm()
   const [result, setResult] = useState<Row | null>(null)
+  const [mode, setMode] = useState<'days' | 'hours'>('days')
+  const [autoShifts, setAutoShifts] = useState(true)
 
   const targets = useQuery({
     queryKey: ['/mh/planner/targets'],
-    queryFn: async () => (await api.get<{ items: Row[]; surface_prep: Row[] }>(
-      '/mh/planner/targets')).data,
+    queryFn: async () => (await api.get<Targets>('/mh/planner/targets')).data,
   })
 
   const run = useMutation({
@@ -50,28 +67,34 @@ export default function ManpowerPlanner() {
     onSuccess: (d) => setResult(d as Row),
   })
 
-  const options = [
-    {
-      label: 'Lining work (area still outstanding)',
-      options: (targets.data?.items ?? []).map((t) => ({
-        value: `${t.Equipment_Tag_No}|${t.Lining_System_Code}`,
-        label: `${t.Equipment_Tag_No} · ${t.Lining_System_Code} — ${n2(t.Remaining_SQM)} m² left`,
-      })),
-    },
-    {
-      label: 'Surface prep (no lining system)',
-      options: (targets.data?.surface_prep ?? []).map((t) => ({
-        value: `${t.Equipment_Tag_No}|`,
-        label: `${t.Equipment_Tag_No} · surface prep`,
-      })),
-    },
-  ]
+  // Only equipment that still has something outstanding, so the list is the
+  // work rather than the whole master.
+  const equipmentOptions = useMemo(() => {
+    const live = new Set<string>()
+    for (const t of targets.data?.items ?? []) live.add(String(t.Equipment_Tag_No))
+    for (const t of targets.data?.surface_prep ?? []) live.add(String(t.Equipment_Tag_No))
+    return [...live].sort().map((t) => ({ value: t, label: t }))
+  }, [targets.data])
+
+  // The chip here is the AGGREGATE form — a code used on both concrete and
+  // steel prints `LSC1 [CV/ME]`, because this select spans every tag.
+  const codeOptions = useMemo(
+    () => (targets.data?.codes ?? []).map((c) => ({
+      value: c.Lining_System_Code,
+      label: c.System_Name ? `${c.Code_Chip} — ${c.System_Name}` : c.Code_Chip,
+    })), [targets.data])
 
   const submit = async () => {
     const v = await form.validateFields()
-    const [tag, code] = String(v.target).split('|')
-    run.mutate({ equipment_tag: tag, lining_system_code: code ?? '',
-                 deadline_hours: v.deadline_hours })
+    run.mutate({
+      equipment_tags: v.equipment_tags ?? [],
+      lining_system_codes: v.lining_system_codes ?? [],
+      include_surface_prep: !!v.include_surface_prep,
+      ...(mode === 'days'
+        ? { target_days: v.target_days }
+        : { deadline_hours: v.deadline_hours }),
+      ...(autoShifts ? {} : { shifts_per_day: v.shifts_per_day ?? 2 }),
+    })
   }
 
   const inputs = result?.inputs as Row | undefined
@@ -80,69 +103,152 @@ export default function ManpowerPlanner() {
   const strat = result?.strategy as Row | undefined
   const roster = result?.roster as Row | undefined
   const warnings = (result?.warnings as string[]) ?? []
+  const jobs = (result?.jobs as Row[]) ?? []
+  const shiftsPerDay = Number(inputs?.shifts_per_day ?? 1)
+
+  const jobCols: ColumnsType<Row> = [
+    { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 200 },
+    { title: 'System', key: 'sys', width: 220,
+      render: (_: unknown, r: Row) => {
+        const j = r.Job as Row | undefined
+        return <SystemCode code={String(r.Lining_System_Code ?? '')}
+          type={String(j?.Type ?? '')} name={String(j?.System_Name ?? '')} />
+      } },
+    { title: 'Remaining m²', key: 'rem', width: 130, align: 'right',
+      render: (_: unknown, r: Row) =>
+        n2((r.workload as Row | undefined)?.remaining_sqm) },
+    { title: 'Man-hours', dataIndex: 'Required_Manhours', width: 130,
+      align: 'right', render: n0 },
+  ]
 
   const activityCols: ColumnsType<Row> = [
-    { title: 'Sub-activity', dataIndex: 'Execution_Sub_Activity_Code', width: 130 },
-    { title: 'Activity', dataIndex: 'Activity', width: 200 },
-    { title: 'Variant', dataIndex: 'Variant_Key', width: 120,
-      render: (v: string) => v ? <Tag color="purple">{v}</Tag> : '—' },
-    { title: 'Benchmark crew', dataIndex: 'Benchmark_Crew_Size', width: 120, align: 'right' },
-    { title: 'm²/shift', dataIndex: 'Standard_Productivity_Per_Shift', width: 100, align: 'right' },
-    { title: 'Man-hrs per m²', dataIndex: 'Manhours_Per_SQM', width: 130, align: 'right',
+    { title: 'Job', dataIndex: 'Job_Label', width: 230, ellipsis: true },
+    { title: 'Sub-activity', dataIndex: 'Execution_Sub_Activity_Code', width: 120 },
+    { title: 'Activity', dataIndex: 'Activity', width: 190, ellipsis: true },
+    { title: 'Detail', dataIndex: 'Sub_Activity', width: 160, ellipsis: true },
+    { title: 'Type', dataIndex: 'Type', width: 70,
+      render: (v: string) => v ? <Tag>{v}</Tag> : '—' },
+    { title: 'Share', dataIndex: 'Share', width: 90, align: 'right',
+      render: (v: unknown) => `${(Number(v ?? 0) * 100).toFixed(1)}%` },
+    { title: 'Area m²', dataIndex: 'Applied_SQM', width: 110, align: 'right',
+      render: n2 },
+    { title: 'Man-hrs per m²', dataIndex: 'Manhours_Per_SQM', width: 130,
+      align: 'right',
       render: (v: unknown) => (
         <Tooltip title="Derived from man-hours ÷ productivity per shift, not from
           the workbook's rounded m²/hr/person column — that column is 2 d.p. and
           overstates tile lining by about 3.6%.">
           <span>{n2(v)}</span>
         </Tooltip>) },
-    { title: 'Required man-hrs', dataIndex: 'Required_Manhours', width: 140, align: 'right',
-      render: n0 },
-    { title: 'Headcount for deadline', dataIndex: 'Required_Headcount', width: 160,
-      align: 'right', render: n2 },
-  ]
-
-  const gapCols: ColumnsType<Row> = [
-    { title: 'Role', dataIndex: 'Role_Code', width: 170 },
-    { title: 'Required man-hrs', dataIndex: 'Required_Manhours', width: 140,
+    { title: 'Man-hours', dataIndex: 'Required_Manhours', width: 120,
       align: 'right', render: n0 },
-    { title: 'Required head', dataIndex: 'Required_Headcount_Rounded', width: 120,
-      align: 'right' },
-    { title: 'Available', dataIndex: 'Available_Headcount', width: 100, align: 'right' },
-    { title: 'of which GI', dataIndex: 'Available_GI', width: 100, align: 'right' },
-    { title: 'of which Non-GI', dataIndex: 'Available_NON_GI', width: 120, align: 'right' },
-    { title: 'Day', dataIndex: 'Available_Day', width: 70, align: 'right' },
-    { title: 'Night', dataIndex: 'Available_Night', width: 70, align: 'right' },
-    { title: 'To procure', dataIndex: 'To_Procure', width: 110, align: 'right',
-      render: (v: unknown) => {
-        const x = Number(v ?? 0)
-        return x > 0 ? <Tag color="red">{x}</Tag> : <Tag color="green">0</Tag>
-      } },
+    { title: 'Crew-shifts', dataIndex: 'Crew_Shifts', width: 110, align: 'right',
+      render: (v: unknown) => (
+        <Tooltip title="Shifts of the BENCHMARK crew this work contains —
+          workload, not elapsed time. It does not depend on how many people you
+          actually send.">
+          <span>{n2(v)}</span>
+        </Tooltip>) },
   ]
 
   return (
     <div>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        Works out the labour needed to finish a job by a deadline, what the
-        roster already covers, and how to remove the overtime. It is advice —
-        nothing here changes the roster or assigns anybody.
+        Works out the labour needed to finish a selection of jobs by a deadline,
+        what the roster already covers, and how to remove the overtime. It is
+        advice — nothing here changes the roster or assigns anybody.
       </Typography.Paragraph>
 
       <Card size="small" style={{ marginBottom: 16 }}>
-        <Form form={form} layout="inline" initialValues={{ deadline_hours: 11 }}
+        <Form form={form} layout="vertical"
+          initialValues={{ target_days: 5, deadline_hours: 11, shifts_per_day: 2,
+                           include_surface_prep: false }}
           onFinish={submit}>
-          <Form.Item name="target" label="Job" rules={[{ required: true }]}
-            style={{ minWidth: 420 }}>
-            <Select showSearch options={options} loading={targets.isFetching}
-              placeholder="Equipment and system" optionFilterProp="label" />
-          </Form.Item>
-          <Form.Item name="deadline_hours" label="Hours available per person"
-            rules={[{ required: true }]}
-            tooltip="The window each worker can put in. 11 h is one full shift
-              (12 hours less an hour for lunch); 22 h is two.">
-            <InputNumber min={0.5} step={1} style={{ width: 140 }} />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" icon={<ThunderboltOutlined />}
-            loading={run.isPending}>Plan</Button>
+          <Row gutter={12}>
+            <Col xs={24} md={9}>
+              <Form.Item name="equipment_tags" label="Equipment"
+                rules={[{ required: true, message: 'pick at least one' }]}>
+                <MultiSelectAll options={equipmentOptions}
+                  loading={targets.isFetching}
+                  placeholder="Equipment tags" style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={9}>
+              <Form.Item name="lining_system_codes" label="System codes"
+                tooltip="Only combinations that actually exist are planned —
+                  picking 2 tags and 3 codes does not create 6 jobs.">
+                <MultiSelectAll options={codeOptions} loading={targets.isFetching}
+                  placeholder="All systems on the selected equipment"
+                  style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="include_surface_prep" label="Surface prep"
+                valuePropName="checked"
+                tooltip="Prep is per EQUIPMENT, not per system — a tag with six
+                  systems has one surface to blast, and it is counted once.">
+                <Switch checkedChildren="included" unCheckedChildren="excluded" />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Row gutter={12} align="bottom">
+            <Col xs={24} md={7}>
+              <Form.Item label="Deadline expressed as" style={{ marginBottom: 8 }}>
+                <Segmented value={mode} onChange={(v) => setMode(v as 'days' | 'hours')}
+                  options={[{ label: 'Target days', value: 'days' },
+                            { label: 'Hours per person', value: 'hours' }]} />
+              </Form.Item>
+            </Col>
+            <Col xs={12} md={4}>
+              {mode === 'days' ? (
+                <Form.Item name="target_days" label="Target days"
+                  rules={[{ required: true }]}
+                  tooltip="Calendar days to finish in. Each person offers 11
+                    worked hours a day, so 5 days = 55 hours per person.">
+                  <InputNumber min={0.5} step={1} style={{ width: '100%' }} />
+                </Form.Item>
+              ) : (
+                <Form.Item name="deadline_hours" label="Hours per person"
+                  rules={[{ required: true }]}
+                  tooltip="The window each worker can put in. 11 h is one full
+                    shift (12 hours less an hour for lunch); 22 h is two.">
+                  <InputNumber min={0.5} step={1} style={{ width: '100%' }} />
+                </Form.Item>
+              )}
+            </Col>
+            {/* The switch and the radio group are ONE control conceptually —
+                "who decides how many shifts" and "which" — so they share a
+                Form.Item and sit on one line. Split across two columns with a
+                blank label each, they stacked and collided with the button. */}
+            <Col xs={24} md={9}>
+              <Form.Item label="Shifts per day" style={{ marginBottom: 8 }}
+                tooltip="Auto reads the roster: two if anyone in a required role
+                  is on nights. You can force two anyway — the plan then shows
+                  the crew you would have to staff.">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10,
+                              flexWrap: 'wrap' }}>
+                  <Switch checked={autoShifts} onChange={setAutoShifts}
+                    checkedChildren="auto" unCheckedChildren="manual" />
+                  {!autoShifts && (
+                    <Form.Item name="shifts_per_day" noStyle>
+                      <Radio.Group optionType="button" buttonStyle="solid"
+                        options={[{ label: 'Day only', value: 1 },
+                                  { label: 'Day + Night', value: 2 }]} />
+                    </Form.Item>
+                  )}
+                </div>
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item label=" " style={{ marginBottom: 8 }}>
+                <Button type="primary" htmlType="submit" block
+                  icon={<ThunderboltOutlined />} loading={run.isPending}>
+                  Plan
+                </Button>
+              </Form.Item>
+            </Col>
+          </Row>
         </Form>
       </Card>
 
@@ -152,7 +258,7 @@ export default function ManpowerPlanner() {
       )}
 
       {!result && !run.isPending && (
-        <Empty description="Pick a job and a deadline to see the plan" />
+        <Empty description="Pick equipment and a deadline to see the plan" />
       )}
 
       {result && (
@@ -167,41 +273,106 @@ export default function ManpowerPlanner() {
 
           {/* ── 1. workload ────────────────────────────────────────────── */}
           <Typography.Title level={5}>1 · Workload and required hours</Typography.Title>
-          <Row gutter={12} style={{ marginBottom: 12 }}>
-            <Col xs={12} md={6}><Card size="small">
+          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+            <Col xs={12} md={6} xl={4}><Card size="small">
               <Statistic title="Area remaining" value={n2(workload?.remaining_sqm)}
                 suffix="m²" /></Card></Col>
-            <Col xs={12} md={6}><Card size="small">
+            <Col xs={12} md={6} xl={4}><Card size="small">
               <Statistic title="Required man-hours"
                 value={n0(req?.Total_Required_Manhours)} /></Card></Col>
-            <Col xs={12} md={6}><Card size="small">
-              <Statistic title="Headcount for the deadline"
-                value={n2(req?.Total_Required_Headcount)} /></Card></Col>
-            <Col xs={12} md={6}><Card size="small">
-              <Statistic title="Shifts in the window"
-                value={n2(inputs?.shifts_in_window)} /></Card></Col>
+            <Col xs={12} md={6} xl={4}><Card size="small">
+              <Tooltip title="Shifts of the benchmark crew the work contains.
+                Workload, not elapsed time.">
+                <Statistic title="Crew-shifts of work"
+                  value={n2(req?.Total_Crew_Shifts)} />
+              </Tooltip></Card></Col>
+            <Col xs={12} md={6} xl={4}><Card size="small">
+              <Statistic title="Days to the deadline"
+                value={n2(req?.Total_Days)} /></Card></Col>
+            <Col xs={12} md={6} xl={4}><Card size="small">
+              <Tooltip title={`${n2(req?.Total_Days)} days x ${shiftsPerDay} shift(s) a day`}>
+                <Statistic title="Calendar shifts"
+                  value={n2(req?.Total_Calendar_Shifts)} />
+              </Tooltip></Card></Col>
+            <Col xs={12} md={6} xl={4}><Card size="small">
+              <Tooltip title="How long the CURRENT roster would take, counting
+                only the roles this work needs. Blank when no matching worker is
+                on the roster.">
+                <Statistic title="Days at current roster"
+                  value={req?.Days_With_Current_Roster == null ? '—'
+                    : n2(req?.Days_With_Current_Roster)} />
+              </Tooltip></Card></Col>
           </Row>
-          <Descriptions size="small" column={3} bordered style={{ marginBottom: 12 }}>
-            <Descriptions.Item label="Job">
-              {String(inputs?.equipment_tag)}{' '}
-              {inputs?.system_agnostic
-                ? <Tag color="gold">surface prep</Tag>
-                : <Tag>{String(inputs?.lining_system_code)}</Tag>}
+
+          <Descriptions size="small" column={{ xs: 1, md: 3 }} bordered
+            style={{ marginBottom: 12 }}>
+            <Descriptions.Item label="Jobs">
+              {String(req?.Jobs ?? 0)} · {n2(workload?.done_sqm)} of{' '}
+              {n2(workload?.original_sqm)} m² done
             </Descriptions.Item>
-            <Descriptions.Item label="Area source">
-              {String(workload?.source ?? '—')}
+            <Descriptions.Item label="Deadline">
+              {n2(req?.Total_Days)} days = {n2(inputs?.deadline_hours)} h per person
             </Descriptions.Item>
-            <Descriptions.Item label="Done so far">
-              {n2(workload?.done_sqm)} of {n2(workload?.original_sqm)} m²
+            <Descriptions.Item label="Shifts per day">
+              <Tag color={shiftsPerDay === 2 ? 'blue' : undefined}>
+                {shiftsPerDay === 2 ? 'Day + Night' : 'Day only'}
+              </Tag>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {String(inputs?.shifts_per_day_source) === 'operator'
+                  ? 'set by you' : 'read from the roster'}
+              </Typography.Text>
             </Descriptions.Item>
           </Descriptions>
+
+          {jobs.length > 1 && (
+            <Table size="small" pagination={false} columns={jobCols}
+              dataSource={jobs}
+              rowKey={(r) => `${r.Equipment_Tag_No}|${r.Lining_System_Code}`}
+              scroll={{ x: 'max-content' }} style={{ marginBottom: 12 }} />
+          )}
+
           <Table size="small" pagination={false} columns={activityCols}
             dataSource={(result.activities as Row[]) ?? []}
-            rowKey={(r) => `${r.Execution_Sub_Activity_Code}|${r.Variant_Key}`}
+            rowKey={(r, i) => `${r.Job_Label}|${r.Execution_Sub_Activity_Code}|${r.Activity}|${i}`}
             scroll={{ x: 'max-content' }} style={{ marginBottom: 20 }} />
 
           {/* ── 2. gap ─────────────────────────────────────────────────── */}
-          <Typography.Title level={5}>2 · Roster versus gap, by role</Typography.Title>
+          <Typography.Title level={5}>
+            2 · What we need, what we have, what to assign
+          </Typography.Title>
+          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+            <Col xs={12} md={6}><Card size="small">
+              <Statistic title="Total headcount needed"
+                value={n0(req?.Total_Required_Headcount)} /></Card></Col>
+            <Col xs={12} md={6}><Card size="small">
+              <Tooltip title="Per shift. Two shifts means two DISJOINT crews —
+                nobody works both — so the TOTAL headcount is unchanged and only
+                this figure halves.">
+                <Statistic title={`Per shift (x${shiftsPerDay})`}
+                  value={n0(req?.Headcount_Per_Shift)} />
+              </Tooltip></Card></Col>
+            <Col xs={12} md={6}><Card size="small">
+              <Statistic title="On the roster (matched roles)"
+                value={n0(roster?.In_Scope)} /></Card></Col>
+            <Col xs={12} md={6}><Card size="small">
+              <Statistic title="To assign / procure"
+                valueStyle={{ color: (result.gap as Row[] ?? [])
+                  .reduce((a, g) => a + Number(g.To_Procure ?? 0), 0) > 0
+                  ? '#cf1322' : '#3f8600' }}
+                value={n0((result.gap as Row[] ?? [])
+                  .reduce((a, g) => a + Number(g.To_Procure ?? 0), 0))} />
+            </Card></Col>
+          </Row>
+
+          {shiftsPerDay === 2 && (
+            <Alert type="info" showIcon style={{ marginBottom: 12 }}
+              message="Two shifts splits the crew — it does not halve the hiring"
+              description={`${n0(req?.Total_Required_Headcount)} people are still
+                needed in total; they are split into two crews of about
+                ${n0(req?.Headcount_Per_Shift)}. Nobody works both shifts, so
+                running nights compresses nothing on its own.`} />
+          )}
+
           {roster?.Unmapped && Object.keys(roster.Unmapped as object).length > 0 && (
             <Alert type="info" showIcon style={{ marginBottom: 8 }}
               message="Some workers are not counted as available"
@@ -210,14 +381,66 @@ export default function ManpowerPlanner() {
                 'nobody wrote down that they are masons' and 'there are no
                 masons' call for completely different actions." />
           )}
-          <Table size="small" pagination={false} columns={gapCols}
-            dataSource={(result.gap as Row[]) ?? []}
-            rowKey={(r) => String(r.Role_Code)}
-            scroll={{ x: 'max-content' }} style={{ marginBottom: 20 }} />
+
+          <Collapse
+            style={{ marginBottom: 20 }}
+            items={((result.gap as Row[]) ?? []).map((g) => ({
+              key: String(g.Role_Code),
+              label: (
+                <Row gutter={8} align="middle" style={{ width: '100%' }}>
+                  <Col flex="200px"><strong>{String(g.Role_Code)}</strong></Col>
+                  <Col flex="auto">
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      need <strong>{String(g.Required_Headcount_Rounded)}</strong>
+                      {shiftsPerDay === 2
+                        && <> ({String(g.Headcount_Per_Shift)} per shift)</>}
+                      {' · '}have <strong>{String(g.Available_Headcount)}</strong>
+                      {' · '}
+                      {Number(g.To_Procure ?? 0) > 0
+                        ? <Tag color="red">assign {String(g.To_Procure)}</Tag>
+                        : <Tag color="green">covered</Tag>}
+                    </Typography.Text>
+                  </Col>
+                </Row>
+              ),
+              children: (
+                <>
+                  <Descriptions size="small" column={{ xs: 2, md: 4 }} bordered>
+                    <Descriptions.Item label="Required man-hours">
+                      {n0(g.Required_Manhours)}</Descriptions.Item>
+                    <Descriptions.Item label="Required headcount">
+                      {n2(g.Required_Headcount)}</Descriptions.Item>
+                    <Descriptions.Item label="Per shift">
+                      {String(g.Headcount_Per_Shift)}</Descriptions.Item>
+                    <Descriptions.Item label="To assign">
+                      {String(g.To_Procure)}</Descriptions.Item>
+                    <Descriptions.Item label="Available (GI)">
+                      {String(g.Available_GI)}</Descriptions.Item>
+                    <Descriptions.Item label="Available (Non-GI)">
+                      {String(g.Available_NON_GI)}</Descriptions.Item>
+                    <Descriptions.Item label="On days">
+                      {String(g.Available_Day)}</Descriptions.Item>
+                    <Descriptions.Item label="On nights">
+                      {String(g.Available_Night)}</Descriptions.Item>
+                  </Descriptions>
+                  {((g.Jobs as Row[]) ?? []).length > 0 && (
+                    <Table size="small" pagination={false} style={{ marginTop: 8 }}
+                      dataSource={(g.Jobs as Row[]) ?? []}
+                      rowKey={(r) => String(r.Job)}
+                      columns={[
+                        { title: 'Which job asked for this role',
+                          dataIndex: 'Job' },
+                        { title: 'Man-hours', dataIndex: 'Required_Manhours',
+                          width: 130, align: 'right', render: n0 },
+                      ]} />
+                  )}
+                </>
+              ),
+            }))} />
 
           {/* ── 3. strategy ────────────────────────────────────────────── */}
           <Typography.Title level={5}>3 · Overtime strategy</Typography.Title>
-          <Row gutter={12} style={{ marginBottom: 12 }}>
+          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
             <Col xs={12} md={6}><Card size="small">
               <Statistic title="Normal capacity"
                 value={n0(strat?.Normal_Capacity_Manhours)} suffix="man-hrs" />
@@ -246,7 +469,7 @@ export default function ManpowerPlanner() {
             message="Recommendation"
             description={String(strat?.Recommendation ?? '')} />
           {Number(strat?.Hire_NON_GI_To_Clear_Overtime ?? 0) > 0 && (
-            <Row gutter={12}>
+            <Row gutter={[12, 12]}>
               <Col xs={24} md={12}>
                 <Card size="small" title="Hire Non-GI (recommended)">
                   <Statistic value={String(strat?.Hire_NON_GI_To_Clear_Overtime)}

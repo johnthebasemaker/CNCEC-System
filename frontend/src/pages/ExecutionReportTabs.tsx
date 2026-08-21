@@ -15,6 +15,7 @@
  * itself as on target.
  */
 import { DownloadOutlined } from '@ant-design/icons'
+import SystemCode from '../sme/SystemCode'
 import {
   Alert, Button, Card, Col, DatePicker, Row, Space, Statistic, Table, Tag,
   Tooltip, Typography,
@@ -83,9 +84,10 @@ export function ExecVarianceTab() {
     { title: 'Entry', dataIndex: 'Entry_No', width: 150 },
     { title: 'Date', dataIndex: 'Work_Date', width: 105 },
     { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 160 },
-    { title: 'System', dataIndex: 'Lining_System_Code', width: 130,
-      render: (v: string) => v === '(surface prep)'
-        ? <Tag color="gold">surface prep</Tag> : v },
+    { title: 'System', dataIndex: 'Lining_System_Code', width: 150,
+      render: (v: string, r: Row) => v === '(surface prep)'
+        ? <Tag color="gold">surface prep{r.Type ? ` [${r.Type}]` : ''}</Tag>
+        : <SystemCode code={v} type={String(r.Type ?? '')} plain /> },
     { title: 'Sub-activity', dataIndex: 'Execution_Sub_Activity_Code', width: 120 },
     { title: 'Area m²', dataIndex: 'Actual_SQM', width: 90, align: 'right', render: n2 },
     { title: 'Material actual', dataIndex: 'Material_Actual', width: 120, align: 'right', render: n2 },

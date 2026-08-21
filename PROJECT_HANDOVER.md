@@ -706,6 +706,54 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-21 — Phase 8 slice 8b (`feat/phase8-planner-ux`).**
+> Many jobs, one deadline. Baselines move to **service tests 1,725** (+27,
+> suite CF) and **E2E 96** (+6, `manpower-planner.spec.ts`); legacy 599,
+> parity 1,313, UI math 33, nav 47 and alembic head `d4b8c1e63a27` unchanged —
+> **this slice has no migration.**
+>
+> **Four additions to the LOCKED set:**
+>
+> * **A STACKED SURFACE IS PREPARED ONCE** (operator ruling Q13, closing the
+>   open question 8a left). Two systems filed against an identical
+>   `Lining_Area_Location` AND an identical area are one physical surface, and
+>   the prep area counts it once — J027 is 4,555 m², not 5,059. The test is
+>   EXACT match on both fields: partial overlaps exist in the master and no
+>   arithmetic here can say how much of one lies inside another, so merging on
+>   a partial match would silently drop real area. Where merged systems route
+>   to different blasting variants the DEAREST is charged.
+>
+> * **TWO SHIFTS SPLIT THE CREW; THEY DO NOT ADD CAPACITY.** Nobody works both
+>   a day and a night shift, so `Total_Required_Headcount = manhours / (days ×
+>   11)` is independent of `shifts_per_day` and only `Headcount_Per_Shift`
+>   halves. The natural reading — "two shifts, so half the people" — under-hires
+>   by half, so the page states it in a banner and an E2E test fails if that
+>   banner is removed. `target_days` and `deadline_hours` are the same quantity
+>   (`hours = days × 11`); sending both is a 422, never a precedence rule.
+>
+> * **A SELECTION IS INTERSECTED WITH REALITY, NEVER MULTIPLIED.** Tags × codes
+>   resolves against `sme_sqm_progress`, so 3 tags × 2 codes is 3 jobs and not
+>   6; dropped combinations are named. An EMPTY code filter means EVERY code on
+>   the selected tags — the filter's own placeholder says "all", and returning
+>   nothing was a promise the UI made and the API broke. Surface prep is added
+>   once per TAG, never per (tag, code).
+>
+> * **THE BACKEND ASSEMBLES THE JOB LABEL; THE FRONTEND RENDERS IT.**
+>   `services/jobs.py` is the one assembler (operator ruling Q4) — a mirrored TS
+>   formatter would be the third dual-implementation surface after the SME
+>   engine and the sort key, and a label does not earn that machinery. The name
+>   comes from `sme_recipe."Lining_System"`, the column the operator edits, NOT
+>   from `Lining_System_Name` which holds the short code (`RLCB4`). Whitespace
+>   is collapsed, because LSC3 ships two spellings of one name.
+>
+> ⚠️ **CV/ME IS A PROPERTY OF THE (TAG, CODE) ROW.** Already locked in 8a; 8b is
+> where it reaches the UI. A row that IS one tag+code shows its exact discipline
+> (`LSC1 [ME]`); an aggregate shows the set (`LSC1 [CV/ME]`). Never one Type
+> picked from the first row met — that reads as fact and is wrong half the time.
+> `frontend/src/sme/SystemCode.tsx` and `jobs.code_chip` both implement this;
+> they are NOT a parity pair, since the backend owns every label that ships in a
+> payload and the component only decorates rows the client already holds.
+
 > **Updated 2026-08-20 — Phase 8 slice 8a (`feat/phase8-planner-math`).**
 > The planner's arithmetic. Baselines move to **service tests 1,698** (+31,
 > suite CE), alembic head **`d4b8c1e63a27`**; E2E 90, legacy 599, parity 1,313,

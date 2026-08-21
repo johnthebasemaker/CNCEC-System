@@ -1634,6 +1634,112 @@ row. Suite CE asserts it on every activity in a plan.
 
 ---
 
+## 14i. Many jobs, one deadline (Phase 8 · slice 8b)
+
+> Added 2026-08-21 (branch `feat/phase8-planner-ux`). Rule 13.
+
+### 14i.1 ⚠️ Stacked surfaces are now blasted ONCE
+
+Operator ruling 2026-08-21 (Q13). Slice 8a *reported* the overlap and planned
+on the gross because nobody had said which reading was right. The answer is
+that a surface carrying two systems is prepared once, so the deduplicated
+figure is now the one the plan uses.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-DEDUP-01** | Prep-plan J027 | **4,555 m²**, not 5,059. LSC1 and LSC2 both claim 504 m² at an identical `Lining_Area_Location` — one surface, two systems. |
+| **TC-DEDUP-02** | Read the warning | It names the codes, the shared area and both totals, so a plan can still be reconciled against one printed before the ruling. |
+| **TC-DEDUP-03** | Check `benchmark_selection.surface_prep_partition` | The merged surface appears **once**, with `codes: [LSC1, LSC2]` and `merged: true`. |
+| **TC-DEDUP-04** | Two systems on the same location routing to *different* blasting variants | The **dearest** is charged. Nothing in the data says which coat went on first, and overstating one surface is recoverable where understating it is not. |
+
+> **The test is exact match on BOTH location and area, deliberately.** Partial
+> overlaps exist — LSC6 covers "Pedastal Wall Side surface, Wall" while LSC1
+> covers that *and* "Floor" — and no arithmetic can say how much of one lies
+> inside the other. Merging on a partial match would silently drop real area.
+
+### 14i.2 Multi-select: the intersection, never the cross product
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-MS-01** | Select 3 equipment × 2 codes where only 3 pairs exist | **3 jobs.** A cross product would invent work on pairs nobody planned. |
+| **TC-MS-02** | Read the warnings | The dropped combinations are **named**, not silently omitted. |
+| **TC-MS-03** | Select equipment and **no** system code | Every system on that equipment is planned. The filter says "All systems on the selected equipment", so empty has to mean all — returning nothing was a dead end the UI promised against. |
+| **TC-MS-04** | Turn **Surface prep** on for a tag with six systems | **One** prep job for the tag, not six. Prep is per equipment. |
+| **TC-MS-05** | Open the Equipment dropdown → **Select all** | Resolves to the real value list, not a sentinel — the tag count is the number of equipment. |
+
+### 14i.3 Target Days, and the reverse calculation
+
+```
+deadline_hours = target_days × 11        (11 worked hours in a 12-hour shift)
+Total_Required_Headcount = man-hours ÷ (target_days × 11)
+Headcount_Per_Shift      = Total_Required_Headcount ÷ shifts_per_day
+```
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-DAY-01** | Target days **5** vs Hours per person **55** | **Byte-identical** plans. A person works one shift a day, so 5 days is 55 hours. |
+| **TC-DAY-02** | Send both in one request | **422.** They are the same quantity; silently preferring one hides a contradiction. |
+| **TC-DAY-03** | 900 man-hours at 5 days | Total headcount **16.36 → 17**. |
+| **TC-DAY-04** | Check the KPI row | Man-hours · **Crew-shifts** · **Days** · **Calendar shifts** · Days at current roster. |
+| **TC-DAY-05** | Compare Crew-shifts to Days | They are different questions. Crew-shifts is WORKLOAD — shifts of the benchmark crew, independent of who you deploy. Days is the deadline. |
+
+### 14i.4 ⚠️ Two shifts SPLIT the crew — they do not halve the hiring
+
+**TC-SHIFT-01** — plan at 5 days with 1 shift, then with 2.
+
+| | 1 shift | 2 shifts |
+|---|---|---|
+| Total headcount | 17 | **17** (unchanged) |
+| Per shift | 17 | **9** |
+| Days | 5 | 5 |
+| Calendar shifts | 5 | 10 |
+
+Nobody works both a day and a night shift, so two crews need the **same** total
+people. The natural reading — "two shifts, so half the people" — under-hires by
+half, which is why the page states it in a banner rather than leaving it to be
+inferred. **If that banner is ever tidied away, the E2E fails.**
+
+**TC-SHIFT-02** — auto mode reads the roster: two shifts if anyone *in a role
+this job needs* is on nights, else one. An idle night blaster does not put a
+brick-lining job onto two shifts.
+
+**TC-SHIFT-03** — forcing two shifts with **no** night crew is allowed (operator
+ruling Q6) and warns that the split shown is one you would have to staff.
+
+### 14i.5 The per-role dashboard
+
+**TC-ROLE-01** — each role is a collapsible row: `need / have / assign` in the
+header, and expanding shows the GI–Non-GI–Day–Night split plus **which jobs
+asked for that role**, so a headline number can always be decomposed.
+
+**TC-ROLE-02** — the per-role man-hours still sum back to the total across every
+selected job. Selection and aggregation must not lose hours.
+
+### 14i.6 The job label, and CV/ME
+
+**One assembler, in `backend/api/services/jobs.py`.** The API ships the label;
+the frontend renders it. A mirrored TypeScript formatter would have been the
+third dual-implementation surface after the SME engine and the sort key, and a
+label does not earn that machinery.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-LBL-01** | Look at any job | `J027 · LSC9 [CV] — Polyurethane Resin Acid Resistant 5mm` |
+| **TC-LBL-02** | Look at surface prep | `J027 · Surface prep [CV]` — named, never a blank cell. |
+| **TC-LBL-03** | Check where the name came from | `sme_recipe."Lining_System"` — the column the operator edits. **NOT** `Lining_System_Name`, which despite its name holds the short code (`RLCB4`, `CBL30`). |
+| **TC-LBL-04** | LSC3, which ships `Rubber Lining  4mm` on one row and `Rubber Lining 4mm` on another | One name. Whitespace is collapsed; two spellings would render as two systems. |
+
+**⚠️ CV/ME is a property of the (tag, code) ROW, not of the code.** `LSC1` is CV
+on nine concrete rows and ME on nineteen tank/vessel rows.
+
+| ID | Where | Expected |
+|---|---|---|
+| **TC-CVME-01** | A row that IS one tag + code (Total Overview, Execution Plan, the planner, the execution queues) | That row's **exact** discipline: `LSC1 [ME]`. |
+| **TC-CVME-02** | An aggregate (the planner's code filter, a code rollup) | **Both**: `LSC1 [CV/ME]`. |
+| **TC-CVME-03** | Anywhere | Never one Type picked from the first row met and presented as the code's discipline. That is an invented aggregate — it reads as fact and is wrong half the time. |
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

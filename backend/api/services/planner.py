@@ -70,6 +70,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..manhours import ot_thresholds
+from .jobs import job_label, system_names
 from .ledger import _MD
 
 norm_t = _MD.tables["sme_manpower_norm"]
@@ -387,6 +388,76 @@ def _topcoat_codes(eq_rows: list[dict], activity_by_code: dict,
     return out
 
 
+def _surface_key(row: dict) -> tuple:
+    """The physical surface an equipment row describes.
+
+    Location text is normalised (case, punctuation spacing, repeated spaces)
+    so 'Floor, Wall' and 'floor,  wall' are one surface rather than two; the
+    area rides along because two systems on the same NAMED place but different
+    areas are not demonstrably the same piece of steel.
+    """
+    loc = " ".join(str(row.get("Lining_Area_Location") or "").lower().split())
+    loc = re.sub(r"\s*,\s*", ",", loc)
+    return (loc, round(float(row.get("Surface_Area_SQM") or 0), 2))
+
+
+def _dedupe_surfaces(eq_rows: list[dict], report: list) -> list[dict]:
+    """One row per PHYSICAL surface — the operator's ruling of 2026-08-21.
+
+    J027 files LSC1 and LSC2 at 504 m² each against an identical
+    `Lining_Area_Location`. That is ONE 504 m² surface carrying two stacked
+    systems, and it is blasted ONCE: the substrate is prepared before the first
+    coat, and the second system goes on top of the first, not onto fresh
+    concrete. Charging both rows billed the same blasting twice.
+
+    ⚠️ THE TEST IS EXACT MATCH ON BOTH LOCATION AND AREA, and deliberately so.
+    Partial overlaps exist in the master — LSC6 covers 'Pedastal Wall Side
+    surface, Wall' while LSC1 covers that AND 'Floor' — and no arithmetic in
+    this file can say how much of one lies inside the other. Merging on a
+    partial match would silently drop real area. Exact pairs are provable;
+    everything else is left alone and counted in full.
+
+    Which benchmark survives a merge is decided the same way every other
+    unresolved choice in this module is: the DEAREST. Two stacked systems can
+    route to different blasting variants, nothing says which coat went on
+    first, and overstating one surface is recoverable where understating it is
+    not.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for row in eq_rows:
+        k = _surface_key(row)
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(row)
+
+    out: list[dict] = []
+    for k in order:
+        rows = groups[k]
+        loc, area = k
+        if len(rows) == 1 or not loc or area <= 0:
+            # No location text means nothing to match on — such rows are always
+            # kept whole rather than collapsed by area alone, which would merge
+            # two genuinely separate 40 m² surfaces.
+            out.extend(rows)
+            continue
+        keep = dict(rows[0])
+        codes = sorted(str(r["Lining_System_Code"]) for r in rows)
+        keep["_merged_codes"] = codes
+        out.append(keep)
+        report.append({
+            "Lining_Area_Location": str(rows[0].get("Lining_Area_Location") or ""),
+            "Surface_Area_SQM": area, "codes": codes,
+            "counted_once": area,
+            "would_have_been": round(area * len(rows), 2),
+            "saved": round(area * (len(rows) - 1), 2),
+            "why": (f"{' + '.join(codes)} are stacked on the same {area:g} m² — "
+                    f"one surface, prepared once before the first coat"),
+        })
+    return out
+
+
 def _prep_partition(eq_rows: list[dict], prep_norms: list[dict],
                     *, activity_by_code: dict, topcoats: set,
                     report: list) -> list:
@@ -413,9 +484,13 @@ def _prep_partition(eq_rows: list[dict], prep_norms: list[dict],
 
     out: list = []
     for row in eq_rows:
-        code = str(row["Lining_System_Code"])
+        # A merged row stands for several stacked systems on ONE surface. Every
+        # one of them is a candidate for choosing the benchmark; the area is
+        # counted once. See _dedupe_surfaces.
+        merged = row.get("_merged_codes") or [str(row["Lining_System_Code"])]
         area = float(row["Surface_Area_SQM"] or 0)
-        if area <= 0 or code in topcoats:
+        live = [c for c in merged if c not in topcoats]
+        if area <= 0 or not live:
             continue
         eq_type = str(row["Type"] or "").strip().upper() or "CV"
         candidates = by_type.get(eq_type) or []
@@ -423,12 +498,26 @@ def _prep_partition(eq_rows: list[dict], prep_norms: list[dict],
             candidates = by_type.get("CV") or []
         if not candidates:
             candidates = list(prep_norms)
-        chosen, why = _pick_prep_variant(
-            candidates, activities=activity_by_code.get(code, set()))
-        if chosen is None:
+        picks = []
+        for c in live:
+            chosen, why = _pick_prep_variant(
+                candidates, activities=activity_by_code.get(c, set()))
+            if chosen is not None:
+                picks.append((chosen, why, c))
+        if not picks:
             continue
-        out.append((chosen, area, code))
-        report.append({"code": code, "area": round(area, 2), "eq_type": eq_type,
+        # Stacked systems can route to different variants and nothing says which
+        # coat went on first, so the dearest wins — the same direction every
+        # other unresolved choice in this module takes.
+        chosen, why, src = max(picks,
+                               key=lambda p: manhours_per_sqm(p[0]) or 0.0)
+        label = "+".join(live)
+        if len(picks) > 1:
+            why = (f"{why} (chosen for {src}; {label} share this surface and "
+                   f"the dearest of their benchmarks was taken)")
+        out.append((chosen, area, label))
+        report.append({"code": label, "codes": live, "area": round(area, 2),
+                       "eq_type": eq_type, "merged": len(live) > 1,
                        "benchmark": _norm_ref(chosen), "why": why})
     return out
 
@@ -468,43 +557,27 @@ def _pick_prep_variant(candidates: list[dict], *, activities: set):
                      "understates")
 
 
-def _overlap_diagnostic(eq_rows: list[dict], topcoats: set) -> dict:
-    """Surfaces described more than once in the equipment master.
+def _overlap_diagnostic(eq_rows: list[dict], topcoats: set,
+                        merges: list) -> dict:
+    """Gross versus deduplicated prep area, and what was merged to get there.
 
-    A tag's rows are per (tag, system), and several systems can sit on the SAME
-    concrete: J027 files LSC1 and LSC2 at 504 m² each against an identical
-    `Lining_Area_Location`. Physically that is one 504 m² surface carrying two
-    systems, so summing the rows counts it twice.
-
-    ⚠️ REPORTED, NOT APPLIED. Removing the duplicate would be a ruling about
-    how many times a surface is prepared, and that is the operator's to make —
-    it is Q13. Both figures are published so the decision can be taken with the
-    numbers in view rather than in the abstract.
+    ⚠️ THE DEDUPLICATED FIGURE IS NOW THE ONE THE PLAN USES (operator ruling,
+    2026-08-21: a surface carrying two stacked systems is blasted ONCE). The
+    gross is still published beside it so a reader can see what changed and
+    reconcile against a plan printed before the ruling.
     """
     gross = sum(float(r["Surface_Area_SQM"] or 0) for r in eq_rows
                 if str(r["Lining_System_Code"]) not in topcoats)
-    seen: dict[tuple, list] = {}
-    for r in eq_rows:
-        if str(r["Lining_System_Code"]) in topcoats:
-            continue
-        loc = str(r["Lining_Area_Location"] or "").strip()
-        area = round(float(r["Surface_Area_SQM"] or 0), 2)
-        if not loc or area <= 0:
-            continue
-        seen.setdefault((loc, area), []).append(str(r["Lining_System_Code"]))
-    dupes = [{"Lining_Area_Location": loc, "Surface_Area_SQM": area,
-              "codes": sorted(codes), "counted_extra": round(area * (len(codes) - 1), 2)}
-             for (loc, area), codes in seen.items() if len(codes) > 1]
-    dupes.sort(key=lambda d: -d["counted_extra"])
-    extra = sum(d["counted_extra"] for d in dupes)
+    saved = sum(m["saved"] for m in merges)
     return {"gross_sqm": round(gross, 2),
-            "deduplicated_sqm": round(gross - extra, 2),
-            "double_counted_sqm": round(extra, 2),
-            "shared_surfaces": dupes}
+            "deduplicated_sqm": round(gross - saved, 2),
+            "double_counted_sqm": round(saved, 2),
+            "shared_surfaces": sorted(merges, key=lambda m: -m["saved"])}
 
 
 async def _remaining_sqm(session: AsyncSession, *, site_id: str, tag: str,
-                         code: str, eq_rows: list[dict], topcoats: set) -> dict:
+                         code: str, eq_rows: list[dict], topcoats: set,
+                         merges: list, prep_area: float) -> dict:
     """How much area is still to do, and where the figure came from."""
     if code:
         row = (await session.execute(select(progress_t).where(
@@ -524,8 +597,12 @@ async def _remaining_sqm(session: AsyncSession, *, site_id: str, tag: str,
     # Surface prep has no planned area of its own — the area to prepare is the
     # equipment's, which sme_equipment already states. See
     # models.SmeSurfacePrepProgress for why there is no Original_SQM twin.
-    overlap = _overlap_diagnostic(eq_rows, topcoats)
-    area = overlap["gross_sqm"]
+    #
+    # `prep_area` is the DEDUPLICATED total the partition actually charges, so
+    # the workload figure and the activity rows can never disagree: they are
+    # the same number, produced once.
+    overlap = _overlap_diagnostic(eq_rows, topcoats, merges)
+    area = float(prep_area)
     done = float((await session.execute(
         select(func.coalesce(func.sum(prep_t.c["Done_SQM"]), 0.0))
         .where(prep_t.c["Site_ID"] == site_id,
@@ -537,54 +614,55 @@ async def _remaining_sqm(session: AsyncSession, *, site_id: str, tag: str,
             "note": "" if area else f"no equipment area recorded for {tag}"}
 
 
-async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
-               lining_system_code: str = "", deadline_hours: float = 11.0,
-               ) -> dict:
-    """The whole plan: workload → requirement → roster → gap → strategy."""
-    tag = (equipment_tag or "").strip()
-    code = (lining_system_code or "").strip()
-    if not tag:
-        raise HTTPException(422, "equipment_tag is required")
-    if float(deadline_hours or 0) <= 0:
-        raise HTTPException(422, "deadline_hours must be greater than zero")
-    deadline_hours = float(deadline_hours)
-    shifts = deadline_hours / SHIFT_WORKED_HOURS
+async def _plan_one(session: AsyncSession, *, site_id: str, tag: str, code: str,
+                    all_norms: list[dict], lining_codes: set,
+                    activity_to_codes: dict) -> dict:
+    """One job — the SELECT half. Returns work items and everything that
+    explains them; no roster, no deadline, no overtime.
 
+    Split out of `plan()` in slice 8b so several jobs can be planned against
+    ONE roster and ONE deadline. Nothing in here depends on the deadline, which
+    is what makes re-costing a different Target Days cheap.
+    """
     warnings: list[str] = []
     selection: list = []
     prep_report: list = []
     topcoat_report: list = []
+    merge_report: list = []
 
-    eq_rows = await _tag_equipment(session, site_id=site_id, tag=tag)
-    all_norms = await _all_norms(session)
-    lining_codes = await _lining_codes(session)
-    activity_to_codes = _activity_to_codes(all_norms, lining_codes)
+    eq_rows_raw = await _tag_equipment(session, site_id=site_id, tag=tag)
     area_by_code = {str(r["Lining_System_Code"]): float(r["Surface_Area_SQM"] or 0)
-                    for r in eq_rows}
+                    for r in eq_rows_raw}
     activity_by_code: dict[str, set] = {}
     for n in all_norms:
         activity_by_code.setdefault(str(n["Lining_System_Code"]), set()).add(
             str(n["Activity"] or "").strip())
 
-    topcoats = _topcoat_codes(eq_rows, activity_by_code, activity_to_codes,
+    topcoats = _topcoat_codes(eq_rows_raw, activity_by_code, activity_to_codes,
                               topcoat_report)
+    # ONE ROW PER PHYSICAL SURFACE (operator ruling 2026-08-21). Stacked systems
+    # on the same location are blasted once. Lining work is unaffected — a
+    # second system on the same concrete is a second lining job.
+    eq_rows = _dedupe_surfaces(
+        [r for r in eq_rows_raw if str(r["Lining_System_Code"]) not in topcoats],
+        merge_report)
 
-    workload = await _remaining_sqm(session, site_id=site_id, tag=tag, code=code,
-                                    eq_rows=eq_rows, topcoats=topcoats)
-    remaining = workload["remaining_sqm"]
-    if workload["note"]:
-        warnings.append(workload["note"])
-
-    # ── SELECT: which benchmarks apply, and to how much of the area ─────────
-    # `items` is the shared currency of both branches: (norm, sqm charged to it,
-    # a label for where that sqm came from).
     items: list = []
+    prep_area = 0.0
+    # The discipline this job belongs to. For a lining job it is the (tag, code)
+    # row's own Type; for surface prep it is the SET across the tag, printed as
+    # 'CV/ME' where a tag carries both — never whichever row was read first.
     if code:
         eq_type = ""
-        for r in eq_rows:
+        for r in eq_rows_raw:
             if str(r["Lining_System_Code"]) == code:
                 eq_type = str(r["Type"] or "").strip().upper()
                 break
+    else:
+        eq_type = "/".join(sorted({str(r["Type"] or "").strip().upper()
+                                   for r in eq_rows_raw
+                                   if str(r["Type"] or "").strip()}))
+    if code:
         if not eq_type:
             # Without an equipment row there is no Type, so the CV/ME twins
             # cannot be told apart and selection falls through to its
@@ -605,14 +683,15 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
                 f"no manpower benchmark exists for {code} — the requirement "
                 f"cannot be computed, and a zero here means 'unknown', not "
                 f"'none'")
+        chosen: list = []
         for esc in sorted(groups):
             for norm, share in _select_variants(
                     groups[esc], eq_type=eq_type, self_code=code,
                     activity_to_codes=activity_to_codes,
                     area_by_code=area_by_code, report=selection):
-                items.append((norm, remaining * share, share, code))
+                chosen.append((norm, share))
         mismatched = {str(n["Type"] or "").strip().upper()
-                      for n, _, _, _ in items} - {eq_type, ""}
+                      for n, _ in chosen} - {eq_type, ""}
         if eq_type and mismatched:
             warnings.append(
                 f"{tag}/{code} is {eq_type} in the equipment master but the "
@@ -633,35 +712,48 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
         # line of work, not four, so they are folded into a single activity row
         # carrying the codes that fed it. Four identical rows in a report is how
         # a reader concludes the planner is double-counting when it is not.
-        merged: dict = {}
+        folded: dict = {}
         for norm, area, src in partition:
-            slot = merged.setdefault(int(norm["id"]), [norm, 0.0, []])
+            slot = folded.setdefault(int(norm["id"]), [norm, 0.0, []])
             slot[1] += area
-            slot[2].append(src)
-        total_area = sum(a for _, a, _ in merged.values())
-        for norm, area, srcs in merged.values():
-            share = (area / total_area) if total_area > 0 else 0.0
-            src = "+".join(sorted(srcs))
-            # The remaining area is scaled by each variant's share of the
-            # gross. Prep progress is recorded per tag, not per surface, so
-            # nothing says WHICH part was prepped first; proportional is the
-            # only reading the data supports.
-            items.append((norm, remaining * share, share, src))
+            slot[2].extend(src.split("+"))
+        prep_area = sum(a for _, a, _ in folded.values())
+        chosen = []
+        for norm, area, srcs in folded.values():
+            share = (area / prep_area) if prep_area > 0 else 0.0
+            chosen.append((norm, share, "+".join(sorted(set(srcs)))))
+
+    workload = await _remaining_sqm(session, site_id=site_id, tag=tag, code=code,
+                                    eq_rows=eq_rows_raw, topcoats=topcoats,
+                                    merges=merge_report, prep_area=prep_area)
+    remaining = workload["remaining_sqm"]
+    if workload["note"]:
+        warnings.append(workload["note"])
+
+    for entry in chosen:
+        if len(entry) == 2:
+            norm, share = entry
+            src = code
+        else:
+            norm, share, src = entry
+        # Remaining area is scaled by each benchmark's share. For prep, progress
+        # is recorded per tag rather than per surface, so nothing says WHICH
+        # part was prepped first; proportional is the only reading the data
+        # supports.
+        items.append((norm, remaining * share, share, src))
+
+    if not code:
         overlap = workload.get("overlap") or {}
         if overlap.get("double_counted_sqm", 0) > 0:
             warnings.append(
-                f"⚠️ {overlap['double_counted_sqm']:g} m² of this tag's "
-                f"{overlap['gross_sqm']:g} m² is described more than once in "
-                f"the equipment master — "
-                + "; ".join(f"{'+'.join(d['codes'])} each claim "
+                f"{overlap['double_counted_sqm']:g} m² of stacked surface on "
+                f"{tag} is counted ONCE, not once per system — "
+                + "; ".join(f"{'+'.join(d['codes'])} share "
                             f"{d['Surface_Area_SQM']:g} m² at "
                             f"{d['Lining_Area_Location'][:48]}"
                             for d in overlap["shared_surfaces"][:3])
-                + f". The plan uses the gross {overlap['gross_sqm']:g} m²; the "
-                  f"deduplicated figure is {overlap['deduplicated_sqm']:g} m². "
-                  f"Whether one surface carrying two systems is blasted once "
-                  f"or twice is an operator ruling, so nothing has been "
-                  f"assumed here.")
+                + f". Prep area is {overlap['deduplicated_sqm']:g} m², not the "
+                  f"{overlap['gross_sqm']:g} m² the rows add up to.")
 
     for entry in topcoat_report:
         if entry.get("needs_operator"):
@@ -670,8 +762,160 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
         if entry.get("needs_operator"):
             warnings.append(f"{entry['sub_activity']}: {entry['why']}")
 
+    return {"equipment_tag": tag, "lining_system_code": code,
+            "system_agnostic": not code, "eq_type": eq_type,
+            "workload": workload, "items": items, "warnings": warnings,
+            "benchmark_selection": {
+                "rules_applied": selection,
+                "surface_prep_partition": prep_report,
+                "topcoats": topcoat_report,
+                "merged_surfaces": merge_report,
+            }}
+
+
+async def resolve_jobs(session: AsyncSession, *, site_id: str,
+                       equipment_tags: list[str], lining_system_codes: list[str],
+                       include_surface_prep: bool) -> tuple[list[tuple], list[str]]:
+    """A tag selection x a code selection → the jobs that actually exist.
+
+    ⚠️ NOT THE CROSS PRODUCT. Picking tags {A, B} and codes {X, Y} is not four
+    jobs; it is the INTERSECTION WITH REALITY — the (tag, code) pairs that
+    `sme_sqm_progress` actually holds. Building the product would invent work
+    on pairs nobody ever planned, and it would look entirely plausible in the
+    output.
+
+    ⚠️ SURFACE PREP IS PER TAG, NOT PER (TAG, CODE). A tag carrying six lining
+    systems has ONE surface to prepare, so prep is added once per selected tag.
+    Adding it per pair would bill six blastings for one vessel.
+    """
+    warnings: list[str] = []
+    tags = [t for t in (s.strip() for s in equipment_tags) if t]
+    codes = [c for c in (s.strip() for s in lining_system_codes) if c]
+    if not tags:
+        return [], ["no equipment selected"]
+
+    stmt = select(progress_t.c["Equipment_Tag_No"],
+                  progress_t.c["Lining_System_Code"])
+    if site_id:
+        stmt = stmt.where(progress_t.c["Site_ID"] == site_id)
+    real = {(str(t), str(c)) for t, c in (await session.execute(stmt)).all()}
+
+    jobs: list[tuple] = []
+    if codes:
+        for tag in tags:
+            for code in codes:
+                if (tag, code) in real:
+                    jobs.append((tag, code))
+    else:
+        # ⚠️ NO CODE SELECTED MEANS EVERY CODE ON THESE TAGS, not none. The
+        # filter's placeholder reads "All systems on the selected equipment"
+        # and an empty list has to mean what the label says — the alternative
+        # is a dead end where picking equipment and pressing Plan returns
+        # "nothing to plan", which is a promise the UI made and the API broke.
+        for tag in tags:
+            for t, c in sorted(real):
+                if t == tag:
+                    jobs.append((tag, c))
+    if codes:
+        missing = [f"{t}/{c}" for t in tags for c in codes
+                   if (t, c) not in real]
+        if missing:
+            warnings.append(
+                f"{len(missing)} selected combination(s) do not exist in the "
+                f"progress master and were dropped rather than invented: "
+                + ", ".join(missing[:8])
+                + (f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""))
+    if include_surface_prep:
+        for tag in tags:
+            jobs.append((tag, ""))
+    if not jobs:
+        warnings.append(
+            "nothing to plan — none of the selected equipment carries any of "
+            "the selected systems, and surface prep was not included")
+    return jobs, warnings
+
+
+async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
+               lining_system_code: str = "", deadline_hours: float = 11.0,
+               ) -> dict:
+    """One job, one deadline. Thin wrapper over `plan_many`."""
+    tag = (equipment_tag or "").strip()
+    if not tag:
+        raise HTTPException(422, "equipment_tag is required")
+    return await plan_many(session, site_id=site_id,
+                           jobs=[(tag, (lining_system_code or "").strip())],
+                           deadline_hours=deadline_hours)
+
+
+async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
+                    deadline_hours: Optional[float] = None,
+                    target_days: Optional[float] = None,
+                    shifts_per_day: Optional[int] = None) -> dict:
+    """Many jobs, one roster, one deadline: workload → gap → overtime strategy.
+
+    ── THE DEADLINE ────────────────────────────────────────────────────────
+    `target_days` and `deadline_hours` are two spellings of one quantity and
+    exactly one may be given:
+
+        deadline_hours = target_days x SHIFT_WORKED_HOURS
+
+    A person works ONE shift a day, so over D days each offers D x 11 hours no
+    matter how many shifts the site runs. That substitution makes every figure
+    the planner already computed read "per day" without a single formula
+    changing.
+
+    ── SHIFTS PER DAY ──────────────────────────────────────────────────────
+    ⚠️ RUNNING NIGHTS SPLITS THE CREW; IT DOES NOT ADD CAPACITY. Two shifts a
+    day means two DISJOINT crews — nobody works both — so the total headcount
+    needed is unchanged and only the per-shift figure halves:
+
+        Total_Required_Headcount = manhours / (days x 11)     (independent of s)
+        Headcount_Per_Shift      = Total_Required_Headcount / s
+
+    This is counter-intuitive enough that the UI states it, because the natural
+    reading — "two shifts, so half the people" — is wrong and would under-hire
+    by half.
+    """
+    if deadline_hours is not None and target_days is not None:
+        raise HTTPException(422, "give either target_days or deadline_hours, "
+                                 "not both — they are the same quantity")
+    if target_days is not None:
+        if float(target_days) <= 0:
+            raise HTTPException(422, "target_days must be greater than zero")
+        deadline_hours = float(target_days) * SHIFT_WORKED_HOURS
+    if deadline_hours is None:
+        deadline_hours = SHIFT_WORKED_HOURS
+    if float(deadline_hours) <= 0:
+        raise HTTPException(422, "deadline_hours must be greater than zero")
+    deadline_hours = float(deadline_hours)
+    shifts = deadline_hours / SHIFT_WORKED_HOURS
+    days = shifts   # one shift per person per day — see the docstring
+
+    if shifts_per_day is not None and int(shifts_per_day) not in (1, 2):
+        raise HTTPException(422, "shifts_per_day must be 1 (day only) or 2 "
+                                 "(day and night)")
+
+    warnings: list[str] = []
+    all_norms = await _all_norms(session)
+    lining_codes = await _lining_codes(session)
+    activity_to_codes = _activity_to_codes(all_norms, lining_codes)
+    names = await system_names(session)
+
+    planned: list[dict] = []
+    for tag, code in jobs:
+        planned.append(await _plan_one(
+            session, site_id=site_id, tag=tag, code=code, all_norms=all_norms,
+            lining_codes=lining_codes, activity_to_codes=activity_to_codes))
+
+    items: list = []
+    for p in planned:
+        for n, sqm, share, src in p["items"]:
+            items.append((n, sqm, share, src, p))
+        warnings.extend(p["warnings"] if len(planned) == 1 else
+                        [f"{_short_job(p, names)}: {w}" for w in p["warnings"]])
+
     # ── 1. workload → required man-hours, per sub-activity ──────────────────
-    norm_ids = [n["id"] for n, _, _, _ in items]
+    norm_ids = [n["id"] for n, _, _, _, _ in items]
     crew_rows = (await session.execute(
         select(norm_role_t.c["Norm_ID"], norm_role_t.c["Role_Code"],
                norm_role_t.c["Headcount"])
@@ -682,9 +926,11 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
 
     activities: list[dict] = []
     role_manhours: dict[str, float] = {}
+    role_jobs: dict[str, dict] = {}
     total_manhours = 0.0
     total_crew_shifts = 0.0
-    for n, sqm, share, src in items:
+    per_job_mh: dict[int, float] = {}
+    for n, sqm, share, src, owner in items:
         per_sqm = manhours_per_sqm(n)
         if per_sqm is None:
             warnings.append(
@@ -694,6 +940,7 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
             continue
         mh = sqm * per_sqm
         total_manhours += mh
+        per_job_mh[id(owner)] = per_job_mh.get(id(owner), 0.0) + mh
         cs = crew_shifts(n, sqm)
         if cs is not None:
             total_crew_shifts += cs
@@ -708,12 +955,18 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
                 sh = head / crew_total
                 split[rc] = round(mh * sh, 2)
                 role_manhours[rc] = role_manhours.get(rc, 0.0) + mh * sh
+                jl = _short_job(owner, names)
+                role_jobs.setdefault(rc, {})[jl] = \
+                    role_jobs.setdefault(rc, {}).get(jl, 0.0) + mh * sh
         else:
             warnings.append(
                 f"{n['Execution_Sub_Activity_Code']} has no crew composition, "
                 f"so its {round(mh, 2)} man-hours cannot be attributed to a "
                 f"role")
         activities.append({
+            "Equipment_Tag_No": owner["equipment_tag"],
+            "Lining_System_Code": owner["lining_system_code"],
+            "Job_Label": _short_job(owner, names),
             "Execution_Sub_Activity_Code": n["Execution_Sub_Activity_Code"],
             "Activity": n["Activity"], "Sub_Activity": n["Sub_Activity"],
             "Variant_Key": n["Variant_Key"] or "",
@@ -763,6 +1016,23 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
               "down that they are masons' is a different problem from 'there "
               "are no masons', so they are reported rather than assumed")
 
+    # ── 2b. how many shifts a day ───────────────────────────────────────────
+    # Auto: nights are already staffed IN A ROLE THE JOB NEEDS, so running them
+    # is a fact rather than a proposal. The HOD can force 2 anyway (operator
+    # ruling Q6) — "we could put a night crew on" is a decision the roster
+    # cannot make, so the override is not a debug switch.
+    night_in_scope = sum(int(available.get(rc, {}).get("Night", 0))
+                         for rc in role_manhours) if role_manhours else \
+        sum(int(v.get("Night", 0)) for v in available.values())
+    auto_shifts = 2 if night_in_scope > 0 else 1
+    shifts_per_day = int(shifts_per_day) if shifts_per_day else auto_shifts
+    shift_source = "operator" if shifts_per_day != auto_shifts else "roster"
+    if shifts_per_day == 2 and night_in_scope == 0:
+        warnings.append(
+            "a two-shift plan was requested but no active worker in the "
+            "required roles is on the night shift — the split below is what "
+            "you would have to staff, not what exists")
+
     # ── 3. the gap, per role ────────────────────────────────────────────────
     gap_rows = []
     for rc in sorted(set(role_manhours) | set(available)):
@@ -771,11 +1041,15 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
         have = available.get(rc, {})
         have_total = int(have.get("total", 0))
         gap = need_exact - have_total
+        need_round = math.ceil(need_exact - 1e-9)
         gap_rows.append({
             "Role_Code": rc,
             "Required_Manhours": round(mh, 2),
             "Required_Headcount": round(need_exact, 2),
-            "Required_Headcount_Rounded": math.ceil(need_exact - 1e-9),
+            "Required_Headcount_Rounded": need_round,
+            # Per SHIFT, when nights run. Rounded UP per shift rather than
+            # halving the total, because you cannot roster half a mason.
+            "Headcount_Per_Shift": math.ceil(need_exact / shifts_per_day - 1e-9),
             "Available_Headcount": have_total,
             "Available_GI": int(have.get("GI", 0)),
             "Available_NON_GI": int(have.get("NON_GI", 0)),
@@ -783,6 +1057,11 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
             "Available_Night": int(have.get("Night", 0)),
             "Gap_Headcount": round(gap, 2),
             "To_Procure": max(math.ceil(gap - 1e-9), 0),
+            # Which jobs asked for this role, biggest first — the collapsible
+            # detail behind the headline row.
+            "Jobs": [{"Job": j, "Required_Manhours": round(v, 2)}
+                     for j, v in sorted(role_jobs.get(rc, {}).items(),
+                                        key=lambda kv: -kv[1])],
         })
 
     # ── 4. the overtime strategy ────────────────────────────────────────────
@@ -806,32 +1085,89 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
     ng_needed = math.ceil(overflow / (ng_thr * shifts) - 1e-9) if overflow > 0 and ng_thr > 0 else 0
     gi_needed = math.ceil(overflow / (gi_thr * shifts) - 1e-9) if overflow > 0 and gi_thr > 0 else 0
 
+    # Days the CURRENT roster would take, which is a different question from
+    # the target and the one people actually argue about. Only the roles this
+    # job needs count — idle blasters do not shorten a brick-lining job.
+    roster_in_scope = sum(int(available.get(rc, {}).get("total", 0))
+                          for rc in role_manhours)
+    days_with_roster = (total_manhours / (roster_in_scope * SHIFT_WORKED_HOURS)
+                        if roster_in_scope > 0 and total_manhours > 0 else None)
+
+    if len(planned) == 1:
+        workload = planned[0]["workload"]
+        selection_out = planned[0]["benchmark_selection"]
+    else:
+        workload = {
+            "remaining_sqm": round(sum(p["workload"]["remaining_sqm"]
+                                       for p in planned), 2),
+            "original_sqm": round(sum(p["workload"]["original_sqm"]
+                                      for p in planned), 2),
+            "done_sqm": round(sum(p["workload"]["done_sqm"] for p in planned), 2),
+            "source": f"{len(planned)} job(s)", "note": "",
+        }
+        selection_out = {
+            "rules_applied": [r for p in planned
+                              for r in p["benchmark_selection"]["rules_applied"]],
+            "surface_prep_partition": [
+                r for p in planned
+                for r in p["benchmark_selection"]["surface_prep_partition"]],
+            "topcoats": [r for p in planned
+                         for r in p["benchmark_selection"]["topcoats"]],
+            "merged_surfaces": [
+                r for p in planned
+                for r in p["benchmark_selection"]["merged_surfaces"]],
+        }
+
     return {
         "inputs": {
-            "site_id": site_id, "equipment_tag": tag,
-            "lining_system_code": code,
-            "system_agnostic": not code,
+            "site_id": site_id,
+            "equipment_tag": planned[0]["equipment_tag"] if planned else "",
+            "lining_system_code": planned[0]["lining_system_code"] if planned else "",
+            "system_agnostic": planned[0]["system_agnostic"] if planned else True,
+            "jobs": [{"Equipment_Tag_No": p["equipment_tag"],
+                      "Lining_System_Code": p["lining_system_code"],
+                      "Job_Label": _short_job(p, names),
+                      "Remaining_SQM": p["workload"]["remaining_sqm"],
+                      "Required_Manhours": round(per_job_mh.get(id(p), 0.0), 2)}
+                     for p in planned],
             "deadline_hours": deadline_hours,
+            "target_days": round(days, 3),
+            "shifts_per_day": shifts_per_day,
+            "shifts_per_day_source": shift_source,
             "shifts_in_window": round(shifts, 3),
             "shift_worked_hours": SHIFT_WORKED_HOURS,
             "ot_thresholds": thresholds,
         },
         "workload": workload,
+        "jobs": [{"Equipment_Tag_No": p["equipment_tag"],
+                  "Lining_System_Code": p["lining_system_code"],
+                  "Job_Label": _short_job(p, names),
+                  "Job": job_label(p["equipment_tag"], p["lining_system_code"],
+                                   names, p.get("eq_type", "")),
+                  "workload": p["workload"],
+                  "Required_Manhours": round(per_job_mh.get(id(p), 0.0), 2)}
+                 for p in planned],
         "activities": activities,
-        "benchmark_selection": {
-            "rules_applied": selection,
-            "surface_prep_partition": prep_report,
-            "topcoats": topcoat_report,
-        },
+        "benchmark_selection": selection_out,
         "requirement": {
             "Total_Required_Manhours": round(total_manhours, 2),
             "Total_Required_Headcount": round(
                 total_manhours / deadline_hours, 2) if deadline_hours else None,
+            "Headcount_Per_Shift": math.ceil(
+                total_manhours / deadline_hours / shifts_per_day - 1e-9)
+            if deadline_hours and total_manhours > 0 else 0,
             "Total_Crew_Shifts": round(total_crew_shifts, 3),
+            "Total_Days": round(days, 2),
+            "Total_Calendar_Shifts": round(days * shifts_per_day, 2),
+            "Days_With_Current_Roster": round(days_with_roster, 2)
+            if days_with_roster is not None else None,
             "Activities": len(activities),
+            "Jobs": len(planned),
         },
         "roster": {
             "GI": n_gi, "NON_GI": n_ng, "Total": n_gi + n_ng,
+            "In_Scope": roster_in_scope,
+            "Night_In_Scope": night_in_scope,
             "Unmapped": unmapped,
         },
         "gap": gap_rows,
@@ -850,6 +1186,11 @@ async def plan(session: AsyncSession, *, site_id: str, equipment_tag: str,
         },
         "warnings": warnings,
     }
+
+
+def _short_job(p: dict, names: dict) -> str:
+    return job_label(p["equipment_tag"], p["lining_system_code"], names,
+                     p.get("eq_type", ""))["Short"]
 
 
 def _recommend(required: float, normal_capacity: float, unmet: float,

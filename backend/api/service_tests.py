@@ -15836,15 +15836,20 @@ async def test_planner_selection():
         # ── the overlap diagnostic: reported, never applied ─────────────────
         p5 = await _plan("SVCE-T5", "")
         ov = p5["workload"]["overlap"]
-        check("CE-22 two systems on the SAME location and area are one surface "
-              "counted twice, and the diagnostic says by how much",
+        check("CE-22 two systems on the SAME location and area are one surface, "
+              "and the diagnostic still publishes both figures so a plan can be "
+              "reconciled against one printed before the ruling",
               ov["gross_sqm"] == 500.0 and ov["deduplicated_sqm"] == 250.0
               and ov["double_counted_sqm"] == 250.0, str(ov))
-        check("CE-23 …the plan still uses the GROSS figure — deduplicating is "
-              "an operator ruling, not something the planner may assume",
-              p5["workload"]["remaining_sqm"] == 500.0, str(p5["workload"]))
-        check("CE-24 …and it warns, naming both codes and both figures",
-              any("described more than once" in w and "SVCE-G+SVCE-H" in w
+        # ⚠️ OPERATOR RULING 2026-08-21 (Q13), and this check was REVERSED to
+        # match it. Slice 8a reported the overlap and planned on the gross
+        # because nobody had said which reading was right; the answer is that a
+        # stacked surface is blasted ONCE, so the deduplicated figure is now the
+        # one the plan uses.
+        check("CE-23 …and the plan charges that surface ONCE (250 m², not 500)",
+              p5["workload"]["remaining_sqm"] == 250.0, str(p5["workload"]))
+        check("CE-24 …says so, naming both codes and both figures",
+              any("counted ONCE" in w and "SVCE-G+SVCE-H" in w
                   for w in p5["warnings"]), str(p5["warnings"]))
 
         # ── crew-shifts: the free self-check ────────────────────────────────
@@ -15921,6 +15926,307 @@ async def _svce_norm_count() -> int:
         return (await s.execute(_sqt(
             'SELECT COUNT(*) FROM sme_manpower_norm '
             "WHERE \"Lining_System_Code\" LIKE 'SVCE-%'"))).scalar_one()
+
+
+# --- Suite CF: many jobs, one deadline ----------------------------------------
+async def test_planner_ux():
+    """Suite CF — Phase 8 slice 8b. Multi-select, Target Days, and the label.
+
+    THE FIXTURE, built so every number is checkable on paper. Productivity is
+    100 m²/shift throughout, so man-hours per m² is `Manhours_Per_Shift / 100`:
+
+        SVCF-T1  SVCF-A  200 m² CV  2.0 mh/m²  →   400 man-hours
+                 SVCF-B  300 m² CV  1.0        →   300
+                 (both at 'SVCF Deck', 250 m² each? no — different locations)
+        SVCF-T2  SVCF-A  100 m² CV  2.0        →   200
+        SVCF-T3  SVCF-C  400 m² ME  — no progress row, so not a real job
+
+    Three tags x two codes is SIX combinations but only THREE exist, which is
+    the whole point of `resolve_jobs`.
+
+        total for the three real jobs = 400 + 300 + 200 = 900 man-hours
+
+    At a 5-day target each person offers 5 x 11 = 55 hours, so:
+
+        total headcount   = 900 / 55            = 16.36  → 17
+        per shift (x2)    = 16.36 / 2           =  8.18  →  9
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import planner as P
+    from .services.jobs import code_chip, job_label, system_names
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _reset():
+        async with SessionLocal() as s:
+            for tbl, col in (("sme_manpower_norm", "Lining_System_Code"),
+                             ("sme_recipe", "Lining_System_Code")):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE "{col}" '
+                                     f"LIKE 'SVCF-%'"))
+            for tbl in ("sme_sqm_progress", "sme_equipment",
+                        "sme_surface_prep_progress"):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE '
+                                     f'"Equipment_Tag_No" LIKE \'SVCF-%\''))
+            await s.execute(_sqt("DELETE FROM mh_employees WHERE "
+                                 "\"Employee_Code\" LIKE 'SVCF-%'"))
+            await s.commit()
+
+    await _reset()
+
+    EQUIP = [
+        # tag,       code,     type, area, location, progress?
+        ("SVCF-T1", "SVCF-A", "CV", 200.0, "SVCF Floor", True),
+        ("SVCF-T1", "SVCF-B", "CV", 300.0, "SVCF Wall", True),
+        ("SVCF-T2", "SVCF-A", "CV", 100.0, "SVCF Shell", True),
+        # ME, and NO progress row — it exists in the master but is not a job.
+        ("SVCF-T3", "SVCF-C", "ME", 400.0, "SVCF Tank", False),
+        # The SAME code on a STEEL tag. This is the LSC1 shape: one code used
+        # on concrete AND on tanks, so its aggregate chip must say CV/ME while
+        # each individual row still says its own. Not selected by any plan
+        # below, so it changes no arithmetic.
+        ("SVCF-T4", "SVCF-A", "ME", 150.0, "SVCF Vessel", True),
+    ]
+    NORMS = [
+        ("SVCF-A", "ESCFA", "CV", "svcf alpha", 200, {"MASON": 1}),
+        ("SVCF-B", "ESCFB", "CV", "svcf beta", 100, {"HELPER": 1}),
+        ("SVCF-C", "ESCFC", "ME", "svcf gamma", 100, {"MASON": 1}),
+    ]
+
+    async with SessionLocal() as s:
+        for tag, code, typ, area, loc, prog in EQUIP:
+            await s.execute(_sqt(
+                'INSERT INTO sme_equipment ("Site_ID", "Equipment_Tag_No", '
+                '"Lining_System_Code", "Type", "Surface_Area_SQM", '
+                '"Lining_Area_Location", "Lining_System") VALUES '
+                "('CNCEC', :t, :c, :y, :a, :l, :n)"),
+                {"t": tag, "c": code, "y": typ, "a": area, "l": loc,
+                 "n": f"Full name of {code}"})
+            if prog:
+                await s.execute(_sqt(
+                    'INSERT INTO sme_sqm_progress ("Site_ID", '
+                    '"Equipment_Tag_No", "Lining_System_Code", "Original_SQM", '
+                    '"Done_SQM") VALUES (\'CNCEC\', :t, :c, :a, 0)'),
+                    {"t": tag, "c": code, "a": area})
+            await s.execute(_sqt(
+                'INSERT INTO sme_recipe ("Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+                '"For_1_SQM", "Lining_System", "Lining_System_Name") VALUES '
+                "(:c, :e, :m, :m, 1.0, :n, 'SHORTCODE')"
+                " ON CONFLICT DO NOTHING"),
+                {"c": code, "e": f"{code}-R", "m": f"SVCF-MAT-{code}",
+                 "n": f"Full name of {code}"})
+        for code, esc, typ, act, mh, crew in NORMS:
+            nid = (await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+                '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+                '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+                "VALUES (:y, :c, :e, :a, '', :n, 11, :m, 100, 0) RETURNING id"),
+                {"y": typ, "c": code, "e": esc, "a": act,
+                 "n": sum(crew.values()), "m": mh})).scalar_one()
+            for rc, head in crew.items():
+                await s.execute(_sqt(
+                    'INSERT INTO sme_manpower_norm_role ("Norm_ID", '
+                    '"Role_Code", "Headcount") VALUES (:n, :r, :h)'),
+                    {"n": nid, "r": rc, "h": head})
+        await s.commit()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+
+        async def _plan(**body):
+            r = await ac.post("/mh/planner", headers=H, json=body)
+            assert r.status_code == 200, f"{r.status_code} {r.text[:220]}"
+            return r.json()
+
+        # ── the selection is intersected with reality, not multiplied ───────
+        multi = await _plan(equipment_tags=["SVCF-T1", "SVCF-T2", "SVCF-T3"],
+                            lining_system_codes=["SVCF-A", "SVCF-B"],
+                            target_days=5)
+        pairs = {(j["Equipment_Tag_No"], j["Lining_System_Code"])
+                 for j in multi["jobs"]}
+        check("CF-01 three tags x two codes is SIX combinations but only the "
+              "THREE that exist are planned — a cross product would invent work",
+              pairs == {("SVCF-T1", "SVCF-A"), ("SVCF-T1", "SVCF-B"),
+                        ("SVCF-T2", "SVCF-A")}, str(sorted(pairs)))
+        check("CF-02 …and the ones that were dropped are NAMED, not silently "
+              "omitted",
+              any("do not exist in the progress master" in w
+                  and "SVCF-T3/SVCF-A" in w for w in multi["warnings"]),
+              str(multi["warnings"][:2]))
+        check("CF-03 the man-hours are the sum of the real jobs "
+              "(400 + 300 + 200)",
+              abs(multi["requirement"]["Total_Required_Manhours"] - 900.0) < 1e-6,
+              str(multi["requirement"]))
+
+        # ── an empty code filter means EVERY code, not none ─────────────────
+        # The filter's placeholder says "All systems on the selected equipment".
+        # Returning nothing here was a dead end: pick equipment, press Plan,
+        # get "nothing to plan" — a promise the UI made and the API broke.
+        allcodes = await _plan(equipment_tags=["SVCF-T1"], target_days=5)
+        check("CF-27 selecting no system code plans EVERY system on the chosen "
+              "equipment — the filter's placeholder says 'all', so empty has to "
+              "mean all",
+              {j["Lining_System_Code"] for j in allcodes["jobs"]}
+              == {"SVCF-A", "SVCF-B"}
+              and abs(allcodes["requirement"]["Total_Required_Manhours"] - 700.0)
+              < 1e-6, str([j["Job_Label"] for j in allcodes["jobs"]]))
+
+        # ── surface prep is per TAG, not per (tag, code) ────────────────────
+        prep = await _plan(equipment_tags=["SVCF-T1"],
+                           lining_system_codes=["SVCF-A", "SVCF-B"],
+                           include_surface_prep=True, target_days=5)
+        preps = [j for j in prep["jobs"] if j["Lining_System_Code"] == ""]
+        check("CF-04 a tag carrying two systems has ONE surface to prepare, "
+              "not one per system",
+              len(preps) == 1, str([j["Job_Label"] for j in prep["jobs"]]))
+
+        # ── target days ⇄ hours ─────────────────────────────────────────────
+        byhours = await _plan(equipment_tags=["SVCF-T1", "SVCF-T2"],
+                              lining_system_codes=["SVCF-A", "SVCF-B"],
+                              deadline_hours=55)
+        check("CF-05 five target days and 55 hours per person are the same "
+              "deadline, because a person works ONE shift a day",
+              byhours["requirement"] == multi["requirement"],
+              f"{byhours['requirement']} vs {multi['requirement']}")
+        check("CF-06 total headcount is man-hours over the window "
+              "(900 / 55 = 16.36)",
+              abs(multi["requirement"]["Total_Required_Headcount"] - 16.36) < 0.01,
+              str(multi["requirement"]))
+        both = await ac.post("/mh/planner", headers=H, json={
+            "equipment_tags": ["SVCF-T1"], "target_days": 5,
+            "deadline_hours": 55})
+        check("CF-07 giving BOTH spellings of the deadline is refused rather "
+              "than silently preferring one",
+              both.status_code == 422, f"{both.status_code} {both.text[:120]}")
+
+        # ── two shifts split the crew; they do not halve the hiring ─────────
+        two = await _plan(equipment_tags=["SVCF-T1", "SVCF-T2"],
+                          lining_system_codes=["SVCF-A", "SVCF-B"],
+                          target_days=5, shifts_per_day=2)
+        check("CF-08 running nights does NOT change the total headcount — "
+              "nobody works both shifts",
+              two["requirement"]["Total_Required_Headcount"]
+              == multi["requirement"]["Total_Required_Headcount"],
+              f"{two['requirement']} vs {multi['requirement']}")
+        check("CF-09 …it halves the PER-SHIFT figure (17 → 9, rounded up per "
+              "shift because you cannot roster half a mason)",
+              multi["requirement"]["Headcount_Per_Shift"] == 17
+              and two["requirement"]["Headcount_Per_Shift"] == 9,
+              f"{multi['requirement']['Headcount_Per_Shift']} / "
+              f"{two['requirement']['Headcount_Per_Shift']}")
+        check("CF-10 …and doubles the calendar shifts while the days stay put",
+              two["requirement"]["Total_Days"] == 5.0
+              and two["requirement"]["Total_Calendar_Shifts"] == 10.0
+              and multi["requirement"]["Total_Calendar_Shifts"] == 5.0,
+              str(two["requirement"]))
+        check("CF-11 forcing two shifts with nobody on nights is ALLOWED, and "
+              "says the crew shown is one you would have to staff",
+              two["inputs"]["shifts_per_day"] == 2
+              and two["inputs"]["shifts_per_day_source"] == "operator"
+              and any("no active worker in the required roles is on the night "
+                      "shift" in w for w in two["warnings"]),
+              str(two["inputs"]))
+        check("CF-12 with no night crew the automatic choice is one shift",
+              multi["inputs"]["shifts_per_day"] == 1
+              and multi["inputs"]["shifts_per_day_source"] == "roster",
+              str(multi["inputs"]))
+
+        # a night worker in a required role flips the default
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                'INSERT INTO mh_employees ("Site_ID", "Employee_Code", "Name", '
+                '"Designation", "Worker_Type", "Shift", status) VALUES '
+                "('CNCEC', 'SVCF-N1', 'Night Mason', 'Mason', 'GI', 'Night', "
+                "'active')"))
+            await s.commit()
+        auto2 = await _plan(equipment_tags=["SVCF-T1"],
+                            lining_system_codes=["SVCF-A"], target_days=5)
+        check("CF-13 …and one night worker in a role the job needs flips it to "
+              "two, without anybody asking",
+              auto2["inputs"]["shifts_per_day"] == 2
+              and auto2["inputs"]["shifts_per_day_source"] == "roster",
+              str(auto2["inputs"]))
+
+        # ── the per-role dashboard ──────────────────────────────────────────
+        mason = next(g for g in multi["gap"] if g["Role_Code"] == "MASON")
+        check("CF-14 each role says what it needs, what is there and what to "
+              "assign (600 man-hours of MASON / 55 h = 10.91 → 11)",
+              abs(mason["Required_Manhours"] - 600.0) < 1e-6
+              and mason["Required_Headcount_Rounded"] == 11,
+              str(mason))
+        check("CF-15 …and it breaks down by WHICH job asked for it, so a "
+              "headline number can be decomposed",
+              len(mason["Jobs"]) == 2
+              and abs(sum(j["Required_Manhours"] for j in mason["Jobs"])
+                      - 600.0) < 1e-6, str(mason["Jobs"]))
+        check("CF-16 the role hours still sum back to the total across jobs",
+              abs(sum(g["Required_Manhours"] for g in multi["gap"]) - 900.0)
+              < 1e-6, str([(g["Role_Code"], g["Required_Manhours"])
+                           for g in multi["gap"]]))
+
+        # ── the label ───────────────────────────────────────────────────────
+        lbl = {j["Lining_System_Code"]: j["Job_Label"] for j in prep["jobs"]}
+        check("CF-17 a job is labelled with its tag, its code, its DISCIPLINE "
+              "and the full system name from the workbook",
+              lbl.get("SVCF-A") == "SVCF-T1 · SVCF-A [CV] — Full name of SVCF-A",
+              str(lbl))
+        check("CF-18 …and surface prep is named as such rather than shown as a "
+              "blank cell",
+              lbl.get("") == "SVCF-T1 · Surface prep [CV]", str(lbl))
+
+        tg = await ac.get("/mh/planner/targets", headers=H)
+        tgd = tg.json()
+        check("CF-19 the targets list ships assembled labels, so the select "
+              "option and the plan header cannot drift apart",
+              tg.status_code == 200
+              and all("Job_Label" in i and "Code_Chip" in i
+                      for i in tgd["items"]), f"{tg.status_code}")
+        chips = {c["Lining_System_Code"]: c["Code_Chip"] for c in tgd["codes"]}
+        # THE CONTRAST THAT MATTERS. SVCF-A is used on concrete (T1, T2) and on
+        # a steel vessel (T4) — the live LSC1 shape. A per-equipment label says
+        # that ROW's discipline; the aggregate filter says both. Printing
+        # 'SVCF-A [CV]' in the filter would be an invented aggregate, true of
+        # some rows and asserted of all.
+        check("CF-20 an AGGREGATE code chip names every discipline the code is "
+              "used in, never just the first one met",
+              chips.get("SVCF-A") == "SVCF-A [CV/ME]"
+              and chips.get("SVCF-B") == "SVCF-B [CV]", str(chips))
+        check("CF-26 …while the SAME code on a specific row still shows that "
+              "row's own discipline — exact where it can be, honest where it "
+              "cannot",
+              lbl.get("SVCF-A") == "SVCF-T1 · SVCF-A [CV] — Full name of SVCF-A",
+              str(lbl.get("SVCF-A")))
+
+    # ── the pure helpers, without HTTP ──────────────────────────────────────
+    check("CF-21 code_chip prints BOTH disciplines where a code spans them — "
+          "LSC1 is CV on concrete and ME on tanks, so 'LSC1 [CV]' is a lie",
+          code_chip("LSC1", ["ME", "CV"]) == "LSC1 [CV/ME]"
+          and code_chip("LSC1", "CV") == "LSC1 [CV]", code_chip("LSC1", ["ME", "CV"]))
+    check("CF-22 …and an empty code is surface prep, not an empty string",
+          code_chip("", "CV") == "Surface prep", code_chip("", "CV"))
+    async with SessionLocal() as s:
+        names = await system_names(s)
+    check("CF-23 the system name comes from Lining_System (the column the "
+          "operator edits), NOT from Lining_System_Name which holds the short "
+          "code",
+          names.get("SVCF-A") == "Full name of SVCF-A", str(names.get("SVCF-A")))
+    j = job_label("T", "C", {"C": "Some System 4mm"}, "CV",
+                  esc="ESC1", activity="Act", sub_activity="Sub")
+    check("CF-24 the label ships its PARTS as well as the assembled strings, "
+          "so a screen with its own layout need not re-derive them",
+          j["Short"] == "T · C [CV] — Some System 4mm"
+          and j["Full"].endswith("ESC1 · Act → Sub")
+          and j["System_Name"] == "Some System 4mm", str(j))
+    check("CF-25 whitespace in the workbook is collapsed — LSC3 ships "
+          "'Rubber Lining  4mm' on one row and 'Rubber Lining 4mm' on another, "
+          "and they are one name typed twice",
+          job_label("T", "C", {"C": "Rubber  Lining   4mm"})["System_Name"]
+          == "Rubber Lining 4mm", "")
+
+    await _reset()
 
 
 # --- Suite BX: the 2026-08-13 workflow polish ---------------------------------
@@ -16653,6 +16959,9 @@ async def main() -> int:
     print("\n CE. Selection, not summation — which benchmark applies, and to "
           "how much of the area")
     await test_planner_selection()
+    print("\n CF. Many jobs, one deadline — the multi-select, Target Days, and "
+          "the label every screen shares")
+    await test_planner_ux()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()
