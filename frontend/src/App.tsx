@@ -51,6 +51,7 @@ const AdminConsolePage = lazy(() => import('./pages/AdminConsolePage'))
 const OverdueActionsPage = lazy(() => import('./pages/OverdueActionsPage'))
 const CrossSitePage = lazy(() => import('./pages/CrossSitePage'))
 const ManHoursPage = lazy(() => import('./pages/ManHoursPage'))
+const QcHodPage = lazy(() => import('./pages/QcHodPage'))
 const OcrImportPage = lazy(() => import('./pages/OcrImportPage'))
 const FeedbackPage = lazy(() => import('./pages/FeedbackPage'))
 
@@ -107,6 +108,7 @@ export default function App() {
         <Route path="admin/console" element={<AdminConsolePage />} />
         <Route path="hod/requests" element={<CrossSitePage />} />
         <Route path="manhours" element={<ManHoursPage />} />
+        <Route path="qc-hod" element={<QcHodPage />} />
         <Route path="feedback" element={<FeedbackPage />} />
         <Route path="security" element={<SecurityPage />} />
       </Route>

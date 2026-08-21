@@ -97,16 +97,38 @@ MFA_TTL = _dt.timedelta(minutes=5)
 # inspector site-scoped for free (SITE_SCOPE_MIN_LEVEL = 3). It also means a
 # level check can never isolate the role, exactly as it cannot isolate the
 # other two, so every /qc route uses require_roles(), never require_level().
+#
+# `qc_hod` (2026-08-22) is the Head of Qualities: cross-site oversight of
+# Surface Shield material. It sits at LEVEL 2 with an explicit cross-site
+# exemption in `site_scope`, and the level is the whole decision.
+#
+# ⚠️ LEVEL 3 WOULD HAVE BEEN THE OBVIOUS CHOICE AND IT IS THE WRONG ONE.
+# Cross-site reads key off the level ladder (SITE_SCOPE_MIN_LEVEL = 3), so 3
+# buys global reach — and, with it, EVERY endpoint gated by require_level(0..3):
+# ninety-seven of them, including Entry Log reads, SME, Records, Reports, Burn
+# Rate and the HOD's own queues. That is not a Head of Qualities; it is a second
+# Logistics account with a quality-themed sidebar.
+#
+# Level 2 + `QC_OVERSIGHT_ROLES` gives the reach without the inheritance, and
+# every /qc-hod route uses require_roles(), never require_level(), so its
+# surface is ENUMERABLE rather than inherited. This is the pattern `qc`
+# established and it has held.
 ROLE_META = {
     "admin":          {"label": "Admin",              "level": 4},
     "logistics":      {"label": "Logistics",          "level": 3},
     "auditor":        {"label": "Auditor (view-only)", "level": 3},
     "hod":            {"label": "Head of Department", "level": 2},
+    "qc_hod":         {"label": "Head of Qualities",  "level": 2},
     "warehouse_user": {"label": "Warehouse",          "level": 1},
     "supervisor":     {"label": "Supervisor",         "level": 1},
     "qc":             {"label": "Quality Control",    "level": 1},
     "store_keeper":   {"label": "Store Keeper",       "level": 0},
 }
+
+# Roles that read across every site WITHOUT being level 3. The exemption is
+# named rather than implied, so `site_scope` states the exception instead of
+# leaving it to be inferred from a number.
+QC_OVERSIGHT_ROLES = frozenset({"qc_hod"})
 
 # Self-service registrants may request any role EXCEPT admin (no self-elevation);
 # the approving admin can still override the role at approval time.
@@ -119,7 +141,10 @@ _REGISTERABLE_ROLES = set(ROLE_META) - {"admin"}
 _SCOPED_REG_ROLES = {"store_keeper", "supervisor", "hod"}
 # auditor is unscoped: it reads across every site, so binding it to one would
 # contradict the reason it exists.
-_UNSCOPED_REG_ROLES = {"warehouse_user", "logistics", "auditor"}
+# qc_hod joins the unscoped set: cross-site by definition, so binding it to one
+# site would contradict the reason it exists — the same argument that put
+# `auditor` here.
+_UNSCOPED_REG_ROLES = {"warehouse_user", "logistics", "auditor", "qc_hod"}
 # qc is the first DUAL-scope role: a quality inspector belongs either to a
 # site or to a warehouse, and which one decides everything they can see.
 #
@@ -277,8 +302,25 @@ async def get_current_user(
 
 def require_level(min_level: int):
     """Dependency factory: 403 unless the user's role level ≥ min_level
-    (store_keeper 0 · warehouse/supervisor 1 · hod 2 · logistics 3 · admin 4)."""
+    (store_keeper 0 · warehouse/supervisor 1 · hod 2 · logistics 3 · admin 4).
+
+    ⚠️ OVERSIGHT ROLES ARE NOT ON THE LADDER AND NEVER SATISFY A LEVEL CHECK.
+    `qc_hod` carries level 2 so it does NOT inherit the level-3 tier, but the
+    number alone still admitted it to every `require_level(0|1|2)` endpoint —
+    eighty-five of them, including the HOD's approval queue, the Estimator and
+    the Man-Hours portal. That is the same trap the role's level was chosen to
+    avoid, one rung lower down, and suite BU caught it.
+
+    The level on an oversight role exists to say what it must NOT reach; its
+    actual grants are enumerated with `require_roles`. So a level check refuses
+    it outright, and anything it genuinely needs (the site list, the warehouse
+    names its escalations are addressed to) says so by name.
+    """
     async def _dep(user: dict = Depends(get_current_user)) -> dict:
+        if user.get("role") in QC_OVERSIGHT_ROLES:
+            raise HTTPException(
+                403, "this action is granted by role, not by rank — an "
+                     "oversight account reaches only what names it explicitly")
         if user["level"] < min_level:
             raise HTTPException(403, "insufficient role for this action")
         return user
@@ -308,6 +350,14 @@ def site_scope(user: dict) -> str | None:
     user may read — possibly '' for a site-less scoped user (e.g. a warehouse
     account), which every consumer must treat as *matches nothing* (fail-closed),
     never as a wildcard."""
+    # The named exception (2026-08-22). A Head of Qualities is level 2 —
+    # deliberately BELOW the level-3 ladder, so it inherits none of the
+    # require_level endpoints — but its whole job is comparing one site's
+    # Surface Shield stock against another's, which a site lock makes
+    # impossible. The exemption buys READ reach and nothing else: every write
+    # is refused by readonly.py, whatever the level says.
+    if user.get("role") in QC_OVERSIGHT_ROLES:
+        return None
     if user.get("level", 0) >= SITE_SCOPE_MIN_LEVEL:
         return None
     return (user.get("site_id") or "").strip()
@@ -387,6 +437,15 @@ def warehouse_scope(user: dict) -> str | None:
         # Adding a role to ROLE_META and forgetting this file is the mistake
         # this comment exists to prevent.
         return (user.get("warehouse_id") or "").strip()
+    if role in QC_OVERSIGHT_ROLES:
+        # DELIBERATE, not inherited. A Head of Qualities has to see Surface
+        # Shield held in a WAREHOUSE as well as on a site — uncertified stock
+        # sitting at goods-in is exactly what the role exists to chase. It
+        # would have fallen through to `None` below anyway; stating it here is
+        # the point, because the line below reads "any known role that is not
+        # warehouse_user is unrestricted" and that is how `qc` nearly inherited
+        # global warehouse visibility by accident.
+        return None
     if role != "warehouse_user":
         return None
     return (user.get("warehouse_id") or "").strip()
@@ -425,7 +484,11 @@ def qc_scope(user: dict) -> dict:
         # /auth/register each refuse to create one, so a row in that state
         # was hand-edited and should not be trusted with either scope.
         return {"site": "", "warehouse": ""}
-    if user.get("level", 0) >= SITE_SCOPE_MIN_LEVEL:
+    if role in QC_OVERSIGHT_ROLES or user.get("level", 0) >= SITE_SCOPE_MIN_LEVEL:
+        # qc_hod is level 2 and would otherwise fall to the site-scoped line at
+        # the bottom, resolving to '' — a Head of Qualities carries no site, so
+        # that reads as "matches nothing" and the role would see an empty
+        # dashboard while every number it needed sat one query away.
         return {"site": None, "warehouse": None}
     if role == "warehouse_user":
         return {"site": None, "warehouse": (user.get("warehouse_id") or "").strip()}

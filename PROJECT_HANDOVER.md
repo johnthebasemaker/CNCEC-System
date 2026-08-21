@@ -706,6 +706,49 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-23 — Phase 8 slice 8d (`feat/phase8-qc-hod`).**
+> The ninth role. Baselines move to **service tests 1,788** (+37, suite CH plus
+> the qc_hod pass in BU), **E2E 101** (+5), alembic head **`c7e1a4b92d63`**,
+> **nav 48**; legacy 599, parity 1,313, UI math 33 unchanged.
+>
+> **Four additions to the LOCKED set:**
+>
+> * **AN OVERSIGHT ROLE IS NOT ON THE LEVEL LADDER, AND A LEVEL CHECK REFUSES
+>   IT.** `qc_hod` is level 2 with a named cross-site exemption
+>   (`auth.QC_OVERSIGHT_ROLES`). Level 3 would have inherited 97
+>   `require_level(0..3)` endpoints — but level 2 ALONE still admitted it to the
+>   85 gated `require_level(<=2)`, the same trap one rung lower, and suite BU
+>   caught it. `require_level` now refuses `QC_OVERSIGHT_ROLES` outright: the
+>   level says what the role must NOT reach, and every actual grant is
+>   enumerated with `require_roles`. Anything it genuinely needs (the site list,
+>   the warehouse names) names the role explicitly.
+>
+> * **THE CATEGORY IS THE BOUNDARY OF THE ROLE.** Every read in
+>   `services/qc_oversight.py` is filtered to the controlled category in SQL,
+>   per function, never by a caller or a page. A cross-site account without that
+>   filter is a company-wide window onto PPE, tools, consumables and every price
+>   on every purchase order.
+>
+> * **READ-ONLY ALLOWLISTS ARE PER ROLE.** `readonly.py` no longer has one
+>   shared list: `auditor` keeps its compute-only POSTs and streamed AI answers;
+>   `qc_hod` gets three paths, all of which send a message. `/qc-hod/` is
+>   deliberately NOT a bare prefix — that would open any future POST under it by
+>   accident, which is the fail-open shape the whole module exists to avoid.
+>
+> * **A SITE-SCOPED NOTIFICATION CANNOT REACH AN UNSCOPED ROLE.** Visibility is
+>   `recipient_site IS NULL OR recipient_site = site`, and a Head of Qualities
+>   carries `site_id = ''` — so adding the role to `_MTC_ALERT_ROLES` would have
+>   looked right and delivered nothing. `dispatch_missing_mtc` fires a SECOND,
+>   unscoped, AGGREGATED message instead, which is the right shape for oversight
+>   anyway: six messages saying one thing is how somebody responsible for six
+>   sites learns to ignore them.
+>
+> ⚠️ **The role-registration checklist is now twelve files** and forgetting one
+> fails quietly — the QSEP release added `qc` and forgot the AI manual map, so
+> an inspector was answered out of the Store Keeper chapter for weeks. CH-25
+> asserts every role in `ROLE_META` has chapters, a label and a refusal;
+> `MANUAL_TESTING_GUIDE` §14k.7 lists the rest.
+
 > **Updated 2026-08-22 — Phase 8 slice 8c (`feat/phase8-procurement-lock`).**
 > Baselines move to **service tests 1,751** (+26, suite CG) and alembic head
 > **`a9f2c6b40d18`**; E2E 96, legacy 599, parity 1,313, UI math 33, nav 47

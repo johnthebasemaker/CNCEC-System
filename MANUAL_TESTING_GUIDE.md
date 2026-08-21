@@ -1838,6 +1838,119 @@ nothing, and that a clean re-run is idempotent.
 
 ---
 
+## 14k. The Head of Qualities (Phase 8 · slice 8d)
+
+> Added 2026-08-23 (branch `feat/phase8-qc-hod`). Rule 13.
+> Alembic `c7e1a4b92d63`. User manual §23.
+
+### 14k.1 ⚠️ The level is the whole security decision
+
+`qc_hod` reads across **every site**, which is normally what level 3 buys — and
+level 3 would have handed it **every endpoint gated by `require_level(0..3)`**:
+ninety-seven of them, including Entry Log reads, SME, Records and the HOD's own
+queues. That is not a Head of Qualities; it is a second Logistics account with a
+quality-themed sidebar.
+
+So: **level 2, a named cross-site exemption, and a level check that refuses it
+outright.**
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-QCH-01** | `GET /qc-hod/overview` as qc_hod | 200. |
+| **TC-QCH-02** | `GET /hod/pending`, `/sme/summary`, `/mh/employees`, `/logistics/prs`, `/admin/users` | **403 on every one.** The rank grants nothing; only `require_roles` does. |
+| **TC-QCH-03** | `GET /qc-hod/stagnation` | 200 with rows from **every** site. `site_scope` returns `None` for `QC_OVERSIGHT_ROLES`. |
+| **TC-QCH-04** | Check `qc_scope` and `warehouse_scope` | Both unrestricted. Falling through to the site-scoped line would resolve to `''` — *matches nothing* — and the dashboard would be empty while every number sat one query away. |
+
+> **Level 2 alone was not enough, and a test caught it.** The number kept the
+> role off the level-3 tier but still admitted it to every `require_level(≤2)`
+> endpoint — the same trap, one rung lower. `require_level` now refuses
+> oversight roles outright.
+
+### 14k.2 The category IS the boundary
+
+Every read is filtered to the controlled category (`Surface Shields`) **in SQL,
+in every function**, never by the page.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-QCH-05** | Consume one controlled and one non-controlled material, then open **Where It Is Used** | The controlled one appears; the other does **not**. |
+| **TC-QCH-06** | Consider what a missing filter would mean | A cross-site account with no category filter is a company-wide window onto PPE, tools, consumables and every price on every purchase order. |
+
+### 14k.3 Read-only, with a three-path exception
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-QCH-07** | `POST /entry/receive`, `/qc/inspections/{id}/decide`, `/hod/prs`, `/logistics/pos` as qc_hod | **403 "view-only (Head of Qualities)"** — from the middleware, before the route. |
+| **TC-QCH-08** | `POST /qc-hod/escalations` | Allowed. It is a **message**, not a change to stock. |
+| **TC-QCH-09** | `POST /qc-hod/overview` (a path not on the allowlist) | **403.** `/qc-hod/` is deliberately **not** a bare prefix — that would open any future POST under it by accident. |
+| **TC-QCH-10** | `POST /sme/plan/cascade` as qc_hod | **403.** The auditor's compute-only POSTs are its own; a Head of Qualities has no business rendering an SME cascade. |
+
+### 14k.4 An escalation names exactly one place
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-QCH-11** | Escalate with neither site nor warehouse | **422.** |
+| **TC-QCH-12** | Escalate with **both** | **422.** A message aimed at everywhere is one nobody owns. |
+| **TC-QCH-13** | Escalate to `warehouse_user` at a **site** | 422 naming the right field — a warehouse user belongs to a warehouse. |
+| **TC-QCH-14** | Escalate properly | 201, **and** exactly one `app_notifications` row for that role at that place. The log and the message are written together: *"I raised it"* and *"they were told"* must not be two separate claims. |
+| **TC-QCH-15** | Close it with an empty note | Refused. |
+| **TC-QCH-16** | Close it, then close it again | Second attempt **409**, and the first note survives. That note is the record of what actually fixed it. |
+
+### 14k.5 The daily alert has to REACH them
+
+**TC-QCH-17** — create controlled stock on hand with no MTC, run the sweep, and
+open the Head of Qualities' bell.
+
+> **The per-site alerts cannot reach this account, and adding the role to their
+> recipient list would not have helped.** A notification is visible when
+> `recipient_site IS NULL OR recipient_site = <your site>`, the per-site alerts
+> set a specific place, and a Head of Qualities carries `site_id = ''`. So
+> `'SITE-A' != ''` and the row is invisible — the change would have looked
+> right and delivered nothing.
+
+A **second, unscoped, aggregated** dispatch exists instead
+(`mtc_missing_daily_oversight`). **TC-QCH-18** — confirm there is exactly
+**one** such row, naming every location. Six messages saying one thing is how
+somebody responsible for six sites learns to ignore them.
+
+### 14k.6 The dashboard
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-QCH-19** | Sign in as qc_hod | Lands on `/qc-hod`, not the Dashboard — which is site-shaped and would show this account nothing. |
+| **TC-QCH-20** | Count the tabs | Seven: Overview · Surface Shield POs · MTC Register · Where It Is Used · Stagnation & Expiry · Escalations · Settings. |
+| **TC-QCH-21** | Read the Overview | The category in scope is stated on the page — it is the boundary of the role, not a filter somebody chose. |
+| **TC-QCH-22** | Open Stagnation → Stagnant | A lot **received and never touched** is marked *(never used)*. Same idle days as one abandoned mid-job, completely different problem. |
+| **TC-QCH-23** | Check **Could move to** | Sites already drawing that material, excluding the holder. A **contact list, not a transfer** — moving stock is somebody else's authority. |
+| **TC-QCH-24** | Settings | 90 / 60 days, editable. Policy, not a constant. |
+| **TC-QCH-25** | Open `/qc-hod` as an ordinary HOD | Redirected. It is not "the HOD page with more sites"; it is a different job. |
+
+### 14k.7 The role-registration checklist
+
+Adding a role touches more files than is obvious, and forgetting one fails
+**quietly**. All of these ship together:
+
+| File | What |
+|---|---|
+| `auth.py` `ROLE_META` | label + level 2 |
+| `auth.py` `QC_OVERSIGHT_ROLES` | the named exemption |
+| `auth.py` `require_level` | refuses oversight roles outright |
+| `auth.py` `site_scope` / `warehouse_scope` / `qc_scope` | all three, explicitly |
+| `auth.py` `_UNSCOPED_REG_ROLES` | admin-created, carries no site |
+| `readonly.py` | read-only + the three-path allowlist |
+| `ai/manual_qa.py` | `_ROLE_ALLOWED`, `_ROLE_LABEL`, `_ROLE_REFUSAL` |
+| `main.py` | router + the `warehouses` read grant (the escalation form needs the names) |
+| `config/nav.tsx` | sidebar, route guard, `ROLE_HOME` |
+| `auth/readOnly.ts` | client mirror |
+| `USER_MANUAL.md` | §2 matrix and §23 |
+| suites BU / CH, `tests/e2e` harness | negative access, behaviour, a real login |
+
+**TC-QCH-26** — CH-25 asserts every role in `ROLE_META` has AI manual chapters,
+a label and a refusal. The QSEP release added `qc` and forgot that map, so an
+inspector was answered out of the Store Keeper chapter for weeks.
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

@@ -11801,6 +11801,10 @@ async def _qsep_seed_users() -> None:
         ("SVCQ-qcbroken", "qc", None, None),
         ("SVCQ-admin", "admin", None, None),
         ("SVCQ-log", "logistics", None, None),
+        # Phase 8 slice 8d — the Head of Qualities. NO site: it is cross-site by
+        # definition, and binding it to one would contradict the reason it
+        # exists (the same argument that leaves `auditor` unbound).
+        ("SVCQ-qchod", "qc_hod", None, None),
     ]
     async with SessionLocal() as s:
         await s.execute(_sqt("DELETE FROM users WHERE username LIKE 'SVCQ-%'"))
@@ -14062,7 +14066,7 @@ async def test_strict_rbac_api_gates():
 
     ROLES = {"sk": "SVCQ-sk", "wh": "SVCQ-wh", "sup": "SVCQ-sup", "qc": "SVCQ-qc",
              "hod": "SVCQ-hod", "log": "SVCQ-log", "aud": "SVCQ-aud",
-             "admin": "SVCQ-admin"}
+             "qch": "SVCQ-qchod", "admin": "SVCQ-admin"}
 
     try:
         transport = ASGITransport(app=app)
@@ -14070,7 +14074,7 @@ async def test_strict_rbac_api_gates():
             H = {}
             for key, uname in ROLES.items():
                 H[key] = await _qsep_login(ac, uname)
-            check("bu-setup: all eight roles signed in — a 403 check against a "
+            check("bu-setup: all nine roles signed in — a 403 check against a "
                   "role that could not log in at all proves nothing",
                   all(H[k] for k in ROLES),
                   str({k: bool(v) for k, v in H.items()}))
@@ -14138,6 +14142,57 @@ async def test_strict_rbac_api_gates():
                   "how they see why the issue form refused them. Deciding "
                   "stays roles('qc')",
                   r.status_code == 200, f"got {r.status_code}")
+
+            # ── 4b. the Head of Qualities reads its own portal and NOTHING
+            #        else that writes ───────────────────────────────────────
+            # This is the check the level decision rests on. `qc_hod` is level
+            # 2, and if it had been level 3 — the obvious choice, because
+            # cross-site reads key off the level ladder — it would have
+            # inherited every endpoint gated by require_level(0..3). The
+            # refusals below are what "level 2 plus a named exemption" buys.
+            await sweep(
+                "GET /qc-hod/overview is the Head of Qualities' own portal",
+                "/qc-hod/overview", {"qch", "admin"},
+                note="require_roles('qc_hod'), never require_level — so the "
+                     "surface is one file, not whatever the ladder reaches")
+
+            for label, path in (
+                    ("the HOD's approval queue", "/hod/pending"),
+                    ("the Estimator", "/sme/summary"),
+                    ("the Man-Hours portal", "/mh/employees"),
+                    ("the Logistics PR queue", "/logistics/prs"),
+                    ("the admin user list", "/admin/users"),
+            ):
+                st = (await ac.get(path, headers=H["qch"])).status_code
+                check(f"bu: qc_hod is REFUSED {label} ({path}). Level 3 would "
+                      f"have admitted it here by inheritance",
+                      st == 403, f"got {st}")
+
+            # Cross-site READS are the exemption, and they are real.
+            r = await ac.get("/qc-hod/stagnation", headers=H["qch"])
+            check("bu: …but it DOES read across every site. site_scope returns "
+                  "None for QC_OVERSIGHT_ROLES — without that a level-2 account "
+                  "with no site of its own resolves to '' and sees nothing at "
+                  "all, which is the fail-closed default doing the wrong thing",
+                  r.status_code == 200, f"got {r.status_code}")
+
+            # WRITES: refused by the read-only middleware, not by the route.
+            for label, path, body in (
+                    ("stage a receipt", "/entry/receive", {"SAP_Code": "1001"}),
+                    ("approve an inspection", "/qc/inspections/1/decide",
+                     {"action": "approve"}),
+                    ("raise a PR", "/hod/prs",
+                     {"site_id": "CNCEC", "lines": []}),
+                    ("create a PO", "/logistics/pos",
+                     {"pr_number": "X", "site_id": "CNCEC", "po_number": "Y"}),
+            ):
+                r = await ac.post(path, headers=H["qch"], json=body)
+                check(f"bu: qc_hod cannot {label} — the read-only guard refuses "
+                      f"EVERY mutating verb it has not explicitly allowed, so a "
+                      f"POST added tomorrow is closed the moment it is written",
+                      r.status_code == 403
+                      and "view-only" in r.text.lower(),
+                      f"{r.status_code} {r.text[:120]}")
 
             # ── 5. the ladder is gone from the pages that matter ─────────────
             # Read out of the manifest rather than restated here, so this
@@ -16229,6 +16284,255 @@ async def test_planner_ux():
     await _reset()
 
 
+# --- Suite CH: the Head of Qualities ------------------------------------------
+async def test_qc_hod():
+    """Suite CH — Phase 8 slice 8d. Cross-site reach, and where it stops.
+
+    The role is the awkward one: it reads across EVERY site, which is normally
+    what level 3 buys, and level 3 would have handed it most of the system. So
+    it is level 2 with a NAMED exemption, a level check refuses it outright,
+    and its whole surface is one file.
+
+    Three properties are worth more than the routes themselves:
+
+      · the CATEGORY is the boundary. A cross-site account with no category
+        filter is a company-wide window onto PPE, tools and every PO price.
+      · an escalation names ONE place. A message aimed at everywhere is one
+        nobody owns.
+      · the daily alert REACHES them. The per-site alerts cannot — a Head of
+        Qualities carries site_id '' and the visibility rule compares it
+        against 'SITE-A' — so a second unscoped dispatch exists, and CH-14
+        is the check that it works rather than looking like it does.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import qc_oversight as qcx
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _cleanup():
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM qc_escalations WHERE raised_by "
+                                 "LIKE 'SVCQ-%'"))
+            await s.execute(_sqt("DELETE FROM app_notifications WHERE event_key "
+                                 "LIKE 'qc_hod_%' OR event_key = "
+                                 "'mtc_missing_daily_oversight'"))
+            await s.commit()
+
+    await _cleanup()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        Q = await _qsep_login(ac, "SVCQ-qchod")
+        H = await _qsep_login(ac, "SVCQ-hod")
+
+        # ── the category IS the boundary ────────────────────────────────────
+        async with SessionLocal() as s:
+            cat = (await s.execute(_sqt(
+                "SELECT value FROM app_settings WHERE key = "
+                "'mtc_required_category'"))).scalar() or "Surface Shields"
+            # One controlled SAP and one that is NOT, both with consumption, so
+            # "the filter works" is a comparison rather than an empty list.
+            await s.execute(_sqt(
+                'INSERT INTO inventory ("SAP_Code", "Material_Code", '
+                '"Equipment_Description", "Category", "UOM") VALUES '
+                "('SVCH-SS', 'SVCH-SS', 'A controlled shield', :c, 'KG'), "
+                "('SVCH-PPE', 'SVCH-PPE', 'A pair of gloves', 'PPE', 'Each') "
+                'ON CONFLICT ("SAP_Code") DO UPDATE SET "Category" = EXCLUDED."Category"'),
+                {"c": cat})
+            for sap in ("SVCH-SS", "SVCH-PPE"):
+                await s.execute(_sqt(
+                    'INSERT INTO consumption ("Date", "SAP_Code", "Quantity", '
+                    '"Site_ID", "Lot_Number") VALUES '
+                    "('2026-08-01', :s, 5, 'CNCEC', 'SVCH-LOT')"), {"s": sap})
+            # ON-HAND CONTROLLED STOCK WITH NO CERTIFICATE — the real condition
+            # the daily sweep looks for. An earlier draft called the sweep with
+            # force=True against an empty database and asserted a message: it
+            # proved only that `force` does nothing when there is nothing to
+            # say, which is correct behaviour and not what CH-14 is about.
+            await s.execute(_sqt(
+                'INSERT INTO receipts ("Date", "SAP_Code", "Quantity", '
+                '"Site_ID", "Lot_Number") VALUES '
+                "('2026-08-01', 'SVCH-SS', 100, 'CNCEC', 'SVCH-LOT')"))
+            await s.commit()
+
+        usage = (await ac.get("/qc-hod/usage", headers=Q)).json()["items"]
+        saps = {str(u["SAP_Code"]) for u in usage}
+        check("CH-01 usage shows the controlled material…",
+              "SVCH-SS" in saps, str(sorted(saps)[:8]))
+        check("CH-02 …and NOT the uncontrolled one. The filter is the role's "
+              "boundary: a cross-site account without it is a company-wide "
+              "window onto PPE, tools and every purchase-order price",
+              "SVCH-PPE" not in saps, str(sorted(saps)[:8]))
+
+        # ── the escalation must name exactly one place ──────────────────────
+        base = {"target_role": "qc", "kind": "mtc_demand",
+                "message": "Please obtain the certificate."}
+        neither = await ac.post("/qc-hod/escalations", headers=Q, json=base)
+        check("CH-03 an escalation aimed at NOWHERE is refused",
+              neither.status_code == 422 and "EXACTLY ONE" in neither.text,
+              f"{neither.status_code} {neither.text[:140]}")
+        both = await ac.post("/qc-hod/escalations", headers=Q, json={
+            **base, "target_site": "CNCEC", "target_warehouse": "WH-01"})
+        check("CH-04 …and one aimed at BOTH is refused too. A message aimed at "
+              "everywhere is one nobody owns",
+              both.status_code == 422, f"{both.status_code}")
+
+        ok = await ac.post("/qc-hod/escalations", headers=Q, json={
+            **base, "target_site": "CNCEC", "sap_code": "SVCH-SS"})
+        check("CH-05 a properly targeted escalation is created",
+              ok.status_code == 201 and ok.json().get("created") is True,
+              f"{ok.status_code} {ok.text[:160]}")
+        esc_id = ok.json()["id"]
+
+        async with SessionLocal() as s:
+            n = (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM app_notifications WHERE event_key = "
+                "'qc_hod_mtc_demand' AND recipient_role = 'qc' "
+                "AND recipient_site = 'CNCEC'"))).scalar_one()
+        check("CH-06 …and it really SENT, to that site's QC and nobody else's. "
+              "The log and the message are written together — 'I raised it' "
+              "and 'they were told' must not be two separate claims",
+              n == 1, f"got {n}")
+
+        bad_role = await ac.post("/qc-hod/escalations", headers=Q, json={
+            **base, "target_role": "warehouse_user", "target_site": "CNCEC"})
+        check("CH-07 a warehouse user cannot be addressed AT A SITE — they "
+              "belong to a warehouse, and the refusal says which field to use",
+              bad_role.status_code == 422 and "warehouse" in bad_role.text,
+              f"{bad_role.status_code} {bad_role.text[:140]}")
+
+        # ── resolving keeps the record ──────────────────────────────────────
+        nonote = await ac.post(f"/qc-hod/escalations/{esc_id}/resolve",
+                               headers=Q, json={"note": "   "})
+        check("CH-08 closing with an empty note is refused",
+              nonote.status_code in (409, 422), f"{nonote.status_code}")
+        done = await ac.post(f"/qc-hod/escalations/{esc_id}/resolve",
+                             headers=Q, json={"note": "certificate uploaded"})
+        check("CH-09 …and with a real one it closes",
+              done.status_code == 200 and done.json().get("resolved") is True,
+              f"{done.status_code} {done.text[:140]}")
+        again = await ac.post(f"/qc-hod/escalations/{esc_id}/resolve",
+                              headers=Q, json={"note": "something else"})
+        check("CH-10 re-closing is refused rather than overwriting the note. "
+              "That note is the record of what actually fixed it",
+              again.status_code == 409 and "already" in again.text,
+              f"{again.status_code} {again.text[:140]}")
+        async with SessionLocal() as s:
+            note = (await s.execute(_sqt(
+                "SELECT resolution_note FROM qc_escalations WHERE id = :i"),
+                {"i": esc_id})).scalar_one()
+        check("CH-11 …and the first note survived",
+              note == "certificate uploaded", str(note))
+
+        # ── thresholds are policy, not a constant ───────────────────────────
+        th = (await ac.get("/qc-hod/settings", headers=Q)).json()
+        check("CH-12 the thresholds are seeded at 90 / 60 days",
+              th["stagnant_days"] == 90 and th["expiry_warn_days"] == 60,
+              str(th))
+        put = await ac.put("/qc-hod/settings", headers=Q,
+                           json={"stagnant_days": 45, "expiry_warn_days": 30})
+        stag = (await ac.get("/qc-hod/stagnation", headers=Q)).json()
+        check("CH-13 …and changing them changes what the dashboard counts, "
+              "without a release",
+              put.status_code == 200
+              and stag["thresholds"]["stagnant_days"] == 45,
+              f"{put.status_code} {stag['thresholds']}")
+        await ac.put("/qc-hod/settings", headers=Q,
+                     json={"stagnant_days": 90, "expiry_warn_days": 60})
+
+        # ── the daily alert has to REACH them ───────────────────────────────
+        from .health_monitor import dispatch_missing_mtc, missing_mtc_rows
+        async with SessionLocal() as s:
+            async with s.begin():
+                found = await missing_mtc_rows(s, None)
+                await dispatch_missing_mtc(s)
+        check("CH-13b the fixture really is an uncertified controlled material "
+              "on hand — a sweep over nothing would prove nothing",
+              any(str(f.get("sap")) == "SVCH-SS" for f in found),
+              str([f.get("sap") for f in found][:6]))
+        bell = (await ac.get("/notifications", headers=Q)).json()["items"]
+        keys = {str(b.get("event_key")) for b in bell}
+        check("CH-14 the daily missing-MTC sweep REACHES the Head of Qualities. "
+              "The per-site alerts cannot: they set recipient_site, and this "
+              "account carries '' — adding the role to the per-site fan-out "
+              "would have looked right and delivered nothing",
+              "mtc_missing_daily_oversight" in keys, str(sorted(keys)[:6]))
+
+        async with SessionLocal() as s:
+            per_place = (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM app_notifications WHERE event_key = "
+                "'mtc_missing_daily_oversight'"))).scalar_one()
+        check("CH-15 …as ONE aggregated message, not one per location. Six "
+              "messages saying one thing is how somebody responsible for six "
+              "sites learns to ignore them",
+              per_place == 1, f"got {per_place}")
+
+        # ── the allowlist is three paths, not a namespace ───────────────────
+        stray = await ac.post("/qc-hod/overview", headers=Q, json={})
+        check("CH-16 a POST to a qc-hod path that is NOT on the allowlist is "
+              "refused by the read-only guard. '/qc-hod/' is deliberately not "
+              "a bare prefix — that would open any future POST under it by "
+              "accident, which is the fail-open shape the guard exists to stop",
+              stray.status_code == 403 and "view-only" in stray.text.lower(),
+              f"{stray.status_code} {stray.text[:140]}")
+
+        # ── and an HOD cannot see the oversight portal ──────────────────────
+        denied = await ac.get("/qc-hod/overview", headers=H)
+        check("CH-17 an ordinary HOD is refused the oversight portal — it is "
+              "not 'the HOD page with more sites', it is a different job",
+              denied.status_code == 403, f"{denied.status_code}")
+
+    # ── the pure guards ────────────────────────────────────────────────────
+    from .auth import QC_OVERSIGHT_ROLES, ROLE_META, qc_scope, site_scope, warehouse_scope
+    u = {"role": "qc_hod", "level": ROLE_META["qc_hod"]["level"], "site_id": "",
+         "warehouse_id": ""}
+    check("CH-18 qc_hod is LEVEL 2 — deliberately below the level-3 tier, so "
+          "it inherits none of it",
+          ROLE_META["qc_hod"]["level"] == 2, str(ROLE_META["qc_hod"]))
+    check("CH-19 …and reads across every site anyway, by NAME rather than by "
+          "rank", site_scope(u) is None and "qc_hod" in QC_OVERSIGHT_ROLES, "")
+    check("CH-20 …across every warehouse too — uncertified stock at goods-in "
+          "is exactly what the role chases",
+          warehouse_scope(u) is None, str(warehouse_scope(u)))
+    check("CH-21 …and on both quality axes. Falling through to the site-scoped "
+          "line would resolve to '' — 'matches nothing' — and the dashboard "
+          "would be empty while every number sat one query away",
+          qc_scope(u) == {"site": None, "warehouse": None}, str(qc_scope(u)))
+
+    from .readonly import blocks_request
+    check("CH-22 the guard lets a qc_hod raise an escalation…",
+          not blocks_request("qc_hod", "POST", "/qc-hod/escalations"), "")
+    check("CH-23 …and refuses it everything else, including the auditor's "
+          "compute-only POSTs — a Head of Qualities has no business rendering "
+          "an SME cascade",
+          blocks_request("qc_hod", "POST", "/entry/receive")
+          and blocks_request("qc_hod", "POST", "/sme/plan/cascade")
+          and blocks_request("qc_hod", "POST", "/hod/prs"), "")
+    check("CH-24 …while the auditor keeps its own, unchanged by the split",
+          not blocks_request("auditor", "POST", "/sme/plan/cascade")
+          and blocks_request("auditor", "POST", "/qc-hod/escalations"), "")
+
+    from .ai.manual_qa import _ROLE_ALLOWED, _ROLE_LABEL, _ROLE_REFUSAL
+    check("CH-25 every role in ROLE_META has AI manual chapters, a label and a "
+          "refusal. The QSEP release added `qc` and forgot this map, so an "
+          "inspector was answered out of the Store Keeper chapter for weeks",
+          all(r in _ROLE_ALLOWED and r in _ROLE_LABEL and r in _ROLE_REFUSAL
+              for r in ROLE_META),
+          str([r for r in ROLE_META if r not in _ROLE_ALLOWED
+               or r not in _ROLE_LABEL or r not in _ROLE_REFUSAL]))
+
+    await _cleanup()
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM consumption WHERE \"Lot_Number\" = "
+                             "'SVCH-LOT'"))
+        await s.execute(_sqt("DELETE FROM receipts WHERE \"Lot_Number\" = "
+                             "'SVCH-LOT'"))
+        await s.execute(_sqt("DELETE FROM inventory WHERE \"SAP_Code\" LIKE "
+                             "'SVCH-%'"))
+        await s.commit()
+
+
 # --- Suite CG: procurement locks ----------------------------------------------
 async def test_procurement_locks():
     """Suite CG — Phase 8 slice 8c. The PR number, the state, and the retry.
@@ -17268,6 +17572,8 @@ async def main() -> int:
     await test_planner_ux()
     print("\n CG. Procurement locks — the PR number, the state, and the retry")
     await test_procurement_locks()
+    print("\n CH. The Head of Qualities — cross-site reach, and where it stops")
+    await test_qc_hod()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

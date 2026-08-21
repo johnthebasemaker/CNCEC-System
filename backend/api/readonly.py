@@ -40,9 +40,20 @@ from __future__ import annotations
 
 from starlette.responses import JSONResponse
 
-# The one read-only role. A set so a second one (a client/QA account, say)
-# costs one entry rather than a refactor.
-READ_ONLY_ROLES = frozenset({"auditor"})
+# Read-only roles. Each may read what its level reaches and write only what
+# its own allowlist names — the lists are PER ROLE, because "read-only" means
+# different things to different accounts:
+#
+#   auditor — reads across every site and writes nothing at all. Its extras are
+#             compute-only POSTs (a cascade, an export) and streamed AI answers,
+#             none of which touch a row.
+#   qc_hod  — Head of Qualities (2026-08-22). Oversight, not operation: it reads
+#             Surface Shield material across every site and the only thing it
+#             may WRITE is a message — an escalation asking somebody who can act
+#             to act. It cannot approve an inspection, decide a DN, move stock
+#             or raise a PR, and the fact that its allowlist is three paths long
+#             is the whole security story of the role.
+READ_ONLY_ROLES = frozenset({"auditor", "qc_hod"})
 
 # Methods that cannot change server state. HEAD/OPTIONS matter for CORS
 # preflight — blocking OPTIONS would break the browser before it ever asked.
@@ -51,7 +62,9 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 # Exact paths that mutate nothing but the caller's own session/credentials, or
 # that only compute and render. Compared after stripping the optional /api/v1
 # prefix and any trailing slash.
-_ALLOWED_EXACT = frozenset({
+# Shared by EVERY read-only role: signing in, and looking after your own
+# credentials. Without these an account cannot even reach the thing it may read.
+_BASE_EXACT = frozenset({
     # session lifecycle — without these an auditor cannot even sign in
     "/auth/login",
     "/auth/login/2fa",
@@ -63,21 +76,43 @@ _ALLOWED_EXACT = frozenset({
     "/auth/2fa/disable",
     "/auth/phone/request-otp",
     "/auth/phone/verify-otp",
-    # pure computation / document rendering — no row is touched
-    "/sme/plan/cascade",
-    "/sme/plan/export",
-    "/sme/export/rows",
 })
+
+# Per-role extras. Adding a path here is a deliberate edit with a reason
+# attached, which is the point — the default for anything not listed is 403.
+_ROLE_EXACT = {
+    "auditor": frozenset({
+        # pure computation / document rendering — no row is touched
+        "/sme/plan/cascade",
+        "/sme/plan/export",
+        "/sme/export/rows",
+    }),
+    "qc_hod": frozenset(),
+}
 
 # Prefixes for read-shaped POSTs. Each is a question whose body is too big for
 # a query string; none of them write. Kept short and reviewed as a unit.
-_ALLOWED_PREFIXES = (
-    "/ai/assistant",
-    "/ai/query",
-    "/ai/nl-search",
-    "/ai/insights",
-    "/ai/eod-summary",
-)
+_ROLE_PREFIXES = {
+    "auditor": (
+        "/ai/assistant",
+        "/ai/query",
+        "/ai/nl-search",
+        "/ai/insights",
+        "/ai/eod-summary",
+    ),
+    # ⚠️ THREE PATHS, AND THEY ALL SEND A MESSAGE. A QC-HOD raises an
+    # escalation, resolves one they raised, and tunes their own stagnation
+    # thresholds. Every one of those writes to a qc_hod-owned table; none
+    # touches stock, an inspection decision, a DN or a PR. `/qc-hod/` is NOT
+    # listed as a bare prefix on purpose — that would open any future POST
+    # under it by accident, which is exactly the fail-open shape this whole
+    # module exists to avoid.
+    "qc_hod": (
+        "/qc-hod/escalations",
+        "/qc-hod/settings",
+        "/ai/assistant",
+    ),
+}
 
 _API_PREFIX = "/api/v1"
 
@@ -97,10 +132,17 @@ def is_read_only_role(role: str | None) -> bool:
     return (role or "") in READ_ONLY_ROLES
 
 
-def is_allowed_write(path: str) -> bool:
-    """True if this mutating-verb path is one of the documented exceptions."""
+def is_allowed_write(path: str, role: str = "auditor") -> bool:
+    """True if this mutating-verb path is one of THIS ROLE's documented
+    exceptions. The role defaults to `auditor` so the original single-role
+    callers keep their meaning."""
     p = normalize_path(path)
-    return p in _ALLOWED_EXACT or p.startswith(_ALLOWED_PREFIXES)
+    if p in _BASE_EXACT:
+        return True
+    if p in _ROLE_EXACT.get(role, frozenset()):
+        return True
+    prefixes = _ROLE_PREFIXES.get(role, ())
+    return bool(prefixes) and p.startswith(prefixes)
 
 
 def blocks_request(role: str | None, method: str, path: str) -> bool:
@@ -110,7 +152,7 @@ def blocks_request(role: str | None, method: str, path: str) -> bool:
         return False
     if (method or "").upper() in SAFE_METHODS:
         return False
-    return not is_allowed_write(path)
+    return not is_allowed_write(path, role or "")
 
 
 def _role_from_request(request) -> str | None:
@@ -137,9 +179,11 @@ async def read_only_guard(request, call_next):
     if request.method.upper() not in SAFE_METHODS:
         role = _role_from_request(request)
         if blocks_request(role, request.method, request.url.path):
+            label = "Head of Qualities" if role == "qc_hod" else "Auditor"
             return JSONResponse(
                 status_code=403,
-                content={"detail": "your account is view-only (Auditor) — "
-                                   "this action changes data and is not permitted"},
+                content={"detail": f"your account is view-only ({label}) — "
+                                   f"this action changes data and is not "
+                                   f"permitted"},
             )
     return await call_next(request)

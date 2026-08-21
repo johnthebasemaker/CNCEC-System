@@ -129,9 +129,18 @@ side at the same level and differ only in what they are scoped to.
 | 1 | Supervisor | One site |
 | 1 | Quality Control (QC) | One site **or** one warehouse — never both |
 | 2 | Head of Department | One site |
+| 2 | Head of Qualities (QC-HOD) | **All sites**, Surface Shield only, read + escalate |
 | 3 | Logistics | All sites |
 | 3 | Auditor | All sites, read-only |
 | 4 | Admin | Everything |
+
+**The Head of Qualities is level 2 but reads across every site, and that is not
+a contradiction.** Cross-site reach normally comes from being level 3 — and
+level 3 would also have handed this role every endpoint the rank admits, which
+is most of the system. Instead it is level 2 with a *named* cross-site
+exemption, and the rank grants it nothing at all: a level check refuses it
+outright, so it reaches only what names the role explicitly. Its whole surface
+is the Quality Oversight page. See §23.
 
 **The QC role is scoped on one of two axes, and exactly one.** Material is
 inspected either where it arrives (a warehouse) or where it lands (a site), and
@@ -166,6 +175,7 @@ exception and reaches every workspace deliberately, for support.
 | 🛡️ Supervisor Portal | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ (admin shadow) |
 | 🧪 Material Estimator | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
 | 🕒 Man-Hours | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 🛡️ Quality Oversight (§23) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ — **and the Head of Qualities, who has no other page** |
 | 🔍 Auditor view | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 
 > **Exact-role locks:** Entry Log, HOD Portal, Supervisor Portal, Logistics Portal, Warehouse Portal, Material Estimator and Man-Hours are locked to their own role — a higher-ranked role does **not** inherit access. Admin reaches them for support purposes.
@@ -180,6 +190,7 @@ exception and reaches every workspace deliberately, for support.
 | Quality Control (QC) | Whichever single place they were created against: one site, or one warehouse. A site QC sees inspections raised at that site and has no warehouse business at all; a warehouse QC is pinned to its warehouse exactly as a Warehouse User is. An account with no binding, or with both, sees an empty list — it never falls back to seeing everything. Moving a QC to another site is a request, decided by an Admin, not something the QC or their HOD can do alone. |
 | HOD | Their own site only — but they can REQUEST material from other sites (Cross-Site tab) and submit PRs to Logistics. |
 | Logistics (NEW) | All sites globally for PRs and POs they manage. No site lock — they sit above the site boundary. |
+| Head of Qualities (NEW) | All sites globally, but ONLY Surface Shield material — every query on their page is filtered to the controlled category in the database, so the category is the boundary of the role rather than a filter on a page. They read, and they send escalations; they cannot approve an inspection, move stock, raise a PR or open any other portal. See §23. |
 | Auditor (NEW) | All sites globally, **read-only**. Sits at level 3 so it is not site-locked — an auditor pinned to one site could not audit. It can open the Dashboard, Stock, Records, Reports and Lining Coverage and change nothing anywhere. See §20. |
 | Admin | All sites + all warehouses globally — has the "All Sites" filter on every multi-site view; warehouse picker in sidebar when shadowing the Warehouse Portal. |
 
@@ -4406,6 +4417,141 @@ password reset and self-registration. Self-registration previously enforced a
 much weaker rule than the admin screens did.
 
 The **Request Access** page now offers **Quality Control** in its role list.
+
+---
+
+# 23. Quality Oversight (Head of Qualities) Manual
+
+> **Access:** `🛡️ Quality → Quality Oversight` — exact-locked to **Head of
+> Qualities (`qc_hod`) + Admin**. The role reads across **every site**; it has
+> no site of its own. (NEW — 2026-08.)
+
+## 23.1 What the role is for
+
+A Head of Qualities watches **Surface Shield material across the whole
+company**: what has arrived without a certificate, where it is being used, and
+what is sitting still long enough to expire. It is an **oversight** role, not an
+operating one — it reads, and it sends messages.
+
+**What it can do**
+
+- See every Surface Shield purchase order and whether each line has an MTC.
+- See the certificate register across all sites and warehouses.
+- See which sites are consuming which controlled material, and how recently.
+- See lots that have not moved, or that are close to expiry.
+- **Escalate** — ask a site QC, a warehouse or Logistics to obtain a
+  certificate, inspect something, or take stock that would otherwise expire.
+- Set the stagnation and expiry thresholds.
+
+**What it cannot do, and this is the point**
+
+- It cannot approve or reject an inspection — that is the site or warehouse
+  **QC** inspector.
+- It cannot receive, issue, adjust or transfer stock.
+- It cannot approve a delivery note, raise a purchase request or create a
+  purchase order.
+- It cannot open the HOD Portal, the Estimator, Man-Hours, the Logistics Portal
+  or the Admin Portal.
+
+> **Why it is not simply "a senior QC".** Cross-site reach and the power to
+> decide are different things. This role sees everything and decides nothing —
+> which is what lets it be handed out to somebody who needs the whole picture
+> without also handing them the ability to release material.
+
+## 23.2 Everything here is Surface Shield only
+
+Every figure on every tab is filtered to the **controlled category** —
+`Surface Shields` unless an admin has changed `mtc_required_category`. The
+filter is applied in the database, on every query, not by the page.
+
+That is deliberate: the account reads across every site, so without the filter
+it would also be a company-wide window onto PPE, tools, consumables and the
+prices on every purchase order. The category **is** the boundary of the role.
+
+## 23.3 The seven tabs
+
+### 23.3.1 Overview
+The KPI strip: uncertified materials, how many sites and warehouses are
+affected, stagnant lots, lots expiring soon, lots already expired, and open
+escalations. If anything is uncertified you get a banner naming the places and
+a **Chase a certificate** button.
+
+### 23.3.2 Surface Shield POs
+Every Surface Shield line on every purchase order, with **MTC: on file /
+missing** on each row. A missing one carries a **Chase** button that opens the
+escalation form pre-filled with the PO, the material and the site.
+
+### 23.3.3 MTC Register
+Every certificate on file for controlled material — number, material, lot,
+where it is, quantity, who uploaded it and when.
+
+### 23.3.4 Where It Is Used
+Per **site and material**: how much has been consumed, over how many draws, and
+the date of the last one. A site that drew 2,000 kg last March and nothing since
+is a different conversation from one drawing steadily, so the last-used date is
+a column rather than a filter.
+
+### 23.3.5 Stagnation & Expiry
+Three sub-tabs — **Expired**, **Expiring**, **Stagnant**.
+
+> **Two different problems wear the same number.** A lot *received and never
+> touched* and a lot *used until March and then abandoned* have the same idle
+> days and completely different causes. The Idle column says which: the second
+> is marked **(never used)**.
+
+**Could move to** lists sites already drawing that material, most recent first,
+excluding the one holding it. It is a **contact list, not a transfer** — moving
+stock is somebody else's authority.
+
+### 23.3.6 Escalations
+The comms log. Every escalation you have raised, who it went to, what it was
+about, and whether it is still open.
+
+> **It is a log, not a notification.** "Send the site QC a reminder" is easy;
+> what that cannot answer is *how long has this been chased, and by whom*.
+> Uncertified material is a standing condition, so the second and third chase
+> are the ones that matter — and they only exist if the first was written down.
+
+Closing one **requires a note**. The note is the record of what actually fixed
+it, and re-closing an already-closed escalation is refused rather than
+overwriting it.
+
+### 23.3.7 Settings
+Stagnant-after days (default **90**) and expiry-warning days (default **60**).
+These are **your policy, not a system constant** — changing them must not need a
+release.
+
+## 23.4 Escalating: you must name one place
+
+An escalation targets **exactly one site or one warehouse**. Neither, or both,
+is refused.
+
+> A message aimed at everywhere is one nobody owns. An escalation that no
+> particular person is responsible for reading is worse than none, because it
+> looks like the problem was raised.
+
+Choose **who should act** — site/warehouse QC, the warehouse, or Logistics —
+and **what you are asking for**: a certificate, an inspection, or redistribution.
+The recipient gets it in their notification bell and on WhatsApp, and it is
+written to the log at the same moment.
+
+## 23.5 The daily alert
+
+Once a day the system sweeps for controlled material on hand with no
+certificate. Sites and warehouses get their own alert about their own material;
+the Head of Qualities gets **one aggregated message covering every location**.
+
+> **Why a separate message rather than a copy of theirs.** A notification is
+> visible when its site matches yours, and a Head of Qualities has no site — so
+> the per-site alerts are, correctly, invisible to them. One message naming six
+> locations is also the right shape for the job: six messages saying one thing
+> is how somebody responsible for all six learns to ignore them.
+
+## 23.6 Creating the account
+
+Admin Portal → **Users** → Add user → role **Head of Qualities**. The account
+takes **no site** — it is cross-site by definition, and binding it to one would
+contradict the reason it exists. It cannot be self-registered.
 
 ---
 
