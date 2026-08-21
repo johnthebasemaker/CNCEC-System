@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .auth import require_level
 from .db import get_session
 from .services import emailer
+from .services import idempotency as idem
 from .services import procurement
 from .services import warehouse as wh
 
@@ -34,6 +35,11 @@ class CreatePOIn(BaseModel):
     # the PO keeps the scan its figures were read from. Validated in the
     # service (right doc_type, uploaded by this caller), never trusted.
     source_attachment_id: Optional[int] = None
+    # Which submitted PR lines this PO covers. Empty = all of them, which is
+    # what every caller before slice 8c meant. A PR may carry several POs
+    # (partial fulfilment, operator ruling Q7), so the lines NOT listed here
+    # stay `submitted` and remain available to the next PO.
+    line_ids: list[int] = Field(default_factory=list, max_length=500)
 
 
 class AssignIn(BaseModel):
@@ -81,18 +87,37 @@ async def pr_lines(pr_number: str, site_id: Optional[str] = None,
 
 @router.post("/pos", status_code=201, summary="Create a PO from a submitted PR")
 async def create_po(body: CreatePOIn = Body(...),
+                    idempotency_key: Optional[str] = Header(
+                        default=None, alias="Idempotency-Key"),
                     user: dict = Depends(require_level(3)),
                     session: AsyncSession = Depends(get_session)):
+    """Raise a PO over some or all of a PR's submitted lines (slice 8c).
+
+    `line_ids` selects which lines this PO covers; omitting it takes all of
+    them. A PR may carry SEVERAL POs — partial fulfilment splits one request
+    across vendors or deliveries (operator ruling Q7) — so the lock is per
+    LINE, not per PR: lines this PO does not cover stay `submitted` and remain
+    available to the next one."""
     try:
         async with session.begin():
+            prior = await idem.claim(session, key=idempotency_key,
+                                     action="logistics_create_po",
+                                     body=body.model_dump(),
+                                     username=user["username"])
+            if prior is not None:
+                return prior
             res = await procurement.create_po_from_pr(
                 session, username=user["username"], pr_number=body.pr_number,
                 site_id=body.site_id, po_number=body.po_number,
                 vendor_code=body.vendor_code, vendor_name=body.vendor_name,
                 expected_delivery=body.expected_delivery,
-                source_attachment_id=body.source_attachment_id)
-        if res.get("error"):
-            raise HTTPException(409, res["error"])
+                source_attachment_id=body.source_attachment_id,
+                line_ids=body.line_ids)
+            if res.get("error"):
+                raise HTTPException(409, res["error"])
+            await idem.finish(session, key=idempotency_key,
+                              action="logistics_create_po",
+                              username=user["username"], result=res)
         return res
     except HTTPException:
         raise
@@ -132,16 +157,31 @@ async def po_items(po_number: str, session: AsyncSession = Depends(get_session))
 
 @router.post("/pos/{po_number}/assign", summary="Assign a PO to a warehouse")
 async def assign(po_number: str, body: AssignIn = Body(...),
+                 idempotency_key: Optional[str] = Header(
+                     default=None, alias="Idempotency-Key"),
                  user: dict = Depends(require_level(3)),
                  session: AsyncSession = Depends(get_session)):
+    """One PO, one warehouse. Re-assignment is refused, not replaced — moving
+    a PO another warehouse has already been told to expect is a decision, not
+    a correction, and there is no route for it."""
     try:
         async with session.begin():
+            prior = await idem.claim(session, key=idempotency_key,
+                                     action="logistics_assign_po",
+                                     body={"po_number": po_number,
+                                           **body.model_dump()},
+                                     username=user["username"])
+            if prior is not None:
+                return prior
             res = await procurement.assign_po(
                 session, username=user["username"], po_number=po_number,
                 warehouse_id=body.warehouse_id, expected_delivery=body.expected_delivery,
                 notes=body.notes or "")
-        if res.get("error"):
-            raise HTTPException(409, res["error"])
+            if res.get("error"):
+                raise HTTPException(409, res["error"])
+            await idem.finish(session, key=idempotency_key,
+                              action="logistics_assign_po",
+                              username=user["username"], result=res)
         return res
     except HTTPException:
         raise

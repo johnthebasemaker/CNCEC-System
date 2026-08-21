@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { idemHeaders, type IdempotencyKey } from './idempotency'
 import { api, deliveryHeaders, fetchList } from './client'
 import { postWithOfflineFallback } from '../offline/queue'
 import type { Health, InventorySummary, ListResponse, Row } from './client'
@@ -322,11 +323,20 @@ export function useHodPrs(siteId?: string) {
   })
 }
 
-export function useCreatePr() {
+// The four procurement mutations carry an Idempotency-Key so a double-click or
+// a retry after a dropped connection resolves to ONE order rather than two.
+// The key is minted per form mount and rotated on success — see
+// api/idempotency.ts for why both halves of that matter.
+export function useCreatePr(idem?: IdempotencyKey) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: Row) => api.post('/hod/prs', body).then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['/hod/prs'] }),
+    mutationFn: (body: Row) => api.post('/hod/prs', body, {
+      headers: idemHeaders(idem?.current() ?? ''),
+    }).then((r) => r.data),
+    onSuccess: () => {
+      idem?.rotate()
+      qc.invalidateQueries({ queryKey: ['/hod/prs'] })
+    },
   })
 }
 
@@ -356,12 +366,16 @@ export function useRenamePr() {
   })
 }
 
-export function useSubmitPr() {
+export function useSubmitPr(idem?: IdempotencyKey) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ pr, site }: { pr: string; site: string }) =>
-      api.post(`/hod/prs/${pr}/submit`, null, { params: { site_id: site } }).then((r) => r.data),
+      api.post(`/hod/prs/${pr}/submit`, null, {
+        params: { site_id: site },
+        headers: idemHeaders(idem?.current() ?? ''),
+      }).then((r) => r.data),
     onSuccess: () => {
+      idem?.rotate()
       qc.invalidateQueries({ queryKey: ['/hod/prs'] })
       qc.invalidateQueries({ queryKey: ['/logistics/prs'] })
     },
@@ -533,11 +547,14 @@ export function usePoItems(po: string | null) {
   })
 }
 
-export function useCreatePo() {
+export function useCreatePo(idem?: IdempotencyKey) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: Row) => api.post('/logistics/pos', body).then((r) => r.data),
+    mutationFn: (body: Row) => api.post('/logistics/pos', body, {
+      headers: idemHeaders(idem?.current() ?? ''),
+    }).then((r) => r.data),
     onSuccess: () => {
+      idem?.rotate()
       for (const k of ['/logistics/prs', '/logistics/pos', '/hod/prs']) {
         qc.invalidateQueries({ queryKey: [k] })
       }
@@ -545,12 +562,17 @@ export function useCreatePo() {
   })
 }
 
-export function useAssignPo() {
+export function useAssignPo(idem?: IdempotencyKey) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ po, body }: { po: string; body: Row }) =>
-      api.post(`/logistics/pos/${po}/assign`, body).then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['/logistics/pos'] }),
+      api.post(`/logistics/pos/${po}/assign`, body, {
+        headers: idemHeaders(idem?.current() ?? ''),
+      }).then((r) => r.data),
+    onSuccess: () => {
+      idem?.rotate()
+      qc.invalidateQueries({ queryKey: ['/logistics/pos'] })
+    },
   })
 }
 

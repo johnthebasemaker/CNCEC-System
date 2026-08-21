@@ -14,7 +14,7 @@ import datetime as _dt
 import io
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select, text, update
@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import require_level, resolve_site_param, site_scope
 from .db import get_session
-from .services import ledger, procurement
+from .services import idempotency as idem, ledger, procurement
 from .services import warehouse as wh
 from .services.notifications import dispatch, notify
 from .stock import SQL_SITE_STOCK
@@ -505,8 +505,16 @@ async def hod_pr_list(site_id: Optional[str] = None,
 
 @router.post("/prs", status_code=201, summary="Create a site PR (draft) from lines")
 async def hod_pr_create(body: CreatePRIn = Body(...),
+                        idempotency_key: Optional[str] = Header(
+                            default=None, alias="Idempotency-Key"),
                         user: dict = Depends(require_level(2)),
                         session: AsyncSession = Depends(get_session)):
+    """Idempotent when the caller sends `Idempotency-Key` (slice 8c).
+
+    The key is claimed inside the SAME transaction as the work, so a
+    double-clicked Create does not raise two purchase requests: the second
+    request blocks on the first's uncommitted claim and then replays its
+    answer. See services/idempotency.py."""
     if not body.lines:
         raise HTTPException(422, "add at least one line")
     # A site-scoped HOD may only raise PRs for their own site.
@@ -515,14 +523,23 @@ async def hod_pr_create(body: CreatePRIn = Body(...),
         raise HTTPException(403, "you may only create PRs for your own site")
     try:
         async with session.begin():
+            prior = await idem.claim(session, key=idempotency_key,
+                                     action="hod_pr_create",
+                                     body=body.model_dump(),
+                                     username=user["username"])
+            if prior is not None:
+                return prior
             res = await procurement.create_pr(
                 session, username=user["username"], site_id=body.site_id,
                 lines=[ln.model_dump() for ln in body.lines],
                 supplier=body.supplier, notes=body.notes,
                 delivery_date=body.delivery_date,
                 source_attachment_id=body.source_attachment_id)
-        if res.get("error"):
-            raise HTTPException(409, res["error"])
+            if res.get("error"):
+                raise HTTPException(409, res["error"])
+            await idem.finish(session, key=idempotency_key,
+                              action="hod_pr_create",
+                              username=user["username"], result=res)
         return res
     except HTTPException:
         raise
@@ -577,16 +594,32 @@ async def hod_pr_rename(pr_number: str, body: PrRenameIn = Body(...),
 
 @router.post("/prs/{pr_number}/submit", summary="Submit a PR to Logistics")
 async def hod_pr_submit(pr_number: str, site_id: str,
+                        idempotency_key: Optional[str] = Header(
+                            default=None, alias="Idempotency-Key"),
                         user: dict = Depends(require_level(2)),
                         session: AsyncSession = Depends(get_session)):
+    """A second submit is refused, not silently repeated (slice 8c).
+
+    It used to accept lines that were ALREADY submitted, so a double-click
+    rewrote the timestamp and fired a second `pr_submitted_to_logistics`
+    notification — Logistics saw one PR arrive twice with no way to tell which
+    was real."""
     scope = site_scope(user)
     if scope is not None and site_id != scope:
         raise HTTPException(403, "you may only submit PRs for your own site")
     async with session.begin():
+        prior = await idem.claim(session, key=idempotency_key,
+                                 action="hod_pr_submit",
+                                 body={"pr_number": pr_number, "site_id": site_id},
+                                 username=user["username"])
+        if prior is not None:
+            return prior
         res = await procurement.submit_pr(session, username=user["username"],
                                           pr_number=pr_number, site_id=site_id)
-    if res.get("error"):
-        raise HTTPException(409, res["error"])
+        if res.get("error"):
+            raise HTTPException(409, res["error"])
+        await idem.finish(session, key=idempotency_key, action="hod_pr_submit",
+                          username=user["username"], result=res)
     return res
 
 

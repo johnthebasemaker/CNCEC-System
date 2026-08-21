@@ -1472,6 +1472,61 @@ class PoItems(Base):
     close_reason = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
+class PrRegistry(Base):
+    """One row per PR NUMBER — the place the number can be unique.
+
+    `pr_master` cannot carry that constraint: a PR is many lines, so the number
+    repeats by design. Without a table where it appears once, `_next_pr_number`
+    was a read-then-write with nothing behind it, and two HODs creating a PR in
+    the same second both read the same last number and both wrote the next one.
+    From then on two different purchase requests are ONE PR to every query in
+    the system, and nothing ever raised.
+
+    The number is the primary key, so the database decides who got it. The
+    generator inserts and retries on conflict rather than trusting what it read.
+
+    ⚠️ KEYED ON THE NUMBER ALONE, not (number, site). That is deliberate: a PR
+    number that means one thing at CNCEC and another at a second site is
+    exactly the collision this exists to make impossible, and `Site_ID` here
+    records where the number was issued rather than being part of its identity.
+    """
+    __tablename__ = "pr_registry"
+    PR_Number = Column(Text, primary_key=True)
+    Site_ID = Column(Text, nullable=False)
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+
+class ProcurementIdempotency(Base):
+    """A retry is not a second order.
+
+    Four actions in the procurement chain are dangerous to repeat: creating a
+    PR, submitting it, raising a PO and assigning one. A double-click, a flaky
+    network retry or a stale tab sends the same request twice, and the second
+    one is a second purchase request or a second warehouse told to expect the
+    same goods.
+
+    The key is CLAIMED before the work (`result_json = ''`) and filled in after,
+    so two concurrent requests carrying one key serialise on the primary key
+    instead of racing. A second request that arrives while the first is still
+    in flight is told to wait — never handed an answer that does not exist yet.
+
+    `body_hash` is what separates a retry from a bug: the same key with a
+    DIFFERENT body is a client error, and replaying the first answer would hide
+    it behind a success.
+    """
+    __tablename__ = "procurement_idempotency"
+    idem_key = Column(Text, primary_key=True)
+    action = Column(Text, nullable=False)
+    body_hash = Column(Text, nullable=False)
+    result_json = Column(Text, nullable=False, server_default=text("''"))
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        Index("ix_procurement_idem_action", "action", "created_at"),
+    )
+
+
 class PrMaster(Base):
     __tablename__ = "pr_master"
     id = Column(Integer, primary_key=True, autoincrement=True)

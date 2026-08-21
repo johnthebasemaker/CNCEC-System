@@ -1740,6 +1740,104 @@ on nine concrete rows and ME on nineteen tank/vessel rows.
 
 ---
 
+## 14j. Procurement locks (Phase 8 · slice 8c)
+
+> Added 2026-08-22 (branch `feat/phase8-procurement-lock`). Rule 13.
+> Alembic `a9f2c6b40d18`.
+
+Three things that used to succeed **silently**: two PRs with one number, a
+second submit, and a second PO over the same lines.
+
+### 14j.1 The PR number is reserved, not guessed
+
+`_next_pr_number` read the newest row and added one — no lock, and
+`pr_master."PR_Number"` cannot be unique because a PR is *many lines*. Two HODs
+creating a PR in the same second both got `0004`, and from then on two
+different purchase requests were **one PR** to every query in the system.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-PRN-01** | Create several PRs at the same instant | Distinct numbers. `pr_registry` holds the number **once**, so the database decides who got it. |
+| **TC-PRN-02** | Check `pr_registry` after each create | One row per number, stamped with the site and the user. |
+| **TC-PRN-03** | Rename a draft PR | The reservation **moves with it**. Leaving it behind would reserve the old number forever and the new one not at all. |
+| **TC-PRN-04** | Rename onto a number that exists in `pr_master` but was never registered (an import, a fixture) | Refused. The check reads **both** tables: the registry knows what is *reserved*, `pr_master` knows what *exists*, and each catches what the other cannot. |
+
+### 14j.2 State transitions are read, attempted, and asserted
+
+```
+site_draft ──submit──> submitted ──po_raised──> in_po ──> closed
+```
+
+Every transition reads the current state, updates `WHERE state = <expected>`,
+and treats `rowcount == 0` as an **error**. Both halves are needed: the read
+alone loses a race, and the UPDATE alone cannot say *why* it matched nothing.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-PST-01** | Submit a draft PR | 200. |
+| **TC-PST-02** | Submit it **again** | 409 naming the state it found. It used to accept already-submitted lines, rewrite the timestamp and fire a **second** notification. |
+| **TC-PST-03** | Count `pr_submitted_to_logistics` for that PR | **Exactly one.** Counting the notification is what catches this — the refusal alone does not. |
+| **TC-PST-04** | Raise a PO over a PR nobody submitted | 409, naming what the PR actually holds ("2 line(s) site_draft"), not "no eligible lines". |
+
+### 14j.3 ⚠️ A PR may carry SEVERAL POs — the lock is per LINE
+
+Operator ruling Q7. Partial fulfilment splits one request across vendors or
+deliveries, so **one PO per PR is not the rule** and `uq_po_per_pr` was
+deliberately dropped from the design.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-PO-01** | Create a PO with `line_ids` covering *some* of a PR's lines | Created. The lines not covered stay `submitted`. |
+| **TC-PO-02** | Create a second PO over the remaining lines | Created. **Two POs against one PR is legal.** |
+| **TC-PO-03** | Create a third PO over a line that is already on one | 409. That line is spoken for. |
+| **TC-PO-04** | Omit `line_ids` | Takes every submitted line — what every caller before 8c meant. |
+| **TC-PO-05** | Check the lines afterwards | They really moved to `in_po`. The flip used to be an UPDATE whose rowcount nobody read, so a second PO matched zero rows and **passed**. |
+
+### 14j.4 Idempotency: a retry is not a second order
+
+Send `Idempotency-Key: <uuid>` on `POST /hod/prs`, `/hod/prs/{n}/submit`,
+`/logistics/pos`, `/logistics/pos/{n}/assign`.
+
+| ID | Do this | Expected |
+|---|---|---|
+| **TC-IDEM-01** | Same key, same body, twice | The second **replays** the first answer with `"replayed": true`. |
+| **TC-IDEM-02** | Count the rows afterwards | **One** PR, not two. The status code alone would pass either way — count the side effect. |
+| **TC-IDEM-03** | Same key, **different** body | **409.** That is a client bug, and replaying the first answer would hide it behind a success. |
+| **TC-IDEM-04** | New key, same body | A new PR. Asking twice on purpose is allowed. |
+| **TC-IDEM-05** | No header at all | Works. The guard is opt-in, so an existing integration is not broken by adding it. |
+| **TC-IDEM-06** | The same key as another **user** | Not replayed. Keys are scoped by user *and* action — a UUID from one browser cannot replay another account's order. |
+| **TC-IDEM-07** | Repeat while the first is still in flight | 409 "still being processed" — never an answer that does not exist yet. |
+
+> **Why claim-then-fill.** The key is written *before* the work and filled in
+> after. Checking first and writing later would leave the whole window between
+> them open to the very double-click this exists to stop.
+
+### 14j.5 The buttons are hidden, not disabled
+
+| ID | Where | Expected |
+|---|---|---|
+| **TC-BTN-01** | HOD → Purchase Requests, a PR with no draft lines left | **Submit to Logistics is gone**, replaced by the state. A greyed-out button invites "why can't I?"; the state beside it already answers. |
+| **TC-BTN-02** | A PR holding **both** draft and submitted lines | Submit still shows. The gate reads the **draft line count**, never the aggregated status — that field is a lexicographic `MAX`, so a mixed PR reports `submitted` and would hide a button that still has work. |
+| **TC-BTN-03** | Logistics → Purchase Orders, an assigned PO | **Assign is gone**, replaced by the warehouse. |
+| **TC-BTN-04** | Double-click any of the four | One order. The key is minted per **form mount** and retired on success: a key per *click* protects nothing, a key that never changes replays a genuinely new request. |
+
+### 14j.6 The migration surveys before it writes
+
+**TC-MIG-01** — `pr_registry."PR_Number"` is the primary key, so a number issued
+at two different sites cannot be represented. The migration **raises with the
+list** rather than half-applying:
+
+```
+1 PR number(s) are used at more than one site and cannot enter a registry
+keyed on the number alone: SURVEY-CLASH at SITE-A, SITE-B. Rename one side …
+```
+
+Which of two real purchase requests keeps the number is a commercial decision,
+not something a migration may pick. **TC-MIG-02** — confirm a refused run wrote
+nothing, and that a clean re-run is idempotent.
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

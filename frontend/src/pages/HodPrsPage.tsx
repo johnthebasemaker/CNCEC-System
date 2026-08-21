@@ -10,6 +10,7 @@ import { DownloadOutlined, EditOutlined, InboxOutlined, MinusCircleOutlined, Plu
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../api/client'
 import { downloadPrPdf, useAutoDraftPr, useCreatePr, useEditPrLine, useHodPrLines, useHodPrs, useInventoryMaster, useRenamePr, useSites, useSubmitPr } from '../api/hooks'
+import { useIdempotencyKey } from '../api/idempotency'
 import type { Row as ApiRow } from '../api/client'
 
 function errMsg(e: unknown): string {
@@ -37,7 +38,8 @@ function NewPr() {
   const [form] = Form.useForm<PrFormValues>()
   const { data: sites } = useSites()
   const inventory = useInventoryMaster()
-  const create = useCreatePr()
+  const createIdem = useIdempotencyKey()
+  const create = useCreatePr(createIdem)
   const autoDraft = useAutoDraftPr()
   const siteWatch = Form.useWatch('site_id', form)
 
@@ -172,7 +174,8 @@ function ImportPrPdf() {
   const { data: sites } = useSites()
   const [preview, setPreview] = useState<PrPreview | null>(null)
   const [site, setSite] = useState<string | undefined>(user?.site_id || undefined)
-  const create = useCreatePr()
+  const scanIdem = useIdempotencyKey()
+  const create = useCreatePr(scanIdem)
 
   const patchQty = (i: number, v: number | null) =>
     setPreview((p) => p && ({
@@ -337,7 +340,10 @@ function PrQueue() {
   const { data: sites } = useSites()
   const [siteId, setSiteId] = useState<string | undefined>(undefined)
   const { data: rows, isFetching } = useHodPrs(siteId)
-  const submit = useSubmitPr()
+  // One key per mount, retired on success — a double-click sends the SAME
+  // key and resolves to one submission. See api/idempotency.ts.
+  const submitIdem = useIdempotencyKey()
+  const submit = useSubmitPr(submitIdem)
   const rename = useRenamePr()
   const [renaming, setRenaming] = useState<ApiRow | null>(null)
   const [newPr, setNewPr] = useState('')
@@ -375,12 +381,26 @@ function PrQueue() {
       key: '__act',
       render: (_: unknown, r: ApiRow) => (
         <Space>
-          {r.logistics_status === 'in_po' ? (
-            <Typography.Text type="secondary">in PO</Typography.Text>
-          ) : (
+          {/* HIDDEN, not disabled, once every line has moved on. The API
+              refuses a second submit outright (it used to accept it and fire a
+              SECOND notification to Logistics), and this is the half that
+              stops the click. A greyed-out button invites "why can't I?"; the
+              state beside it already answers.
+
+              Gated on the DRAFT LINE COUNT, never on the aggregated status —
+              that field is a lexicographic MAX, so a PR holding both draft and
+              submitted lines reports 'submitted' and would hide a button that
+              still has work to do. */}
+          {Number(r.draft_lines ?? 0) > 0 ? (
             <Popconfirm title="Submit this PR to Logistics?" onConfirm={() => doSubmit(r)}>
               <Button size="small" type="primary">Submit to Logistics</Button>
             </Popconfirm>
+          ) : (
+            <Typography.Text type="secondary">
+              {Number(r.in_po_lines ?? 0) > 0 && !Number(r.submitted_lines ?? 0)
+                ? 'in PO'
+                : 'submitted'}
+            </Typography.Text>
           )}
           <Button
             size="small"

@@ -706,6 +706,53 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-22 — Phase 8 slice 8c (`feat/phase8-procurement-lock`).**
+> Baselines move to **service tests 1,751** (+26, suite CG) and alembic head
+> **`a9f2c6b40d18`**; E2E 96, legacy 599, parity 1,313, UI math 33, nav 47
+> unchanged.
+>
+> **Four additions to the LOCKED set:**
+>
+> * **A PR NUMBER IS RESERVED, NOT GUESSED.** `pr_registry` is the table where
+>   the number appears ONCE and can carry a primary key — `pr_master` cannot,
+>   because a PR is many lines. `_next_pr_number` inserts and retries on
+>   conflict, and it scans BOTH tables for the highest number: the registry
+>   knows what is reserved (including a number whose lines are not written
+>   yet), `pr_master` knows what exists (including rows an import wrote that
+>   were never registered). `rename_pr` moves the reservation with the PR and
+>   checks both tables for the collision.
+>
+> * **EVERY TRANSITION IS READ, ATTEMPTED, AND ASSERTED.** Read the state,
+>   `UPDATE ... WHERE state = <expected>`, and treat `rowcount == 0` as an
+>   ERROR. Both halves are needed — the read alone loses a race and the UPDATE
+>   alone cannot say why it matched nothing. `submit_pr` used to accept lines
+>   that were ALREADY submitted and fire a second notification to Logistics;
+>   `create_po_from_pr` flipped the PR with an UPDATE whose rowcount nobody
+>   read, so a second PO over the same lines matched zero rows and passed.
+>
+> * **THE PO LOCK IS PER LINE, NOT PER PR** (operator ruling Q7). A PR may
+>   carry several POs — partial fulfilment splits one request across vendors or
+>   deliveries — so `create_po_from_pr` takes `line_ids`; omitting them means
+>   all submitted lines, which is what every earlier caller meant. **There is
+>   deliberately no `uq_po_per_pr`**; it would make partial fulfilment
+>   unrepresentable.
+>
+> * **A RETRY IS NOT A SECOND ORDER.** `Idempotency-Key` on the four dangerous
+>   actions. The key is CLAIMED before the work and filled in after, so
+>   concurrent duplicates serialise on the primary key; checking first and
+>   writing later would leave the whole window open to the double-click it
+>   exists to stop. Same key + same body replays; same key + DIFFERENT body is
+>   409 (a client bug, not a retry); in-flight is 409, never a fabricated
+>   answer. Keys are scoped by user AND action. On the client the key is minted
+>   per FORM MOUNT and retired on success — per click it protects nothing, and
+>   never rotating replays a genuinely new request.
+>
+> ⚠️ **Buttons are HIDDEN, not disabled**, once their state has moved on, and
+> the Submit gate reads the DRAFT LINE COUNT rather than the aggregated
+> `logistics_status` — that field is a lexicographic `MAX`, so a PR holding
+> both draft and submitted lines reports `submitted` and would hide a button
+> that still has work to do.
+
 > **Updated 2026-08-21 — Phase 8 slice 8b (`feat/phase8-planner-ux`).**
 > Many jobs, one deadline. Baselines move to **service tests 1,725** (+27,
 > suite CF) and **E2E 96** (+6, `manpower-planner.spec.ts`); legacy 599,
