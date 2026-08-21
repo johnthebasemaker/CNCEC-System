@@ -658,6 +658,29 @@ async def main() -> int:
             if len(plan.get("rejects", [])) > 10:
                 print(f"      … {len(plan['rejects']) - 10} more rejects")
 
+            # Rows the DATABASE holds that this workbook does not name. The
+            # counts line above can only describe rows that ARRIVED, so before
+            # this a rename looked identical to a clean run: the new row was an
+            # insert, every other row matched, nothing was rejected, and the
+            # superseded row was never mentioned by anything. Printed one per
+            # line with its numbers, because "there is an orphan" is not
+            # actionable and "CV/ESC1/ESC1 'Blasting Civil PU Area' crew 3 @ 40
+            # /shift" is.
+            orphans = plan.get("orphans", [])
+            if orphans:
+                print(f"      ⚠ {len(orphans)} row(s) in the database that this "
+                      f"workbook does not name — NOT deleted:")
+                for o in orphans[:10]:
+                    print(f"        · id {o['id']}  {o['Type']}/"
+                          f"{o['Lining_System_Code']}/"
+                          f"{o['Execution_Sub_Activity_Code']}  "
+                          f"{o['Activity']!r}"
+                          + (f" [{o['Variant_Key']}]" if o.get("Variant_Key") else "")
+                          + f"  crew {o.get('Crew_Size')} @ "
+                            f"{o.get('Standard_Productivity_Per_Shift')} /shift")
+                if len(orphans) > 10:
+                    print(f"        … {len(orphans) - 10} more")
+
             # The ON CONFLICT safety net has a hole where the natural key is
             # NULLable — say so rather than implying full protection.
             if kind == "sme-recipes":
