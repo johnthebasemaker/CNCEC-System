@@ -11,9 +11,16 @@ import {
 } from '../harness/env'
 
 setup('mint per-role storage states', async ({ request }) => {
-  for (const [role, username] of Object.entries(USERS) as [Role, string][]) {
+  // ⚠️ ONE IP BUCKET PER ROLE, not one for the loop. Every login shared bucket
+  // '250', and the rate limiter is per bucket — so the list simply had to grow
+  // long enough (it hit the limit at eleven) for setup to start failing with a
+  // 429, which reads as "the new account is broken" rather than "the fixture
+  // out-grew its own bucket". A distinct bucket per role is also closer to the
+  // truth: these are different people on different machines.
+  const roles = Object.entries(USERS) as [Role, string][]
+  for (const [i, [role, username]] of roles.entries()) {
     const r = await request.post(`${API_URL}/auth/login`, {
-      headers: apiHeaders('250'),
+      headers: apiHeaders(String(200 + i)),
       data: { username, password: E2E_PASSWORD },
     })
     expect(r.status(), `login ${username} (${role})`).toBe(200)

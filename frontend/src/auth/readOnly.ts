@@ -19,7 +19,7 @@
 import type { User } from './AuthContext'
 
 /** Roles that may read but never write. Keep in step with READ_ONLY_ROLES. */
-export const READ_ONLY_ROLES = new Set(['auditor'])
+export const READ_ONLY_ROLES = new Set(['auditor', 'qc_hod'])
 
 export function isReadOnlyRole(role: string | undefined | null): boolean {
   return READ_ONLY_ROLES.has(String(role ?? ''))
@@ -49,6 +49,20 @@ const ALLOWED_PREFIXES = [
   '/ai/assistant', '/ai/query', '/ai/nl-search', '/ai/insights', '/ai/eod-summary',
 ]
 
+/**
+ * Per-role extras. `qc_hod` is read-only everywhere EXCEPT its own portal: it
+ * may raise an escalation, resolve one, and retune its own thresholds. Those
+ * three paths are the whole of what the role can change, and they mirror
+ * `_ROLE_PREFIXES` in backend/api/readonly.py.
+ *
+ * ⚠️ `/qc-hod/` is deliberately NOT a bare prefix. Opening the whole namespace
+ * would admit any future POST under it by accident, which is the fail-open
+ * shape both files exist to avoid.
+ */
+const ROLE_ALLOWED_PREFIXES: Record<string, string[]> = {
+  qc_hod: ['/qc-hod/escalations', '/qc-hod/settings', '/ai/assistant'],
+}
+
 /** Strip the /api or /api/v1 mount and any trailing slash or query string. */
 export function normalizePath(url: string): string {
   let p = String(url || '/').split('?')[0]
@@ -61,8 +75,15 @@ export function normalizePath(url: string): string {
   return p.startsWith('/') ? p : `/${p}`
 }
 
-export function isAllowedWrite(url: string): boolean {
+export function isAllowedWrite(url: string, role = 'auditor'): boolean {
   const p = normalizePath(url)
+  const extra = ROLE_ALLOWED_PREFIXES[role]
+  if (extra?.some((a) => p.startsWith(a))) return true
+  // The auditor's compute-only POSTs are not open to every read-only role;
+  // qc_hod has no business rendering an SME cascade.
+  if (role !== 'auditor') {
+    return ALLOWED_EXACT.has(p) && p.startsWith('/auth/')
+  }
   return ALLOWED_EXACT.has(p) || ALLOWED_PREFIXES.some((a) => p.startsWith(a))
 }
 
@@ -71,5 +92,5 @@ export function blocksRequest(role: string | null | undefined,
                               method: string, url: string): boolean {
   if (!isReadOnlyRole(role)) return false
   if (SAFE_METHODS.has(String(method || 'get').toLowerCase())) return false
-  return !isAllowedWrite(url)
+  return !isAllowedWrite(url, String(role ?? ''))
 }

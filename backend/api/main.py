@@ -73,6 +73,7 @@ from .stock import router as stock_router  # noqa: E402
 from .warehouse import router as warehouse_router  # noqa: E402
 from .dashboard import router as dashboard_router  # noqa: E402
 from .qc import router as qc_router  # noqa: E402
+from .qc_hod import router as qc_hod_router  # noqa: E402
 from .ppe import router as ppe_router  # noqa: E402
 from .employees import router as employees_router  # noqa: E402
 
@@ -131,7 +132,7 @@ ENTITIES = [
     {"name": "vendors",         "prefix": "/vendors",         "tag": "vendors",         "id_col": "id",       "site_col": None,       "read_roles": ["logistics"], "writable": True},
     # Warehouses are named on user accounts and on every DN, so the warehouse
     # portal and the admin user forms both need the list.
-    {"name": "warehouses",      "prefix": "/warehouses",      "tag": "warehouses",      "id_col": "id",       "site_col": None,       "read_roles": ["warehouse_user", "logistics"], "writable": True},
+    {"name": "warehouses",      "prefix": "/warehouses",      "tag": "warehouses",      "id_col": "id",       "site_col": None,       "read_roles": ["warehouse_user", "logistics", "qc_hod"], "writable": True},
 ]
 
 
@@ -293,6 +294,13 @@ app.include_router(receiving_router)
 # QSEP — Quality Control: accounts, site transfers, and the inspection ledger
 # whose approvals gate what a Store Keeper may issue (self-guarded per route).
 app.include_router(qc_router)
+
+# Phase 8 slice 8d — the Head of Qualities. Cross-site oversight of Surface
+# Shield material and nothing else: every route is require_roles("qc_hod"), and
+# every read is filtered to the controlled category in SQL. The role is level 2
+# with a NAMED cross-site exemption (auth.QC_OVERSIGHT_ROLES) precisely so its
+# surface is this file and not whatever require_level(<=3) happens to reach.
+app.include_router(qc_hod_router)
 
 # QSEP — PPE usable-time rules, per-person history and the 15-day order
 # forecast. There is deliberately NO issue endpoint here: PPE goes out

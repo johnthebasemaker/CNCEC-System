@@ -59,13 +59,19 @@ _ROLE_ALLOWED: dict[str, set[int]] = {
     # is its own; 4 and 15 are there because an inspector has to understand
     # the issue and the goods-in they sit between, not to let them do either.
     "qc":             {1, 2, 3, 4, 11, 12, 15, 21, 22},
+    # The Head of Qualities (2026-08-22) oversees Surface Shield across every
+    # site. Its chapters are orientation, the procurement chain the material
+    # travels down, the quality chapter and the data model — plus §23, its own.
+    # NOT the site role chapters: it does not issue, receive or approve, and
+    # operational how-tos it cannot perform would only mislead it.
+    "qc_hod":         {1, 2, 3, 9, 10, 11, 12, 16, 21, 22, 23},
     # The view-only Auditor (2026-08-03) reads across every site but can
     # open only Dashboard / Stock / Records / Reports / Lining Coverage.
     # Its chapters mirror exactly that: orientation, reporting, the data
     # model and the glossary. No role operational how-tos it could not
     # perform anyway, and not the hosting chapter.
     "auditor":        {1, 2, 3, 8, 9, 10, 11, 12, 16, 20, 21, 22},
-    "admin":          set(range(1, 23)),
+    "admin":          set(range(1, 24)),
 }
 
 _SECTION_TITLES = {
@@ -91,6 +97,7 @@ _SECTION_TITLES = {
     20: "Auditor (View-Only) Manual",
     21: "2026-08 Feature Update",
     22: "Quality, Safety, Employees & Procurement (QSEP)",
+    23: "Quality Oversight (Head of Qualities) Manual",
 }
 
 
@@ -184,6 +191,7 @@ _ROLE_LABEL = {
     "logistics": "Logistics Coordinator",
     "warehouse_user": "Warehouse Operator",
     "qc": "Quality Control Inspector",
+    "qc_hod": "Head of Qualities",
     "admin": "Administrator",
     "auditor": "Auditor (view-only)",
 }
@@ -196,6 +204,7 @@ _ROLE_REFUSAL = {
     "logistics": "That's outside the Logistics Portal — please ask your Admin.",
     "warehouse_user": "That's outside the Warehouse Portal — please ask your Admin.",
     "qc": "That's outside the Quality section — please ask your HOD.",
+    "qc_hod": "That's outside Quality oversight — please ask your Admin.",
     "admin": "I can't find that in the manual. Check the source markdown in USER_MANUAL.md.",
     "auditor": "That's outside the read-only Auditor view — please ask your Admin.",
 }

@@ -195,15 +195,17 @@ export default async function globalSetup() {
     "INSERT INTO receipts (\"Date\", \"SAP_Code\", \"Quantity\", \"Site_ID\", \"Received_by\") "
     + "VALUES (CURRENT_DATE::text, 'E2EPPE-1', 50, 'CNCEC', 'e2e-setup')", E2E_DB)
 
-  // ── 1f. the last two roles, for the RBAC matrix ──────────────────────────
-  // The legacy data has no warehouse_user and no auditor to log in as, so the
-  // matrix spec could otherwise only assert six of the eight roles — and these
-  // two are the ones the 2026-08-12 pass changed most. A warehouse user is
-  // warehouse-bound with NO site; an auditor is global and view-only.
+  // ── 1f. the roles the legacy data has nobody for ─────────────────────────
+  // The legacy data has no warehouse_user, auditor or Head of Qualities to log
+  // in as, so the matrix spec could otherwise only assert six of the nine roles
+  // — and those are the ones the RBAC passes changed most. A warehouse user is
+  // warehouse-bound with NO site; an auditor is global and view-only; a Head of
+  // Qualities is global, view-mostly, and scoped to one material category.
   psql(
     "INSERT INTO users (username, password_hash, role, \"Site_ID\", \"Warehouse_ID\") "
     + "VALUES ('e2e_wh','x','warehouse_user',NULL,'WH-01'), "
-    + "('e2e_auditor','x','auditor',NULL,NULL) "
+    + "('e2e_auditor','x','auditor',NULL,NULL), "
+    + "('e2e_qc_hod','x','qc_hod',NULL,NULL) "
     + "ON CONFLICT (username) DO UPDATE SET role = excluded.role, "
     + "\"Site_ID\" = excluded.\"Site_ID\", \"Warehouse_ID\" = excluded.\"Warehouse_ID\"",
     E2E_DB)

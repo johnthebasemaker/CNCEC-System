@@ -30,7 +30,7 @@ export const E2E_PASSWORD = 'E2ePlaywright!2026'
 export type Role =
   | 'admin' | 'hod' | 'sk' | 'supervisor' | 'logistics'
   | 'warehouse' | 'auditor'
-  | 'qc' | 'qcwh' | 'qcnone'
+  | 'qc' | 'qcwh' | 'qcnone' | 'qchod'
 export const USERS: Record<Role, string> = {
   admin: 'admin', // global admin
   hod: 'hod', // head_of_department @ CNCEC
@@ -52,6 +52,9 @@ export const USERS: Record<Role, string> = {
   qc: 'e2e_qc', // site-bound   @ CNCEC
   qcwh: 'e2e_qc_wh', // warehouse-bound @ WH-01
   qcnone: 'e2e_qc_none', // NEITHER — must see nothing, never everything
+  // Phase 8 slice 8d. Cross-site by definition, so NO site and NO warehouse —
+  // binding it to one would contradict the reason the role exists.
+  qchod: 'e2e_qc_hod', // Head of Qualities, global, Surface Shield only
 }
 
 // Site and warehouse the QC fixtures are pinned to. Specs assert against these

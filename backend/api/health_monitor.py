@@ -702,6 +702,45 @@ async def dispatch_missing_mtc(session: AsyncSession, *, force: bool = False) ->
                 related_table="mtc_documents", related_ref=f"mtc-daily:{place}",
                 created_by="health-monitor")
             sent += 1
+
+    # ── the Head of Qualities: ONE unscoped message, not one per place ───────
+    #
+    # ⚠️ THE ALERTS ABOVE CANNOT REACH A qc_hod, AND THE REASON IS THE
+    # VISIBILITY RULE, NOT THE RECIPIENT LIST. A notification is visible when
+    #
+    #     recipient_role = role
+    #     AND (recipient_site IS NULL OR recipient_site = site)
+    #
+    # and every message above sets `recipient_site` to a specific place. A
+    # Head of Qualities carries site_id '' — it is cross-site by design — so
+    # 'SITE-A' != '' and the row is invisible to them. Adding 'qc_hod' to
+    # `_MTC_ALERT_ROLES` would have looked right, changed nothing, and left the
+    # bell empty while the condition it describes was live at six sites.
+    #
+    # Relaxing the visibility rule is NOT the fix: it would leak every
+    # site-scoped notification to every unscoped role. A second dispatch with
+    # `recipient_site=None` is, and it is the right SHAPE for oversight anyway
+    # — six messages saying one thing is how somebody responsible for all six
+    # sites learns to ignore them.
+    if rows:
+        listed = ", ".join(
+            f"{place} ({len(found)})" for (where, place), found
+            in sorted(places.items()))
+        await dispatch(
+            session, event_key="mtc_missing_daily_oversight", severity="warning",
+            recipient_role="qc_hod", wa_template="action_required",
+            title=(f"Surface Shield without MTC — {len(rows)} material(s) "
+                   f"across {len(places)} location(s)"),
+            body=(f"{len(rows)} Surface Shield material(s) are on hand with no "
+                  f"Material Test Certificate: {listed}. None of it can be "
+                  f"issued to the field until the certificates are uploaded. "
+                  f"Open Quality Oversight to see the register and chase the "
+                  f"site, the warehouse or Logistics."),
+            link_page="/qc-hod", related_table="mtc_documents",
+            related_ref=f"mtc-daily-oversight:{_dt.date.today().isoformat()}",
+            created_by="health-monitor")
+        sent += 1
+
     return {"dispatched": sent, "materials": len(rows), "places": len(places)}
 
 

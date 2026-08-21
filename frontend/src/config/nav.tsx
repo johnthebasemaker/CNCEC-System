@@ -284,7 +284,7 @@ export const NAV: NavGroup[] = [
     // just refused them. Only the two write pages carry `writes`.
     id: 'quality',
     label: 'Quality',
-    access: { anyRole: ['qc', 'hod', 'logistics', 'warehouse_user', 'store_keeper', 'auditor'] },
+    access: { anyRole: ['qc', 'qc_hod', 'hod', 'logistics', 'warehouse_user', 'store_keeper', 'auditor'] },
     children: [
       // Not marked `writes`, deliberately: reading the inspection queue is a
       // read, and the Approve/Reject controls inside are gated separately
@@ -297,6 +297,15 @@ export const NAV: NavGroup[] = [
       {
         key: '/qc/accounts', label: 'QC Accounts', icon: <TeamOutlined />,
         access: w({ anyRole: ['hod', 'logistics', 'warehouse_user'] }),
+      },
+      {
+        // The Head of Qualities' whole portal (Phase 8 slice 8d). NOT marked
+        // `writes`: the page is a set of read tabs, and its one mutating
+        // control — raising an escalation — is what the role EXISTS to do.
+        // Marking it would hide the page from the very account it is for.
+        key: '/qc-hod', label: 'Quality Oversight',
+        icon: <SafetyCertificateOutlined />,
+        access: { anyRole: ['qc_hod'] },
       },
     ],
   },
@@ -405,6 +414,7 @@ export const PRIMARY_GROUP: Record<string, string> = {
   hod: 'hod',
   logistics: 'logistics',
   qc: 'quality',
+  qc_hod: 'quality',
   admin: 'admin',
 }
 
@@ -420,6 +430,9 @@ export const ROLE_HOME: Record<string, string> = {
   logistics: '/logistics',
   // A quality inspector's whole job is the queue, so that is the landing page.
   qc: '/qc/inspections',
+  // The Head of Qualities lands on their own dashboard — the ordinary
+  // Dashboard is site-shaped and shows them nothing they are responsible for.
+  qc_hod: '/qc-hod',
   admin: '/admin/console',
 }
 

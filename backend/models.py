@@ -2209,6 +2209,73 @@ class QcTransferRequests(Base):
     decision_notes = Column(Text)
 
 
+class QcEscalations(Base):
+    """A Head of Qualities asking somebody who CAN act, to act.
+
+    The role reads across every site and writes almost nothing — this table is
+    the almost. It is the only thing a `qc_hod` may create, and every row is a
+    message, never a change to stock, an inspection decision or a document.
+
+    ⚠️ IT IS A LOG, NOT A FIRE-AND-FORGET NOTIFICATION. "Send the site QC a
+    reminder about the missing MTC" is trivially a `dispatch()` call; what that
+    cannot answer is *how long has this been chased, and by whom*. Uncertified
+    Surface Shield is a standing condition, so the second and third chase are
+    the ones that matter, and they only exist if the first was written down.
+
+    ⚠️ THE TARGET IS A SPECIFIC PLACE (operator ruling Q12). Exactly one of
+    `target_site` / `target_warehouse` is set. A broadcast to every site QC
+    about one site's material is the kind of message people learn to ignore,
+    and an escalation nobody reads is worse than none — it looks like the
+    problem was raised.
+    """
+    __tablename__ = "qc_escalations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    raised_by = Column(Text, nullable=False)
+    target_role = Column(Text, nullable=False)      # qc | warehouse_user | logistics
+    target_site = Column(Text)                      # exactly one of these two
+    target_warehouse = Column(Text)
+    # mtc_demand | inspection_request | transfer_suggestion
+    kind = Column(Text, nullable=False)
+    SAP_Code = Column(Text)
+    Material_Code = Column(Text)
+    Lot_Number = Column(Text)
+    PO_Number = Column(Text)
+    message = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'open'"))
+    resolved_by = Column(Text)
+    resolved_at = Column(DateTime)
+    resolution_note = Column(Text)
+    # The app_notifications row this actually sent. Without it "I raised it" and
+    # "they were told" are two different claims with nothing joining them.
+    notification_id = Column(Integer)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        Index("ix_qc_escalations_open", "status", "kind", "created_at"),
+    )
+
+
+class QcStagnationRules(Base):
+    """When controlled material has sat too long, per category.
+
+    A TABLE and not a constant, for the same reason the overtime thresholds are
+    (`mh_ot_threshold_*`): 90 days is the operator's policy, not the system's,
+    and changing a policy must not be a code change. Seeded at 90 days without
+    movement and 60 days to expiry (operator ruling Q9) so the settings page
+    shows a real number on a fresh box rather than an empty form.
+    """
+    __tablename__ = "qc_stagnation_rules"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Category = Column(Text, nullable=False)
+    stagnant_days = Column(Integer, nullable=False, server_default=text('90'))
+    expiry_warn_days = Column(Integer, nullable=False, server_default=text('60'))
+    status = Column(Text, nullable=False, server_default=text("'active'"))
+    updated_by = Column(Text)
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Category"),
+    )
+
+
 class SystemAuditLog(Base):
     __tablename__ = "system_audit_log"
     id = Column(Integer, primary_key=True, autoincrement=True)
