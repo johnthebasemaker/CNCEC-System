@@ -1,4 +1,4 @@
-# PROJECT STATUS — resume here (updated 2026-08-13 · FEATURE-COMPLETE · deployment PAUSED, fine-tuning next)
+# PROJECT STATUS — resume here (updated 2026-08-24 · Phase 8 COMPLETE · deployment PAUSED)
 
 > 🔄 **2026-08-13 — the backend suite runs against its OWN database.**
 > `gihub_svctest`, rebuilt from `gi_database.db` before the engine is created,
@@ -25,6 +25,29 @@ run log — the project's full history lives THERE, not here).
 Legacy/SME rules: [`handoff.md`](../handoff.md) (SME Canon).
 
 ---
+
+## 0a. Phase 8 — complete (2026-08-20 → 2026-08-24)
+
+Six slices, all merged. Baselines now **service tests 1,868 / 0** (suites
+A…CJ) · **E2E 107** · legacy 599 · SME parity 1,313 · UI math 33 · nav 48 ·
+alembic head **`c7e1a4b92d63`**.
+
+| Slice | Branch | What shipped |
+|---|---|---|
+| 8a | `feat/phase8-planner-math` | benchmark **selection** before summation — four live planner defects (2.00× · 2.00× · 2.29× · 25×), the orphan norm pruned |
+| 8b | `feat/phase8-planner-ux` | surface dedup (a stacked surface is blasted once), one shared job label, CV/ME chips, Target Days, multi-select, per-role dashboard |
+| 8c | `feat/phase8-procurement-lock` | `pr_registry`, asserted state transitions, **per-LINE** PO lock (a PR may carry several POs), idempotency keys |
+| 8d | `feat/phase8-qc-hod` | the `qc_hod` role — level 2 with a *named* cross-site exemption, category-bounded reads, escalations, stagnation/expiry, a 7-tab portal |
+| 8e | `feat/phase8-sme-mp-link` | the SME session costed in labour (can do · overall · blocked), 60 s cascade cache, exports, URL handoff; **Track 5** full-width KPI rows |
+| 8f | `feat/phase8-docs-ai` | **one** manual (the stale `docs/USER_MANUAL.md` deleted), §2 restructured for retrieval, all 12 Man-Hours tabs written up, alias map, index warmed at boot, prompt rules, suite CJ |
+
+⚠️ **The assistant's "outdated answers" were a CORPUS problem, not a pipeline
+problem.** Measured before anything changed: the index costs 17 ms to build
+and 0.3 ms per search, while §19 documented five Man-Hours tabs against a page
+that had eleven, and the access matrix was invisible to every non-admin role.
+Suite CJ compares the manual against the CODE so the drift cannot come back
+quietly.
+
 
 ## 0. Current state in one paragraph
 
@@ -104,7 +127,7 @@ injection. It stays meaningful only on CI / a freshly-reloaded mirror.
 - **Cutover day (2026-07-13):** SME **S6 Master Data CRUD** · **Phase B
   restructure** (`legacy/` · `tools/` · `data-archive/`) · Excel injection
   #1 · Bulk Excel Import (`/import/{kind}` + BulkImportPage) · C3 OCR doc
-  assist · QR/returnables parity · role-based `docs/USER_MANUAL.md` v2.
+  assist · QR/returnables parity · role-based manual content folded into the root `USER_MANUAL.md`.
 - **Pre-deploy batch (2026-07-18):**
   1. **SME SAP-code overhaul** — `sme_recipe.SAP_Code` +
      `sme_inventory_seed.SAP_Code` (alembic `b3f2a9c47d18`); recipe identity
@@ -336,7 +359,7 @@ _Last verified against reality: 2026-07-26 via Phase 1 Audit 04._
 ## 5. Docs & assets map
 
 - `docs/ARCHITECTURE.md` — the brain. `docs/automatic_test.md` — manual
-  test matrix. `docs/USER_MANUAL.md` — role-based v2 manual (+ screenshots
+  test matrix. `USER_MANUAL.md` (repo root) — the single product manual (+ screenshots
   `docs/screenshots/v2/`). `docs/NATIVE_APPS.md` — native build/release/
   install guide (Apple-Silicon fix, Cloudflare-Access bypass, JDK 21).
   `docs/DEBUGGING.md` — sync doctor + gates + console debugging.

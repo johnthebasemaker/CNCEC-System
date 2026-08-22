@@ -128,19 +128,101 @@ def _load_sections() -> dict[int, str]:
 
 @lru_cache(maxsize=1)
 def _index() -> mx.Index:
-    """Built once per process — ~390 chunks over the live manual, a few ms."""
+    """Built once per process — ~450 chunks over the live manual.
+
+    Measured on the live 229 KB manual: 2 ms to chunk, 15 ms to build the BM25
+    tables, 17 ms in total, and 0.3 ms per subsequent search. It is pre-built
+    in the FastAPI lifespan (`warm()`), which is worth doing for two reasons,
+    neither of which is "the assistant is slow": it keeps 17 ms of synchronous
+    work off the event loop on whoever asks the first question, and it surfaces
+    a missing or unparseable manual AT BOOT rather than inside somebody's chat.
+    The perceived latency is token generation in Ollama, not this.
+    """
     return mx.Index(mx.build_chunks(_manual_text()))
 
 
-_PER_SECTION_CHAR_CAP = 800
+def warm() -> dict:
+    """Build the index and the per-role fallback contexts up front.
+
+    Returns a small summary so startup can print something falsifiable rather
+    than "AI ready". Never raises: a box without the manual must still boot.
+    """
+    import time as _t
+    t0 = _t.perf_counter()
+    try:
+        idx = _index()
+        for role in _ROLE_ALLOWED:
+            _context_for_role(role)
+        return {"ok": True, "chunks": len(idx.chunks),
+                "chapters": len(_load_sections()),
+                "ms": round((_t.perf_counter() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001 — startup must not depend on this
+        return {"ok": False, "error": f"{type(e).__name__}: {e}",
+                "ms": round((_t.perf_counter() - t0) * 1000, 1)}
+
+
+# The FALLBACK path's per-chapter budget — used only when retrieval scores
+# nothing at all, or when there is no question yet.
+#
+# ⚠️ 800 CHARACTERS HID THE ACCESS MATRIX FROM EVERY NON-ADMIN ROLE. §2's
+# "Page access matrix" begins about 1,900 characters in, behind the role
+# hierarchy table, so the head-truncated §2 stopped mid-hierarchy and the one
+# table that answers "can my role open X" was never in any non-admin prompt.
+# That is the mechanism behind the reported "HODs cannot access the Manpower
+# portal" answer: §2.1 says the page is locked to its own role, and without the
+# matrix to name that role the model inferred exclusion.
+_PER_SECTION_CHAR_CAP = 3000
+
+# Chapters that are never head-truncated for anyone. §2 is the chapter that
+# says what a role may do; truncating it is how the assistant ends up guessing
+# about access. It is 6.5 KB — the whole of it costs less than being wrong.
+_NEVER_TRUNCATE = frozenset({2})
+
+_SUBHEAD_LINE = re.compile(r"^#{2,4}\s+\S")
+
+
+def _head_by_section(body: str, cap: int) -> str:
+    """The first whole `##` sub-sections of `body` that fit inside `cap`.
+
+    ⚠️ TRUNCATION LANDS ON A HEADING, NEVER MID-TABLE. Slicing at a character
+    count cuts markdown tables in half, and half a table reads as a complete
+    one — the model answers confidently from the rows that survived. Snapping
+    to the next sub-heading costs a few hundred characters and removes a class
+    of confident wrong answer.
+
+    At least one sub-section is always kept, even if it alone exceeds the cap:
+    an empty chapter is worse than an over-long one.
+    """
+    if len(body) <= cap:
+        return body
+    kept: list[str] = []
+    size = 0
+    current: list[str] = []
+    for line in body.splitlines():
+        if _SUBHEAD_LINE.match(line) and current:
+            block = "\n".join(current)
+            if kept and size + len(block) > cap:
+                break
+            kept.append(block)
+            size += len(block) + 1
+            current = [line]
+        else:
+            current.append(line)
+    if current and (not kept or size + len("\n".join(current)) <= cap):
+        kept.append("\n".join(current))
+    out = "\n".join(kept).rstrip()
+    return (out or body[:cap]) + \
+        "\n[... later sub-sections omitted — ask for specifics ...]"
 
 
 @lru_cache(maxsize=16)
 def _context_for_role(role: str) -> str:
-    """Concatenation of allowed sections, each labeled. Truncation policy
-    (legacy Phase 7G): Admin gets FULL sections (deep answers live far past
-    the head; keep_alive KV cache amortizes the longer prompt); every other
-    role is head-truncated — site users ask short workflow questions."""
+    """Concatenation of allowed sections, each labeled — the FALLBACK context,
+    used when the question retrieves nothing.
+
+    Admin still gets FULL sections. Everyone else gets whole sub-sections up to
+    `_PER_SECTION_CHAR_CAP`, except the chapters in `_NEVER_TRUNCATE`, which
+    are always complete."""
     allowed = _ROLE_ALLOWED.get(role, _ROLE_ALLOWED["store_keeper"])
     sections = _load_sections()
     if not sections:
@@ -151,9 +233,8 @@ def _context_for_role(role: str) -> str:
         body = sections.get(num)
         if not body:
             continue
-        if not is_admin and len(body) > _PER_SECTION_CHAR_CAP:
-            body = body[:_PER_SECTION_CHAR_CAP] + \
-                "\n[... truncated — ask for specifics if you need more ...]"
+        if not is_admin and num not in _NEVER_TRUNCATE:
+            body = _head_by_section(body, _PER_SECTION_CHAR_CAP)
         chunks.append(f"=== Section {num}: {_SECTION_TITLES.get(num, '')} ===\n{body}")
     return "\n\n".join(chunks)
 
@@ -217,6 +298,17 @@ RULES:
 - Answer ONLY using the manual sections provided below as CONTEXT.
 - If the answer is not in the CONTEXT, reply with exactly this sentence \
 and nothing else: "{refusal}"
+- ANSWER THE QUESTION. Never reply by pointing at a section number: \
+"see 2.1", "refer to section 19" and "check the access matrix" are not \
+answers. The CONTEXT below is what the reader would find there, so give \
+them the content. A section number may appear only AFTER a complete answer, \
+as a citation.
+- Be direct and specific. If the question is a yes/no ("can an HOD open the \
+Man-Hours page?"), start with Yes or No and then give the reason. If a table \
+in the CONTEXT answers it, read the row out in words — do not tell the user \
+to look at the table.
+- Never say "the manual does not specify" when the CONTEXT contains a table, \
+list or matrix that covers it. Read it.
 - Be concise. 2-4 short sentences for most questions. Bullet lists are \
 fine for steps.
 - Refer to UI elements using exact names from the manual (e.g. "Entry \

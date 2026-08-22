@@ -16967,6 +16967,221 @@ async def test_sme_mp_session():
     await _reset()
 
 
+
+# --- Suite CJ: the corpus, and the pipeline that reads it ---------------------
+async def test_docs_and_assistant():
+    """Suite CJ — Phase 8 slice 8f. Documentation drift, and the retrieval.
+
+    THE FINDING THIS SUITE EXISTS FOR. The assistant was reported as giving
+    outdated and evasive answers. Measured before anything was changed:
+
+      · the index costs 17 ms to build and 0.3 ms per search — the latency
+        people feel is token generation, not this;
+      · §2's access MATRIX begins ~1,900 characters into the chapter, and the
+        fallback path head-truncated every non-admin chapter at 800 — so the
+        one table that answers "may my role open X" was in NO non-admin
+        prompt, ever;
+      · a question containing "PR" retrieved nothing from the procurement
+        chapter, because the manual spells it "purchase requisition";
+      · §19 documented FIVE Man-Hours tabs. The page had eleven.
+
+    The corpus was the bug. The prompt tuning is the smaller half.
+
+    ⚠️ THE DOC-DRIFT CHECKS COMPARE THE MANUAL TO THE CODE, not to a number
+    typed into this file. A test that says "§19 documents 12 tabs" passes
+    forever once the manual is written and notices nothing when the page grows
+    a thirteenth; one that reads `ManHoursPage.tsx` fails the day they diverge,
+    which is the only day it matters.
+    """
+    import pathlib
+    import re as _cjre
+
+    from .ai import manual_index as _mx
+    from .ai import manual_qa as _mq
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+
+    # ── 1. one manual, and it is the one everything points at ───────────────
+    dup = root / "docs" / "USER_MANUAL.md"
+    check("CJ-01 there is exactly ONE user manual. The 2026-07-26 "
+          "docs/USER_MANUAL.md described a system three phases old while the "
+          "root manual moved on — two manuals means one is wrong and nobody "
+          "knows which",
+          not dup.exists(), f"{dup} still exists")
+    tool = (root / "tools" / "export_docs_pdf.py").read_text()
+    check("CJ-02 …and the PDF export points at the survivor rather than at a "
+          "path that no longer exists",
+          '("USER_MANUAL.md"' in tool and '("docs/USER_MANUAL.md"' not in tool,
+          "export_docs_pdf.py still names the deleted manual")
+    check("CJ-03 the PDF the APP serves is built by the same command as the "
+          "ops PDF. They were two pipelines, and the in-app manual had drifted "
+          "eleven days and four phases behind",
+          "GI_Hub_User_Manual.pdf" in tool and "reference" in tool,
+          "the served copy is still built somewhere else")
+
+    md = _mq._manual_text()
+
+    # ── 2. doc drift: the manual against the code ───────────────────────────
+    page = (root / "frontend" / "src" / "pages" / "ManHoursPage.tsx").read_text()
+    # The tab list is `{ key: '…', label: '…', children: … }` inside <Tabs>.
+    tabs_in_code = len(_cjre.findall(r"\{\s*key:\s*'[^']+',\s*label:\s*'[^']+'",
+                                     page[page.index("<Tabs"):]))
+    documented = len(_cjre.findall(r"^### 19\.2\.\d+ ", md, _cjre.M))
+    check(f"CJ-04 §19 documents every Man-Hours tab the page actually has "
+          f"({tabs_in_code} in ManHoursPage.tsx). It said FIVE while the page "
+          f"had eleven, and the assistant was answering correctly from it",
+          documented == tabs_in_code, f"code={tabs_in_code} manual={documented}")
+    check("CJ-05 …and the count is stated in prose too, so a reader is not "
+          "left to count headings",
+          "twelve" in md[md.index("## 19.2"):md.index("## 19.3")].lower(),
+          "the tab count is not written out in §19.2")
+
+    # Roles: every role the API knows must have a capability list a person can
+    # read, not just a row in a table.
+    from .auth import ROLE_META
+    sec2 = md[md.index("# 2. Roles, Permissions & Page Access"):
+              md.index("# 3. Login, Sidebar & Common Elements")]
+    role_blocks = _cjre.findall(r"^### 2\.3\.\d+ (.+)$", sec2, _cjre.M)
+    joined = " ".join(role_blocks).lower()
+    missing = [r for r, meta in ROLE_META.items()
+               if (meta.get("label") or r).split()[0].lower() not in joined]
+    check(f"CJ-06 every role in ROLE_META has its own '### what this role can "
+          f"do' block in §2.3 — {len(role_blocks)} blocks for "
+          f"{len(ROLE_META)} roles",
+          not missing and len(role_blocks) >= len(ROLE_META),
+          f"blocks={role_blocks} missing={missing}")
+
+    # ── 3. §2: the caveat and the matrix are ONE chunk ──────────────────────
+    # THE ACTUAL MECHANISM behind "HODs can't access the Manpower portal":
+    # `chunk_chapter` splits at `##`, so 2.1's "locked to their own role"
+    # sentence and 2.2's table were separate chunks and only one was ever
+    # retrieved. Reading the caveat alone, exclusion is the obvious inference.
+    chunks = _mx.build_chunks(md)
+    two = [c for c in chunks if c.chapter == 2]
+    both = [c for c in two
+            if "higher rank does not open" in c.text
+            and "Man-Hours / Labor Tracking |" in c.text]
+    check("CJ-07 the exact-role-lock caveat and the access matrix sit in the "
+          "SAME retrievable chunk. Split apart, the caveat says a page is "
+          "'locked to its own role' with no table to name that role — which "
+          "is exactly how the assistant concluded an HOD was excluded",
+          bool(both), f"{len(two)} chunks in §2, none carrying both")
+    check("CJ-08 …and the matrix says an HOD CAN open Man-Hours and the "
+          "Material Estimator, in the same breath as the lock",
+          any("Man-Hours" in c.text and "locked to *the HOD*" in c.text
+              for c in two),
+          "the matrix chunk does not resolve the lock in the HOD's favour")
+
+    # ── 4. the fallback path shows the matrix to everyone ───────────────────
+    for role in ("store_keeper", "supervisor", "hod", "logistics",
+                 "warehouse_user", "qc", "qc_hod", "auditor", "admin"):
+        ctx = _mq._context_for_role(role)
+        check(f"CJ-09 the fallback context for {role} contains the access "
+              f"matrix. At an 800-character head-truncation it did not — the "
+              f"matrix starts ~1,900 characters into §2, so NO non-admin role "
+              f"could ever see it",
+              "Man-Hours / Labor Tracking |" in ctx, f"{len(ctx)} chars")
+
+    check("CJ-10 §2 is never head-truncated for anyone — it is the chapter "
+          "that says what a role may do, and a partial answer about access is "
+          "worse than none",
+          2 in _mq._NEVER_TRUNCATE, str(sorted(_mq._NEVER_TRUNCATE)))
+    sk = _mq._context_for_role("store_keeper")
+    check("CJ-11 …and truncation elsewhere lands on a HEADING, never inside a "
+          "table. Half a markdown table reads as a whole one, and the model "
+          "answers confidently from the rows that survived",
+          "omitted — ask for specifics" in sk
+          and not _cjre.search(r"\|\s*$", sk.split("omitted")[0][-80:]),
+          sk[-160:])
+
+    # ── 5. aliases ──────────────────────────────────────────────────────────
+    check("CJ-12 an alias EXPANDS and never substitutes — the original word "
+          "survives, so nothing that matched before stops matching",
+          _mx.expand_aliases("raise a PR").startswith("raise a PR")
+          and "purchase requisition" in _mx.expand_aliases("raise a PR"),
+          _mx.expand_aliases("raise a PR"))
+    check("CJ-13 …and no alias value repeats its own key, which would inflate "
+          "that term's frequency against every passage mentioning it once",
+          all(k not in v.split() for k, v in _mx._ALIASES.items()),
+          str([k for k, v in _mx._ALIASES.items() if k in v.split()]))
+    for q, want_chapter in (("how do I raise a PR", 6),
+                            ("manpower planner", 19),
+                            ("what is MPH", 19)):
+        hits = _mq._index().search(q, allowed=_mq.allowed_sections("hod"))
+        check(f"CJ-14 '{q}' now retrieves chapter {want_chapter} — the manual "
+              f"writes these as words and the user types initials",
+              any(c.chapter == want_chapter for c in hits),
+              str([c.chapter for c in hits]))
+
+    # ⚠️ THE ALIAS MAP MUST NOT WIDEN WHAT A ROLE MAY SEE. It cannot — the
+    # chapter filter runs before scoring — but that is exactly the kind of
+    # claim that should be checked rather than reasoned about.
+    ADVERSARIAL = ["PR PO DN admin users hosting credentials",
+                   "SME manpower MPH everything about every module",
+                   "qc hod surface shield escalations across all sites"]
+    for role in ("store_keeper", "logistics", "warehouse_user", "qc",
+                 "auditor"):
+        allowed = _mq.allowed_sections(role)
+        leaked = {c.chapter for q in ADVERSARIAL
+                  for c in _mq._index().search(q, allowed=allowed, k=30)
+                  } - allowed
+        check(f"CJ-15 alias expansion leaks no forbidden chapter to {role} — "
+              f"an alias can change WHICH allowed chunk wins, never whether a "
+              f"forbidden one becomes a candidate",
+              not leaked, f"leaked {sorted(leaked)}")
+
+    # ── 6. the prompt refuses to answer with a section number ───────────────
+    prompt = _mq.build_system_prompt("hod", "andrew", "can an HOD open man-hours")
+    rules = prompt[:prompt.index("CONTEXT (")]
+    check("CJ-16 the system prompt BANS answering with a bare section number. "
+          "'Look at 2.1' is the reader doing the work the assistant was asked "
+          "to do",
+          "Never reply by pointing at a section number" in rules, rules[:200])
+    check("CJ-17 …and requires a yes/no question to open with Yes or No",
+          "start with Yes or No" in rules, rules[:200])
+    check("CJ-18 …and forbids 'the manual does not specify' when a table in "
+          "the context covers it",
+          "does not specify" in rules and "Read it." in rules, rules[:200])
+    check("CJ-19 the retrieved context for the exact question that was "
+          "answered wrongly now leads with the HOD's own capability list",
+          "2.3.4 Head of Department" in
+          _mq.retrieve_context("hod", "can a HOD open the manpower portal"),
+          _mq.retrieve_context("hod", "can a HOD open the manpower portal")[:180])
+
+    # ── 7. the index is pre-built at boot ───────────────────────────────────
+    main_py = (root / "backend" / "api" / "main.py").read_text()
+    check("CJ-20 the manual index is warmed in the FastAPI lifespan, so 17 ms "
+          "of synchronous work does not land on the event loop inside "
+          "whoever asks the first question",
+          "manual_qa import warm" in main_py, "warm() is not called at startup")
+    w = _mq.warm()
+    check("CJ-21 …and warming reports something FALSIFIABLE — a chapter and "
+          "chunk count — rather than printing 'AI ready' whatever happened",
+          w["ok"] and w["chapters"] >= 23 and w["chunks"] >= 400, str(w))
+    check("CJ-22 warm() never raises: a box without the manual must still "
+          "boot, and an assistant that cannot answer is not a reason to "
+          "refuse every other request",
+          isinstance(_mq.warm(), dict), "warm() did not return a dict")
+
+    # ── 8. the new chapters are actually in the corpus ──────────────────────
+    for needle, why in (
+            ("16.4 What stops a duplicate PR", "the procurement locks (8c)"),
+            ("19.5 🔗 SME Session Plan", "the SME-Manpower link (8e)"),
+            ("2.3.5 Head of Qualities", "the QC-HOD's capability list (8d)"),
+            ("### 19.2.11 🧠 Manpower Planner", "the planner (8b)"),
+            ("Two shifts splits the crew", "the under-hiring trap (8b)")):
+        check(f"CJ-23 the manual documents {why}", needle in md, needle)
+
+    # And the assistant can actually find them.
+    for q, chapter in (("what stops a duplicate purchase requisition", 16),
+                       ("what is the session report for MP&H", 19)):
+        hits = _mq._index().search(q, allowed=_mq.allowed_sections("hod"))
+        check(f"CJ-24 …and '{q}' retrieves chapter {chapter}, so writing it "
+              f"down and being able to find it are separately true",
+              any(c.chapter == chapter for c in hits),
+              str([c.chapter for c in hits]))
+
+
 # --- Suite CG: procurement locks ----------------------------------------------
 async def test_procurement_locks():
     """Suite CG — Phase 8 slice 8c. The PR number, the state, and the retry.
@@ -18011,6 +18226,9 @@ async def main() -> int:
     print("\n CI. The SME session costed in labour — what we can do, the "
           "whole job, and what is waiting on a drum")
     await test_sme_mp_session()
+    print("\n CJ. The corpus and the pipeline that reads it — documentation "
+          "drift, and the retrieval that was answering from a stale manual")
+    await test_docs_and_assistant()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

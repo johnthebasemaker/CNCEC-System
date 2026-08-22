@@ -1,6 +1,6 @@
 # PROPOSED PHASE 8 PLAN — Unification, Uniqueness, Quality Oversight, and an Assistant That Answers
 
-**Status:** proposal. No application code written.
+**Status:** ✅ COMPLETE — all six slices shipped and merged (8a…8f, 2026-08-20 → 2026-08-24).
 **Date:** 2026-08-20
 **Baseline:** `main` @ `ff1db9a` (Phase 7 merged) · alembic head `e5b2d7c94a16` ·
 gates 1667/0 · E2E 90/90 · legacy 599/0 · SME parity 1,313 · UI math 33/0 · nav 47
@@ -51,7 +51,7 @@ have been rewritten to match; the rest confirmed the recommendations.
 | **8c** | `feat/phase8-procurement-lock` | ✅ **shipped** — pr_registry, asserted transitions, per-LINE PO lock, idempotency keys. Gates 1,751 / 0 · alembic head `a9f2c6b40d18` |
 | **8d** | `feat/phase8-qc-hod` | ✅ **shipped** — level-2 role + named exemption, category-bounded reads, escalations, stagnation, 7-tab dashboard. Gates 1,788 / 0 · E2E 101 · alembic head `c7e1a4b92d63` |
 | **8e** | `feat/phase8-sme-mp-link` | ✅ **shipped** — three-column session report (can do / overall / blocked), 60 s cascade cache, exports, URL handoff, KPI full-width rows (Track 5). Gates 1,825 / 0 · E2E 107 · **no migration** (head stays `c7e1a4b92d63`) |
-| 8f | `feat/phase8-docs-ai` | queued |
+| **8f** | `feat/phase8-docs-ai` | ✅ **shipped** — one manual (the stale `docs/USER_MANUAL.md` deleted), §2 restructured for retrieval + 9 role capability lists, all 12 Man-Hours tabs, alias map, index warmed at boot, prompt rules. Gates 1,868 / 0 · E2E 107 · no migration. **PHASE 8 COMPLETE** |
 
 **Q13 — ANSWERED 2026-08-21.** A surface carrying two stacked systems is
 blasted **ONCE**. The prep area is deduplicated on an exact (location, area)

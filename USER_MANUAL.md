@@ -149,52 +149,192 @@ created against a site or against a warehouse, and an account carrying neither �
 or both — sees nothing at all rather than everything. That is deliberate: an
 inspector with an unclear remit is a bigger problem than an inspector with none.
 
-**A higher rank does not open a lower role's workspace.** The Logistics Portal,
-Warehouse Portal, Entry Log, HOD Portal, Supervisor Portal, Material Estimator
-and Man-Hours pages are locked to their own role exactly — Logistics outranks a
-Head of Department but still cannot open the HOD Portal. Admin is the single
-exception and reaches every workspace deliberately, for support.
+## 2.2 Page access matrix — which role can open which page
 
-## 2.2 Page access matrix
+⚠️ **A higher rank does not open a lower role's workspace.** The Logistics
+Portal, Warehouse Portal, Entry Log, HOD Portal, Supervisor Portal, Material
+Estimator and Man-Hours pages are locked to their own role exactly — Logistics
+outranks a Head of Department but still cannot open the HOD Portal. **Read that
+caveat together with the table below it, not instead of it:** the caveat says a
+page is locked to "its own role", and the table is what names that role. A
+Head of Department **can** open Man-Hours and the Material Estimator; those two
+are locked to *the HOD*, not away from them. Admin is the single exception and
+reaches every workspace deliberately, for support.
 
-| Page | Store Keeper | Warehouse User | Supervisor | QC | HOD | Logistics | Auditor | Admin |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 🧪 Quality → Inspections | ✅ (read) | ✅ (read) | ❌ | ✅ (decides) | ✅ (read) | ✅ (read) | ✅ (read) | ✅ |
-| 👥 Quality → QC Accounts | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ |
-| ⏳ Safety & People → PPE Forecast | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 🛡️ Safety & People → PPE Usable Time | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| 👤 Safety & People → Employees | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 📦 Live Dashboard | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 📝 Entry Log | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| 📋 HOD Portal | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ (hidden — uses Admin Portal) |
-| 🚚 Logistics Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ (admin shadow) |
-| 🏭 Warehouse Portal | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (admin shadow, picks WH in sidebar) |
-| 🛡️ Admin Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| 📊 Reports | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ (read + download only) | ✅ |
-| 🗂️ Records (Inventory, ledgers, POs, PRs) | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| 🛡️ Supervisor Portal | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ (admin shadow) |
-| 🧪 Material Estimator | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| 🕒 Man-Hours | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| 🛡️ Quality Oversight (§23) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ — **and the Head of Qualities, who has no other page** |
-| 🔍 Auditor view | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Page | Store Keeper | Warehouse User | Supervisor | QC | HOD | Logistics | QC-HOD | Auditor | Admin |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 📦 Live Dashboard | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| 📊 Stock | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| 📍 Rack Locator | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 🎯 Assets | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| 📝 Entry Log (all tabs) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (shadow) |
+| 🛡️ Supervisor Portal | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (shadow) |
+| 📋 HOD Portal → Approvals | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 📋 HOD Portal → Executive Summary, Burn Rate, Documents, Low Stock, PRs, Cross-Site | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (read) | ✅ |
+| 🧪 Lining Coverage | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| 📥 Bulk Excel Import | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 🧪 Material Estimator (SME) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (read) | ✅ |
+| 🕒 Man-Hours / Labor Tracking | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 🧾 Execution Entries | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 📊 Reports | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ (read + download) | ✅ |
+| 🚚 Logistics Portal (Procurement) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (shadow) |
+| 🏭 Warehouse Portal (Receiving & DN) | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (shadow) |
+| 🧪 Quality → Inspections | ✅ (read) | ✅ (read) | ❌ | ✅ (decides) | ✅ (read) | ✅ (read) | ❌ | ✅ (read) | ✅ |
+| 👥 Quality → QC Accounts | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| 🛡️ Quality Oversight (§23) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| ⏳ Safety & People → PPE Forecast | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| 🛡️ Safety & People → PPE Usable Time | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 👤 Safety & People → Employees | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ |
+| 🗂️ Records (Inventory, ledgers, POs, PRs) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ (read) | ✅ |
+| 🛡️ Admin Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| 📄 Documents · 🔐 Security · 💬 Feedback | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-> **Exact-role locks:** Entry Log, HOD Portal, Supervisor Portal, Logistics Portal, Warehouse Portal, Material Estimator and Man-Hours are locked to their own role — a higher-ranked role does **not** inherit access. Admin reaches them for support purposes.
+**Where each role lands after signing in:** Store Keeper → Entry Log → Issue
+Stock · Warehouse User → Warehouse Portal · Supervisor → Supervisor Portal ·
+QC → Quality → Inspections · HOD → HOD Portal → Approvals · Logistics →
+Logistics Portal · Head of Qualities → Quality Oversight · Auditor →
+Dashboard · Admin → Admin Portal → Console.
 
-## 2.3 Site scope by role
+## 2.3 What each role can do
+
+One list per role, in plain words. If you only want to know whether *your*
+account can do a thing, read your own entry — each is complete on its own.
+
+### 2.3.1 Store Keeper — what a Store Keeper can and cannot do
+
+**Can:** open the Entry Log and post every stock movement — receive, issue,
+return, adjust, count, returnable items, OCR import; see Incoming Deliveries
+and Supervisor Requests; open the Dashboard, Stock, Rack Locator, Assets, PPE
+Forecast, PPE Usable Time, Employees and Execution Entries; read quality
+inspections; download documents.
+
+**Cannot:** approve anything (an HOD approves what a Store Keeper stages);
+open the HOD, Supervisor, Logistics or Warehouse portals; open Reports,
+Records, the Material Estimator or Man-Hours; see another site's stock.
+
+**Scope:** one site.
+
+### 2.3.2 Supervisor — what a Supervisor can and cannot do
+
+**Can:** raise material requests from the Supervisor Portal; post Execution
+Entries; open the Dashboard, Stock, Assets and Employees.
+
+**Cannot:** post stock movements (the Entry Log is the Store Keeper's);
+approve requests; open Reports, Records, the Material Estimator, Man-Hours or
+any other role's portal.
+
+**Scope:** one site.
+
+### 2.3.3 Quality Control (QC) — what an inspector can and cannot do
+
+**Can:** decide inspections — pass, fail or hold — from Quality → Inspections;
+open the Stock page to see what is waiting and what their decision released.
+
+**Cannot:** open the Dashboard, post any stock movement, approve a purchase,
+create QC accounts, or move themselves between sites (that is an Admin
+decision). See §22.
+
+**Scope:** exactly one site **or** exactly one warehouse — never both, never
+neither.
+
+### 2.3.4 Head of Department (HOD) — what an HOD can and cannot do
+
+**Can — and this is the question people ask most:** open the **🕒 Man-Hours /
+Labor Tracking page** and the **🧪 Material Estimator**. Both are exact-locked
+to the HOD (and Admin for support); the lock is what *admits* an HOD, not what
+excludes them. That includes all twelve Man-Hours tabs — roster, timesheets,
+estimator, variance, scorecard, employee-wise, the four execution views, the
+Manpower Planner and the SME Session Plan (§19).
+
+Also: approve or reject everything the site stages (receipts, issues, returns,
+adjustments, counts); create and submit Purchase Requisitions to Logistics;
+raise Cross-Site Requests; run Reports; open the Executive Summary, Burn Rate,
+Low Stock, Lining Coverage, Document Library and Bulk Excel Import; create QC
+accounts for their site; post Execution Entries; open PPE Forecast, PPE Usable
+Time and Employees.
+
+**Cannot:** open the Logistics Portal, the Warehouse Portal, the Supervisor
+Portal, the Entry Log, Quality Oversight or the Admin Portal; raise a Purchase
+Order (Logistics does that); see another site's stock — though they may
+*request* material from one.
+
+**Scope:** one site.
+
+### 2.3.5 Head of Qualities (QC-HOD) — what this role can and cannot do
+
+**Can:** open the **Quality Oversight** page and nothing else. Across **every
+site and warehouse**, but only for **Surface Shield** material: the controlled
+category is filtered in the database on every query, so it is the boundary of
+the role rather than a filter on a page. Seven views — overview, Surface
+Shield purchase orders, the MTC register, where it is used, stagnation and
+expiry, escalations, and the 90/60-day thresholds. They may **raise and close
+escalations** and **retune those two thresholds**.
+
+**Cannot:** approve or reject a quality inspection; move, issue or receive
+stock; raise a PR or PO; open any other portal or page; see PPE, tools,
+consumables or any other category. See §23.
+
+**Scope:** all sites and all warehouses; Surface Shield only.
+
+### 2.3.6 Logistics Coordinator — what Logistics can and cannot do
+
+**Can:** run the whole procurement chain from the Logistics Portal — receive
+submitted PRs, raise Purchase Orders, assign POs to warehouses, manage vendors,
+track DN status; open Records (inventory, ledgers, POs, PRs), Reports, the
+Warehouse Portal, Lining Coverage, the Rack Locator, PPE Forecast, and quality
+inspections; create QC accounts.
+
+**Cannot:** open the HOD Portal, the Entry Log, the Supervisor Portal, the
+Material Estimator, Man-Hours or the Admin Portal — outranking a role does not
+open its workspace.
+
+**Scope:** all sites, no site lock.
+
+### 2.3.7 Warehouse Operator — what a Warehouse User can and cannot do
+
+**Can:** receive against POs, prepare and dispatch Delivery Notes from the
+Warehouse Portal; open the Dashboard, Stock, Rack Locator and Assets; read
+quality inspections; create QC accounts for their warehouse.
+
+**Cannot:** open the Logistics Portal, the HOD Portal, the Entry Log, Reports,
+Records, the Material Estimator or Man-Hours.
+
+**Scope:** one warehouse.
+
+### 2.3.8 Auditor — what a view-only Auditor can and cannot do
+
+**Can:** read across every site — Dashboard, Stock, Assets, Records, Reports
+(including downloads), Lining Coverage, the Material Estimator, the HOD
+Portal's read-only views (Executive Summary, Burn Rate, Documents, Low Stock,
+PRs, Cross-Site Requests), Employees and quality inspections.
+
+**Cannot:** change anything at all, anywhere. Every write route is refused by
+the server, not merely hidden. Not Man-Hours, not the Entry Log, not any
+approval. See §20.
+
+**Scope:** all sites, read-only.
+
+### 2.3.9 Administrator — what an Admin can do
+
+Everything, including every other role's workspace as a support shadow, plus
+the Admin Portal: users, access requests, overdue actions, inventory master,
+the audit log and the console.
+
+## 2.4 Site scope by role
 
 | Role | What they see |
 |------|---|
 | Store Keeper | Their own site only — they cannot view another site's stock. |
-| Warehouse User (NEW) | Their own warehouse only — POs assigned to them, DNs they've prepared, items received from vendors. Tied to `users.Warehouse_ID`. |
+| Warehouse User | Their own warehouse only — POs assigned to them, DNs they've prepared, items received from vendors. Tied to `users.Warehouse_ID`. |
 | Supervisor | Their own site only — Reports, Live Dashboard, Burn Rate all site-locked. |
 | Quality Control (QC) | Whichever single place they were created against: one site, or one warehouse. A site QC sees inspections raised at that site and has no warehouse business at all; a warehouse QC is pinned to its warehouse exactly as a Warehouse User is. An account with no binding, or with both, sees an empty list — it never falls back to seeing everything. Moving a QC to another site is a request, decided by an Admin, not something the QC or their HOD can do alone. |
 | HOD | Their own site only — but they can REQUEST material from other sites (Cross-Site tab) and submit PRs to Logistics. |
-| Logistics (NEW) | All sites globally for PRs and POs they manage. No site lock — they sit above the site boundary. |
-| Head of Qualities (NEW) | All sites globally, but ONLY Surface Shield material — every query on their page is filtered to the controlled category in the database, so the category is the boundary of the role rather than a filter on a page. They read, and they send escalations; they cannot approve an inspection, move stock, raise a PR or open any other portal. See §23. |
-| Auditor (NEW) | All sites globally, **read-only**. Sits at level 3 so it is not site-locked — an auditor pinned to one site could not audit. It can open the Dashboard, Stock, Records, Reports and Lining Coverage and change nothing anywhere. See §20. |
+| Logistics | All sites globally for PRs and POs they manage. No site lock — they sit above the site boundary. |
+| Head of Qualities | All sites globally, but ONLY Surface Shield material — every query on their page is filtered to the controlled category in the database, so the category is the boundary of the role rather than a filter on a page. They read, and they send escalations; they cannot approve an inspection, move stock, raise a PR or open any other portal. See §23. |
+| Auditor | All sites globally, **read-only**. Sits at level 3 so it is not site-locked — an auditor pinned to one site could not audit. It can open the Dashboard, Stock, Records, Reports and Lining Coverage and change nothing anywhere. See §20. |
 | Admin | All sites + all warehouses globally — has the "All Sites" filter on every multi-site view; warehouse picker in sidebar when shadowing the Warehouse Portal. |
 
-## 2.4 Default seeded accounts
+## 2.5 Default seeded accounts
 
 The first time the app starts, these accounts are created. **Change the passwords immediately.**
 
@@ -205,7 +345,7 @@ The first time the app starts, these accounts are created. **Change the password
 | supervisor | super2026 | Supervisor |
 | worker | floor2026 | Store Keeper |
 
-**No default `logistics` or `warehouse_user` accounts are seeded.** Both roles are strictly admin-created — go to **Admin Portal → 👥 Users → Add user**. This is intentional: the procurement chain has commercial visibility (Logistics sees prices, Warehouse routes inventory) and seeded credentials would be a security liability. When you create a `warehouse_user`, set their `Warehouse_ID` to one of the values from **Admin Portal → 🗄️ Master DB Editor → `warehouses` table** — without it, the user lands on the Warehouse Portal and sees an error telling them to ask Admin.
+**No default `logistics`, `warehouse_user`, `qc`, `qc_hod` or `auditor` accounts are seeded.** All of them are strictly admin-created — go to **Admin Portal → 👥 Users → Add user**. This is intentional: the procurement chain has commercial visibility (Logistics sees prices, Warehouse routes inventory) and seeded credentials would be a security liability. When you create a `warehouse_user`, set their `Warehouse_ID` to one of the values from **Admin Portal → 🗄️ Master DB Editor → `warehouses` table** — without it, the user lands on the Warehouse Portal and sees an error telling them to ask Admin.
 
 ---
 
@@ -3302,6 +3442,50 @@ Receiving day Truck doesn't show up — vendor delay:
 
 ---
 
+## 16.4 What stops a duplicate PR or a double order
+
+*Added 2026-08 (Phase 8).* Three rules run underneath the procurement chain.
+None of them changes how the screens are used; they change what happens when
+two people, or one impatient person, do the same thing twice.
+
+### 16.4.1 A PR number is reserved, not guessed
+
+Every PR number is claimed in a registry before the requisition's lines are
+written, so two HODs pressing **Create PR** in the same second get different
+numbers. If a number is somehow taken, the system takes the next one rather
+than failing. Renaming a PR moves its reservation with it and is refused if the
+new name is already in use — by a registered PR **or** by one that was imported
+without ever being registered.
+
+### 16.4.2 Each step happens once, in order
+
+A requisition moves `site_draft → submitted → in_po`, and each move is checked
+against the state the row is actually in — not the state the screen was showing
+when it loaded. Consequences you will see:
+
+- **Submitting twice does nothing the second time.** It used to accept lines
+  that were already submitted, rewrite their timestamp and fire a *second*
+  notification at Logistics.
+- **A PO cannot be raised twice over the same lines.** The second attempt is
+  refused with a message naming the lines, rather than silently succeeding.
+- **A PR may still carry several POs.** Partial fulfilment splits one
+  requisition across vendors or deliveries, so the lock is per **line**, not
+  per PR.
+
+### 16.4.3 A retry is not a second order
+
+**Submit PR**, **Create PO**, **Assign PO** and **Rename PR** each carry a key
+minted when the form opens. Press the button twice, lose the connection and
+retry, or double-click — the system recognises the repeat and replays the first
+answer instead of doing the work again. Sending the *same* key with *different*
+details is refused, because that is a client bug rather than a retry.
+
+⚠️ **The buttons disappear rather than grey out.** Once a PR is submitted, the
+Submit button is gone — not disabled. A greyed-out button invites a second
+click and a support call about why it "isn't working"; an absent one says the
+step is done.
+
+
 # 17. Operations & Hosting — the after-launch chapter
 
 This chapter is for whoever is responsible for keeping the system running once
@@ -3679,15 +3863,48 @@ The SME does **not** issue stock itself. Day-to-day consumption is entered on th
 
 Man-Hours tracks **labor** the way the Material Estimator tracks material: log who worked, where, and for how long; record SQM produced; define the **required** man-hours for a scope; then compare **estimated vs actual** to surface over-runs. It is fully **site-scoped** and **isolated** — it reads the Material Estimator's Equipment / System-Code / Location lists for its dropdowns without ever changing them, and writes only to its own man-hours records. Nothing here touches inventory, the end-of-day path, or the SME data.
 
-## 19.2 Tabs
+## 19.2 Tabs — all twelve
 
-*The five below are the original Man-Hours tabs. The page has since grown the
-four execution views (Phase 6), the Manpower Planner (Phase 7) and the SME
-Session Plan (§19.5) — twelve in all, so the last few sit behind the **"…"**
-button at the end of the tab bar.*
+The page has **twelve** tabs. Only about six fit across a laptop screen; the
+rest are reachable through the **"…"** button at the end of the tab bar, or by
+adding `?tab=` to the address (`/manhours?tab=planner`, `?tab=session`).
+
+| # | Tab | What it is for | Added |
+|:--:|---|---|---|
+| 1 | 👥 Employees | the per-site labour roster | original |
+| 2 | 🕒 Daily Timesheet | who worked, where, for how long | original |
+| 3 | 📐 Estimator | the required man-hours for a scope | original |
+| 4 | 📊 Estimate vs Actual | the variance dashboard | original |
+| 5 | 🔗 Scorecard | material and labour side by side, per equipment | 2026-07 |
+| 6 | 🧑‍🔧 Employee-wise | one person's timeline, date by date | original |
+| 7 | ✅ HOD Approval Queue | execution entries waiting on the HOD | Phase 6 |
+| 8 | ⚖️ Actual vs Benchmark | reported work against the workbook norms | Phase 6 |
+| 9 | 📝 Reason Audit Log | why an over-consumption happened, and who said so | Phase 6 |
+| 10 | 🧱 Surface Prep Progress | blasting coverage per equipment | Phase 6 |
+| 11 | 🧠 Manpower Planner | how many people to finish by a deadline | Phase 7 |
+| 12 | 🔗 SME Session | the SME session costed in labour (§19.5) | Phase 8 |
 
 ### 19.2.1 👥 Employees
-Per-site labor roster. Add/update a worker with **Code, Name, Designation, Type (OWN / Supply), Company**. "OWN" = your own (GI) staff; "Supply" = subcontractor labor (e.g. DMC) — these can live here even though they aren't ERP app-users. A status expander flips a worker active/inactive.
+Per-site labour roster. Add or update a worker with **Employee Code, Name,
+Designation, Worker Type, Shift and Company**.
+
+**Worker Type is `GI` or `NON_GI`** — your own staff against supplied
+(subcontractor) labour, e.g. DMC. Supplied workers live here even though they
+are not ERP app-users. *(The workbook's own words are "OWN" and "Supply"; the
+import maps both spellings onto GI / NON_GI.)*
+
+**Shift is `Day` or `Night`.** It is what the Manpower Planner reads to decide
+whether a two-shift plan is a fact or a proposal.
+
+The tab also carries the **overtime thresholds**, which the HOD owns: overtime
+begins after **8** net worked hours for a GI worker and **10** for a non-GI
+worker. They are settings, not constants — changing one applies to new
+timesheets only and never re-splits hours already posted.
+
+⚠️ **Designation is what maps a worker to a role.** A blank or unrecognised
+Designation means the worker is reported as *unmatched* and is **not** counted
+as available in the planner. That is deliberate: "nobody wrote down that they
+are masons" and "there are no masons" call for completely different actions.
 
 ### 19.2.2 🕒 Daily Timesheet
 Two ways to enter actuals, plus team-SQM:
@@ -3699,16 +3916,82 @@ Two ways to enter actuals, plus team-SQM:
 - **🕒 Manual per-day batch grid** — pick a **Work Date**, **Equipment Tag**, **System Code** (drop-downs from the Material Estimator's equipment), and a break (default 60 min). The grid lists active workers; tick **Worked** and set In/Out (default 07:30–16:30). On save, one timesheet row is written per worker.
 - **📐 Team SQM** — record the SQM the crew completed on that date/tag/system and choose **even** (equal per worker) or **by-hours** (pro-rata on hours) distribution; each worker's share is recorded as their allocated SQM for the day.
 
-**Hours math:** Total = time out minus time in, less the break. **Normal hours** are the Total capped at 8; **overtime** is anything above 8, and never less than zero. (Example: 07:30–16:30 with a 1 h break = 8 h Total / 8 Normal / 0 OT.) The source file's own hour columns are ignored — hours are always recomputed.
+**Hours math:** Total = time out minus time in, less the break. **Normal hours**
+are the Total capped at the worker's own overtime threshold — **8 for GI, 10
+for non-GI**, both set on the Employees tab — and **overtime** is the
+remainder, never less than zero. A full 12-hour shift is 11 worked hours plus
+an hour for lunch, so it splits 8 + 3 for a GI worker and 10 + 1 for a non-GI
+one. The source file's own hour columns are ignored — hours are always
+recomputed.
 
 ### 19.2.3 📐 Estimator
-Define the **required** man-hours for a scope: pick Equipment Tag + System Code, enter Estimated man-hours (and optionally Estimated SQM → yields a man-hours-per-SQM norm) + a basis note. One estimate per Tag/System (re-saving updates it).
+Define the **required** man-hours for a scope: pick Equipment Tag + System Code, enter Estimated man-hours (and optionally Estimated SQM → yields a man-hours-per-SQM norm) + a basis note. One estimate per Tag/System (re-saving updates it). **Auto-draft** proposes estimates for every scope that has none, using a norm you supply; you edit the drafts before saving.
 
 ### 19.2.4 📊 Estimate vs Actual
 The variance dashboard. KPI strip (scopes tracked / over-consuming / total actual man-hours) + a table where **over-runs >10 % are highlighted red** and on-or-under-budget rows green. Variance is Actual minus Estimated, and Variance % is that variance divided by the estimate. A "Where the most man-hours went" table ranks the top consumers. An expander lets you record a **reason** for an over-consumption (saved per Tag/System and shown back in the table).
 
-### 19.2.5 🧑‍🔧 Employee-wise
+### 19.2.5 🔗 Scorecard
+Material and labour for the same equipment, side by side. For each Tag/System:
+SQM done, material consumed against the SME expectation, man-hours spent
+against the estimate, and a reconciliation note when the two disagree about how
+much work has been completed. It is the tab to open when the Estimator says one
+thing and the timesheets say another.
+
+### 19.2.6 🧑‍🔧 Employee-wise
 The "where did each person work, date by date" view. Pick an employee (or *All*) and a date range; get a clean, date-ordered list of every tag/system they worked with hours and allocated SQM — the un-cluttered per-person timeline.
+
+### 19.2.7 ✅ HOD Approval Queue
+Execution entries posted by Store Keepers and Supervisors, waiting on the HOD.
+Each row shows the area claimed, the material it implies and the man-hours
+booked against it. Approve, or reject with a reason — the reason is compulsory
+and lands in the Reason Audit Log (19.2.9).
+
+### 19.2.8 ⚖️ Actual vs Benchmark
+What was actually reported against what the workbook's norms say it should have
+taken — material and man-hours together, per entry and in total. Totals sum the
+absolute figures and derive one percentage from the sums; they are **not** the
+average of the per-entry percentages, which would weight a 2 m² entry the same
+as a 2,000 m² one.
+
+### 19.2.9 📝 Reason Audit Log
+Every over-consumption reason and every rejection reason, with who wrote it and
+when. Append-only: a reason is a record of what somebody believed at the time,
+so it is never edited in place.
+
+### 19.2.10 🧱 Surface Prep Progress
+Blasting coverage per equipment. Coverage is prep area divided by the
+**equipment's own** area, and it **can exceed 100 %** — a surface can be
+re-blasted, and clamping the figure would hide rework instead of showing it.
+
+### 19.2.11 🧠 Manpower Planner
+Answers one question: *to finish this equipment by the deadline, how many of
+each role do I need, how many do I have, and what should I hire?* Pick
+equipment (multi-select), optionally system codes, optionally include surface
+prep, then give a deadline as **Target days** or as **hours per person** —
+they are the same quantity, `hours = days × 11`, and giving both is refused.
+
+Three sections: **workload** (area remaining → man-hours), **gap** (per role:
+need, have, assign — collapsible, with the jobs that asked for each role), and
+**strategy** (where overtime comes from and how to remove it).
+
+⚠️ **Two shifts splits the crew; it does not halve the hiring.** Nobody works
+both a day and a night shift, so a two-shift plan needs the **same total
+headcount** and only the per-shift figure halves. The natural reading — "two
+shifts, so half the people" — under-hires by half, which is why the page says
+so in words beside the number. Shifts default to 2 when anyone in a required
+role is on nights; the HOD can force two anyway, and the plan then shows the
+crew you would have to staff.
+
+⚠️ **It changes nothing.** The planner is advice. It never assigns anybody,
+never edits the roster, and never writes to a timesheet.
+
+⚠️ **A stacked surface is blasted once.** Two lining systems on the same
+physical location share one surface, and prep is charged for it once — the
+plan shows the deduplicated area beside the gross so a figure printed before
+this rule can still be reconciled.
+
+### 19.2.12 🔗 SME Session
+The SME planning session costed in labour — see §19.5.
 
 ## 19.3 Loading an attendance file in bulk
 

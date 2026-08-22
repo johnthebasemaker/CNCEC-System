@@ -3,8 +3,10 @@
 > **2026-07-18 note:** the procedures below (roles, procurement chain, DN
 > state machine, approval gates) apply UNCHANGED to the new React/FastAPI
 > application — screens moved, the process did not. For per-screen
-> instructions use the **v2 User Manual** (`docs/USER_MANUAL.md`; ops PDF in
-> `docs/export/`). New since v1.0 and covered there: Surface-Shields
+> instructions use the **Product Manual** (`USER_MANUAL.md` at the repo root;
+> ops PDF in `docs/export/GI-Hub-User-Manual.pdf`). *(There was a second,
+> role-based `docs/USER_MANUAL.md` from 2026-07-26; it fell three phases behind
+> and was deleted in Phase 8 — there is one manual now.)* New since v1.0 and covered there: Surface-Shields
 > system-first issuing, the SME Smart Calculator, Bulk Excel Import,
 > handwritten-OCR validation + TSV export, and the admin Bug Tracking Engine.
 

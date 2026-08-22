@@ -288,7 +288,34 @@ memory — deliberately not reproduced here).
 ## 7. AI routing layers
 
 1. **Hub Assistant** (`/ai/assistant`, SSE) + insights/EOD — same-box Ollama,
-   one warm model.
+   one warm model. Retrieval is `ai/manual_index.py` (BM25 over
+   `USER_MANUAL.md`, no vector store, no embeddings) + `ai/manual_qa.py`
+   (role gating, prompt). **Measured 2026-08-24 on the live 229 KB manual:
+   2 ms to chunk, 15 ms to build the BM25 tables, 0.3 ms per search.** The
+   index is warmed in the FastAPI lifespan (`manual_qa.warm()`), which is
+   hygiene rather than a speed fix — perceived latency is Ollama token
+   generation, not this. Four properties worth knowing:
+   * **the role filter runs BEFORE scoring** (`Index.search(allowed=…)`), so a
+     role's prompt cannot physically contain a chapter it may not see. That is
+     the security boundary, not the prompt;
+   * **an alias map expands both documents and queries** (`_ALIASES`,
+     `expand_aliases`) — the corpus writes "purchase requisition" and users
+     type "PR". It expands, never substitutes, and cannot widen what a role
+     reaches (the chapter filter is upstream of it);
+   * **a table adheres to the paragraph above it** when a long sub-section is
+     wrapped, so a caption and its table are never retrieved separately;
+   * **the fallback path** (used only when nothing scores) keeps whole `##`
+     sub-sections up to `_PER_SECTION_CHAR_CAP = 3000` and never truncates §2
+     at all — at the old 800-character head-truncation the access matrix,
+     which starts ~1,900 characters in, was in NO non-admin prompt.
+
+   ⚠️ **`USER_MANUAL.md` at the REPO ROOT is the only manual.** It is the AI
+   corpus, the source of the in-app PDF and the ops PDF (both built by
+   `tools/export_docs_pdf.py`, one command, two destinations). A second
+   role-based `docs/USER_MANUAL.md` existed from 2026-07-26 to 2026-08-24 and
+   fell four phases behind; suite CJ now fails if it comes back, and it
+   compares §19's tab count against `ManHoursPage.tsx` rather than a number
+   typed into the test.
 2. **`POST /ai/query` (chat-with-your-data, level ≥2)** — two lanes:
    **template lane** = deterministic intent router (`ai/query_router.py`:
    returns/receipts/issues/stock/low-stock/expiring/top-suppliers/PRs/POs +
@@ -333,7 +360,7 @@ memory — deliberately not reproduced here).
 > answer. See `PROJECT_HANDOVER.md` rule 15.
 
 ```bash
-# 1. service tests (1502 checks, suites A…BX) — CI mirror, own throwaway DB
+# 1. service tests (1868 checks, suites A…CJ) — CI mirror, own throwaway DB
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
 JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 .venv/bin/python -u -m backend.api.service_tests
@@ -349,7 +376,7 @@ JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 npm run build --prefix frontend && cd frontend && npx tsc --noEmit
 
 # 4. headless E2E (Playwright — builds/destroys its own gihub_e2e_pw stack)
-cd tests/e2e && npm test        # 42 tests, ~19 s
+cd tests/e2e && npm test        # 107 tests, ~37 s
 
 # 5. alembic single head
 .venv/bin/python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; c=Config('backend/alembic.ini'); c.set_main_option('script_location','backend/alembic'); print(ScriptDirectory.from_config(c).get_heads())"

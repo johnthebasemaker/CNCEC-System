@@ -2076,6 +2076,104 @@ of the bar — antd's own overflow, not a fault — or by URL (`?tab=planner`,
 
 ---
 
+## 14m. The manual and the Hub Assistant (Phase 8 · slice 8f)
+
+The assistant was reported as giving outdated and evasive answers. It was
+answering **correctly, from a manual that described the system a week ago**.
+The corpus was the bug; the prompt was the smaller half.
+
+### 14m.1 One manual
+
+**TC-DOC-01** — `docs/USER_MANUAL.md` no longer exists. There is one manual,
+`USER_MANUAL.md` at the repo root. Two manuals means one of them is wrong and
+nobody knows which; the deleted one was four phases behind.
+
+**TC-DOC-02** — `.venv/bin/python tools/export_docs_pdf.py` writes **four**
+files: the two ops PDFs under `docs/export/` *and* the two the app serves from
+the repo root (`GI_Hub_User_Manual.pdf`, `GI_Hub_SOP.pdf`). Download the manual
+from **Documents → User Manual** in the app and check the content matches the
+markdown. These were two pipelines and the in-app copy had drifted eleven days
+behind.
+
+### 14m.2 The drift gate
+
+**TC-DOC-03** — add a thirteenth tab to `ManHoursPage.tsx` and run the backend
+suite. **CJ-04 must fail.** It counts the tabs in the code and requires §19 to
+document that many. A test asserting "twelve" would pass forever and notice
+nothing.
+
+**TC-DOC-04** — add a role to `auth.ROLE_META` without writing its §2.3 block.
+**CJ-06 must fail.** Every role a person can hold needs a capability list they
+can read, not just a row in a table.
+
+### 14m.3 ⚠️ The answer that started this
+
+**TC-AI-01** — sign in as an HOD and ask the Hub Assistant *"can I open the
+Manpower portal?"*. The answer must be **yes**, with the reason.
+
+The old answer was no, and the mechanism is worth knowing because it will
+recur: §2.1 said these pages are "locked to their own role", §2.2's table said
+which role — and they were **separate retrievable chunks**, so only one
+reached the model. Reading the caveat alone, exclusion is the obvious
+inference.
+
+**TC-AI-02** — the caveat and the matrix are now one chunk, *and the chunker
+keeps them together*: putting them under one `##` was not enough, because §2.2
+is ~3,000 characters and the size wrap split it anyway. A markdown table now
+adheres to the paragraph above it.
+
+**TC-AI-03** — ask the same question as a **Store Keeper**. It must answer
+about the Store Keeper's own access, and must not describe HOD screens.
+
+### 14m.4 Answers, not signposts
+
+**TC-AI-04** — ask any yes/no question. The reply must **start with Yes or
+No**. It must never be "see section 2.1", "refer to the access matrix" or
+"check §19" — pointing at a section number is the reader doing the work the
+assistant was asked to do. A section number may follow a complete answer as a
+citation.
+
+**TC-AI-05** — the assistant must not say "the manual does not specify" when a
+table in its context covers the question.
+
+### 14m.5 Words people actually type
+
+**TC-AI-06** — ask *"how do I raise a PR"*. Before the alias map this
+retrieved nothing from the procurement chapter, because the manual spells it
+"purchase requisition". Also try **MPH**, **manpower**, **SME**, **DN**,
+**MTC**, **PPE**, **SQM**.
+
+**TC-AI-07** — ⚠️ **an alias must never widen access.** As a Store Keeper, ask
+*"PR PO DN admin users hosting credentials"*. The answer must stay inside the
+Store Keeper's chapters. The chapter filter runs before scoring, so an alias
+can only change which *allowed* passage wins.
+
+### 14m.6 Speed — what is and is not slow
+
+**TC-AI-08** — restart the API and read the boot log. It prints
+`[ai] manual index: OK — 23 chapters, 453 chunks, NN ms`. A missing or
+unparseable manual says so **at boot** rather than inside somebody's chat.
+
+⚠️ **Do not report the index as the cause of slow answers.** Measured on the
+live 229 KB manual: 2 ms to chunk, 15 ms to build, 0.3 ms per search. What a
+person waits for is token generation in Ollama. Warming the index moves 17 ms
+off the first questioner's request; it does not make the model faster.
+
+### 14m.7 What every role can now see
+
+**TC-AI-09** — for each role, ask *"what pages can I open?"*. The access matrix
+must be reachable. At the old 800-character head-truncation it was in **no**
+non-admin prompt at all: the matrix begins ~1,900 characters into §2, and the
+cut landed inside the role-hierarchy table above it.
+
+**TC-AI-10** — §2 is never truncated for anyone. Other chapters truncate on a
+`##` boundary and say so; the cut must never land mid-table, because half a
+table reads as a complete one and the model answers confidently from the rows
+that survived.
+
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

@@ -4,8 +4,8 @@ tools/export_docs_pdf.py — render the ops-handoff PDFs from Markdown.
 
     .venv/bin/python tools/export_docs_pdf.py
 
-Converts `docs/USER_MANUAL.md` (v2 role-based manual) and `SOP.md` into
-clean PDFs under `docs/export/` using fpdf2 (already a project dependency —
+Converts `USER_MANUAL.md` (the single product manual, at the repo root) and
+`SOP.md` into clean PDFs under `docs/export/` using fpdf2 (already a project dependency —
 same engine as backend/api/exec_pdf.py). Deliberately lightweight: headings,
 bullets, numbered lists, tables, block quotes, code blocks, images
 (screenshots), bold/code inline markers stripped. Core Helvetica fonts ⇒
@@ -24,12 +24,25 @@ from fpdf import FPDF
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, "docs", "export")
 
-DOCS = [  # (source md, output pdf, cover title)
-    ("docs/USER_MANUAL.md", "GI-Hub-User-Manual-v2.pdf",
-     "GI Hub — User Manual (v2, React/FastAPI)"),
+# ⚠️ ONE MANUAL, AT THE REPO ROOT. `docs/USER_MANUAL.md` was a second,
+# role-based manual written 2026-07-26 and never updated; it described a system
+# three phases old while the root manual — the one `ai/manual_qa.py` parses and
+# the API serves — moved on. Two manuals means one of them is wrong and nobody
+# knows which, so it was deleted in Phase 8 slice 8f and this points at the
+# survivor. The old `GI-Hub-User-Manual-v2.pdf` went with it.
+DOCS = [  # (source md, output pdf, cover title, the copy the API serves)
+    ("USER_MANUAL.md", "GI-Hub-User-Manual.pdf",
+     "GI Hub — Product Manual & User Catalogue", "GI_Hub_User_Manual.pdf"),
     ("SOP.md", "GI-Hub-SOP.pdf",
-     "GI Hub — Standard Operating Procedure"),
+     "GI Hub — Standard Operating Procedure", "GI_Hub_SOP.pdf"),
 ]
+
+# ⚠️ THE APP SERVES ITS OWN COPY, AND IT USED TO BE BUILT SEPARATELY.
+# `documents.reference_doc` reads `GI_Hub_User_Manual.pdf` / `GI_Hub_SOP.pdf`
+# from the repo ROOT; this tool wrote only to `docs/export/`. So the ops PDF
+# and the one a user downloads inside the app came from two pipelines and
+# drifted — at the time this was fixed the in-app manual was eleven days and
+# four phases behind. One command now writes both.
 
 _EMOJI_MAP = {"🐞": "[bug]", "✨": "[feature]", "💬": "[note]", "⚠️": "(!)",
               "🚨": "(!!)", "✅": "[ok]", "❌": "[x]", "🔁": "", "📋": "",
@@ -196,13 +209,17 @@ def render(md_path: str, out_pdf: str, title: str) -> str:
 
 
 def main() -> int:
-    for md, out_name, title in DOCS:
+    import shutil
+    for md, out_name, title, served in DOCS:
         out = render(md, out_name, title)
         size = os.path.getsize(out)
         print(f"✅ {md} → {os.path.relpath(out, ROOT)} ({size/1024:.0f} KB)")
         if size < 5_000:
             print(f"❌ {out_name} suspiciously small")
             return 1
+        dest = os.path.join(ROOT, served)
+        shutil.copyfile(out, dest)
+        print(f"   ↳ also {served} (the copy /documents/reference serves)")
     return 0
 
 
