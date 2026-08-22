@@ -16533,6 +16533,440 @@ async def test_qc_hod():
         await s.commit()
 
 
+
+# --- Suite CI: the SME session, costed in labour ------------------------------
+async def test_sme_mp_session():
+    """Suite CI — Phase 8 slice 8e. Can do · overall · blocked.
+
+    THE FIXTURE, built so every figure is checkable on paper. Every benchmark
+    runs at 100 m²/shift, so man-hours per m² is `Manhours_Per_Shift / 100`.
+
+        SVCI-T1  SVCI-A  200 m²   recipe: 1.0 of M1 per m²   2.0 mh/m²  MASON
+        SVCI-T2  SVCI-B  100 m²   recipe: 2.0 of M1 per m²   1.0 mh/m²  HELPER
+        SVCI-T2  SVCI-C  100 m²   recipe: 1.0 of M2 per m²   3.0 mh/m²  MASON
+
+        stock:   M1  150 available (none on order)
+                 M2    0 available (none on order)
+
+    With the session ordered [T1, T2] the cascade spends M1 on T1 first:
+
+        T1/A  demand 200, gets 150  → 150 m² achievable, 50 blocked
+        T2/B  demand 200, gets   0  →   0 m² achievable, 100 blocked
+        T2/C  M2 is empty           →   0 m² achievable, 100 blocked
+
+                        can do      overall     blocked
+        man-hours          300          800         500
+        MASON              300          700         400
+        HELPER               0          100         100
+
+    REVERSE the session and the overall total does not move — it is the same
+    work — while can-do collapses from 300 man-hours to 150. That is CI-09,
+    and it is the reason this report takes the priority order at all.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import session_plan as SP
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _reset():
+        SP.invalidate_cache()
+        async with SessionLocal() as s:
+            for tbl, col in (("sme_manpower_norm", "Lining_System_Code"),
+                             ("sme_recipe", "Lining_System_Code")):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE "{col}" '
+                                     f"LIKE 'SVCI-%'"))
+            for tbl in ("sme_sqm_progress", "sme_equipment",
+                        "sme_surface_prep_progress"):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE '
+                                     f'"Equipment_Tag_No" LIKE \'SVCI-%\''))
+            await s.execute(_sqt("DELETE FROM sme_inventory_seed WHERE "
+                                 "\"Material_Code\" LIKE 'SVCI-%'"))
+            await s.execute(_sqt("DELETE FROM mh_employees WHERE "
+                                 "\"Employee_Code\" LIKE 'SVCI-%'"))
+            await s.commit()
+
+    await _reset()
+
+    UNITS = [
+        # tag,      code,     area, location,    material, per_sqm, mh/shift, role
+        ("SVCI-T1", "SVCI-A", 200.0, "SVCI Floor", "SVCI-M1", 1.0, 200, "MASON"),
+        ("SVCI-T2", "SVCI-B", 100.0, "SVCI Wall",  "SVCI-M1", 2.0, 100, "HELPER"),
+        ("SVCI-T2", "SVCI-C", 100.0, "SVCI Shell", "SVCI-M2", 1.0, 300, "MASON"),
+    ]
+
+    async def _seed_stock(m1: float, m2: float):
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM sme_inventory_seed WHERE "
+                                 "\"Material_Code\" LIKE 'SVCI-%'"))
+            for code, qty, name in (
+                    ("SVCI-M1", m1, "SVCI resin"),
+                    # ⚠️ RULE 12 LIVES HERE. A material name is master data an
+                    # admin types, and this report is opened in Excel by the
+                    # person who plans the labour. CI-19 reads the rendered
+                    # workbook back to prove the cell is text, not a formula.
+                    ("SVCI-M2", m2, '=HYPERLINK("http://x","open")')):
+                await s.execute(_sqt(
+                    'INSERT INTO sme_inventory_seed ("Material_Code", '
+                    '"SAP_Code", "Material_Name", "UOM", '
+                    '"Initial_Available_Qty", "Initial_Ordered_Qty") '
+                    "VALUES (:c, :c, :n, 'KG', :q, :q)"),
+                    {"c": code, "n": name, "q": qty})
+            await s.commit()
+        SP.invalidate_cache()
+
+    async with SessionLocal() as s:
+        for tag, code, area, loc, mat, per, mps, role in UNITS:
+            await s.execute(_sqt(
+                'INSERT INTO sme_equipment ("Site_ID", "Equipment_Tag_No", '
+                '"Lining_System_Code", "Type", "Surface_Area_SQM", '
+                '"Lining_Area_Location", "Lining_System", "Name") VALUES '
+                "('CNCEC', :t, :c, 'CV', :a, :l, :n, 'SVCI vessel')"),
+                {"t": tag, "c": code, "a": area, "l": loc,
+                 "n": f"Full name of {code}"})
+            await s.execute(_sqt(
+                'INSERT INTO sme_sqm_progress ("Site_ID", "Equipment_Tag_No", '
+                '"Lining_System_Code", "Original_SQM", "Done_SQM") '
+                "VALUES ('CNCEC', :t, :c, :a, 0)"),
+                {"t": tag, "c": code, "a": area})
+            await s.execute(_sqt(
+                'INSERT INTO sme_recipe ("Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+                '"For_1_SQM", "Lining_System", "Lining_System_Name") VALUES '
+                "(:c, :e, :m, :m, :p, :n, 'SHORT')"),
+                {"c": code, "e": f"{code}-R", "m": mat, "p": per,
+                 "n": f"Full name of {code}"})
+            nid = (await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+                '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+                '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+                "VALUES ('CV', :c, :e, :a, '', 1, 11, :m, 100, 0) "
+                "RETURNING id"),
+                {"c": code, "e": f"ESCI-{code}", "a": f"{code} lining",
+                 "m": mps})).scalar_one()
+            await s.execute(_sqt(
+                'INSERT INTO sme_manpower_norm_role ("Norm_ID", "Role_Code", '
+                '"Headcount") VALUES (:n, :r, 1)'), {"n": nid, "r": role})
+        await s.commit()
+    await _seed_stock(150.0, 0.0)
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+
+        async def _sess(**body):
+            r = await ac.post("/mh/planner/session", headers=H, json=body)
+            assert r.status_code == 200, f"{r.status_code} {r.text[:260]}"
+            return r.json()
+
+        d = await _sess(priority_order=["SVCI-T1", "SVCI-T2"], target_days=5,
+                        refresh=True)
+        col = d["columns"]
+
+        # ── the three columns ───────────────────────────────────────────────
+        check("CI-01 'we can do' is costed from the area the PHYSICAL stock "
+              "supports — 150 of T1's 200 m², at 2 mh/m²",
+              abs(col["can_do"]["Manhours"] - 300.0) < 0.01
+              and abs(col["can_do"]["SQM"] - 150.0) < 0.01,
+              str(col["can_do"]))
+        check("CI-02 'overall' is the whole job, materials no object",
+              abs(col["overall"]["Manhours"] - 800.0) < 0.01
+              and abs(col["overall"]["SQM"] - 400.0) < 0.01,
+              str(col["overall"]))
+        check("CI-03 'blocked' is what the deficit costs — the size of the "
+              "delay, not a second job",
+              abs(col["blocked"]["Manhours"] - 500.0) < 0.01
+              and abs(col["blocked"]["SQM"] - 250.0) < 0.01,
+              str(col["blocked"]))
+        check("CI-04 CONSERVATION: can_do + blocked == overall. The three "
+              "columns are one number split, and a report where they did not "
+              "reconcile would be argued about instead of used",
+              abs(col["can_do"]["Manhours"] + col["blocked"]["Manhours"]
+                  - col["overall"]["Manhours"]) < 0.01
+              and abs(col["can_do"]["SQM"] + col["blocked"]["SQM"]
+                      - col["overall"]["SQM"]) < 0.01,
+              f'{col["can_do"]["Manhours"]} + {col["blocked"]["Manhours"]} '
+              f'vs {col["overall"]["Manhours"]}')
+        check("CI-05 …and in crew-shifts too, which is the same identity in "
+              "the other unit",
+              abs(col["can_do"]["Crew_Shifts"] + col["blocked"]["Crew_Shifts"]
+                  - col["overall"]["Crew_Shifts"]) < 0.01,
+              str([col[k]["Crew_Shifts"] for k in
+                   ("can_do", "overall", "blocked")]))
+
+        # ── the trap: no headcount against blocked work ─────────────────────
+        check("CI-06 the BLOCKED column carries NO headcount — labour you "
+              "cannot deploy is not a hiring requirement, and a number here "
+              "would be hired against",
+              col["blocked"]["Required_Headcount"] is None
+              and col["blocked"]["Required_Headcount_Rounded"] is None
+              and col["blocked"]["Headcount_Per_Shift"] is None,
+              str(col["blocked"]))
+        check("CI-07 …and it SAYS so rather than leaving a blank cell to be "
+              "read as zero",
+              "cannot deploy labour against material" in
+              str(col["blocked"]["Headcount_Note"]),
+              str(col["blocked"]["Headcount_Note"]))
+        check("CI-08 the two columns you CAN staff do carry one "
+              "(300 / 55 = 5.45 → 6, and 800 / 55 = 14.55 → 15)",
+              col["can_do"]["Required_Headcount_Rounded"] == 6
+              and col["overall"]["Required_Headcount_Rounded"] == 15,
+              f'{col["can_do"]["Required_Headcount"]} / '
+              f'{col["overall"]["Required_Headcount"]}')
+
+        # ── priority is not decoration ──────────────────────────────────────
+        rev = await _sess(priority_order=["SVCI-T2", "SVCI-T1"], target_days=5)
+        check("CI-09 REVERSING the session leaves the overall total untouched "
+              "— it is the same work — while can-do collapses, because the "
+              "last drum went to a different job",
+              abs(rev["columns"]["overall"]["Manhours"] - 800.0) < 0.01
+              and abs(rev["columns"]["can_do"]["Manhours"] - 75.0) < 0.01,
+              f'can_do={rev["columns"]["can_do"]["Manhours"]} '
+              f'overall={rev["columns"]["overall"]["Manhours"]}')
+        check("CI-10 …and conservation survives the reordering",
+              abs(rev["columns"]["can_do"]["Manhours"]
+                  + rev["columns"]["blocked"]["Manhours"] - 800.0) < 0.01,
+              str(rev["columns"]["blocked"]["Manhours"]))
+
+        # ── per role ────────────────────────────────────────────────────────
+        roles = {r["Role_Code"]: r for r in d["by_role"]}
+        check("CI-11 each role is split the same three ways (MASON: 300 of "
+              "700 startable)",
+              abs(roles["MASON"]["Can_Do_Manhours"] - 300.0) < 0.01
+              and abs(roles["MASON"]["Overall_Manhours"] - 700.0) < 0.01
+              and abs(roles["MASON"]["Blocked_Manhours"] - 400.0) < 0.01,
+              str(roles.get("MASON")))
+        check("CI-12 …and the roles sum back to the columns, so a headline "
+              "figure can be decomposed without re-deriving it",
+              abs(sum(r["Can_Do_Manhours"] for r in d["by_role"]) - 300.0) < 0.01
+              and abs(sum(r["Overall_Manhours"] for r in d["by_role"]) - 800.0)
+              < 0.01,
+              str([(r["Role_Code"], r["Overall_Manhours"]) for r in d["by_role"]]))
+        check("CI-13 a role's BLOCKED headcount is absent, not zero — the "
+              "same rule as the column, applied where somebody would actually "
+              "act on it",
+              all(r["Blocked_Headcount"] is None for r in d["by_role"]),
+              str([(r["Role_Code"], r["Blocked_Headcount"]) for r in d["by_role"]]))
+        check("CI-14 the gap to assign is measured against CAN-DO, never the "
+              "overall — HELPER has 100 blocked man-hours and nothing to "
+              "start, so it asks for nobody",
+              roles["HELPER"]["To_Assign"] == 0
+              and abs(roles["HELPER"]["Blocked_Manhours"] - 100.0) < 0.01,
+              str(roles.get("HELPER")))
+
+        # ── what is in the way ──────────────────────────────────────────────
+        mats = {m["Material_Code"]: m for m in d["materials_blocking"]}
+        check("CI-15 the blocking materials are named, with how much is "
+              "missing and how many jobs stand behind them",
+              abs(mats["SVCI-M1"]["Short_Now_Qty"] - 250.0) < 0.01
+              and mats["SVCI-M1"]["Blocks_Job_Count"] == 2,
+              str(sorted(mats)))
+        check("CI-16 …and no man-hour figure is attributed to a material. "
+              "Several can be short on one unit while only the scarcest "
+              "decides it, so 'this material blocks N hours' would sum to "
+              "more than the delay",
+              not any(k.endswith("Manhours") for m in d["materials_blocking"]
+                      for k in m),
+              str(list(d["materials_blocking"][0]) if d["materials_blocking"]
+                  else "none"))
+        t1 = next(j for j in d["jobs"] if j["Equipment_Tag_No"] == "SVCI-T1")
+        check("CI-17 each job names the ONE material that decides its "
+              "achievable area — the bottleneck, by the same rule the SME "
+              "engine used to compute it",
+              (t1.get("Bottleneck") or {}).get("Material_Code") == "SVCI-M1",
+              str(t1.get("Bottleneck")))
+
+        # ── zero stock ──────────────────────────────────────────────────────
+        await _seed_stock(0.0, 0.0)
+        zero = await _sess(priority_order=["SVCI-T1", "SVCI-T2"], target_days=5,
+                           refresh=True)
+        zc = zero["columns"]
+        check("CI-18 with NOTHING on site, can-do is zero man-hours and the "
+              "whole requirement is blocked — not an error, and not an empty "
+              "report",
+              abs(zc["can_do"]["Manhours"]) < 0.01
+              and abs(zc["blocked"]["Manhours"] - 800.0) < 0.01
+              and abs(zc["overall"]["Manhours"] - 800.0) < 0.01,
+              str({k: zc[k]["Manhours"] for k in zc}))
+        check("CI-18b …and the can-do column still says 0 rather than None: "
+              "'nobody is needed yet' is an answer, 'no headcount applies' is "
+              "the blocked column's answer, and they are different",
+              zc["can_do"]["Required_Headcount"] == 0.0
+              and zc["blocked"]["Required_Headcount"] is None,
+              str(zc["can_do"]))
+
+        # ── the export ──────────────────────────────────────────────────────
+        await _seed_stock(150.0, 0.0)
+        body = {"priority_order": ["SVCI-T1", "SVCI-T2"], "target_days": 5,
+                "refresh": True}
+        rx = await ac.post("/mh/planner/session/export", headers=H,
+                           json={**body, "format": "xlsx"})
+        check("CI-19 the report renders as a workbook",
+              rx.status_code == 200 and len(rx.content) > 2000,
+              f"{rx.status_code} {len(rx.content)}")
+        if rx.status_code == 200:
+            import io as _io
+
+            from openpyxl import load_workbook
+            wb = load_workbook(_io.BytesIO(rx.content))
+            cells = [str(c.value) for ws in wb.worksheets
+                     for row in ws.iter_rows() for c in row
+                     if c.value is not None]
+            hit = [c for c in cells if "HYPERLINK" in c]
+            check("CI-20 RULE 12: a material named "
+                  "'=HYPERLINK(...)' arrives as TEXT, not as a live formula "
+                  "in the labour planner's spreadsheet",
+                  bool(hit) and all(c.startswith("'=") for c in hit),
+                  str(hit[:1]))
+            check("CI-21 the workbook leads with the three-column answer and "
+                  "keeps the evidence on its own sheets",
+                  [ws.title for ws in wb.worksheets][:4]
+                  == ["Summary", "Per job", "Per role", "Blocking materials"],
+                  str([ws.title for ws in wb.worksheets]))
+        rc = await ac.post("/mh/planner/session/export", headers=H,
+                           json={**body, "format": "csv"})
+        text_csv = rc.content.decode("utf-8-sig", "replace")
+        check("CI-22 the csv carries the summary — one file, so one table",
+              rc.status_code == 200 and "We can do now" in text_csv
+              and "Blocked by material" in text_csv, f"{rc.status_code}")
+        check("CI-23 …and the blocked row's headcount cells are empty in the "
+              "document too, with the reason in the row",
+              "cannot deploy labour against material" in text_csv,
+              text_csv[:200])
+
+        # ── the cache (operator ruling Q8) ──────────────────────────────────
+        first = await _sess(priority_order=["SVCI-T1", "SVCI-T2"],
+                            target_days=5, refresh=True)
+        again = await _sess(priority_order=["SVCI-T1", "SVCI-T2"],
+                            target_days=5)
+        check("CI-24 the cascade is computed once per selection and reused — "
+              "it is the heaviest read in the codebase and nothing about it "
+              "depends on the deadline",
+              first["cascade"]["cached"] is False
+              and again["cascade"]["cached"] is True,
+              f'{first["cascade"]} / {again["cascade"]}')
+        moved = await _sess(priority_order=["SVCI-T1", "SVCI-T2"],
+                            target_days=10)
+        check("CI-25 …so dragging Target Days re-runs the DIVISION only: the "
+              "man-hours are identical and only the headcount moves",
+              moved["cascade"]["cached"] is True
+              and abs(moved["columns"]["can_do"]["Manhours"] - 300.0) < 0.01
+              and moved["columns"]["can_do"]["Required_Headcount_Rounded"] == 3,
+              str(moved["columns"]["can_do"]))
+        fresh = await _sess(priority_order=["SVCI-T1", "SVCI-T2"],
+                            target_days=5, refresh=True)
+        check("CI-26 …and a cache on a number people decide from stays "
+              "escapable: refresh recomputes, and every answer says whether "
+              "it came from the cache",
+              fresh["cascade"]["cached"] is False
+              and "age_seconds" in fresh["cascade"],
+              str(fresh["cascade"]))
+
+        # ── the filters and the refusals ────────────────────────────────────
+        one = await _sess(priority_order=["SVCI-T1", "SVCI-T2"],
+                          lining_system_codes=["SVCI-C"], target_days=5)
+        check("CI-27 a code filter narrows the report to those systems and "
+              "nothing else",
+              {j["Lining_System_Code"] for j in one["jobs"]} == {"SVCI-C"}
+              and abs(one["columns"]["overall"]["Manhours"] - 300.0) < 0.01,
+              str([j["Job_Label"] for j in one["jobs"]]))
+        empty = await ac.post("/mh/planner/session", headers=H,
+                              json={"priority_order": [], "target_days": 5})
+        check("CI-28 an EMPTY session is refused with the sentence that says "
+              "what to do, rather than answered with a report of zeroes",
+              empty.status_code == 422 and "Session Builder" in empty.text,
+              f"{empty.status_code} {empty.text[:120]}")
+        both = await ac.post("/mh/planner/session", headers=H, json={
+            "priority_order": ["SVCI-T1"], "target_days": 5,
+            "deadline_hours": 55})
+        check("CI-29 giving both spellings of the deadline is refused here "
+              "too — the same rule as /mh/planner, not a second one",
+              both.status_code == 422, f"{both.status_code}")
+
+        # ── the two planners must agree on the same work ────────────────────
+        # The session report and /mh/planner cost the SAME jobs by different
+        # routes: one multiplies a per-m² coefficient, the other sums per
+        # activity. If they ever disagree, one of them is wrong and nothing in
+        # either file would say which.
+        rp = await ac.post("/mh/planner", headers=H, json={
+            "equipment_tags": ["SVCI-T1", "SVCI-T2"], "target_days": 5})
+        both_agree = (rp.status_code == 200
+                      and abs(rp.json()["requirement"]["Total_Required_Manhours"]
+                              - 800.0) < 0.01)
+        check("CI-35 the ordinary planner and the session report cost the "
+              "same jobs identically — one sums per activity, the other "
+              "multiplies a per-m² rate, and they are the same arithmetic",
+              both_agree,
+              str(rp.json().get("requirement") if rp.status_code == 200
+                  else rp.status_code))
+
+        # ── the label and the honesty about what is unmodelled ──────────────
+        check("CI-30 every job carries the SAME assembled label the planner "
+              "and the targets list use",
+              t1["Job_Label"] == "SVCI-T1 · SVCI-A [CV] — Full name of SVCI-A",
+              str(t1["Job_Label"]))
+
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM sme_recipe WHERE "
+                                 "\"Lining_System_Code\" = 'SVCI-C'"))
+            await s.commit()
+        SP.invalidate_cache()
+        un = await _sess(priority_order=["SVCI-T2"],
+                         lining_system_codes=["SVCI-C"], target_days=5,
+                         refresh=True)
+        check("CI-31 a system with NO recipe scores 0 m² achievable, so its "
+              "hours land in 'blocked' — and the report says UNMODELLED "
+              "rather than letting somebody chase procurement for a material "
+              "nobody has named",
+              abs(un["columns"]["blocked"]["Manhours"] - 300.0) < 0.01
+              and any("UNMODELLED, not blocked by stock" in w
+                      for w in un["warnings"]), str(un["warnings"][:2]))
+
+        # ── the roster still decides the shifts ─────────────────────────────
+        before = await _sess(priority_order=["SVCI-T1"], target_days=5,
+                             refresh=True)
+        check("CI-32a the fixture: with nobody on nights in a required role "
+              "the automatic choice is ONE shift — asserted first, because "
+              "CI-32 proves nothing if this was already two",
+              before["inputs"]["shifts_per_day"] == 1
+              and before["roster"]["Night_In_Scope"] == 0,
+              str(before["inputs"]))
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                'INSERT INTO mh_employees ("Site_ID", "Employee_Code", "Name", '
+                '"Designation", "Worker_Type", "Shift", status) VALUES '
+                "('CNCEC', 'SVCI-N1', 'Night Mason', 'Mason', 'GI', 'Night', "
+                "'active')"))
+            await s.commit()
+        night = await _sess(priority_order=["SVCI-T1"], target_days=5,
+                            refresh=True)
+        check("CI-32 the roster is read LIVE, never from the cascade cache — "
+              "a night mason hired a minute ago flips the plan to two shifts "
+              "on the next question",
+              night["inputs"]["shifts_per_day"] == 2
+              and night["inputs"]["shifts_per_day_source"] == "roster"
+              and night["roster"]["Night_In_Scope"] >= 1,
+              str(night["inputs"]))
+        check("CI-33 …and two shifts SPLIT that crew rather than halving the "
+              "hiring: 300 man-hours over 55 h is 6 people in total, in two "
+              "crews of 3 — not 3 people",
+              night["columns"]["can_do"]["Required_Headcount_Rounded"] == 6
+              and night["columns"]["can_do"]["Headcount_Per_Shift"] == 3,
+              str(night["columns"]["can_do"]))
+
+        # ── who may ask ─────────────────────────────────────────────────────
+        H_sk = await _qsep_login(ac, "SVCQ-sk")
+        r_sk = await ac.post("/mh/planner/session", headers=H_sk,
+                             json={"priority_order": ["SVCI-T1"],
+                                   "target_days": 5})
+        check("CI-34 the man-hours portal is exact-locked to {hod, admin}, "
+              "and the new route inherits that lock rather than restating it",
+              r_sk.status_code == 403, f"{r_sk.status_code}")
+
+    await _reset()
+
+
 # --- Suite CG: procurement locks ----------------------------------------------
 async def test_procurement_locks():
     """Suite CG — Phase 8 slice 8c. The PR number, the state, and the retry.
@@ -17574,6 +18008,9 @@ async def main() -> int:
     await test_procurement_locks()
     print("\n CH. The Head of Qualities — cross-site reach, and where it stops")
     await test_qc_hod()
+    print("\n CI. The SME session costed in labour — what we can do, the "
+          "whole job, and what is waiting on a drum")
+    await test_sme_mp_session()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

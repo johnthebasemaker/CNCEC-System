@@ -47,21 +47,38 @@ function writeStore(store: Store) {
 // be shared as a link. Equipment tags never contain '~' (SAP-style codes), so
 // '~' delimits encodeURIComponent()-escaped tags. URL wins over localStorage
 // on first load (an opened share-link shows the sender's exact scenario).
-const URL_PARAM = 'scenario'
+export const URL_PARAM = 'scenario'
 
-function readUrlOrder(): string[] | null {
-  const p = new URLSearchParams(window.location.search).get(URL_PARAM)
-  if (!p) return null
-  const tags = p.split('~').map((t) => {
+/**
+ * The encoding, exported (Phase 8 slice 8e).
+ *
+ * The session now travels to a SECOND page — `/manhours?tab=session&scenario=…`
+ * carries it to the manpower report — and a handoff whose two ends spell the
+ * encoding separately is a handoff that breaks the first time a tag contains a
+ * character one side escapes and the other does not. One pair of functions,
+ * both readers.
+ */
+export function encodeTags(tags: string[]): string {
+  return tags.map(encodeURIComponent).join('~')
+}
+
+export function decodeTags(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  const tags = raw.split('~').map((t) => {
     try { return decodeURIComponent(t).trim() } catch { return '' }
   }).filter(Boolean)
-  return tags.length ? [...new Set(tags)] : null
+  return [...new Set(tags)]
+}
+
+function readUrlOrder(): string[] | null {
+  const tags = decodeTags(new URLSearchParams(window.location.search).get(URL_PARAM))
+  return tags.length ? tags : null
 }
 
 function writeUrlOrder(order: string[]) {
   try {
     const url = new URL(window.location.href)
-    if (order.length) url.searchParams.set(URL_PARAM, order.map(encodeURIComponent).join('~'))
+    if (order.length) url.searchParams.set(URL_PARAM, encodeTags(order))
     else url.searchParams.delete(URL_PARAM)
     window.history.replaceState(null, '', url)
   } catch {

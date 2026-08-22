@@ -8,6 +8,7 @@ import { Table } from '../lib/smartTable'
 import { InboxOutlined, DownloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import dayjs, { Dayjs } from 'dayjs'
 import { api } from '../api/client'
 import type { Row as ApiRow } from '../api/client'
@@ -16,6 +17,7 @@ import { useSites, downloadDocument } from '../api/hooks'
 import { HodApprovalQueueTab } from './ExecutionPage'
 import { ExecVarianceTab, ReasonLogTab, SurfacePrepTab } from './ExecutionReportTabs'
 import ManpowerPlanner from './ManpowerPlanner'
+import SessionManpowerReport from './SessionManpowerReport'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -958,6 +960,13 @@ export default function ManHoursPage() {
   const [site, setSite] = useState<string>()
   const effSite = isAdmin ? (site ?? sites?.[0]) : undefined
 
+  // ?tab= is the landing half of the SME handoff (Phase 8 slice 8e). Read from
+  // the URL so a link opens on the right tab, but held in state afterwards:
+  // writing the key back on every click would put a history entry behind each
+  // tab and make Back walk sideways instead of leaving the page.
+  const [params] = useSearchParams()
+  const [tab, setTab] = useState<string>(() => params.get('tab') || 'employees')
+
   return (
     <div>
       <Space align="center" style={{ justifyContent: 'space-between', width: '100%' }}>
@@ -972,7 +981,8 @@ export default function ManHoursPage() {
         required-MH estimates and the variance between them.
       </Typography.Paragraph>
       <Tabs
-        defaultActiveKey="employees"
+        activeKey={tab}
+        onChange={setTab}
         items={[
           { key: 'employees', label: '👥 Employees', children: <EmployeesTab site={effSite} /> },
           { key: 'timesheet', label: '🕒 Daily Timesheet', children: <TimesheetTab site={effSite} /> },
@@ -993,6 +1003,10 @@ export default function ManHoursPage() {
             children: <SurfacePrepTab /> },
           { key: 'planner', label: '🧠 Manpower Planner',
             children: <ManpowerPlanner /> },
+          // Phase 8 slice 8e — the SME session, costed in labour. Arrived at
+          // from the Session Builder's 📊 button, which lands on ?tab=session.
+          { key: 'session', label: '🔗 SME Session',
+            children: <SessionManpowerReport site={effSite} /> },
         ]}
       />
     </div>

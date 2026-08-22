@@ -1951,6 +1951,131 @@ inspector was answered out of the Store Keeper chapter for weeks.
 
 ---
 
+## 14l. Session Report For MP&H (Phase 8 · slice 8e)
+
+The SME Session Builder knows what the material on site can build. The Manpower
+Planner knows what labour a piece of work needs. This joins them, so the
+question people actually ask at the morning meeting has one answer:
+
+| Column | Basis | Means |
+|---|---|---|
+| **We can do now** | `SQM_Achievable_Now` | the part you can start today |
+| **Overall total** | `Remaining_SQM` | the whole remaining job |
+| **Blocked by material** | `SQM_Deficit` | the size of the delay |
+
+Reached from **SME → 🔍 Session Builder → 📊 Session Report For MP&H**, which
+lands on **Labor Tracking → 🔗 SME Session**.
+
+### 14l.1 ⚠️ The blocked column must never show a headcount
+
+**TC-MPH-01** — cost any session with a shortage. The Blocked card shows
+man-hours and crew-shifts, and **"not applicable"** where a headcount would be.
+Every per-role row does the same.
+
+**This is the case to fail the build on.** Labour you cannot deploy because the
+material has not landed is not a hiring requirement. A number in that cell is a
+number somebody hires against, and those people are idle when the drums arrive.
+
+**TC-MPH-02** — the per-role **To assign** figure is measured against **can-do**,
+never the overall. A role with 100 blocked man-hours and nothing startable asks
+for nobody.
+
+### 14l.2 Conservation — the three columns are one number split
+
+**TC-MPH-03** — `can do + blocked == overall`, in man-hours *and* in
+crew-shifts, on every session. They are one arithmetic: the achievable area plus
+the deficit **is** the remaining area, and man-hours are linear in area.
+
+A report whose columns do not reconcile gets argued about instead of used, so
+suite CI (CI-04, CI-05, CI-10) gates it.
+
+**TC-MPH-04** — `/mh/planner` and this report cost the same jobs identically
+(CI-35). One sums per activity, the other multiplies a per-m² rate. If they ever
+disagree, one is wrong and neither file says which.
+
+### 14l.3 Priority order is not decoration
+
+**TC-MPH-05** — cost a session, then drag the same equipment into a different
+order and cost it again. **The overall total does not move** — it is the same
+work — while can-do changes, because the cascade gave the last drum to a
+different job.
+
+If reordering changes the overall, the report is reading the order where it
+should not.
+
+### 14l.4 The session travels in the URL
+
+**TC-MPH-06** — the 📊 button is **disabled** on an empty session. Costing
+nothing is not a report.
+
+**TC-MPH-07** — press it with a session loaded. The address becomes
+`/manhours?tab=session&scenario=…`, and the `scenario` value is
+**byte-for-byte** the one the SME page was publishing. Paste that link into a
+new tab: the same report. Nothing is stored anywhere in between — the SME
+planning session in the other tab is untouched by anything done here.
+
+### 14l.5 The cache says it is a cache
+
+**TC-MPH-08** — cost a session, then change **Target days** and cost it again.
+It returns instantly and the "Material picture" reads *cached Ns ago*: the
+cascade is the heaviest read in the system and nothing about it depends on the
+deadline, so only the division re-runs. The man-hours are identical; the
+headcount moves.
+
+**TC-MPH-09** — post a receipt, then press the ⟳ button beside **Cost it**. The
+picture reads *read just now* and the numbers move. A silent 60-second window is
+how a store keeper's just-posted receipt becomes an argument about whose screen
+is right, so the age is always on the page and always escapable.
+
+⚠️ The **roster** is never cached. Hire a night mason and the very next answer
+plans two shifts (CI-32).
+
+### 14l.6 What the report will not claim
+
+**TC-MPH-10** — no material carries a man-hour figure. Several materials can be
+short on one unit while only the scarcest decides how much of it can be built,
+so "this material blocks N man-hours" would sum to more than the delay. What is
+shown instead: how much is missing, how much survives the open POs, how many
+jobs it stands in front of, and which of those it is the **bottleneck** for.
+
+**TC-MPH-11** — a system with **no recipe** is reported as *unmodelled*, not as
+blocked. The SME engine scores it 0 m² achievable either way; only one of those
+readings sends somebody to chase procurement for a material nobody has named.
+
+**TC-MPH-12** — **surface prep is not in this report**, and the page says so.
+Blasting consumes no recipe line, so the material model has no opinion on
+whether it is blocked. Use 🧠 Manpower Planner for prep.
+
+### 14l.7 The export
+
+**TC-MPH-13** — Excel gives four sheets: Summary (the three columns, leading),
+Per job, Per role, Blocking materials — plus "Read this first" when there are
+warnings. CSV carries the Summary only: one file, one table.
+
+**TC-MPH-14** — rule 12 holds here too. A material named `=HYPERLINK(...)`
+arrives as **text**, not as a live formula in the labour planner's spreadsheet
+(CI-20).
+
+### 14l.8 KPI rows use the whole width (Track 5)
+
+**TC-KPI-01** — at 1280px, the last card in any KPI row reaches the right-hand
+edge, whether the row holds three, four or six cards. The old fixed 4-up grid
+left dead space on the right at every other count, which reads as "something
+failed to load" rather than "there are three of these".
+
+**TC-KPI-02** — on a 390px phone the cards stack full width, one per line.
+
+**TC-KPI-03** — cards in a row are the same height even when one title wraps to
+two lines.
+
+⚠️ **Known, pre-existing:** Labor Tracking now has **twelve** tabs and only about
+six fit at 1280px. The rest are reachable through the **"…"** button at the end
+of the bar — antd's own overflow, not a fault — or by URL (`?tab=planner`,
+`?tab=session`). This was already true at eleven tabs.
+
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

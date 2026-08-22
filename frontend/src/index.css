@@ -392,6 +392,31 @@ body {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
 }
 
+/* KPI ROWS USE THE WHOLE WIDTH (Phase 8 Track 5).
+   A 24-column grid slice fits exactly four cards; every other count leaves
+   dead space on the right, which reads as a failed load rather than a short
+   row. Flex divides the line by however many cards there are. `height: 100%`
+   is load-bearing: flex items stretch to the tallest in the line, so without
+   it a two-line title leaves its neighbour short. See components/KpiRow.tsx. */
+.gi-kpi-row {
+  display: flex;
+  flex-wrap: wrap;
+}
+.gi-kpi-row > .gi-kpi-cell {
+  flex: 1 1 var(--gi-kpi-min, 220px);
+  min-width: 0;
+  display: flex;
+}
+.gi-kpi-row > .gi-kpi-cell > * {
+  width: 100%;
+}
+.gi-kpi-row > .gi-kpi-cell > .ant-card {
+  height: 100%;
+}
+.gi-kpi-row > .gi-kpi-cell > .ant-card > .ant-card-body {
+  width: 100%;
+}
+
 /* Data grids: gentle fade as rows land */
 .ant-table-tbody > tr.ant-table-row {
   animation: gi-fade 0.16s ease-out both;

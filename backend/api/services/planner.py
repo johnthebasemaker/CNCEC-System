@@ -614,6 +614,52 @@ async def _remaining_sqm(session: AsyncSession, *, site_id: str, tag: str,
             "note": "" if area else f"no equipment area recorded for {tag}"}
 
 
+async def roster(session: AsyncSession, *, site_id: str) -> tuple[dict, dict]:
+    """Active workers per role, split by contract and by shift.
+
+    Returns `(available, unmapped)`. `unmapped` holds the designations that
+    match no role — reported rather than counted as zero availability, because
+    "nobody wrote down that they are masons" and "there are no masons" call for
+    completely different actions.
+
+    Lifted out of `plan_many` in slice 8e so the session plan reads the SAME
+    roster by the SAME rules. A second copy of this loop would have drifted the
+    first time a designation spelling was added to one of them.
+    """
+    lookup = await _role_lookup(session)
+    emp_rows = (await session.execute(
+        select(emp_t.c["Designation"], emp_t.c["Worker_Type"], emp_t.c["Shift"],
+               func.count())
+        .where(emp_t.c["Site_ID"] == site_id, emp_t.c["status"] == "active")
+        .group_by(emp_t.c["Designation"], emp_t.c["Worker_Type"],
+                  emp_t.c["Shift"]))).all()
+
+    available: dict[str, dict] = {}
+    unmapped: dict[str, int] = {}
+    for desig, wtype, shift, cnt in emp_rows:
+        key = str(desig or "").strip().lower().replace(" ", "_")
+        rc = lookup.get(key)
+        if rc is None:
+            label = str(desig or "").strip() or "(no designation recorded)"
+            unmapped[label] = unmapped.get(label, 0) + int(cnt)
+            continue
+        slot = available.setdefault(rc, {"GI": 0, "NON_GI": 0, "Day": 0,
+                                         "Night": 0, "total": 0})
+        wt = str(wtype or "GI")
+        slot[wt] = slot.get(wt, 0) + int(cnt)
+        slot[str(shift or "Day")] = slot.get(str(shift or "Day"), 0) + int(cnt)
+        slot["total"] += int(cnt)
+    return available, unmapped
+
+
+def unmapped_warning(unmapped: dict) -> str:
+    return ("roster designations that match no role: "
+            + ", ".join(f"{k} x{v}" for k, v in sorted(unmapped.items()))
+            + " — these workers are NOT counted as available. \'nobody wrote "
+              "down that they are masons\' is a different problem from \'there "
+              "are no masons\', so they are reported rather than assumed")
+
+
 async def _plan_one(session: AsyncSession, *, site_id: str, tag: str, code: str,
                     all_norms: list[dict], lining_codes: set,
                     activity_to_codes: dict) -> dict:
@@ -984,37 +1030,10 @@ async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
         })
 
     # ── 2. the roster ───────────────────────────────────────────────────────
-    lookup = await _role_lookup(session)
     thresholds = await ot_thresholds(session)
-    emp_rows = (await session.execute(
-        select(emp_t.c["Designation"], emp_t.c["Worker_Type"], emp_t.c["Shift"],
-               func.count())
-        .where(emp_t.c["Site_ID"] == site_id, emp_t.c["status"] == "active")
-        .group_by(emp_t.c["Designation"], emp_t.c["Worker_Type"],
-                  emp_t.c["Shift"]))).all()
-
-    available: dict[str, dict] = {}
-    unmapped: dict[str, int] = {}
-    for desig, wtype, shift, cnt in emp_rows:
-        key = str(desig or "").strip().lower().replace(" ", "_")
-        rc = lookup.get(key)
-        if rc is None:
-            label = str(desig or "").strip() or "(no designation recorded)"
-            unmapped[label] = unmapped.get(label, 0) + int(cnt)
-            continue
-        slot = available.setdefault(rc, {"GI": 0, "NON_GI": 0, "Day": 0,
-                                         "Night": 0, "total": 0})
-        wt = str(wtype or "GI")
-        slot[wt] = slot.get(wt, 0) + int(cnt)
-        slot[str(shift or "Day")] = slot.get(str(shift or "Day"), 0) + int(cnt)
-        slot["total"] += int(cnt)
+    available, unmapped = await roster(session, site_id=site_id)
     if unmapped:
-        warnings.append(
-            "roster designations that match no role: "
-            + ", ".join(f"{k} x{v}" for k, v in sorted(unmapped.items()))
-            + " — these workers are NOT counted as available. 'nobody wrote "
-              "down that they are masons' is a different problem from 'there "
-              "are no masons', so they are reported rather than assumed")
+        warnings.append(unmapped_warning(unmapped))
 
     # ── 2b. how many shifts a day ───────────────────────────────────────────
     # Auto: nights are already staffed IN A ROLE THE JOB NEEDS, so running them

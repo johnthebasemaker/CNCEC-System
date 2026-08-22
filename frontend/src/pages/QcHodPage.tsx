@@ -18,12 +18,13 @@ import {
   SendOutlined,
 } from '@ant-design/icons'
 import {
-  Alert, App, Button, Card, Col, Descriptions, Empty, Form, Input, InputNumber,
+  Alert, App, Button, Card, Descriptions, Empty, Form, Input, InputNumber,
   Modal, Radio, Row, Select, Skeleton, Space, Statistic, Table, Tabs, Tag,
   Tooltip, Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import KpiRow from '../components/KpiRow'
 import { useState } from 'react'
 
 import { api } from '../api/client'
@@ -165,34 +166,34 @@ function Overview({ onEscalate }: { onEscalate: (s: EscalateSeed) => void }) {
   const uncertified = Number(data.uncertified_materials ?? 0)
   return (
     <>
-      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={12} md={8} xl={4}><Card size="small">
+      <KpiRow min={180} gap={12} style={{ marginBottom: 16 }}>
+        <Card size="small">
           <Statistic title="Uncertified materials" value={n0(uncertified)}
             valueStyle={{ color: uncertified > 0 ? '#cf1322' : '#3f8600' }} />
-        </Card></Col>
-        <Col xs={12} md={8} xl={4}><Card size="small">
+        </Card>
+        <Card size="small">
           <Statistic title="Sites affected" value={n0(data.sites_affected)} />
-        </Card></Col>
-        <Col xs={12} md={8} xl={4}><Card size="small">
+        </Card>
+        <Card size="small">
           <Statistic title="Warehouses affected"
             value={n0(data.warehouses_affected)} />
-        </Card></Col>
-        <Col xs={12} md={8} xl={4}><Card size="small">
+        </Card>
+        <Card size="small">
           <Tooltip title={`No movement for ${th?.stagnant_days ?? 90} days`}>
             <Statistic title="Stagnant lots" value={n0(data.stagnant_lots)} />
           </Tooltip>
-        </Card></Col>
-        <Col xs={12} md={8} xl={4}><Card size="small">
+        </Card>
+        <Card size="small">
           <Tooltip title={`Within ${th?.expiry_warn_days ?? 60} days of expiry`}>
             <Statistic title="Expiring soon" value={n0(data.expiring_lots)}
               valueStyle={{ color: Number(data.expiring_lots ?? 0) > 0 ? '#d46b08' : undefined }} />
           </Tooltip>
-        </Card></Col>
-        <Col xs={12} md={8} xl={4}><Card size="small">
+        </Card>
+        <Card size="small">
           <Statistic title="Expired" value={n0(data.expired_lots)}
             valueStyle={{ color: Number(data.expired_lots ?? 0) > 0 ? '#cf1322' : '#3f8600' }} />
-        </Card></Col>
-      </Row>
+        </Card>
+      </KpiRow>
 
       <Descriptions size="small" bordered column={{ xs: 1, md: 3 }}
         style={{ marginBottom: 16 }}>

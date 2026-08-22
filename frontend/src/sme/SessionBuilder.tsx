@@ -12,14 +12,15 @@ import {
   App, Alert, Badge, Button, Card, Col, Collapse, Empty, Row, Select, Skeleton,
   Space, Tooltip, Typography,
 } from 'antd'
-import { ClearOutlined, LinkOutlined, PlusOutlined } from '@ant-design/icons'
+import { BarChartOutlined, ClearOutlined, LinkOutlined, PlusOutlined } from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
 import { useSmeSnapshot } from '../api/hooks'
 import { buildModel, runPlan } from './engine'
 import { applyFilters, filterOptions, locColor } from './insights'
 import type { DashFilters } from './insights'
 import MultiSelectAll from './MultiSelectAll'
 import PriorityList from './PriorityList'
-import { useScenario } from './ScenarioContext'
+import { encodeTags, useScenario } from './ScenarioContext'
 import { tagStats } from './session'
 import TagDetail from './TagDetail'
 
@@ -30,6 +31,7 @@ const secHdr: React.CSSProperties = {
 
 export default function SessionBuilder({ siteId }: { siteId?: string }) {
   const { message } = App.useApp()
+  const navigate = useNavigate()
   const { data: snap, isLoading } = useSmeSnapshot(siteId)
   const scenario = useScenario()
   const [filters, setFilters] = useState<DashFilters>({ locations: [], types: [], codes: [], substrates: [] })
@@ -251,6 +253,41 @@ export default function SessionBuilder({ siteId }: { siteId?: string }) {
           title={<span style={secHdr}>📋 Session priority — drag to re-cascade ({scenario.order.length})</span>}
           extra={(
             <Space>
+              {/* ── The bridge to the manpower module (Phase 8 slice 8e) ────
+                  The session is handed over IN THE URL, not through shared
+                  state. `ScenarioProvider` is mounted inside SmePage and
+                  Labor Tracking is a different route, so lifting the provider
+                  to App.tsx was the alternative — a much wider blast radius
+                  for one button, and it would have disturbed the provider's
+                  per-user/per-site key logic. The encoding is the one already
+                  written and tested for `?scenario=`, imported rather than
+                  respelt, and nothing global is touched on the way. */}
+              <Tooltip title={scenario.order.length
+                ? 'Cost this session in labour: the manpower for what the '
+                  + 'material on site can actually start, the overall total, '
+                  + 'and what is waiting on a delivery'
+                : 'Add equipment to the session first — there is nothing to cost'}>
+                <span>
+                  <Button size="small" type="primary" ghost
+                    icon={<BarChartOutlined />}
+                    disabled={scenario.order.length === 0}
+                    onClick={() => {
+                      const p = new URLSearchParams({
+                        tab: 'session',
+                        scenario: encodeTags(scenario.order),
+                      })
+                      // Carried only if the operator actually set one. An
+                      // empty filter means "every system on this equipment",
+                      // and sending '' would read as "no systems".
+                      if (filters.codes.length) {
+                        p.set('codes', encodeTags(filters.codes))
+                      }
+                      navigate(`/manhours?${p.toString()}`)
+                    }}>
+                    📊 Session Report For MP&amp;H
+                  </Button>
+                </span>
+              </Tooltip>
               <Button size="small" icon={<LinkOutlined />} onClick={async () => {
                 try {
                   await navigator.clipboard.writeText(scenario.shareUrl())

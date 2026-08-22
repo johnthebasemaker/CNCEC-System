@@ -18,6 +18,7 @@ import {
   Space, Statistic, Tag, Typography,
 } from 'antd'
 import { ArrowLeftOutlined, WarningOutlined } from '@ant-design/icons'
+import KpiRow from '../components/KpiRow'
 import { Table } from '../lib/smartTable'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -118,39 +119,31 @@ export default function MaterialCardPage() {
       </Typography.Text>
 
       {/* KPI strip */}
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic title={`Current stock${d.scope ? ` @ ${d.scope}` : ' (all sites)'}`}
-              value={d.current_stock} suffix={d.uom}
-              valueStyle={d.below_minimum ? { color: C_LOW } : undefined}
-              precision={Number.isInteger(d.current_stock) ? 0 : 2} />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic title="Days of cover"
-              value={d.days_of_cover ?? '—'} valueStyle={{ color: cover.color }} />
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {d.avg_daily_consumption > 0
-                ? `${nf(d.avg_daily_consumption)} ${d.uom}/day burn`
-                : 'no issues in window'}
-            </Typography.Text>
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic title={`Received (${d.window_days}d)`} value={d.totals.received_30d}
-              suffix={d.uom} valueStyle={{ color: C_RECEIVED }} precision={2} />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic title={`Consumed (${d.window_days}d)`} value={d.totals.consumed_30d}
-              suffix={d.uom} valueStyle={{ color: C_CONSUMED }} precision={2} />
-          </Card>
-        </Col>
-      </Row>
+      <KpiRow style={{ marginTop: 16 }}>
+        <Card size="small">
+          <Statistic title={`Current stock${d.scope ? ` @ ${d.scope}` : ' (all sites)'}`}
+            value={d.current_stock} suffix={d.uom}
+            valueStyle={d.below_minimum ? { color: C_LOW } : undefined}
+            precision={Number.isInteger(d.current_stock) ? 0 : 2} />
+        </Card>
+        <Card size="small">
+          <Statistic title="Days of cover"
+            value={d.days_of_cover ?? '—'} valueStyle={{ color: cover.color }} />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {d.avg_daily_consumption > 0
+              ? `${nf(d.avg_daily_consumption)} ${d.uom}/day burn`
+              : 'no issues in window'}
+          </Typography.Text>
+        </Card>
+        <Card size="small">
+          <Statistic title={`Received (${d.window_days}d)`} value={d.totals.received_30d}
+            suffix={d.uom} valueStyle={{ color: C_RECEIVED }} precision={2} />
+        </Card>
+        <Card size="small">
+          <Statistic title={`Consumed (${d.window_days}d)`} value={d.totals.consumed_30d}
+            suffix={d.uom} valueStyle={{ color: C_CONSUMED }} precision={2} />
+        </Card>
+      </KpiRow>
 
       <Alert type="info" showIcon style={{ marginTop: 12 }}
         title={cover.text}

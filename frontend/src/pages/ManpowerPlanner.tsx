@@ -31,6 +31,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 
 import { api } from '../api/client'
+import KpiRow from '../components/KpiRow'
 import MultiSelectAll from '../sme/MultiSelectAll'
 import SystemCode from '../sme/SystemCode'
 
@@ -273,36 +274,36 @@ export default function ManpowerPlanner() {
 
           {/* ── 1. workload ────────────────────────────────────────────── */}
           <Typography.Title level={5}>1 · Workload and required hours</Typography.Title>
-          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
-            <Col xs={12} md={6} xl={4}><Card size="small">
+          <KpiRow min={180} gap={12} style={{ marginBottom: 12 }}>
+            <Card size="small">
               <Statistic title="Area remaining" value={n2(workload?.remaining_sqm)}
-                suffix="m²" /></Card></Col>
-            <Col xs={12} md={6} xl={4}><Card size="small">
+                suffix="m²" /></Card>
+            <Card size="small">
               <Statistic title="Required man-hours"
-                value={n0(req?.Total_Required_Manhours)} /></Card></Col>
-            <Col xs={12} md={6} xl={4}><Card size="small">
+                value={n0(req?.Total_Required_Manhours)} /></Card>
+            <Card size="small">
               <Tooltip title="Shifts of the benchmark crew the work contains.
                 Workload, not elapsed time.">
                 <Statistic title="Crew-shifts of work"
                   value={n2(req?.Total_Crew_Shifts)} />
-              </Tooltip></Card></Col>
-            <Col xs={12} md={6} xl={4}><Card size="small">
+              </Tooltip></Card>
+            <Card size="small">
               <Statistic title="Days to the deadline"
-                value={n2(req?.Total_Days)} /></Card></Col>
-            <Col xs={12} md={6} xl={4}><Card size="small">
+                value={n2(req?.Total_Days)} /></Card>
+            <Card size="small">
               <Tooltip title={`${n2(req?.Total_Days)} days x ${shiftsPerDay} shift(s) a day`}>
                 <Statistic title="Calendar shifts"
                   value={n2(req?.Total_Calendar_Shifts)} />
-              </Tooltip></Card></Col>
-            <Col xs={12} md={6} xl={4}><Card size="small">
+              </Tooltip></Card>
+            <Card size="small">
               <Tooltip title="How long the CURRENT roster would take, counting
                 only the roles this work needs. Blank when no matching worker is
                 on the roster.">
                 <Statistic title="Days at current roster"
                   value={req?.Days_With_Current_Roster == null ? '—'
                     : n2(req?.Days_With_Current_Roster)} />
-              </Tooltip></Card></Col>
-          </Row>
+              </Tooltip></Card>
+          </KpiRow>
 
           <Descriptions size="small" column={{ xs: 1, md: 3 }} bordered
             style={{ marginBottom: 12 }}>
@@ -340,29 +341,29 @@ export default function ManpowerPlanner() {
           <Typography.Title level={5}>
             2 · What we need, what we have, what to assign
           </Typography.Title>
-          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
-            <Col xs={12} md={6}><Card size="small">
+          <KpiRow gap={12} style={{ marginBottom: 12 }}>
+            <Card size="small">
               <Statistic title="Total headcount needed"
-                value={n0(req?.Total_Required_Headcount)} /></Card></Col>
-            <Col xs={12} md={6}><Card size="small">
+                value={n0(req?.Total_Required_Headcount)} /></Card>
+            <Card size="small">
               <Tooltip title="Per shift. Two shifts means two DISJOINT crews —
                 nobody works both — so the TOTAL headcount is unchanged and only
                 this figure halves.">
                 <Statistic title={`Per shift (x${shiftsPerDay})`}
                   value={n0(req?.Headcount_Per_Shift)} />
-              </Tooltip></Card></Col>
-            <Col xs={12} md={6}><Card size="small">
+              </Tooltip></Card>
+            <Card size="small">
               <Statistic title="On the roster (matched roles)"
-                value={n0(roster?.In_Scope)} /></Card></Col>
-            <Col xs={12} md={6}><Card size="small">
+                value={n0(roster?.In_Scope)} /></Card>
+            <Card size="small">
               <Statistic title="To assign / procure"
                 valueStyle={{ color: (result.gap as Row[] ?? [])
                   .reduce((a, g) => a + Number(g.To_Procure ?? 0), 0) > 0
                   ? '#cf1322' : '#3f8600' }}
                 value={n0((result.gap as Row[] ?? [])
                   .reduce((a, g) => a + Number(g.To_Procure ?? 0), 0))} />
-            </Card></Col>
-          </Row>
+            </Card>
+          </KpiRow>
 
           {shiftsPerDay === 2 && (
             <Alert type="info" showIcon style={{ marginBottom: 12 }}
@@ -440,29 +441,29 @@ export default function ManpowerPlanner() {
 
           {/* ── 3. strategy ────────────────────────────────────────────── */}
           <Typography.Title level={5}>3 · Overtime strategy</Typography.Title>
-          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
-            <Col xs={12} md={6}><Card size="small">
+          <KpiRow gap={12} style={{ marginBottom: 12 }}>
+            <Card size="small">
               <Statistic title="Normal capacity"
                 value={n0(strat?.Normal_Capacity_Manhours)} suffix="man-hrs" />
-            </Card></Col>
-            <Col xs={12} md={6}><Card size="small">
+            </Card>
+            <Card size="small">
               <Statistic title="Overtime incurred"
                 valueStyle={{ color: Number(strat?.Overtime_Hours_Incurred ?? 0) > 0
                   ? '#cf1322' : '#3f8600' }}
                 value={n0(strat?.Overtime_Hours_Incurred)} suffix="man-hrs" />
-            </Card></Col>
-            <Col xs={12} md={6}><Card size="small">
+            </Card>
+            <Card size="small">
               <Statistic title="Unmet"
                 valueStyle={{ color: Number(strat?.Unmet_Manhours ?? 0) > 0
                   ? '#cf1322' : '#3f8600' }}
                 value={n0(strat?.Unmet_Manhours)} suffix="man-hrs" />
-            </Card></Col>
-            <Col xs={12} md={6}><Card size="small">
+            </Card>
+            <Card size="small">
               <Statistic title="Deadline reachable?"
                 valueStyle={{ color: strat?.Feasible ? '#3f8600' : '#cf1322' }}
                 value={strat?.Feasible ? 'Yes' : 'No'} />
-            </Card></Col>
-          </Row>
+            </Card>
+          </KpiRow>
           <Alert
             type={strat?.Feasible ? 'success' : 'error'} showIcon
             style={{ marginBottom: 12 }}

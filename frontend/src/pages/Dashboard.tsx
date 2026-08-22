@@ -8,6 +8,7 @@ import { useAuth } from '../auth/AuthContext'
 import AskDataCard from '../components/AskDataCard'
 import BrowseTable from '../components/BrowseTable'
 import KpiCard from '../components/KpiCard'
+import KpiRow from '../components/KpiRow'
 import { brand, status } from '../theme/tokens'
 
 interface CatRow {
@@ -56,40 +57,32 @@ export default function Dashboard() {
           card stranded on a row of its own — it read the same `useHealth()` as
           the header's "API online" chip, which is on every page, not just this
           one. A KPI slot is worth more than a duplicated status light. */}
-      <Row gutter={[16, 16]} className="gi-cascade">
-        <Col xs={12} md={6}>
-          <KpiCard
-            title="Inventory items"
-            value={summary?.total_items ?? 0}
-            icon={<InboxOutlined />}
-          />
-        </Col>
-        <Col xs={12} md={6}>
-          <KpiCard
-            title="Stock value (SAR)"
-            value={metrics ? Math.round(metrics.valuation_total).toLocaleString() : '—'}
-            icon={<DollarOutlined />}
-            tint={brand.gold}
-          />
-        </Col>
-        <Col xs={12} md={6}>
-          <KpiCard
-            title="Sites"
-            value={sites?.length ?? 0}
-            icon={<EnvironmentOutlined />}
-            tint={status.info}
-          />
-        </Col>
-        <Col xs={12} md={6}>
-          <KpiCard
-            title="Expiring / expired lots"
-            value={expiringCount}
-            icon={<WarningOutlined />}
-            tint={expiringCount > 0 ? status.critical : status.ok}
-            valueColor={expiringCount > 0 ? status.critical : undefined}
-          />
-        </Col>
-      </Row>
+      <KpiRow className="gi-cascade">
+        <KpiCard
+          title="Inventory items"
+          value={summary?.total_items ?? 0}
+          icon={<InboxOutlined />}
+        />
+        <KpiCard
+          title="Stock value (SAR)"
+          value={metrics ? Math.round(metrics.valuation_total).toLocaleString() : '—'}
+          icon={<DollarOutlined />}
+          tint={brand.gold}
+        />
+        <KpiCard
+          title="Sites"
+          value={sites?.length ?? 0}
+          icon={<EnvironmentOutlined />}
+          tint={status.info}
+        />
+        <KpiCard
+          title="Expiring / expired lots"
+          value={expiringCount}
+          icon={<WarningOutlined />}
+          tint={expiringCount > 0 ? status.critical : status.ok}
+          valueColor={expiringCount > 0 ? status.critical : undefined}
+        />
+      </KpiRow>
 
       {/* Phase 5 — legacy visual parity: stock-vs-min, burn forecast, top-consumed. */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }} className="gi-cascade">
