@@ -3679,7 +3679,12 @@ The SME does **not** issue stock itself. Day-to-day consumption is entered on th
 
 Man-Hours tracks **labor** the way the Material Estimator tracks material: log who worked, where, and for how long; record SQM produced; define the **required** man-hours for a scope; then compare **estimated vs actual** to surface over-runs. It is fully **site-scoped** and **isolated** — it reads the Material Estimator's Equipment / System-Code / Location lists for its dropdowns without ever changing them, and writes only to its own man-hours records. Nothing here touches inventory, the end-of-day path, or the SME data.
 
-## 19.2 Tabs (5)
+## 19.2 Tabs
+
+*The five below are the original Man-Hours tabs. The page has since grown the
+four execution views (Phase 6), the Manpower Planner (Phase 7) and the SME
+Session Plan (§19.5) — twelve in all, so the last few sit behind the **"…"**
+button at the end of the tab bar.*
 
 ### 19.2.1 👥 Employees
 Per-site labor roster. Add/update a worker with **Code, Name, Designation, Type (OWN / Supply), Company**. "OWN" = your own (GI) staff; "Supply" = subcontractor labor (e.g. DMC) — these can live here even though they aren't ERP app-users. A status expander flips a worker active/inactive.
@@ -3730,6 +3735,71 @@ far more common mistake than deliberately wanting two copies of the same day.
 - **Site-scoped.** HOD sees only their site; Admin switches sites with the sidebar picker. Every timesheet and estimate is stamped with the site it belongs to.
 - **One timesheet line per (employee, date, equipment-tag, system-code).** A worker split across two tags in a day has two rows.
 - Equipment-Tag / System-Code / Location drop-downs come from the **Material Estimator's** equipment master — keep that seeded for a site or the lists will be empty.
+
+## 19.5 🔗 SME Session Plan — labour for what the material allows
+
+*Added 2026-08-24 (Phase 8).*
+
+The Material Estimator knows what the stock on site can build. This page knows
+what a piece of work costs in labour. This tab joins them, and answers the
+question a morning meeting actually asks:
+
+| Column | Means | Hire against it? |
+|---|---|---|
+| **We can do now** | the part the material physically on site supports | **Yes** — this is the actionable number |
+| **Overall total** | the whole remaining job, materials no object | for context |
+| **Blocked by material** | the difference: the size of the delay | **No** — see below |
+
+### How to get here
+
+Material Estimator → **🔍 Session Builder** → add equipment and set the priority
+order → **📊 Session Report For MP&H**. The button is disabled while the session
+is empty, because costing nothing is not a report.
+
+The session travels in the address bar, so the resulting link can be pasted to
+somebody else and shows them the same report. Nothing you do here changes the
+planning session you left open in the Estimator.
+
+### ⚠️ The Blocked column deliberately shows no headcount
+
+You cannot deploy people against material that has not arrived. A headcount
+printed beside blocked work is a headcount somebody hires against, and those
+people are idle when the delivery lands. The column shows the **man-hours** and
+**crew-shifts** — how big the delay is — and the **materials responsible**. The
+per-role **To assign** figure is measured the same way: against what can start,
+never against the overall.
+
+### Reading it
+
+- **Priority order matters.** The cascade spends stock top-down, so re-ordering
+  the session changes *which* jobs can start. The **overall** total never moves
+  — it is the same work either way.
+- **"What is in the way"** lists every short material, how much survives the
+  open purchase orders, how many jobs it holds up, and how many of those it is
+  the **bottleneck** for. Buy the bottlenecks first.
+- No material is ever labelled with a number of man-hours. Several materials can
+  be short on one job while only the scarcest limits it, so such a figure would
+  add up to more than the delay.
+- A system marked **"no recipe — unmodelled"** is not blocked by stock; nobody
+  has written down what it consumes. Chasing procurement for it will not help.
+- **Surface prep is not in this report.** Blasting uses no recipe line, so the
+  material model has no opinion on it — use the 🧠 Manpower Planner.
+
+### The material picture is up to a minute old
+
+Working out what the stock allows is the heaviest calculation in the system, and
+none of it changes when you change the target days — so it is reused for about a
+minute and the page tells you (*cached 12s ago*). Changing **Target days** is
+therefore instant. Press the **⟳** button beside **Cost it** to re-read stock
+after a receipt has been posted. The **roster** is never reused: hire a night
+worker and the very next answer plans two shifts.
+
+### Exports
+
+**Excel** gives four sheets — Summary, Per job, Per role, Blocking materials
+(plus "Read this first" when there are warnings). **CSV** carries the Summary
+only. **PDF** prints all of it.
+
 
 ---
 

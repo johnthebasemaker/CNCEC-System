@@ -706,6 +706,73 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-24 — Phase 8 slice 8e (`feat/phase8-sme-mp-link`).**
+> The two modules finally answer one question. Baselines move to **service
+> tests 1,825** (+37, suite CI) and **E2E 107** (+6); alembic head
+> **`c7e1a4b92d63`** UNCHANGED — this slice adds no table. Legacy 599, parity
+> 1,313, UI math 33, nav 48 unchanged.
+>
+> **Four additions to the LOCKED set:**
+>
+> * **BLOCKED WORK CARRIES NO HEADCOUNT.** `SQM_Deficit` costed in man-hours is
+>   the SIZE OF A DELAY, not a hiring requirement. `session_plan._column` returns
+>   `None` for every headcount field on that column and states why in the cell;
+>   the per-role gap (`To_Assign`) is likewise measured against **can-do**, never
+>   the overall. A number printed there is a number somebody hires against, and
+>   those people are idle when the material lands. Suite CI-06, CI-07, CI-13,
+>   CI-14 and an E2E assertion on the wording all gate it.
+>
+> * **THE THREE COLUMNS ARE ONE NUMBER, SPLIT.** Because
+>   `SQM_Achievable_Now + SQM_Deficit == Remaining_SQM` by definition, and
+>   man-hours are LINEAR in area (each benchmark contributes
+>   `share x manhours_per_sqm`, and the shares do not depend on how much area is
+>   left), `can_do + blocked == overall` survives the multiplication. That is why
+>   the module computes ONE man-hours-per-m² per job and applies it three times
+>   rather than costing three plans and hoping they reconcile. CI-04/05/10 gate
+>   the identity; **CI-35 gates it against the OTHER planner** — `/mh/planner`
+>   sums per activity, this multiplies a rate, and if they ever disagree neither
+>   file says which is wrong.
+>
+> * **A CACHE ON A NUMBER PEOPLE DECIDE FROM MUST SAY IT IS A CACHE.** The
+>   cascade is the heaviest read in the codebase and NOTHING about it depends on
+>   the deadline, so the whole deadline-independent half — cascade, rollup,
+>   benchmark selection, per-m² coefficients — is cached ~60 s per
+>   (site, order, codes) and dragging Target Days re-runs only a division
+>   (operator ruling Q8). Every response carries `cascade.cached` /
+>   `age_seconds`, the page prints it, and `refresh=true` escapes it. **The
+>   roster is deliberately NOT cached** — one cheap grouped query, and a stale
+>   headcount is worse than a slow one (CI-32).
+>
+> * **UNMODELLED IS NOT BLOCKED.** `sme_engine._achievable` scores a unit with no
+>   positive-rate recipe line at 0 (SME ruling Q5), which arrives in this report
+>   as "100% blocked". The report says UNMODELLED instead, because one reading
+>   sends somebody to chase procurement for a material nobody has named (CI-31).
+>
+> ⚠️ **The session travels in the URL, and nothing global was touched.**
+> `ScenarioProvider` is mounted inside `SmePage`; `/manhours` is a different
+> route. Lifting the provider to `App.tsx` for one button would have disturbed
+> its per-user/per-site key logic, so the button navigates to
+> `/manhours?tab=session&scenario=…&codes=…` using the SAME encoder
+> (`sme/ScenarioContext.encodeTags` / `decodeTags`, exported in this slice) that
+> writes `?scenario=` on the SME page. The E2E compares the two URLs
+> byte-for-byte.
+>
+> ⚠️ **Surface prep is not in this report.** Blasting consumes no recipe line, so
+> the material model has no opinion on whether it is blocked; putting it in would
+> place hours in a column whose whole meaning is "material decides this".
+>
+> **Track 5 (KPI width)** shipped here too: `components/KpiRow.tsx` +
+> `.gi-kpi-row` lay KPI cards out with flex rather than a 24-column slice, so N
+> cards are N equal shares of the FULL width. Applied to Dashboard, Admin
+> Console, Executive Summary, Manpower Planner (x3), Execution Report tabs (x2),
+> Material Card, PPE Forecast, Employees, QC-HOD and the new report.
+>
+> ⚠️ **Known, pre-existing:** Labor Tracking now has TWELVE tabs and only about
+> six fit at 1280px; the rest are reachable through antd's "…" overflow or by
+> `?tab=`. E2E now navigates by URL rather than clicking those tabs
+> (`tests/e2e/harness/ui.ts` explains why, including that the overflow items are
+> `role="option"`, not `menuitem`).
+
 > **Updated 2026-08-23 — Phase 8 slice 8d (`feat/phase8-qc-hod`).**
 > The ninth role. Baselines move to **service tests 1,788** (+37, suite CH plus
 > the qc_hod pass in BU), **E2E 101** (+5), alembic head **`c7e1a4b92d63`**,

@@ -17,7 +17,7 @@
 import { DownloadOutlined } from '@ant-design/icons'
 import SystemCode from '../sme/SystemCode'
 import {
-  Alert, Button, Card, Col, DatePicker, Row, Space, Statistic, Table, Tag,
+  Alert, Button, Card, DatePicker, Row, Space, Statistic, Table, Tag,
   Tooltip, Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -26,6 +26,7 @@ import type { Dayjs } from 'dayjs'
 import { useState } from 'react'
 
 import { api, apiBase } from '../api/client'
+import KpiRow from '../components/KpiRow'
 
 type Row = Record<string, unknown>
 
@@ -109,20 +110,20 @@ export function ExecVarianceTab() {
         <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
         <ExportButtons path="/execution/report/variance" params={params} />
       </Space>
-      <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col xs={12} md={6}><Card size="small">
-          <Statistic title="Entries" value={String(t.Entries ?? 0)} /></Card></Col>
-        <Col xs={12} md={6}><Card size="small">
-          <Statistic title="Area reported" value={n2(t.Actual_SQM)} suffix="m²" /></Card></Col>
-        <Col xs={12} md={6}><Card size="small">
+      <KpiRow gap={12} style={{ marginBottom: 12 }}>
+        <Card size="small">
+          <Statistic title="Entries" value={String(t.Entries ?? 0)} /></Card>
+        <Card size="small">
+          <Statistic title="Area reported" value={n2(t.Actual_SQM)} suffix="m²" /></Card>
+        <Card size="small">
           <Statistic title="Material vs benchmark" value={n2(t.Material_Actual)}
             suffix={<span style={{ fontSize: 13 }}>/ {n2(t.Material_Benchmark)}{' '}
-              <VarianceTag value={t.Material_Variance_Pct} /></span>} /></Card></Col>
-        <Col xs={12} md={6}><Card size="small">
+              <VarianceTag value={t.Material_Variance_Pct} /></span>} /></Card>
+        <Card size="small">
           <Statistic title="Man-hours vs benchmark" value={n2(t.Manpower_Actual_Manhours)}
             suffix={<span style={{ fontSize: 13 }}>/ {n2(t.Manpower_Benchmark_Manhours)}{' '}
-              <VarianceTag value={t.Manpower_Variance_Pct} /></span>} /></Card></Col>
-      </Row>
+              <VarianceTag value={t.Manpower_Variance_Pct} /></span>} /></Card>
+      </KpiRow>
       <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
         Totals sum the absolute figures and derive one percentage from the sums —
         they are not the average of the per-entry percentages, which would weight
@@ -213,14 +214,14 @@ export function SurfacePrepTab() {
           that figure drives completion %, buildable area and the buy list.
           Coverage can exceed 100% — a surface can be re-blasted, and clamping
           it would hide rework instead of showing it." />
-      <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col xs={12} md={8}><Card size="small">
-          <Statistic title="Prep area recorded" value={n2(t.Prep_SQM)} suffix="m²" /></Card></Col>
-        <Col xs={12} md={8}><Card size="small">
-          <Statistic title="Activities tracked" value={String(t.Activities ?? 0)} /></Card></Col>
-        <Col xs={12} md={8}><Card size="small">
-          <Statistic title="Approved entries" value={String(t.Entries ?? 0)} /></Card></Col>
-      </Row>
+      <KpiRow gap={12} style={{ marginBottom: 12 }}>
+        <Card size="small">
+          <Statistic title="Prep area recorded" value={n2(t.Prep_SQM)} suffix="m²" /></Card>
+        <Card size="small">
+          <Statistic title="Activities tracked" value={String(t.Activities ?? 0)} /></Card>
+        <Card size="small">
+          <Statistic title="Approved entries" value={String(t.Entries ?? 0)} /></Card>
+      </KpiRow>
       <Space style={{ marginBottom: 12 }}>
         <ExportButtons path="/execution/report/surface-prep" />
       </Space>

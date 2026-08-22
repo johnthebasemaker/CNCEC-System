@@ -22,6 +22,7 @@ import {
 } from 'antd'
 import { DownloadOutlined, SwapOutlined, TeamOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import KpiRow from '../components/KpiRow'
 import { Table } from '../lib/smartTable'
 import {
   downloadPpe, useEmployeeTimeline, useHrDataQuality, useHrEmployees, useSites,
@@ -161,7 +162,7 @@ function PersonDrawer({ idNumber, onClose }:
             </Descriptions.Item>
           </Descriptions>
 
-          <Space wrap size="large">
+          <KpiRow>
             <Card size="small">
               <Statistic title="Sites worked at" value={allSites.length} />
             </Card>
@@ -173,7 +174,7 @@ function PersonDrawer({ idNumber, onClose }:
               <Statistic title="Days on timesheets"
                          value={worked.reduce((a, w) => a + num(w.days), 0)} />
             </Card>
-          </Space>
+          </KpiRow>
 
           <Card size="small" title="Where they have worked">
             {segments.length === 0

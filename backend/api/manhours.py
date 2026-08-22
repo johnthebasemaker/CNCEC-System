@@ -344,6 +344,98 @@ async def planner(body: PlannerIn = Body(...),
     return out
 
 
+# --- The SME session, costed in labour (Phase 8 slice 8e) ---------------------
+class SessionPlannerIn(BaseModel):
+    """The SME planning session, plus a deadline.
+
+    `priority_order` is the session itself — the equipment tags in the order
+    the SME cascade spends stock on them. Order MATTERS here in a way it never
+    does for `/mh/planner`: it decides who gets the last drum, and therefore
+    which jobs can start.
+    """
+    priority_order: list[str] = Field(default_factory=list, max_length=2000)
+    lining_system_codes: list[str] = Field(default_factory=list, max_length=200)
+
+    deadline_hours: Optional[float] = Field(default=None, gt=0, le=24 * 365)
+    target_days: Optional[float] = Field(default=None, gt=0, le=365)
+    shifts_per_day: Optional[int] = Field(default=None, ge=1, le=2)
+    # Bypass the ~60 s cascade cache. The button that sets this exists because
+    # a cache on a number people decide from has to be escapable.
+    refresh: bool = False
+    site_id: Optional[str] = None
+
+
+@router.post("/planner/session",
+             summary="Session Report For MP&H: manpower for what we CAN do, "
+                     "the overall total, and what is blocked by material")
+async def planner_session(body: SessionPlannerIn = Body(...),
+                          user: dict = Depends(require_roles("hod")),
+                          session: AsyncSession = Depends(get_session)):
+    """READ-ONLY. Same contract as `/mh/planner`: a POST because the inputs are
+    a body, not because anything is written."""
+    from .services.session_plan import plan_session
+    sid = _write_site(user, body.site_id)
+    return await plan_session(
+        session, site_id=sid, priority_order=body.priority_order,
+        lining_system_codes=body.lining_system_codes,
+        deadline_hours=body.deadline_hours, target_days=body.target_days,
+        shifts_per_day=body.shifts_per_day, refresh=body.refresh)
+
+
+class SessionExportIn(SessionPlannerIn):
+    format: str = "xlsx"
+
+
+@router.post("/planner/session/export",
+             summary="Render the session manpower report (xlsx | csv | pdf)")
+async def planner_session_export(body: SessionExportIn = Body(...),
+                                 user: dict = Depends(require_roles("hod")),
+                                 session: AsyncSession = Depends(get_session)):
+    """The same three columns, as a document.
+
+    Rendered through `reports._FORMATS`, so every cell passes the rule-12
+    defusing on the way out: `to_csv` runs `_defuse` and the xlsx path runs
+    `xlsx_style.xl_val`. Nothing here formats a cell itself.
+    """
+    from fastapi.responses import StreamingResponse
+
+    from .reports import _FORMATS
+    from .services.session_plan import plan_session, session_report_sheets
+
+    fmt = (body.format or "xlsx").lower()
+    if fmt not in _FORMATS:
+        raise HTTPException(400, f"format must be one of {sorted(_FORMATS)}")
+    sid = _write_site(user, body.site_id)
+    plan = await plan_session(
+        session, site_id=sid, priority_order=body.priority_order,
+        lining_system_codes=body.lining_system_codes,
+        deadline_hours=body.deadline_hours, target_days=body.target_days,
+        shifts_per_day=body.shifts_per_day, refresh=body.refresh)
+
+    sheets = session_report_sheets(plan)
+    title = "Session Report For MP&H"
+    if fmt == "xlsx":
+        from .reports import to_xlsx_sheets
+        data = to_xlsx_sheets(sheets, user["username"])
+        media = _FORMATS["xlsx"][1]
+    elif fmt == "pdf":
+        from .reports import to_pdf_sheets
+        data = to_pdf_sheets(title, sheets, user["username"],
+                             page_break_between=True)
+        media = _FORMATS["pdf"][1]
+    else:
+        # ⚠️ ONE FILE, SO ONE TABLE. A csv cannot hold four sheets, and the
+        # summary is the sheet somebody opening a csv is after — the per-job
+        # detail is the xlsx. Stacking all four into one csv with blank
+        # separator rows produces a file no spreadsheet can pivot.
+        _, columns, rows = sheets[0]
+        data = _FORMATS["csv"][0](title, columns, rows, user["username"])
+        media = _FORMATS["csv"][1]
+    return StreamingResponse(io.BytesIO(data), media_type=media,
+                             headers={"Content-Disposition":
+                                      f'attachment; filename="session-mph.{fmt}"'})
+
+
 @router.get("/planner/targets", summary="What the planner can be pointed at")
 async def planner_targets(site_id: Optional[str] = None,
                           user: dict = Depends(require_roles("hod")),

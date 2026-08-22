@@ -42,8 +42,12 @@ async function seedBenchmark() {
 }
 
 async function openPlanner(page: import('@playwright/test').Page) {
-  await page.goto('/manhours')
-  await page.getByRole('tab', { name: /Manpower Planner/i }).click()
+  // ⚠️ BY URL, NOT BY CLICKING THE TAB. Labor Tracking has twelve tabs and only
+  // about six fit on a 1280px viewport; the rest sit past the end of an
+  // overflow:hidden strip at coordinates no click can reach, so clicking one
+  // is a coin toss on label widths. `?tab=` is a real feature of the page
+  // (slice 8e added it for the SME handoff) and it is deterministic.
+  await page.goto('/manhours?tab=planner')
   await expect(page.getByRole('button', { name: 'Plan' })).toBeVisible()
 }
 

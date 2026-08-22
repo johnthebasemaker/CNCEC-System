@@ -13,6 +13,7 @@ import {
   downloadExecSummaryPdf, downloadExecSummaryXlsx, useExecutiveSummary, useSites,
   type ExecSummaryKpi,
 } from '../api/hooks'
+import KpiRow from '../components/KpiRow'
 import { useAuth } from '../auth/AuthContext'
 
 const { RangePicker } = DatePicker
@@ -141,32 +142,26 @@ export default function ExecutiveSummaryPage() {
       ) : (
         <Spin spinning={isFetching}>
           {/* ── KPI hero ─────────────────────────────────────────────── */}
-          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
-            <Col xs={12} md={8} xl={4}><LedgerKpiCard title="Receipts (qty)" k={d.kpis.receipts} /></Col>
-            <Col xs={12} md={8} xl={4}><LedgerKpiCard title="Consumption (qty)" k={d.kpis.consumption} /></Col>
-            <Col xs={12} md={8} xl={4}><LedgerKpiCard title="Returns (qty)" k={d.kpis.returns} /></Col>
-            <Col xs={12} md={8} xl={4}>
-              <Card size="small">
-                <Statistic title="SQM done" value={d.kpis.sqm_done.total} precision={2} />
-                <TrendTag pct={d.kpis.sqm_done.delta_pct} />
-              </Card>
-            </Col>
-            <Col xs={12} md={8} xl={4}>
-              <Card size="small">
-                <Statistic title="Man-hours" value={d.kpis.man_hours.total} precision={1} />
-                <TrendTag pct={d.kpis.man_hours.delta_pct} />
-              </Card>
-            </Col>
-            <Col xs={12} md={8} xl={4}>
-              <Card size="small">
-                <Statistic title="Manpower present" value={d.kpis.manpower.present}
-                  suffix={`/ ${d.kpis.manpower.active_total}`} />
-                <Tag color={d.kpis.manpower.absent ? 'orange' : 'green'}>
-                  {d.kpis.manpower.absent} absent
-                </Tag>
-              </Card>
-            </Col>
-          </Row>
+          <KpiRow min={180} gap={12} style={{ marginBottom: 12 }}>
+            <LedgerKpiCard title="Receipts (qty)" k={d.kpis.receipts} />
+            <LedgerKpiCard title="Consumption (qty)" k={d.kpis.consumption} />
+            <LedgerKpiCard title="Returns (qty)" k={d.kpis.returns} />
+            <Card size="small">
+              <Statistic title="SQM done" value={d.kpis.sqm_done.total} precision={2} />
+              <TrendTag pct={d.kpis.sqm_done.delta_pct} />
+            </Card>
+            <Card size="small">
+              <Statistic title="Man-hours" value={d.kpis.man_hours.total} precision={1} />
+              <TrendTag pct={d.kpis.man_hours.delta_pct} />
+            </Card>
+            <Card size="small">
+              <Statistic title="Manpower present" value={d.kpis.manpower.present}
+                suffix={`/ ${d.kpis.manpower.active_total}`} />
+              <Tag color={d.kpis.manpower.absent ? 'orange' : 'green'}>
+                {d.kpis.manpower.absent} absent
+              </Tag>
+            </Card>
+          </KpiRow>
 
           {/* ── Movements ───────────────────────────────────────────── */}
           <Row gutter={[12, 12]}>

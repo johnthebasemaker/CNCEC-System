@@ -20,6 +20,7 @@ import {
 } from 'antd'
 import { DownloadOutlined, FieldTimeOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import KpiRow from '../components/KpiRow'
 import { Table } from '../lib/smartTable'
 import { downloadPpe, usePpeForecast, useSites } from '../api/hooks'
 import type { Row } from '../api/client'
@@ -127,7 +128,9 @@ export default function PpeForecastPage() {
         }}>Export</Button>
       </Space>
 
-      <Space wrap size="large">
+      {/* `Space wrap` sized each card to its own content, so three KPIs
+          huddled on the left of a 1,280px page. */}
+      <KpiRow>
         <Card size="small"><Statistic title="Items to order" value={toOrder.length} /></Card>
         <Card size="small">
           <Statistic title="Total units suggested" value={num(data?.total_suggested)} />
@@ -135,7 +138,7 @@ export default function PpeForecastPage() {
         <Card size="small">
           <Statistic title="People affected" value={num(data?.total_people)} />
         </Card>
-      </Space>
+      </KpiRow>
 
       <Alert
         type="info" showIcon

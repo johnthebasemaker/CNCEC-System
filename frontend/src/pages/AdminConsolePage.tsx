@@ -11,6 +11,7 @@ import { api } from '../api/client'
 import type { Row as ApiRow } from '../api/client'
 import { useSystemOverview } from '../api/hooks'
 import KpiCard from '../components/KpiCard'
+import KpiRow from '../components/KpiRow'
 import { brand, status } from '../theme/tokens'
 
 function errMsg(e: unknown): string {
@@ -348,12 +349,12 @@ function OverviewTab() {
   const txns = data?.transactions
   return (
     <>
-      <Row gutter={[16, 16]} className="gi-cascade">
-        <Col xs={12} md={6}><KpiCard title="Database size" value={data?.db_size ?? '—'} icon={<DatabaseOutlined />} tint={status.info} /></Col>
-        <Col xs={12} md={6}><KpiCard title="Total transactions" value={txns ? txns.total.toLocaleString() : '—'} icon={<SwapOutlined />} /></Col>
-        <Col xs={12} md={6}><KpiCard title="Stock value (SAR)" value={data ? Math.round(data.valuation_total).toLocaleString() : '—'} icon={<DollarOutlined />} tint={brand.gold} /></Col>
-        <Col xs={12} md={6}><KpiCard title="Users" value={data?.users ?? 0} icon={<TeamOutlined />} /></Col>
-      </Row>
+      <KpiRow className="gi-cascade">
+        <KpiCard title="Database size" value={data?.db_size ?? '—'} icon={<DatabaseOutlined />} tint={status.info} />
+        <KpiCard title="Total transactions" value={txns ? txns.total.toLocaleString() : '—'} icon={<SwapOutlined />} />
+        <KpiCard title="Stock value (SAR)" value={data ? Math.round(data.valuation_total).toLocaleString() : '—'} icon={<DollarOutlined />} tint={brand.gold} />
+        <KpiCard title="Users" value={data?.users ?? 0} icon={<TeamOutlined />} />
+      </KpiRow>
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} md={12}>
           <Card size="small" title="Transactions by type">
