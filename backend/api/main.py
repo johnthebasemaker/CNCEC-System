@@ -166,6 +166,24 @@ async def lifespan(app: FastAPI):
             print(f"[ai] failed {n} orphaned OCR job(s) from a previous run")
     except Exception as e:  # never block startup on the sweep
         print(f"[ai] orphan sweep skipped: {type(e).__name__}: {e}")
+    # Pre-build the assistant's manual index (Phase 8 slice 8f). Measured on
+    # the live 229 KB manual: 2 ms to chunk, 15 ms for the BM25 tables, 0.3 ms
+    # per search afterwards.
+    #
+    # ⚠️ THIS IS NOT THE FIX FOR "THE ASSISTANT IS SLOW". 17 ms is not what a
+    # person feels; token generation in Ollama is. It is here for two other
+    # reasons: 17 ms of synchronous CPU no longer lands on the event loop
+    # inside whoever asks the first question, and a manual that is missing or
+    # unparseable now announces itself AT BOOT instead of inside somebody's
+    # chat window.
+    try:
+        from .ai.manual_qa import warm as _warm_manual
+        w = _warm_manual()
+        print(f"[ai] manual index: {'OK' if w['ok'] else 'DEGRADED'} — "
+              + (f"{w['chapters']} chapters, {w['chunks']} chunks, {w['ms']} ms"
+                 if w["ok"] else w.get("error", "?")))
+    except Exception as e:  # never block startup on the assistant
+        print(f"[ai] manual index skipped: {type(e).__name__}: {e}")
     # Second-wall assertion (audit A01-F3): the gi_ai_ro GRANT allowlist is
     # wiped by every mirror reload and re-applied by operator ritual. Say so at
     # boot rather than discovering it during an incident. Never fatal — a dev

@@ -39,6 +39,82 @@ import math
 import re
 from dataclasses import dataclass
 
+# ── Alias map (Phase 8 slice 8f) ─────────────────────────────────────────────
+# The corpus and its readers use different words for the same thing, and BM25
+# has no idea they are related. Measured on the live manual before this existed:
+# a question containing "PR" retrieved nothing from the procurement chapter,
+# because the manual spells it "purchase requisition" in the headings the
+# HEADING_BOOST rewards.
+#
+# ⚠️ EXPANSION, NOT SUBSTITUTION, AND ON BOTH SIDES. The alias adds tokens and
+# keeps the original, so "PR" still matches a literal "PR"; and it runs inside
+# `_tokens()`, which indexes documents as well as queries, so it bridges the gap
+# in EITHER direction — a user typing "purchase requisition" reaches a passage
+# that only ever says "PR", and vice versa. Substituting instead would break
+# the first case and quietly lose the abbreviation everywhere.
+#
+# ⚠️ THIS CANNOT WIDEN WHAT A ROLE MAY SEE. `search()` filters by chapter before
+# scoring; an alias can only change WHICH allowed chunk wins, never whether a
+# forbidden one becomes a candidate. Suite CJ asserts that directly.
+_ALIASES: dict[str, str] = {
+    # the modules, as people say them out loud
+    "manpower": "man hours labor labour",
+    "man power": "man hours labor",
+    "mph": "man hours manpower labor",
+    "labour": "labor",
+    "sme": "material estimator",
+    "estimator": "sme material",
+    "planner": "manpower man hours",
+    # the procurement chain, which the manual writes almost entirely in initials
+    "pr": "purchase requisition",
+    "prs": "purchase requisitions",
+    "po": "purchase order",
+    "pos": "purchase orders",
+    "dn": "delivery note",
+    "dns": "delivery notes",
+    "grn": "goods receipt note receiving",
+    "mtc": "material test certificate",
+    "bom": "recipe bill of materials",
+    # roles, as people refer to them rather than as the schema spells them
+    "sk": "store keeper",
+    "hod": "head of department",
+    "qc": "quality control inspection",
+    "qchod": "head of qualities quality oversight",
+    "qc hod": "head of qualities quality oversight",
+    "ppe": "personal protective equipment safety",
+    # units and quantities
+    "sqm": "square metre area",
+    "ot": "overtime",
+    "uom": "unit of measure",
+    "fefo": "first expiry first out",
+    # the words a question uses that the manual writes differently
+    "permission": "access matrix",
+    "permissions": "access matrix page",
+    "portal": "page access",
+    "shield": "surface controlled",
+}
+
+# ⚠️ A VALUE NEVER REPEATS ITS OWN KEY. "planner" -> "manpower planner ..."
+# would emit `planner` twice for one occurrence, inflating its term frequency
+# against every passage that merely mentions it once.
+#
+# Longest first, so "qc hod" is expanded as one phrase before "qc" claims it.
+_ALIAS_KEYS = sorted(_ALIASES, key=len, reverse=True)
+_ALIAS_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in _ALIAS_KEYS) + r")\b")
+
+
+def expand_aliases(text: str) -> str:
+    """`text` plus the manual's own wording for every alias it contains.
+
+    Additive: the original string is returned unchanged with the expansions
+    appended, so nothing that matched before stops matching.
+    """
+    low = text.lower()
+    extra = {_ALIASES[m.group(1)] for m in _ALIAS_RE.finditer(low)}
+    return f"{text} {' '.join(sorted(extra))}" if extra else text
+
+
 _CHAPTER_RE = re.compile(r"^# (\d+)\.\s+(.+?)\s*$")
 _SUBHEAD_RE = re.compile(r"^(#{2,4})\s+(.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
@@ -113,6 +189,15 @@ def iter_chapters(md: str) -> list[tuple[int, str, str]]:
     return out
 
 
+# A caption may carry a table past `max_chars`, but only a caption — this is
+# the ceiling on how much prose gets to ride along.
+_CAPTION_MAX_CHARS = 1200
+
+
+def _is_table(para: str) -> bool:
+    return para.lstrip().startswith("|")
+
+
 def chunk_chapter(num: int, title: str, body: str,
                   *, max_chars: int = 2200) -> list[Chunk]:
     """Split one chapter at `##`/`###` boundaries (fence-aware again), then
@@ -143,10 +228,22 @@ def chunk_chapter(num: int, title: str, body: str,
             out.append(Chunk(num, title, heading, text))
             continue
         # Wrap on paragraph boundaries so a split never lands mid-sentence.
+        #
+        # ⚠️ A TABLE ADHERES TO THE PARAGRAPH ABOVE IT (Phase 8 slice 8f).
+        # Putting the exact-role-lock caveat and the access matrix under one
+        # `##` heading was not enough: §2.2 is ~3,000 characters, so the size
+        # wrap split it anyway and produced a chunk stating "these pages are
+        # locked to their own role" with no table to name that role, and a
+        # separate chunk of table with no rule. That pair is exactly how the
+        # assistant concluded a Head of Department could not open Man-Hours.
+        # A caption and its table are one passage or they are misleading.
         buf: list[str] = []
         size = 0
         for para in text.split("\n\n"):
-            if size + len(para) > max_chars and buf:
+            over = size + len(para) > max_chars
+            glue = (_is_table(para) and len(buf) == 1
+                    and size <= _CAPTION_MAX_CHARS)
+            if over and buf and not glue:
                 out.append(Chunk(num, title, heading, "\n\n".join(buf)))
                 buf, size = [], 0
             buf.append(para)
@@ -173,7 +270,7 @@ def _tokens(s: str) -> list[str]:
     covers "sign in"/"signin", "check out"/"checkout", "hand over"/"handover"
     and the other two-word forms this manual writes as one word.
     """
-    raw = _WORD_RE.findall(s.lower())
+    raw = _WORD_RE.findall(expand_aliases(s).lower())
     out = [w for w in raw if len(w) > 1 and w not in _STOP]
     for a, b in zip(raw, raw[1:]):
         joined = a + b

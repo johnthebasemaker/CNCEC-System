@@ -706,6 +706,61 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-24 — Phase 8 slice 8f (`feat/phase8-docs-ai`). PHASE 8
+> COMPLETE.** Baselines move to **service tests 1,868** (+43, suite CJ);
+> E2E 107, legacy 599, parity 1,313, UI math 33, nav 48 and alembic head
+> **`c7e1a4b92d63`** unchanged — this slice adds no table and no route.
+>
+> **Four additions to the LOCKED set:**
+>
+> * **THERE IS ONE MANUAL, AND IT LIVES AT THE REPO ROOT.**
+>   `docs/USER_MANUAL.md` was a second, role-based manual written 2026-07-26;
+>   it was never updated, so it described a system four phases old while the
+>   root manual — the AI corpus, parsed at runtime by `ai/manual_qa.py` — moved
+>   on. Two manuals means one of them is wrong and nobody knows which. Deleted
+>   (ruling Q10), and `tools/export_docs_pdf.py` now builds BOTH the ops PDF
+>   (`docs/export/`) and **the copy the app serves** (`GI_Hub_User_Manual.pdf`,
+>   read by `documents.reference_doc`) from it in one command — those were two
+>   pipelines, and the in-app manual had drifted eleven days behind.
+>
+> * **THE ASSISTANT'S BAD ANSWERS WERE THE CORPUS, NOT THE PIPELINE.** Measured
+>   before changing anything (ruling Q11): the index costs **2 ms to chunk +
+>   15 ms to build** over the 229 KB manual and **0.3 ms per search**. That is
+>   not what anybody feels — token generation is. What was actually wrong:
+>   §19 documented FIVE Man-Hours tabs against a page with eleven; the access
+>   matrix was in NO non-admin prompt; and "PR" retrieved nothing because the
+>   manual spells it "purchase requisition". Warming the index in the lifespan
+>   is hygiene (17 ms off the event loop, and a broken manual announces itself
+>   at boot) — never claim it as the speed fix.
+>
+> * **A CAPTION AND ITS TABLE ARE ONE PASSAGE.** Putting the exact-role-lock
+>   caveat and the access matrix under one `##` was NOT enough — §2.2 is
+>   ~3,000 characters and `chunk_chapter`'s size wrap split them anyway,
+>   producing a chunk that says "these pages are locked to their own role" with
+>   no table to name that role. That pair is the whole mechanism behind "an HOD
+>   cannot open the Manpower portal". A markdown table now adheres to the
+>   paragraph above it (`_CAPTION_MAX_CHARS`), and the fallback path truncates
+>   on `##` boundaries rather than at a character count — half a table reads as
+>   a whole one.
+>
+> * **SECTION 2 IS NEVER TRUNCATED, FOR ANY ROLE.** `_PER_SECTION_CHAR_CAP`
+>   went 800 -> 3,000 and section 2 is exempt entirely (`_NEVER_TRUNCATE`). It
+>   is the chapter that says what a role may do; 800 characters landed inside
+>   the role-hierarchy table, ~1,100 short of where the matrix begins. It also
+>   gained a `###` capability list per role — nine of them, one per
+>   `ROLE_META` entry — because "what can I do" is a question people ask in
+>   those words, and a `###` is what retrieval can return.
+>
+> ⚠️ **The alias map (`manual_index._ALIASES`) expands, never substitutes,
+> and runs on documents AND queries** — so "PR" finds "purchase requisition"
+> and vice versa. It cannot widen what a role reaches: `search()` filters by
+> chapter BEFORE scoring, and suite CJ asserts that adversarially.
+>
+> ⚠️ **The doc-drift gate compares the manual to the CODE.** CJ-04 counts
+> the tabs in `ManHoursPage.tsx` and requires section 19 to document that many.
+> A test asserting "twelve" would pass forever and notice nothing when the page
+> grows a thirteenth.
+
 > **Updated 2026-08-24 — Phase 8 slice 8e (`feat/phase8-sme-mp-link`).**
 > The two modules finally answer one question. Baselines move to **service
 > tests 1,825** (+37, suite CI) and **E2E 107** (+6); alembic head
