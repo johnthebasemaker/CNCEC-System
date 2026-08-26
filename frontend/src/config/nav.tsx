@@ -219,7 +219,7 @@ export const NAV: NavGroup[] = [
     label: 'Man-Hours',
     access: { anyRole: ['hod'] },   // Man-Hours exact-locked {hod, admin}
     children: [
-      { key: '/manhours', label: 'Labor Tracking', icon: <FieldTimeOutlined />, access: { anyRole: ['hod'] } },
+      { key: '/manhours', label: 'Manpower Tracking', icon: <FieldTimeOutlined />, access: { anyRole: ['hod'] } },
     ],
   },
   {

@@ -1,6 +1,6 @@
 # Phase 9 — Proposed Plan
 
-> **Status: APPROVED 2026-08-25. Q1–Q16 answered — see §8. Slices 9a + 9b are
+> **Status: COMPLETE 2026-08-28. Approved 2026-08-25. Q1–Q16 answered — see §8. Slices 9a + 9b are
 > SHIPPED on `feat/phase9-wbs-and-math`; 9c–9f remain.**
 >
 > | Slice | Branch | State |
@@ -10,7 +10,7 @@
 > | **9c** form generation + QR | `feat/phase9-form-gen` | ✅ shipped — suite CM (38), E2E +4, migration `f4b8e2c07d15` |
 > | **9d** OCR state machine | `feat/phase9-ocr-workflow` | ✅ shipped — suite CN (48), E2E +6, migration `a2c9f5e81b43` |
 > | **9e** analytics chart | `feat/phase9-analytics` | ✅ shipped — suite CO (26), E2E +4, no migration |
-> | **9f** rename + docs | — | pending |
+> | **9f** rename + docs | `feat/phase9-naming-docs` | ✅ shipped — CJ 25–33, no migration |
 >
 > **The rulings, locked:** Q1 **(b)** — the OCR form becomes the ONLY way lining
 > material is deducted; the SK stops raising separate manual issues for it.

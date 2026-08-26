@@ -216,7 +216,7 @@ async def sk_verify(entry_id: int, body: SkVerifyIn = Body(...),
 
 
 @router.post("/entries/{entry_id}/supervisor",
-             summary="Supervisor files the form → SK (or HOD if labour-only)")
+             summary="Supervisor files the form → SK (or HOD if manpower-only)")
 async def supervisor_submit(entry_id: int, body: SupervisorIn = Body(...),
                             user: dict = Depends(require_roles("supervisor", "hod")),
                             session: AsyncSession = Depends(get_session)):

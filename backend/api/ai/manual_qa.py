@@ -93,7 +93,7 @@ _SECTION_TITLES = {
     16: "Cross-Role Procurement Walk-through",
     17: "Operations & Hosting",
     18: "Material Estimator (SME) Manual",
-    19: "Man-Hours & Labor Tracking Manual",
+    19: "Man-Hours & Manpower Tracking Manual",
     20: "Auditor (View-Only) Manual",
     21: "2026-08 Feature Update",
     22: "Quality, Safety, Employees & Procurement (QSEP)",

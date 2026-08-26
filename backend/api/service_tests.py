@@ -17126,7 +17126,7 @@ async def test_docs_and_assistant():
     two = [c for c in chunks if c.chapter == 2]
     both = [c for c in two
             if "higher rank does not open" in c.text
-            and "Man-Hours / Labor Tracking |" in c.text]
+            and "Man-Hours / Manpower Tracking |" in c.text]
     check("CJ-07 the exact-role-lock caveat and the access matrix sit in the "
           "SAME retrievable chunk. Split apart, the caveat says a page is "
           "'locked to its own role' with no table to name that role — which "
@@ -17146,7 +17146,7 @@ async def test_docs_and_assistant():
               f"matrix. At an 800-character head-truncation it did not — the "
               f"matrix starts ~1,900 characters into §2, so NO non-admin role "
               f"could ever see it",
-              "Man-Hours / Labor Tracking |" in ctx, f"{len(ctx)} chars")
+              "Man-Hours / Manpower Tracking |" in ctx, f"{len(ctx)} chars")
 
     check("CJ-10 §2 is never head-truncated for anyone — it is the chapter "
           "that says what a role may do, and a partial answer about access is "
@@ -17246,12 +17246,12 @@ async def test_docs_and_assistant():
             ("One work type, one spelling", "the normalised work-type key (9a)"),
             # Phase 9c. The two rules a supervisor is most likely to be
             # surprised by, and the one a developer is most likely to "fix".
-            ("16.6 Printing a consumption form", "the printed form (9c)"),
+            ("4.9 Printing a consumption form", "the printed form (9c)"),
             ("Every download is a new sheet", "why a re-print is new paper (9c)"),
             ("There are no spare rows", "the no-write-in-rows rule (9c)"),
             # Phase 9d. The rules a person is most likely to be surprised by,
             # and the two a developer is most likely to "simplify" away.
-            ("16.7 Filing a consumption form", "the paper-first workflow (9d)"),
+            ("4.10 Filing a consumption form", "the paper-first workflow (9d)"),
             ("The lot is per row, not per form", "the 9c lot correction"),
             ("stop raising a separate issue", "the double-deduction warning (9d)"),
             ("EMPTY rather than\nguessed", "the never-guess-a-digit rule (9d)"),
@@ -17263,6 +17263,80 @@ async def test_docs_and_assistant():
             ("The line is the RUNNING figure", "what the chart's line means (9e)"),
             ("no reason recorded", "the never-guess-a-reason rule (9e)")):
         check(f"CJ-23 the manual documents {why}", needle in md, needle)
+
+    # ── ⚠️ Phase 9f: the rename stopped at the display layer ────────────────
+    from .manhours import _scorecard_rows as _sc  # noqa: F401  (import proves it exists)
+    src = (root / "backend" / "api" / "manhours.py").read_text()
+    check("CJ-25 ⚠️ THE JSON KEYS DID NOT MOVE (ruling Q13). 'Labor' became "
+          "'Manpower' everywhere a person reads it, and `Done_SQM_Labor` / "
+          "`Labor_Variance_Pct` stayed exactly as they were — they are API "
+          "contract, read by the frontend and pinned by suite CD. A rename "
+          "that looked complete would have broken every caller for a cosmetic "
+          "gain",
+          '"Done_SQM_Labor"' in src and '"Labor_Variance_Pct"' in src,
+          "the API keys were renamed")
+    check("CJ-26 …and nothing a person READS still says Labor. The column "
+          "headings above those keys moved even though the keys did not, and "
+          "that mismatch is deliberate",
+          "Manpower roster" in src and "Labor roster" not in src
+          and "Material vs Manpower" in src, "a display string still says Labor")
+    ui = (root / "frontend" / "src" / "pages" / "ManHoursPage.tsx").read_text()
+    check("CJ-27 …including the frontend, where the heading and the dataIndex "
+          "now legitimately disagree",
+          "title: 'Done (Manpower)'" in ui and "dataIndex: 'Done_SQM_Labor'" in ui,
+          "the heading/key split is not in place")
+    # ⚠️ A RENAME CHANGES WHAT THE ASSISTANT RETRIEVES, AND CJ-19 CAUGHT IT.
+    # Once the page was called Manpower Tracking, "manpower" appeared hundreds
+    # of times inside chapter 19 — which outweighed section 2 on term frequency
+    # and started answering "can a HOD open the manpower portal" with a tab
+    # list instead of yes. The alias map now pulls access vocabulary back.
+    for q in ("can a HOD open the manpower portal",
+              "can a HOD open the labor tracking page"):
+        hits = _mq._index().search(q, allowed=_mq.allowed_sections("hod"))
+        check(f"CJ-29 {q!r} reaches the ACCESS chapter, not the manual for the "
+              f"page. It is a question about permission, and after the rename "
+              f"the module's own chapter nearly swallowed it",
+              bool(hits) and hits[0].chapter == 2,
+              str([h.chapter for h in hits[:3]]))
+    check("CJ-30 …and the OLD name still finds it. People who learned 'Labor "
+          "Tracking' will keep typing it for years, so the alias keeps working "
+          "in both directions rather than being deleted with the string",
+          "manpower" in _mx.expand_aliases("labor tracking"),
+          _mx.expand_aliases("labor tracking"))
+    check("CJ-31 …while a genuine chapter-19 question still goes to chapter 19 "
+          "— the access aliases must not drag every mention of the module into "
+          "section 2",
+          any(h.chapter == 19 for h in _mq._index().search(
+              "what is the manpower planner",
+              allowed=_mq.allowed_sections("hod"))[:3]),
+          "the planner question left chapter 19")
+
+    # ⚠️ THE WORKFLOW'S OWN USERS MUST BE ABLE TO READ IT. 9c and 9d filed the
+    # consumption-form chapters under 16 ("Cross-Role Procurement"), which
+    # `_ROLE_ALLOWED` grants to HOD and Logistics only — so the assistant could
+    # not show a supervisor or a store keeper one word of the workflow they use
+    # every day. Moved to chapter 4, which both already have.
+    for role in ("supervisor", "store_keeper", "hod"):
+        hits = _mq._index().search("how do I file a filled consumption form",
+                                   allowed=_mq.allowed_sections(role))
+        check(f"CJ-32 a {role} can actually REACH the consumption-form "
+              f"chapters. Documenting a workflow in a chapter its own users "
+              f"cannot read is the same as not documenting it",
+              any("consumption form" in h.heading for h in hits[:4]),
+              str([h.heading[:40] for h in hits[:4]]))
+    check("CJ-33 …and the chapter they live in is one every role in that "
+          "workflow holds, rather than one granted specially",
+          all(4 in _mq.allowed_sections(r)
+              for r in ("supervisor", "store_keeper", "hod")),
+          "chapter 4 is not open to all three")
+
+    check("CJ-28 the manual's access matrix says Manpower Tracking, and the "
+          "AI's own chapter title agrees with it — the assistant cites the "
+          "chapter by name, so a stale one is a wrong answer",
+          "Man-Hours / Manpower Tracking |" in md
+          and _mq._SECTION_TITLES.get(19, "").startswith("Man-Hours & Manpower"),
+          str(_mq._SECTION_TITLES.get(19)))
+
 
     # And the assistant can actually find them.
     for q, chapter in (("what stops a duplicate purchase requisition", 16),

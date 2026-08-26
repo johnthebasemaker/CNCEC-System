@@ -850,13 +850,13 @@ function ScorecardTab({ site }: TabProps) {
     { title: 'Planned SQM', dataIndex: 'Planned_SQM', align: 'right', width: 110,
       render: (v) => v ?? '—' },
     { title: 'Done (SME)', dataIndex: 'Done_SQM_SME', align: 'right', width: 100 },
-    { title: 'Done (Labor)', dataIndex: 'Done_SQM_Labor', align: 'right', width: 105 },
+    { title: 'Done (Manpower)', dataIndex: 'Done_SQM_Labor', align: 'right', width: 105 },
     { title: '%', dataIndex: 'Pct_Complete', align: 'right', width: 70,
       render: (v) => (v == null ? '—' : `${v}%`) },
     { title: 'Est MH', dataIndex: 'Estimated_Manhours', align: 'right', width: 80,
       render: (v) => v ?? '—' },
     { title: 'Act MH', dataIndex: 'Actual_Manhours', align: 'right', width: 80 },
-    { title: 'Labor Var', dataIndex: 'Labor_Variance_Pct', align: 'right', width: 100, render: varTag },
+    { title: 'Manpower Var', dataIndex: 'Labor_Variance_Pct', align: 'right', width: 100, render: varTag },
     { title: 'MH/SQM', dataIndex: 'MH_per_SQM', align: 'right', width: 90,
       render: (v) => v ?? '—' },
     { title: 'Mat Var', dataIndex: 'Material_Variance_Pct', align: 'right', width: 95, render: varTag },
@@ -868,20 +868,20 @@ function ScorecardTab({ site }: TabProps) {
   return (
     <div>
       <Typography.Paragraph type="secondary">
-        One row per Tank/System: SME SQM progress, material variance and labor variance
+        One row per Tank/System: SME SQM progress, material variance and manpower variance
         side by side (read-only over the frozen SME tables). “Recon” compares the two
-        independent “SQM done” sources — labor-reported vs SME-reported.
+        independent “SQM done” sources — manpower-reported vs SME-reported.
       </Typography.Paragraph>
       <Row gutter={16} style={{ marginBottom: 16, maxWidth: 900 }}>
         <Col span={6}><Card size="small"><Statistic title="Scopes" value={k?.scopes ?? 0} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="With labor booked" value={k?.with_labor ?? 0} /></Card></Col>
+        <Col span={6}><Card size="small"><Statistic title="With manpower booked" value={k?.with_labor ?? 0} /></Card></Col>
         <Col span={6}><Card size="small"><Statistic title="Site norm MH/SQM" value={norm?.mh_per_sqm ?? '—'} /></Card></Col>
         <Col span={6}><Card size="small"><Statistic title="Recon drift" value={k?.drift ?? 0}
           styles={(k?.drift ?? 0) > 0 ? { content: { color: '#dc3545' } } : undefined} /></Card></Col>
       </Row>
       <Space style={{ marginBottom: 12 }} wrap>
         <Checkbox checked={activeOnly} onChange={(e) => setActiveOnly(e.target.checked)}>
-          Only scopes with labor booked
+          Only scopes with manpower booked
         </Checkbox>
         <Button icon={<DownloadOutlined />} onClick={() =>
           downloadDocument('/mh/export/scorecard', { format: 'xlsx', ...sp(site) }, 'mh-scorecard.xlsx')}>
@@ -971,14 +971,14 @@ export default function ManHoursPage() {
   return (
     <div>
       <Space align="center" style={{ justifyContent: 'space-between', width: '100%' }}>
-        <Typography.Title level={3} style={{ marginTop: 0 }}>🕒 Man-Hours &amp; Labor Tracking</Typography.Title>
+        <Typography.Title level={3} style={{ marginTop: 0 }}>🕒 Man-Hours &amp; Manpower Tracking</Typography.Title>
         {isAdmin && (
           <Select style={{ width: 160 }} value={effSite} onChange={setSite}
             options={(sites ?? []).map((s) => ({ value: s, label: s }))} placeholder="Site" />
         )}
       </Space>
       <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
-        Track LABOR the way the SME tracks material — roster, daily timesheets,
+        Track MANPOWER the way the SME tracks material — roster, daily timesheets,
         required-MH estimates and the variance between them.
       </Typography.Paragraph>
       <Tabs
