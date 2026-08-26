@@ -10,7 +10,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { BarcodeOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
-import { useBins, useBulkEntry, useCategories, useDocsRequired, useInventoryMaster, usePpeEligible, useSites, useWbsOptions } from '../api/hooks'
+import { useBins, useBulkEntry, useCategories, useDocsRequired, useInventoryMaster, usePpeEligible, useSites, useWbsOptions, useWorkTypeOptions } from '../api/hooks'
 import type { Row as ApiRow } from '../api/client'
 import PpeIssueFields from '../components/PpeIssueFields'
 import { emptyPpe, findPpeRule } from '../lib/ppe'
@@ -73,6 +73,11 @@ export default function IssuePage() {
   const watchLot = Form.useWatch('Lot_Number', form)
   const { data: bins } = useBins(watchSap, watchSite)
   const { data: wbsOptions } = useWbsOptions(watchSite)
+  // Phase 9a. `enforced` is false until the HOD curates a list for this site,
+  // and the field stays a free-text Input in that case — the backend gate is
+  // conditional, so a Select over an empty list would refuse entries the API
+  // still accepts.
+  const { data: workTypes } = useWorkTypeOptions(watchSite)
   const { data: docsRequired } = useDocsRequired()
 
   // ── PPE (QSEP slice 4, Option A) ─────────────────────────────────────────
@@ -434,7 +439,29 @@ export default function IssuePage() {
             )}
           </Row>
           <Row gutter={16}>
-            <Col xs={24} md={8}><Form.Item name="Work_Type" label="Work Type"><Input placeholder="e.g. Maintenance" /></Form.Item></Col>
+            <Col xs={24} md={8}>
+              {workTypes?.enforced ? (
+                <Form.Item name="Work_Type" label="Work Type"
+                  extra={(() => {
+                    const wt = form.getFieldValue('Work_Type')
+                    const hit = workTypes.items.find((o) => o.Work_Type === wt)
+                    return hit?.WBS_Number
+                      ? `Charges to WBS ${hit.WBS_Number}`
+                      : 'This site uses a fixed list, managed by your HOD.'
+                  })()}
+                  rules={[{ required: true, message: 'This site requires a work type' }]}>
+                  <Select showSearch placeholder="Pick a work type"
+                    options={workTypes.items.map((o) => ({
+                      value: o.Work_Type,
+                      label: o.WBS_Number ? `${o.Work_Type} → ${o.WBS_Number}` : o.Work_Type,
+                    }))} />
+                </Form.Item>
+              ) : (
+                <Form.Item name="Work_Type" label="Work Type">
+                  <Input placeholder="e.g. Maintenance" />
+                </Form.Item>
+              )}
+            </Col>
             <Col xs={24} md={8}><Form.Item name="Issued_To" label="Issued To"><Input placeholder="recipient / crew" /></Form.Item></Col>
             <Col xs={24} md={8}><Form.Item name="Issued_By" label="Issued By"><Input placeholder="issuer" /></Form.Item></Col>
           </Row>

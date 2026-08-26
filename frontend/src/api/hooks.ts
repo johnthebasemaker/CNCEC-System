@@ -182,6 +182,123 @@ export function useWbsOptions(site?: string) {
   })
 }
 
+// Phase 9a — the site's canonical work-type list, for the entry forms.
+// `enforced` is false when the HOD has not curated a list yet, and the forms
+// keep their free-text input in that case: the backend gate is conditional, so
+// a Select rendered against an empty list would block entry the API allows.
+export interface WorkTypeOption {
+  Work_Type: string; Work_Type_Norm: string
+  WBS_Number: string | null; Description: string | null
+}
+
+export function useWorkTypeOptions(site?: string) {
+  return useQuery<{ items: WorkTypeOption[]; enforced: boolean }>({
+    queryKey: ['/entry/work-types', site],
+    enabled: !!site,
+    staleTime: 60_000,
+    queryFn: async () =>
+      (await api.get<{ items: WorkTypeOption[]; enforced: boolean }>(
+        '/entry/work-types', { params: { site_id: site } })).data,
+  })
+}
+
+// ── HOD site configuration: WBS numbers and the work types that charge to them
+export function useWbsRows(site?: string) {
+  return useQuery<Row[]>({
+    queryKey: ['/hod/site-config/wbs', site],
+    queryFn: async () => (await api.get<{ items: Row[] }>(
+      '/hod/site-config/wbs', { params: site ? { site_id: site } : {} })).data.items,
+  })
+}
+
+export function useAddWbs() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { WBS_Number: string; Description?: string; site_id?: string }) =>
+      api.post('/hod/site-config/wbs', body).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/hod/site-config/wbs'] })
+      qc.invalidateQueries({ queryKey: ['/entry/wbs'] })
+    },
+  })
+}
+
+export function useSetWbsStatus() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, status }: { id: number; status: 'active' | 'closed' }) =>
+      api.patch(`/hod/site-config/wbs/${id}`, null, { params: { status } })
+        .then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['/hod/site-config/wbs'] })
+      qc.invalidateQueries({ queryKey: ['/entry/wbs'] })
+      // Closing a WBS can strand a mapping that points at it — refetch those too.
+      qc.invalidateQueries({ queryKey: ['/hod/site-config/work-types'] })
+    },
+  })
+}
+
+export function useWorkTypes(site?: string) {
+  return useQuery<Row[]>({
+    queryKey: ['/hod/site-config/work-types', site],
+    queryFn: async () => (await api.get<{ items: Row[] }>(
+      '/hod/site-config/work-types',
+      { params: site ? { site_id: site } : {} })).data.items,
+  })
+}
+
+export interface WorkTypeSuggestion {
+  Work_Type: string; Work_Type_Norm: string; count: number; variants: string[]
+}
+
+// What the ledger has actually seen here, merged by normalised spelling. The
+// bootstrap for an empty list — nothing is seeded by migration on purpose.
+export function useWorkTypeSuggestions(site?: string, enabled = false) {
+  return useQuery<WorkTypeSuggestion[]>({
+    queryKey: ['/hod/site-config/work-types/suggestions', site],
+    enabled: !!site && enabled,
+    queryFn: async () => (await api.get<{ items: WorkTypeSuggestion[] }>(
+      '/hod/site-config/work-types/suggestions',
+      { params: { site_id: site } })).data.items,
+  })
+}
+
+function invalidateWorkTypes(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ['/hod/site-config/work-types'] })
+  qc.invalidateQueries({ queryKey: ['/hod/site-config/work-types/suggestions'] })
+  qc.invalidateQueries({ queryKey: ['/entry/work-types'] })
+}
+
+export function useAddWorkType() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { Work_Type: string; WBS_Number?: string | null
+                         Description?: string; site_id?: string }) =>
+      api.post('/hod/site-config/work-types', body).then((r) => r.data),
+    onSuccess: () => invalidateWorkTypes(qc),
+  })
+}
+
+export function usePatchWorkType() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: number; Work_Type?: string
+                                    WBS_Number?: string | null
+                                    Description?: string; status?: string }) =>
+      api.patch(`/hod/site-config/work-types/${id}`, body).then((r) => r.data),
+    onSuccess: () => invalidateWorkTypes(qc),
+  })
+}
+
+export function useDeleteWorkType() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) =>
+      api.delete(`/hod/site-config/work-types/${id}`).then((r) => r.data),
+    onSuccess: () => invalidateWorkTypes(qc),
+  })
+}
+
 // Parity A1 — is the supporting-document gate on? (drives the required marks)
 export function useDocsRequired() {
   return useQuery<boolean>({

@@ -53,6 +53,7 @@ const CrossSitePage = lazy(() => import('./pages/CrossSitePage'))
 const ManHoursPage = lazy(() => import('./pages/ManHoursPage'))
 const QcHodPage = lazy(() => import('./pages/QcHodPage'))
 const OcrImportPage = lazy(() => import('./pages/OcrImportPage'))
+const WbsPage = lazy(() => import('./pages/WbsPage'))
 const FeedbackPage = lazy(() => import('./pages/FeedbackPage'))
 
 export default function App() {
@@ -93,6 +94,7 @@ export default function App() {
         <Route path="hod/prs" element={<HodPrsPage />} />
         <Route path="hod/lining-coverage" element={<LiningCoveragePage />} />
         <Route path="hod/documents" element={<DocumentLibraryPage />} />
+        <Route path="hod/wbs" element={<WbsPage />} />
         <Route path="logistics/lining-coverage" element={<LiningCoveragePage />} />
         <Route path="logistics" element={<LogisticsPage />} />
         <Route path="warehouse" element={<WarehousePage />} />

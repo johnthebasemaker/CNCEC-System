@@ -331,12 +331,20 @@ async def stage_consumption(session: AsyncSession, *, username: str, data: dict)
     like everything else, so stock, FEFO, burn rate and the QC gate need no
     PPE-shaped exception.
 
-    Both imports are deliberately lazy — `quality` and `ppe` import this
-    module for its metadata and `write_audit`, so a top-level import would
+    Phase 9a adds the third and fourth gate on the same reasoning: the work
+    type must be on the site's canonical list (`wbs.assert_work_type`) and the
+    WBS is resolved from it (`wbs.resolve_wbs`) when the form did not name one.
+    Both are CONDITIONAL — a site with no list and no WBS numbers behaves
+    exactly as it did before Phase 9 — and both belong here rather than in the
+    router for the same reason the quality gates do.
+
+    All imports here are deliberately lazy — `quality`, `ppe` and `wbs` import
+    this module for its metadata and `write_audit`, so a top-level import would
     be a cycle. Same pattern as `notifications.digest_loop`'s lazy
     `db.SessionLocal`.
     """
     from . import ppe, quality
+    from . import wbs as wbs_svc
 
     sap = data["SAP_Code"].strip()
     # BOTH halves of the issue gate, in the order that gives the most useful
@@ -353,21 +361,49 @@ async def stage_consumption(session: AsyncSession, *, username: str, data: dict)
     # there is still nothing to unwind. Returns None for every non-PPE
     # material, which is what leaves the ordinary issue path untouched.
     ppe_plan = await ppe.validate_issue(session, data=data)
+
+    # ── Phase 9a: the work type, then the WBS it charges to ─────────────────
+    # Placed HERE for the reason the QSEP gates are: this is one of the two
+    # mouths of the issue path, and a rule written only in the router would be
+    # walked past by `supervisor.approve_smr`. Both are conditional — a site
+    # with no canonical list and no WBS numbers is completely unaffected.
+    site_id = data["Site_ID"]
+    await wbs_svc.assert_work_type(session, site_id=site_id,
+                                   work_type=data.get("Work_Type"))
+    # Store the HOD's casing, not the caller's. This is what stops the ledger
+    # re-growing the `civil`/`Civil` split one entry at a time.
+    work_type = await wbs_svc.display_spelling(session, site_id=site_id,
+                                               work_type=data.get("Work_Type"))
+    charge = await wbs_svc.resolve_wbs(
+        session, site_id=site_id, work_type=work_type,
+        equipment_tag=data.get("Tank_No"), explicit=data.get("wbs"))
+    # ⚠️ ASSERTED ON THE RESOLVED VALUE, AND ONLY AFTER RESOLVING. Checking the
+    # form's raw `wbs` first — which is what the router used to do — would
+    # reject every issue that left the box blank for want of the very number
+    # the work-type map was about to supply, making the map unreachable.
+    await wbs_svc.assert_wbs(session, site_id=site_id, wbs=charge["wbs"])
+
     values = {
         "Date": data["Date"], "SAP_Code": sap, "Quantity": float(data["Quantity"]),
-        "Work_Type": data.get("Work_Type") or None, "Issued_To": data.get("Issued_To") or None,
+        "Work_Type": work_type or None, "Issued_To": data.get("Issued_To") or None,
         "Issued_By": data.get("Issued_By") or username, "PR_Number": data.get("PR_Number") or None,
         "Tank_No": data.get("Tank_No") or None, "Serial_No": data.get("Serial_No") or None,
         "Remarks": data.get("Remarks") or None, "Requested_By": data.get("Requested_By") or None,
         "Lot_Number": (data.get("Lot_Number") or "").strip() or None,
         "FEFO_Override": data.get("FEFO_Override") or None,
-        "wbs": (data.get("wbs") or "").strip() or None,          # parity A4
+        "wbs": charge["wbs"],                    # parity A4 + Phase 9a resolution
         "Site_ID": data["Site_ID"], "status": PENDING,
     }
     pid = (await session.execute(insert(pending_issues_t).values(**values)
            .returning(pending_issues_t.c["id"]))).scalar_one()
+    # The WBS SOURCE goes in the audit line, not in a column. A wrong cost
+    # centre is a question about who chose it, and "the work-type map did"
+    # reads very differently from "the store keeper did" — but only one of the
+    # two is worth a schema change to keep for every row forever.
     await write_audit(session, username, "STAGE_ISSUE", "pending_issues",
-                      f"id={pid} sap={sap} site={data['Site_ID']} qty={float(data['Quantity']):g}")
+                      f"id={pid} sap={sap} site={data['Site_ID']} qty={float(data['Quantity']):g}"
+                      + (f" wbs={charge['wbs']}({charge['source']})"
+                         if charge["wbs"] else ""))
     out = {"pending_id": pid, "status": PENDING,
            "message": "Issue submitted for HOD approval"}
     if ppe_plan is not None:

@@ -71,7 +71,7 @@ from .jobs import job_label, system_names
 from .ledger import _MD
 from .planner import (SHIFT_WORKED_HOURS, _activity_to_codes, _all_norms,
                       _lining_codes, _plan_one, crew_shifts, manhours_per_sqm,
-                      roster, unmapped_warning)
+                      roster, unmapped_warning, shift_split)
 
 norm_role_t = _MD.tables["sme_manpower_norm_role"]
 
@@ -351,7 +351,7 @@ def _blocking_materials(jobs: list[dict], by_unit: dict) -> list[dict]:
 # ── the deadline-dependent half ──────────────────────────────────────────────
 def _column(basis: str, sqm: float, mh: float, cs: float, *,
             deadline_hours: float, shifts_per_day: int, roster_in_scope: int,
-            headcount: bool) -> dict:
+            headcount: bool, shares: tuple[float, float, str] = (1.0, 0.0, "day_only")) -> dict:
     """One of the three columns.
 
     `headcount=False` is the BLOCKED column, and the nulls are the point: see
@@ -369,6 +369,9 @@ def _column(basis: str, sqm: float, mh: float, cs: float, *,
         out.update({
             "Required_Headcount": None,
             "Required_Headcount_Rounded": None,
+            "Required_Day_Headcount": None,
+            "Required_Night_Headcount": None,
+            "Shift_Split_Basis": None,
             "Headcount_Per_Shift": None,
             "Days_With_Current_Roster": None,
             "Headcount_Note": "no headcount is shown for blocked work: you "
@@ -378,10 +381,17 @@ def _column(basis: str, sqm: float, mh: float, cs: float, *,
         })
         return out
     need = mh / deadline_hours if deadline_hours else 0.0
+    d_share, n_share, basis_name = shares
+    day_need = math.ceil(need * d_share - 1e-9)
+    night_need = math.ceil(need * n_share - 1e-9)
     out.update({
         "Required_Headcount": round(need, 2),
         "Required_Headcount_Rounded": math.ceil(need - 1e-9),
-        "Headcount_Per_Shift": math.ceil(need / shifts_per_day - 1e-9),
+        "Required_Day_Headcount": day_need,
+        "Required_Night_Headcount": night_need,
+        "Shift_Split_Basis": basis_name,
+        # The larger crew, not the total halved — see `planner.shift_split`.
+        "Headcount_Per_Shift": max(day_need, night_need),
         "Days_With_Current_Roster": round(
             mh / (roster_in_scope * SHIFT_WORKED_HOURS), 2)
         if roster_in_scope > 0 and mh > 0 else None,
@@ -462,8 +472,25 @@ async def plan_session(session: AsyncSession, *, site_id: str,
             "a two-shift plan was requested but no active worker in the "
             "required roles is on the night shift — the split below is what "
             "you would have to staff, not what exists")
+    if shifts_per_day == 2 and night_in_scope == 0:
+        warnings[-1] = (
+            "a two-shift plan was requested but no active worker in the "
+            "required roles is on the night shift. There is no roster to "
+            "derive a day/night proportion from, so the split below is an "
+            "assumed even one")
     roster_in_scope = sum(int(available.get(rc, {}).get("total", 0))
                           for rc in roles)
+
+    # ⚠️ THE SAME SPLIT RULE AS `planner.plan_many` (Phase 9b, ruling Q10), from
+    # the same helper. Two planners reading one roster and disagreeing about how
+    # it splits would be worse than either being wrong, because only one of them
+    # would ever be checked.
+    site_night = sum(int(v.get("Night", 0)) for v in available.values())
+    site_day = max(sum(int(v.get("total", 0)) for v in available.values())
+                   - site_night, 0)
+    site_shares = shift_split({"total": roster_in_scope, "Night": night_in_scope},
+                              site_day=site_day, site_night=site_night,
+                              shifts_per_day=shifts_per_day)
 
     # ── the three columns ───────────────────────────────────────────────────
     tot = {"can_do": [0.0, 0.0, 0.0], "overall": [0.0, 0.0, 0.0],
@@ -502,15 +529,15 @@ async def plan_session(session: AsyncSession, *, site_id: str,
     columns = {
         "can_do": _column("SQM_Achievable_Now", *tot["can_do"],
                           deadline_hours=deadline_hours,
-                          shifts_per_day=shifts_per_day,
+                          shifts_per_day=shifts_per_day, shares=site_shares,
                           roster_in_scope=roster_in_scope, headcount=True),
         "overall": _column("Remaining_SQM", *tot["overall"],
                            deadline_hours=deadline_hours,
-                           shifts_per_day=shifts_per_day,
+                           shifts_per_day=shifts_per_day, shares=site_shares,
                            roster_in_scope=roster_in_scope, headcount=True),
         "blocked": _column("SQM_Deficit", *tot["blocked"],
                            deadline_hours=deadline_hours,
-                           shifts_per_day=shifts_per_day,
+                           shifts_per_day=shifts_per_day, shares=site_shares,
                            roster_in_scope=roster_in_scope, headcount=False),
     }
 
@@ -529,7 +556,12 @@ async def plan_session(session: AsyncSession, *, site_id: str,
             "Blocked_Manhours": round(mh["blocked"], 2),
             "Can_Do_Headcount": round(can_need, 2),
             "Can_Do_Headcount_Rounded": math.ceil(can_need - 1e-9),
-            "Can_Do_Per_Shift": math.ceil(can_need / shifts_per_day - 1e-9),
+            # Same rule as `planner.plan_many`: the roster decides the split.
+            "Can_Do_Per_Shift": max(
+                math.ceil(can_need * site_shares[0] - 1e-9),
+                math.ceil(can_need * site_shares[1] - 1e-9)),
+            "Can_Do_Day_Headcount": math.ceil(can_need * site_shares[0] - 1e-9),
+            "Can_Do_Night_Headcount": math.ceil(can_need * site_shares[1] - 1e-9),
             "Overall_Headcount": round(all_need, 2),
             "Overall_Headcount_Rounded": math.ceil(all_need - 1e-9),
             # Deliberately absent, not zero — see the module docstring.
@@ -604,13 +636,14 @@ def session_report_sheets(plan: dict) -> list[tuple]:
     inputs = plan["inputs"]
 
     summary_cols = ["Column", "Basis", "SQM", "Man-hours", "Crew-shifts",
-                    "Headcount for the target", "Per shift",
+                    "Headcount for the target", "Day crew", "Night crew",
                     "Days at current roster", "Note"]
 
     def _srow(label: str, key: str) -> list:
         c = cols[key]
         return [label, c["Basis"], c["SQM"], c["Manhours"], c["Crew_Shifts"],
-                c["Required_Headcount"], c["Headcount_Per_Shift"],
+                c["Required_Headcount"], c["Required_Day_Headcount"],
+                c["Required_Night_Headcount"],
                 c["Days_With_Current_Roster"], c["Headcount_Note"]]
 
     summary = [_srow("We can do now", "can_do"),
@@ -636,12 +669,13 @@ def session_report_sheets(plan: dict) -> list[tuple]:
         ])
 
     role_cols = ["Role", "Can-do man-hours", "Overall man-hours",
-                 "Blocked man-hours", "Can-do headcount", "Per shift",
-                 "Overall headcount", "Blocked headcount", "On the roster",
-                 "To assign"]
+                 "Blocked man-hours", "Can-do headcount", "Day crew",
+                 "Night crew", "Overall headcount", "Blocked headcount",
+                 "On the roster", "To assign"]
     role_rows = [[r["Role_Code"], r["Can_Do_Manhours"], r["Overall_Manhours"],
                   r["Blocked_Manhours"], r["Can_Do_Headcount"],
-                  r["Can_Do_Per_Shift"], r["Overall_Headcount"],
+                  r["Can_Do_Day_Headcount"], r["Can_Do_Night_Headcount"],
+                  r["Overall_Headcount"],
                   # Not 0 and not blank-by-accident: the reason is in the cell.
                   "not applicable — material, not labour",
                   r["Available_Headcount"], r["To_Assign"]]

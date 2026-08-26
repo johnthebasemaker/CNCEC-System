@@ -335,7 +335,10 @@ async def create_consumption(
         async with session.begin():
             if not await ledger.sap_exists(session, body.SAP_Code):
                 raise HTTPException(404, f"SAP_Code {body.SAP_Code!r} not in inventory")
-            await entry_docs.assert_wbs(session, site_id=body.Site_ID, wbs=body.wbs)
+            # Phase 9a: the WBS gate for an ISSUE moved into `stage_consumption`,
+            # so it runs AFTER the work-type map has had its chance to fill the
+            # number in. Receipts still assert here — they have no work type to
+            # resolve from.
             doc_ids = await entry_docs.assert_entry_docs(
                 session, doc_type="consumption", attachment_ids=body.attachment_ids,
                 username=user["username"])
@@ -806,7 +809,9 @@ async def create_bulk(body: BulkEntryIn = Body(...),
             for i, m in enumerate(parsed):
                 if not await ledger.sap_exists(session, m.SAP_Code):
                     raise HTTPException(404, f"row {i}: SAP_Code {m.SAP_Code!r} not in inventory")
-                if body.kind in ("receipt", "consumption"):
+                # Consumption asserts inside `stage_consumption`, after the
+                # work-type map has resolved a WBS (Phase 9a).
+                if body.kind == "receipt":
                     await entry_docs.assert_wbs(session, site_id=m.Site_ID,
                                                 wbs=getattr(m, "wbs", None))
             for m in parsed:

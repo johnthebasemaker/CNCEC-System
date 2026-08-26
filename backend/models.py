@@ -829,6 +829,33 @@ class WbsMaster(Base):
     )
 
 
+class WbsWorkTypeMap(Base):
+    """A work type, and the WBS number it charges to at this site.
+
+    ⚠️ `Work_Type_Norm` is the identity — see the migration for why. Four of
+    the 35 spellings in the live ledger differ from another only in case, and
+    keyed on raw text those would take different WBS numbers silently.
+    `Work_Type` is only how the identity is spelled back to a human, and it is
+    what lands on the ledger row.
+    """
+    __tablename__ = "wbs_work_type_map"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Site_ID = Column(Text, nullable=False)
+    Work_Type = Column(Text, nullable=False)
+    Work_Type_Norm = Column(Text, nullable=False)
+    WBS_Number = Column(Text)          # NULL = a work type with no WBS yet
+    Description = Column(Text)
+    status = Column(Text, nullable=False, server_default=text("'active'"))
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Site_ID", "Work_Type_Norm",
+                         name="uq_wbs_work_type_site_norm"),
+        Index("ix_wbs_work_type_active", "Site_ID", "status"),
+    )
+
+
 # ==========================================================================
 # 2. SME sub-module (feature-frozen — strict isolation)
 # ==========================================================================

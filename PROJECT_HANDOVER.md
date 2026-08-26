@@ -706,6 +706,86 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-25 — Phase 9 slices 9a + 9b (`feat/phase9-wbs-and-math`).**
+> Baselines move to **service tests 1,925** (+57: suite CK 42, suite CL 13,
+> CI-33b/c) and **E2E 111** (+4). Legacy 599, UI math 33, nav **49** (+1 route),
+> alembic head **`e3a7d9b21f64`** (one additive table, no backfill).
+> ⚠️ `tools/parity_check.py` is RED and was red before this branch — byte
+> identical on a stashed tree. It is sqlite/Postgres data drift in
+> `sme_materials_view`, not code.
+>
+> **Five additions to the LOCKED set:**
+>
+> * **THE WBS COLUMN WAS BLANK BECAUSE A SCREEN WAS MISSING, NOT A FEATURE.**
+>   `wbs_master`, `entry_docs.assert_wbs()` and `GET/POST/PATCH
+>   /hod/site-config/wbs` shipped with the parity build and NOTHING in
+>   `frontend/src/` ever called them. Both WBS rules are CONDITIONAL — they do
+>   nothing until a site has active rows — so with zero rows the gate was a
+>   permanent no-op, no entry was ever asked for a WBS, and all 1,674 live
+>   consumption rows carry none. `/hod/wbs` is the tap. Before adding a
+>   "missing" rule to this system, check whether it is already there with no
+>   way to reach it.
+>
+> * ⚠️ **`resolve_wbs` RUNS BEFORE `assert_wbs`, AND THE ORDER IS THE
+>   FEATURE.** The resolver exists to fill in a WBS the form left blank; the
+>   gate refuses a blank. Run gate-first — which is what the router did — every
+>   issue at a WBS-enabled site is rejected for want of the number the map was
+>   about to supply, and the work-type map is unreachable. The gate for an
+>   ISSUE therefore lives inside `stage_consumption`, after resolution, and
+>   asserts the RESOLVED value. Receipts still assert in the router: they have
+>   no work type to resolve from. CK-26 is the pin.
+>
+> * **`Work_Type_Norm` IS THE IDENTITY; `Work_Type` IS ONLY THE SPELLING.** The
+>   live ledger holds 35 distinct `Work_Type` strings, four pairs of which
+>   differ from another only in case (`civil`/`Civil`, `coating`/`Coating`,
+>   `In yard`/`In Yard`, `others`/`Others`). Normalisation is lower + trim +
+>   collapse-whitespace and merges EXACTLY those; `Arrangement` vs `Site
+>   Arrangement` stays two work types, because merging those is a judgement
+>   about the work and belongs to the HOD in the UI. Nothing is seeded by
+>   migration — seeding would have enshrined both spellings as blessed options;
+>   `/hod/site-config/work-types/suggestions` offers them merged and counted
+>   instead.
+>
+> * ⚠️ **`SUPERVISOR_REQUEST` AND `STOCK_ADJUSTMENT` ARE NOT WORK TYPES.**
+>   They are markers the app writes itself (`supervisor.approve_smr`,
+>   `ledger.stage_adjustment`) and `reports.rep_intent_vs_actual` joins on the
+>   first. They can never be added to the list, never mapped to a WBS, and
+>   never refused by the strict-dropdown gate — a gate that blocked them would
+>   break stock adjustments, a long way from where anyone would look.
+>
+> * **NIGHTS BUY TIME, NOT A SMALLER PAYROLL (ruling Q10, 2026-08-25).** The
+>   total headcount is still `manhours / (days x 11)` whatever the shift count,
+>   because a person works one shift a day — that half of the old model
+>   survives. What running nights buys is CALENDAR TIME:
+>   `Days_Day_Shift_Only`, `Days_Both_Shifts`, `Days_Saved_By_Nights`. A
+>   planner that showed only the unchanged headcount read as though nights
+>   bought nothing.
+>
+> ⚠️ **AND THE PER-SHIFT SPLIT COMES FROM THE ROSTER, NEVER FROM
+> `/ shifts_per_day`.** This operator runs a day shift of 20 against a night
+> shift of 80; an even split understates the night crew FOURFOLD. One helper —
+> `planner.shift_split` — serves `plan_many` AND `session_plan`, and
+> `Shift_Split_Basis` names which basis was available (`roster` · `site` ·
+> `assumed_even` · `day_only`). Only the middle two are assumptions and both
+> say so. A roster with day workers and NO night workers is NOT a valid basis:
+> it means there is no night crew yet, and read as a proportion it would put
+> 100% of a forced two-shift plan on days and make the option do nothing.
+>
+> ⚠️ **CAPACITY IS THE ROLES THE JOB NEEDS, NOT THE PAYROLL.**
+> `days_with_roster` always filtered to `role_manhours`; `normal_capacity` and
+> `ot_capacity` did not, so an idle blaster inflated capacity, understating both
+> the overtime and the hire-to-clear advice — the two numbers an HOD acts on.
+> Same filter now, with the payroll still published beside it as
+> `roster.Capacity_GI` / `Capacity_NON_GI`.
+>
+> ⚠️ **`tests/e2e/specs/wbs-work-types.spec.ts` RUNS IN ITS OWN PROJECT,
+> LAST.** Adding the first WBS number switches `assert_wbs` on for that site,
+> and a scoped HOD can only manage their OWN site — the one every other spec
+> posts to. Run inside the parallel pack it flipped the gate mid-flight and
+> 422'd whichever spec happened to be posting, surfacing as a DIFFERENT failure
+> each run (three runs, three different specs). Same hazard as `entry-docs`,
+> same remedy. Do not fold it back into `chromium`.
+
 > **Updated 2026-08-24 — Phase 8 slice 8f (`feat/phase8-docs-ai`). PHASE 8
 > COMPLETE.** Baselines move to **service tests 1,868** (+43, suite CJ);
 > E2E 107, legacy 599, parity 1,313, UI math 33, nav 48 and alembic head

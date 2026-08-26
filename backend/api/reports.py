@@ -81,12 +81,14 @@ async def rep_consumption(session, *, site_id=None, days=30, **_):
         SELECT TRIM(c."SAP_Code") AS "SAP_Code",
                MAX(i."Equipment_Description") AS "Material",
                MAX(i."UOM") AS "UOM", COALESCE(c."Site_ID",'HQ') AS "Site_ID",
+               COALESCE(NULLIF(TRIM(c."WBS"), ''), '(no WBS)') AS "WBS",
                ROUND(CAST(SUM(c."Quantity") AS NUMERIC), 3) AS "Total_Consumed",
                COUNT(*) AS "Transactions", MAX(c."Date") AS "Last_Issue"
         FROM consumption c
         LEFT JOIN inventory i ON TRIM(i."SAP_Code") = TRIM(c."SAP_Code")
         WHERE {where}
-        GROUP BY TRIM(c."SAP_Code"), COALESCE(c."Site_ID",'HQ')
+        GROUP BY TRIM(c."SAP_Code"), COALESCE(c."Site_ID",'HQ'),
+                 COALESCE(NULLIF(TRIM(c."WBS"), ''), '(no WBS)')
         ORDER BY "Total_Consumed" DESC'''
     cols, rows = await _run(session, sql, params)
     return f"Consumption (last {days} days)", cols, rows
@@ -180,6 +182,7 @@ async def rep_daily_consumption(session, *, site_id=None, date_from=None, date_t
     sql = f'''
         SELECT c."Date", TRIM(c."SAP_Code") AS "SAP_Code",
                i."Equipment_Description" AS "Material", c."Quantity", c."Work_Type",
+               COALESCE(NULLIF(TRIM(c."WBS"), ''), '(no WBS)') AS "WBS",
                c."Issued_By", c."Issued_To", c."Tank_No",
                COALESCE(c."Site_ID",'HQ') AS "Site_ID", c."Lot_Number", c."Remarks"
         FROM consumption c

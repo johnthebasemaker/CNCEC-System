@@ -17,6 +17,14 @@ files were already migrated; this module finally gives them endpoints):
 WBS (`wbs_master`, migrated): legacy blocked SK consumption/receipts without
 an active WBS *when the site has WBS numbers configured* — same semantics
 here: the gate only bites once an HOD adds WBS rows for the site.
+
+Work types (`wbs_work_type_map`, Phase 9a): the same CONDITIONAL shape, one
+level up. An HOD curates a canonical list per site and hangs a WBS number off
+each entry; `services.wbs.resolve_wbs` then stamps that number onto issues that
+did not name one. Empty list → the gate does nothing and the entry forms keep
+their free-text input, so turning the rule on is the HOD's act rather than a
+release. Every rule lives in `services/wbs.py`; the endpoints below are
+transport, site scoping and the audit line.
 """
 from __future__ import annotations
 
@@ -33,12 +41,14 @@ from .auth import (get_current_user, require_roles, resolve_site_param,
                    resolve_site_write, site_filter_applies, site_row_visible,
                    site_scope)
 from .db import get_session
+from .services import wbs as wbs_svc
 from .services.ledger import _MD, write_audit
 
 router = APIRouter(tags=["entry-docs"])
 
 attachments_t = _MD.tables["entry_attachments"]
 wbs_t = _MD.tables["wbs_master"]
+wt_t = _MD.tables["wbs_work_type_map"]
 settings_t = _MD.tables["app_settings"]
 
 # `safety_approval` (QSEP slice 4) is the PPE distribution's mandatory
@@ -112,25 +122,11 @@ async def link_attachments(session: AsyncSession, ids: list[int], *,
 
 
 # ── WBS gate ──────────────────────────────────────────────────────────────────
-async def active_wbs(session: AsyncSession, site_id: str) -> list[str]:
-    rows = (await session.execute(select(wbs_t.c["WBS_Number"]).where(
-        (wbs_t.c["Site_ID"] == site_id) & (wbs_t.c["status"] == "active")
-    ).order_by(wbs_t.c["WBS_Number"]))).all()
-    return [r[0] for r in rows]
-
-
-async def assert_wbs(session: AsyncSession, *, site_id: str, wbs: str | None) -> None:
-    """Legacy rule (hod_portal.py WBS Manager): once a site has ACTIVE WBS
-    numbers, consumption/receipt entries must carry one of them. Sites with
-    no WBS configured are unaffected."""
-    options = await active_wbs(session, site_id)
-    if not options:
-        return
-    if not (wbs or "").strip():
-        raise HTTPException(422, f"site {site_id} requires a WBS Number "
-                                 f"({len(options)} active) — pick one on the form")
-    if wbs.strip() not in options:
-        raise HTTPException(422, f"WBS {wbs!r} is not an active WBS for {site_id}")
+# Both now live in `services/wbs.py`, so the gate and the resolver that has to
+# run before it read the same list from one place. Kept as names here because
+# three call sites and the legacy vocabulary both point at `entry_docs`.
+active_wbs = wbs_svc.active_numbers
+assert_wbs = wbs_svc.assert_wbs
 
 
 # ── attachment endpoints ─────────────────────────────────────────────────────
@@ -318,3 +314,204 @@ async def wbs_status(wid: int, status: str = Query(..., pattern="^(active|closed
     await write_audit(session, user["username"], "WBS_STATUS", "wbs_master", f"#{wid}→{status}")
     await session.commit()
     return {"id": wid, "status": status}
+
+
+# ── Work types + WBS mapping (Phase 9a) ──────────────────────────────────────
+# The dimension the operator plans by. `services.wbs` owns every rule; this
+# section is transport, site scoping and the audit line.
+
+
+class WorkTypeIn(BaseModel):
+    Work_Type: str
+    WBS_Number: Optional[str] = None
+    Description: Optional[str] = None
+    site_id: Optional[str] = None
+
+
+class WorkTypePatch(BaseModel):
+    Work_Type: Optional[str] = None
+    WBS_Number: Optional[str] = None      # '' clears the mapping; None leaves it
+    Description: Optional[str] = None
+    status: Optional[str] = None
+
+
+@router.get("/entry/work-types",
+            summary="The site's work-type dropdown (entry forms)")
+async def work_type_options(site_id: str = Query(...),
+                            user: dict = Depends(get_current_user),
+                            session: AsyncSession = Depends(get_session)):
+    """Same scoping rule as `/entry/wbs`: a scoped user always reads their OWN
+    site's list, never the one named in the query string."""
+    site = resolve_site_param(user, None)
+    if site is None:
+        site = site_id
+    items = await wbs_svc.active_work_types(session, site or "")
+    # `enforced` tells the form whether to render a Select or keep the free-text
+    # Input. The gate is conditional, so the frontend must not assume either.
+    return {"site_id": site, "items": items, "enforced": bool(items)}
+
+
+@router.get("/hod/site-config/work-types",
+            summary="Work types and their WBS mapping (HOD manager)")
+async def work_types_all(site_id: Optional[str] = Query(None),
+                         user: dict = Depends(require_roles("hod")),
+                         session: AsyncSession = Depends(get_session)):
+    site = resolve_site_param(user, site_id)
+    stmt = select(wt_t)
+    if site_filter_applies(site):
+        stmt = stmt.where(wt_t.c["Site_ID"] == site)
+    rows = (await session.execute(
+        stmt.order_by(wt_t.c["status"], wt_t.c["Work_Type"]))).mappings().all()
+    items = []
+    for r in rows:
+        d = dict(r)
+        items.append({k: v for k, v in d.items()
+                      if k not in ("created_at", "updated_at")}
+                     | {"created_at": str(d.get("created_at") or ""),
+                        "updated_at": str(d.get("updated_at") or "")})
+    return {"items": items}
+
+
+@router.get("/hod/site-config/work-types/suggestions",
+            summary="Work types the ledger has seen here, merged and counted")
+async def work_type_suggestions(site_id: Optional[str] = Query(None),
+                                user: dict = Depends(require_roles("hod")),
+                                session: AsyncSession = Depends(get_session)):
+    """The bootstrap for an empty list — see `wbs.usage_suggestions`. Nothing is
+    seeded by migration on purpose; adopting a spelling is a decision."""
+    site = resolve_site_param(user, site_id)
+    if not site:
+        raise HTTPException(422, "site_id required")
+    return {"site_id": site,
+            "items": await wbs_svc.usage_suggestions(session, site_id=site)}
+
+
+@router.post("/hod/site-config/work-types", status_code=201,
+             summary="Add a work type, optionally mapped to a WBS (HOD)")
+async def work_type_add(body: WorkTypeIn,
+                        user: dict = Depends(require_roles("hod")),
+                        session: AsyncSession = Depends(get_session)):
+    site = resolve_site_param(user, body.site_id)
+    if not site:
+        raise HTTPException(422, "site_id required")
+    name = (body.Work_Type or "").strip()
+    if not name:
+        raise HTTPException(422, "Work Type cannot be empty")
+    if wbs_svc.is_reserved(name):
+        raise HTTPException(
+            422, f"{name!r} is a system marker written by the app itself, not a "
+                 f"work type. It cannot be added to the list or given a WBS.")
+    norm = wbs_svc.normalise(name)
+    dup = (await session.execute(select(wt_t.c["id"], wt_t.c["Work_Type"]).where(
+        (wt_t.c["Site_ID"] == site) & (wt_t.c["Work_Type_Norm"] == norm)))).first()
+    if dup:
+        raise HTTPException(
+            409, f"{site} already lists this work type as {dup.Work_Type!r} — "
+                 f"the two differ only in spacing or case")
+    wbs_no = await _checked_wbs(session, site, body.WBS_Number)
+    wid = (await session.execute(insert(wt_t).values(
+        Site_ID=site, Work_Type=name, Work_Type_Norm=norm, WBS_Number=wbs_no,
+        Description=(body.Description or "").strip() or None, status="active",
+        created_by=user["username"]).returning(wt_t.c["id"]))).scalar_one()
+    await write_audit(session, user["username"], "WORK_TYPE_ADD",
+                      "wbs_work_type_map",
+                      f"{name}@{site} wbs={wbs_no or '-'}")
+    await session.commit()
+    return {"id": wid, "Work_Type": name, "Work_Type_Norm": norm,
+            "WBS_Number": wbs_no, "Site_ID": site}
+
+
+@router.patch("/hod/site-config/work-types/{wid}",
+              summary="Rename, re-map or retire a work type (HOD)")
+async def work_type_patch(wid: int, body: WorkTypePatch,
+                          user: dict = Depends(require_roles("hod")),
+                          session: AsyncSession = Depends(get_session)):
+    row = (await session.execute(select(wt_t).where(wt_t.c["id"] == wid))
+           ).mappings().first()
+    if row is None:
+        raise HTTPException(404, "no such work type")
+    if not site_row_visible(site_scope(user), row["Site_ID"]):
+        raise HTTPException(403, "that work type belongs to another site")
+
+    vals: dict = {}
+    if body.Work_Type is not None:
+        name = body.Work_Type.strip()
+        if not name:
+            raise HTTPException(422, "Work Type cannot be empty")
+        if wbs_svc.is_reserved(name):
+            raise HTTPException(422, f"{name!r} is a system marker, not a work type")
+        norm = wbs_svc.normalise(name)
+        if norm != row["Work_Type_Norm"]:
+            clash = (await session.execute(select(wt_t.c["Work_Type"]).where(
+                (wt_t.c["Site_ID"] == row["Site_ID"])
+                & (wt_t.c["Work_Type_Norm"] == norm)
+                & (wt_t.c["id"] != wid)))).first()
+            if clash:
+                raise HTTPException(
+                    409, f"{row['Site_ID']} already lists {clash.Work_Type!r}, "
+                         f"which is the same work type spelled differently")
+        vals["Work_Type"], vals["Work_Type_Norm"] = name, norm
+    if body.WBS_Number is not None:
+        # '' is meaningful and different from absent: it CLEARS the mapping.
+        vals["WBS_Number"] = await _checked_wbs(session, row["Site_ID"],
+                                                body.WBS_Number)
+    if body.Description is not None:
+        vals["Description"] = body.Description.strip() or None
+    if body.status is not None:
+        if body.status not in ("active", "retired"):
+            raise HTTPException(422, "status must be 'active' or 'retired'")
+        vals["status"] = body.status
+    if not vals:
+        raise HTTPException(422, "nothing to change")
+
+    vals["updated_at"] = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+    await session.execute(update(wt_t).where(wt_t.c["id"] == wid).values(**vals))
+    await write_audit(session, user["username"], "WORK_TYPE_PATCH",
+                      "wbs_work_type_map",
+                      f"#{wid} " + ", ".join(f"{k}={v}" for k, v in vals.items()
+                                             if k != "updated_at"))
+    await session.commit()
+    return {"id": wid, **{k: v for k, v in vals.items() if k != "updated_at"}}
+
+
+@router.delete("/hod/site-config/work-types/{wid}",
+               summary="Remove a work type from the list (HOD)")
+async def work_type_delete(wid: int, user: dict = Depends(require_roles("hod")),
+                           session: AsyncSession = Depends(get_session)):
+    """⚠️ DELETING THE OPTION DOES NOT TOUCH THE LEDGER. Rows already posted
+    keep the work type they were posted with — they record what happened, and
+    an option removed today cannot un-happen last month's issue. Retiring
+    (`status='retired'`) is usually the better move and is what the UI offers
+    first; delete exists for a row added by mistake."""
+    row = (await session.execute(select(wt_t.c["Site_ID"], wt_t.c["Work_Type"])
+           .where(wt_t.c["id"] == wid))).first()
+    if row is None:
+        raise HTTPException(404, "no such work type")
+    if not site_row_visible(site_scope(user), row.Site_ID):
+        raise HTTPException(403, "that work type belongs to another site")
+    await session.execute(delete(wt_t).where(wt_t.c["id"] == wid))
+    await write_audit(session, user["username"], "WORK_TYPE_DELETE",
+                      "wbs_work_type_map", f"{row.Work_Type}@{row.Site_ID}")
+    await session.commit()
+    return {"deleted": wid}
+
+
+async def _checked_wbs(session: AsyncSession, site: str,
+                       number: str | None) -> str | None:
+    """A mapping may only point at a WBS that exists and is ACTIVE at this site.
+
+    Without this the screen would happily accept a typo and the resolver would
+    stamp it onto every issue of that work type — a wrong cost centre is far
+    harder to notice than a missing one, because the report still balances.
+    """
+    n = str(number or "").strip()
+    if not n:
+        return None
+    ok = (await session.execute(select(wbs_t.c["id"]).where(
+        (wbs_t.c["WBS_Number"] == n) & (wbs_t.c["Site_ID"] == site)
+        & (wbs_t.c["status"] == "active")))).first()
+    if not ok:
+        raise HTTPException(
+            422, f"WBS {n!r} is not an active WBS number at {site} — add it "
+                 f"under WBS Numbers first, or reopen it if it was closed")
+    return n

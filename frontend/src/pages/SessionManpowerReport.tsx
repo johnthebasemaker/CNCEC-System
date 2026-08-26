@@ -291,8 +291,11 @@ export default function SessionManpowerReport({ site }: { site?: string }) {
                           ? <Tag color="default">not applicable</Tag>
                           : <b>{String(d.Required_Headcount_Rounded ?? '—')}</b>}
                       </Descriptions.Item>
-                      <Descriptions.Item label={`Per shift (x${shiftsPerDay})`}>
-                        {blocked ? '—' : String(d.Headcount_Per_Shift ?? '—')}
+                      <Descriptions.Item label={shiftsPerDay === 2
+                        ? 'Day / night crew' : 'Per shift'}>
+                        {blocked ? '—' : shiftsPerDay === 2
+                          ? `${String(d.Required_Day_Headcount ?? '—')} / ${String(d.Required_Night_Headcount ?? '—')}`
+                          : String(d.Headcount_Per_Shift ?? '—')}
                       </Descriptions.Item>
                       <Descriptions.Item label="Days at current roster">
                         {blocked ? '—' : n2(d.Days_With_Current_Roster)}
@@ -341,12 +344,23 @@ export default function SessionManpowerReport({ site }: { site?: string }) {
 
           {shiftsPerDay === 2 && (
             <Alert type="info" showIcon style={{ marginBottom: 16 }}
-              message="Two shifts splits the crew — it does not halve the hiring"
-              description={`${String(cols.can_do?.Required_Headcount_Rounded ?? 0)}
-                people are still needed in total for the startable work; they
-                are split into two crews of about
-                ${String(cols.can_do?.Headcount_Per_Shift ?? 0)}. Nobody works
-                both shifts.`} />
+              message="Nights buy time, not a smaller payroll"
+              description={(
+                <>
+                  {String(cols.can_do?.Required_Headcount_Rounded ?? 0)} people
+                  are still needed in total for the startable work — nobody works
+                  both shifts, so running nights does not reduce the hiring. The
+                  crew splits{' '}
+                  <strong>
+                    {String(cols.can_do?.Required_Day_Headcount ?? 0)} day
+                    {' / '}
+                    {String(cols.can_do?.Required_Night_Headcount ?? 0)} night
+                  </strong>
+                  {cols.can_do?.Shift_Split_Basis === 'roster'
+                    ? ', in the proportion your roster actually runs.'
+                    : ' — an assumed split; there is no night crew on the roster to derive a real proportion from.'}
+                </>
+              )} />
           )}
 
           <Space style={{ marginBottom: 12 }} wrap>

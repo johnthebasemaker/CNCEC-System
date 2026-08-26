@@ -16948,11 +16948,27 @@ async def test_sme_mp_session():
               and night["inputs"]["shifts_per_day_source"] == "roster"
               and night["roster"]["Night_In_Scope"] >= 1,
               str(night["inputs"]))
-        check("CI-33 …and two shifts SPLIT that crew rather than halving the "
-              "hiring: 300 man-hours over 55 h is 6 people in total, in two "
-              "crews of 3 — not 3 people",
-              night["columns"]["can_do"]["Required_Headcount_Rounded"] == 6
-              and night["columns"]["can_do"]["Headcount_Per_Shift"] == 3,
+        check("CI-33 running nights does NOT reduce the hiring: 300 man-hours "
+              "over 55 h is still 6 people, because nobody works both shifts. "
+              "That half of the old model survives ruling Q10 untouched",
+              night["columns"]["can_do"]["Required_Headcount_Rounded"] == 6,
+              str(night["columns"]["can_do"]))
+        check("CI-33b ⚠️ …but WHICH shift they work is read from the roster, "
+              "not from dividing by two (Phase 9b). Every mason on this roster "
+              "is on nights, so all 6 are a NIGHT requirement — the old "
+              "even split answered '3 day and 3 night' on a site with zero day "
+              "masons, which is a crew you could not field",
+              night["columns"]["can_do"]["Required_Day_Headcount"] == 0
+              and night["columns"]["can_do"]["Required_Night_Headcount"] == 6
+              and night["columns"]["can_do"]["Shift_Split_Basis"] == "roster",
+              str(night["columns"]["can_do"]))
+        check("CI-33c …and the session plan and the main planner use ONE "
+              "split helper. Two planners reading the same roster and "
+              "disagreeing about how it divides would be worse than either "
+              "being wrong, because only one of them would ever be checked",
+              night["columns"]["can_do"]["Headcount_Per_Shift"]
+              == max(night["columns"]["can_do"]["Required_Day_Headcount"],
+                     night["columns"]["can_do"]["Required_Night_Headcount"]),
               str(night["columns"]["can_do"]))
 
         # ── who may ask ─────────────────────────────────────────────────────
@@ -17169,7 +17185,15 @@ async def test_docs_and_assistant():
             ("19.5 🔗 SME Session Plan", "the SME-Manpower link (8e)"),
             ("2.3.5 Head of Qualities", "the QC-HOD's capability list (8d)"),
             ("### 19.2.11 🧠 Manpower Planner", "the planner (8b)"),
-            ("Two shifts splits the crew", "the under-hiring trap (8b)")):
+            ("under-hires by half", "the under-hiring trap (8b/9b)"),
+            # Phase 9b, ruling Q10. Both halves have to be written down: the
+            # total does NOT fall, and what nights actually buy is calendar
+            # time. A manual carrying only the first reads as though running
+            # nights bought nothing at all.
+            ("Nights buy time, not a smaller payroll", "what nights buy (9b)"),
+            ("the split is read from your\nroster", "the roster-derived shift split (9b)"),
+            ("16.5 WBS numbers and work types", "the WBS manager (9a)"),
+            ("One work type, one spelling", "the normalised work-type key (9a)")):
         check(f"CJ-23 the manual documents {why}", needle in md, needle)
 
     # And the assistant can actually find them.
@@ -17767,6 +17791,540 @@ async def test_workflow_polish():
 
 
 # --- Suite BW: the suite's own database isolation -----------------------------
+
+
+# --- Suite CK: the WBS nobody could reach ------------------------------------
+async def test_wbs_work_types():
+    """Suite CK — Phase 9a. WBS numbers, work types, and the order they run in.
+
+    THE FINDING THIS SUITE EXISTS FOR. The operator reported the `WBS #` column
+    as "mostly blank". It is blank in all 1,674 live consumption rows, and the
+    cause was not a missing feature: `wbs_master`, `assert_wbs` and three HOD
+    endpoints shipped with the parity build and **no screen ever called them**.
+    Zero rows means the gate is a permanent no-op, so nothing was ever asked for
+    a WBS and nothing ever carried one. The plumbing was complete; the tap was
+    never opened.
+
+    ⚠️ THE ORDER OF THE TWO GATES IS THE WHOLE FEATURE. `resolve_wbs` exists to
+    fill in a number the form left blank. `assert_wbs` refuses a blank. Run in
+    that order — which is what the router did before this slice — every issue is
+    rejected for want of the number the map was about to supply, and the map is
+    unreachable. CK-20/CK-21 are the checks that they now run the right way
+    round, and they are the two most likely to break in a later refactor.
+
+    ⚠️ CONDITIONAL BY DESIGN. Both rules do nothing until an HOD curates a list,
+    which is what lets Phase 9a ship without a flag day. CK-16 asserts the
+    no-op state BEFORE anything is added rather than after cleanup — the
+    CH-13b lesson: a check that only runs post-teardown passes for the wrong
+    reason on the day the teardown breaks.
+    """
+    import datetime as _dt
+
+    from fastapi import HTTPException
+    from sqlalchemy import text as _sqt
+
+    from .services import wbs as _w
+
+    SITE = "CNCEC"
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _cleanup():
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM wbs_work_type_map WHERE "
+                                 "\"Work_Type\" LIKE 'SVCW-%'"))
+            await s.execute(_sqt("DELETE FROM wbs_master WHERE \"WBS_Number\" "
+                                 "LIKE 'SVCW-%'"))
+            await s.commit()
+
+    await _cleanup()
+
+    # ── 1. normalisation: exactly the collisions the ledger contains ────────
+    # Measured on the live mirror: 35 distinct Work_Type strings, four pairs of
+    # which differ from another only in case.
+    for a, b, why in (
+            ("civil", "Civil", "the live ledger holds both"),
+            ("coating", "Coating", "the live ledger holds both"),
+            ("In yard", "In Yard", "the live ledger holds both"),
+            ("others", "Others", "the live ledger holds both"),
+            ("In  yard", "In yard", "a double space is not a second work type"),
+            ("  Blasting ", "Blasting", "surrounding space is not identity")):
+        check(f"CK-01 {a!r} and {b!r} are ONE work type — {why}",
+              _w.normalise(a) == _w.normalise(b),
+              f"{_w.normalise(a)!r} != {_w.normalise(b)!r}")
+
+    # ⚠️ AND THE CASES IT MUST *NOT* MERGE. Normalisation is a spelling rule,
+    # not a judgement about the work. Merging these is the HOD's call, made in
+    # the UI, and a regex that did it silently would be wrong in a way nobody
+    # could see from the report.
+    for a, b in (("Arrangement", "Site Arrangement"),
+                 ("Blasting", "Sweep blast"),
+                 ("Coating", "Painting")):
+        check(f"CK-02 {a!r} and {b!r} stay DIFFERENT — near-duplicates are a "
+              f"judgement about the work, not a spelling rule",
+              _w.normalise(a) != _w.normalise(b), f"both → {_w.normalise(a)!r}")
+
+    # ── 2. reserved markers are not work types ─────────────────────────────
+    for marker in ("SUPERVISOR_REQUEST", "STOCK_ADJUSTMENT"):
+        check(f"CK-03 {marker} is recognised as a system marker, not a work type",
+              _w.is_reserved(marker), marker)
+    check("CK-04 …and the check is case-insensitive, because the gate sees "
+          "whatever the caller stored",
+          _w.is_reserved("supervisor_request"), "lowercase marker not caught")
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+        SK = await _qsep_login(ac, "SVCQ-sk")
+
+        # ── 3. the no-op state, asserted BEFORE anything is added ───────────
+        async with SessionLocal() as s:
+            check("CK-16 a site with no work-type list refuses nothing — the "
+                  "gate is conditional, which is what lets this ship without a "
+                  "flag day (asserted BEFORE the fixture, not after cleanup)",
+                  await _w.assert_work_type(s, site_id=SITE,
+                                            work_type="anything at all") is None,
+                  "the empty list refused an entry")
+            pre = await _w.active_work_types(s, SITE)
+            check("CK-17 …and that state is real, not a leftover from a prior "
+                  "run", not [r for r in pre if str(r["Work_Type"]).startswith("SVCW-")],
+                  str(pre))
+
+        # ── 4. HOD manages the list ────────────────────────────────────────
+        r = await ac.post("/hod/site-config/work-types",
+                          json={"Work_Type": "SVCW-Blasting", "site_id": SITE},
+                          headers=H)
+        check("CK-05 an HOD adds a work type", r.status_code == 201, r.text)
+        wt_id = r.json()["id"]
+        check("CK-06 …and the API — not the form — computes the normalised key",
+              r.json()["Work_Type_Norm"] == "svcw-blasting", r.text)
+
+        # THE COLLISION THIS TABLE EXISTS TO STOP.
+        r = await ac.post("/hod/site-config/work-types",
+                          json={"Work_Type": "svcw-BLASTING  ", "site_id": SITE},
+                          headers=H)
+        check("CK-07 the same work type in different case is REFUSED, and the "
+              "message names the spelling already on the list — keyed on raw "
+              "text these would take different WBS numbers and the report would "
+              "split with nothing to show why",
+              r.status_code == 409 and "SVCW-Blasting" in r.text, r.text)
+
+        for marker in ("SUPERVISOR_REQUEST", "stock_adjustment"):
+            r = await ac.post("/hod/site-config/work-types",
+                              json={"Work_Type": marker, "site_id": SITE},
+                              headers=H)
+            check(f"CK-08 {marker!r} cannot be added to the list — it is a "
+                  f"marker the app writes itself, and mapping it to a WBS would "
+                  f"charge stock adjustments to a cost centre",
+                  r.status_code == 422 and "marker" in r.text.lower(), r.text)
+
+        r = await ac.post("/hod/site-config/work-types",
+                          json={"Work_Type": "SVCW-Coating", "site_id": SITE},
+                          headers=SK)
+        check("CK-09 a store keeper cannot curate the list",
+              r.status_code == 403, r.text)
+
+        # ── 5. mapping only points at an ACTIVE WBS ────────────────────────
+        r = await ac.patch(f"/hod/site-config/work-types/{wt_id}",
+                           json={"WBS_Number": "SVCW-NOPE"}, headers=H)
+        check("CK-10 a mapping cannot point at a WBS that does not exist. A "
+              "typo here would stamp a wrong cost centre onto every issue of "
+              "that work type — and the report would still balance, which is "
+              "what makes it hard to notice",
+              r.status_code == 422 and "not an active WBS" in r.text, r.text)
+
+        r = await ac.post("/hod/site-config/wbs",
+                          json={"WBS_Number": "SVCW-100", "site_id": SITE},
+                          headers=H)
+        check("CK-11 an HOD adds a WBS number", r.status_code == 201, r.text)
+        wbs_id = r.json()["id"]
+
+        r = await ac.patch(f"/hod/site-config/work-types/{wt_id}",
+                           json={"WBS_Number": "SVCW-100"}, headers=H)
+        check("CK-12 …and now the mapping is accepted",
+              r.status_code == 200, r.text)
+
+        # Closing the WBS must not silently delete the mapping — the row is a
+        # record of a decision, and a closed number on it is information.
+        await ac.patch(f"/hod/site-config/wbs/{wbs_id}?status=closed", headers=H)
+        r = await ac.get("/hod/site-config/work-types",
+                         params={"site_id": SITE}, headers=H)
+        row = next(x for x in r.json()["items"] if x["id"] == wt_id)
+        check("CK-13 closing a WBS leaves the mapping in place rather than "
+              "erasing it — the mapping records a decision, and 'this charges "
+              "to a number we have since closed' is information",
+              row["WBS_Number"] == "SVCW-100", str(row))
+        await ac.patch(f"/hod/site-config/wbs/{wbs_id}?status=active", headers=H)
+
+        # ── 6. the entry-form endpoint ─────────────────────────────────────
+        r = await ac.get("/entry/work-types", params={"site_id": SITE}, headers=SK)
+        body = r.json()
+        check("CK-14 the entry form is told the list AND that it is enforced — "
+              "without the flag a Select would be rendered over an empty list "
+              "and refuse entries the API still accepts",
+              r.status_code == 200 and body["enforced"] is True
+              and any(o["Work_Type"] == "SVCW-Blasting" for o in body["items"]),
+              r.text[:200])
+        check("CK-15 …and each option carries the WBS it charges to, so the "
+              "form can show the consequence of the pick",
+              any(o["Work_Type"] == "SVCW-Blasting" and o["WBS_Number"] == "SVCW-100"
+                  for o in body["items"]), r.text[:200])
+
+    # ── 7. the gate, now that a list exists ────────────────────────────────
+    async with SessionLocal() as s:
+        try:
+            await _w.assert_work_type(s, site_id=SITE, work_type="not on the list")
+            ok = False
+        except HTTPException as e:
+            ok = e.status_code == 422 and "SVCW-Blasting" in str(e.detail)
+        check("CK-18 an unlisted work type is refused, and the refusal NAMES "
+              "the options — a store keeper told only 'invalid' has to go and "
+              "find someone",
+              ok, "not refused, or refused without naming the list")
+
+        try:
+            await _w.assert_work_type(s, site_id=SITE,
+                                      work_type="SUPERVISOR_REQUEST")
+            reserved_ok = True
+        except HTTPException:
+            reserved_ok = False
+        check("CK-19 …but a reserved marker still passes. A gate that blocked "
+              "these would break stock adjustments and supervisor requests, a "
+              "long way from where anyone would look",
+              reserved_ok, "the gate refused a system marker")
+
+        # ── 8. ⚠️ RESOLUTION ORDER — the heart of the slice ────────────────
+        got = await _w.resolve_wbs(s, site_id=SITE, work_type="SVCW-Blasting")
+        check("CK-20 a work type with no WBS on the form resolves to its "
+              "mapped number, and reports WHERE it came from",
+              got == {"wbs": "SVCW-100", "source": "work_type"}, str(got))
+
+        got = await _w.resolve_wbs(s, site_id=SITE, work_type="SVCW-Blasting",
+                                   explicit="SVCW-999")
+        check("CK-21 ⚠️ AN EXPLICIT WBS IS NEVER OVERRIDDEN. The map is a "
+              "default, not a correction — a store keeper who picked a number "
+              "picked it for a reason the table does not know",
+              got == {"wbs": "SVCW-999", "source": "explicit"}, str(got))
+
+        got = await _w.resolve_wbs(s, site_id=SITE, work_type="svcw-blasting  ")
+        check("CK-22 …and resolution matches on the NORMALISED spelling, so a "
+              "row already in the ledger as 'civil' still finds the map the "
+              "HOD wrote as 'Civil'",
+              got["wbs"] == "SVCW-100", str(got))
+
+        got = await _w.resolve_wbs(s, site_id=SITE, work_type="SVCW-Unmapped")
+        check("CK-23 an unmapped work type resolves to nothing, and no WBS "
+              "stays legal", got == {"wbs": None, "source": None}, str(got))
+
+        got = await _w.resolve_wbs(s, site_id=SITE,
+                                   work_type="SUPERVISOR_REQUEST")
+        check("CK-24 a reserved marker never resolves a WBS — it is not a "
+              "description of work and has no cost centre",
+              got["wbs"] is None, str(got))
+
+        spelled = await _w.display_spelling(s, site_id=SITE,
+                                            work_type="svcw-blasting")
+        check("CK-25 the HOD's casing is what gets STORED, whatever the caller "
+              "sent — this is what stops the ledger re-growing the civil/Civil "
+              "split one entry at a time",
+              spelled == "SVCW-Blasting", str(spelled))
+
+    # ── 9. end to end: an issue with a blank WBS box gets one ──────────────
+    # ⚠️ THIS IS THE ORDERING CHECK. Before Phase 9a the router asserted the
+    # form's raw `wbs` BEFORE staging; with an active WBS at the site that
+    # refuses a blank box outright, and the map never gets to speak.
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        SK = await _qsep_login(ac, "SVCQ-sk")
+        async with SessionLocal() as s:
+            sap = (await s.execute(_sqt(
+                'SELECT TRIM("SAP_Code") FROM inventory WHERE "Site_ID" = :s '
+                'AND COALESCE("Category",\'\') <> :c LIMIT 1'),
+                {"s": SITE, "c": "Surface Shields"})).scalar()
+        if sap:
+            r = await ac.post("/entry/consumption", headers=SK, json={
+                "Date": _dt.date.today().isoformat(), "SAP_Code": sap,
+                "Quantity": 1, "Site_ID": SITE, "Work_Type": "SVCW-Blasting"})
+            staged = r.status_code in (200, 201)
+            wbs_on_row = None
+            if staged:
+                async with SessionLocal() as s:
+                    wbs_on_row = (await s.execute(_sqt(
+                        "SELECT wbs FROM pending_issues WHERE id = :i"),
+                        {"i": r.json().get("pending_id")})).scalar()
+            check("CK-26 an issue that left the WBS box blank is STAGED, not "
+                  "refused, and carries the number its work type maps to. The "
+                  "gate runs on the RESOLVED value — asserting the raw form "
+                  "field first would reject every such entry for want of the "
+                  "number the map was about to supply",
+                  staged and wbs_on_row == "SVCW-100",
+                  f"status={r.status_code} wbs={wbs_on_row} {r.text[:160]}")
+
+            if staged:
+                async with SessionLocal() as s:
+                    stored_wt = (await s.execute(_sqt(
+                        'SELECT "Work_Type" FROM pending_issues WHERE id = :i'),
+                        {"i": r.json().get("pending_id")})).scalar()
+                    await s.execute(_sqt("DELETE FROM pending_issues WHERE id = :i"),
+                                    {"i": r.json().get("pending_id")})
+                    await s.commit()
+                check("CK-27 …and the stored work type is the canonical "
+                      "spelling", stored_wt == "SVCW-Blasting", str(stored_wt))
+        else:
+            check("CK-26 skipped — no uncontrolled SAP at this site to issue",
+                  True, "")
+
+    # ── 10. suggestions merge what the ledger actually spells two ways ─────
+    async with SessionLocal() as s:
+        sug = await _w.usage_suggestions(s, site_id=SITE)
+        by_norm = {r["Work_Type_Norm"]: r for r in sug}
+        check("CK-28 the history importer merges spellings by normalised key, "
+              "so an HOD adopts one entry instead of discovering two later",
+              all(len(r["variants"]) >= 1 for r in sug)
+              and len(by_norm) == len(sug), f"{len(sug)} rows, {len(by_norm)} keys")
+        check("CK-29 …and never proposes a reserved marker",
+              not any(_w.is_reserved(r["Work_Type"]) for r in sug),
+              str([r["Work_Type"] for r in sug if _w.is_reserved(r["Work_Type"])]))
+        check("CK-30 …nor anything already on the list — a suggestion you "
+              "cannot act on is noise",
+              "svcw-blasting" not in by_norm, str(list(by_norm)[:5]))
+
+    # ── 11. the reports actually print it ──────────────────────────────────
+    from . import reports as _rep
+    async with SessionLocal() as s:
+        for key, label in (("daily-consumption", "line level"),
+                           ("consumption", "the rollup"),
+                           ("wbs", "the WBS report")):
+            fn = _rep.REPORTS[key]["fn"]
+            _t, cols, _rows = await fn(s, site_id=SITE, days=3650)
+            check(f"CK-31 {key} prints a WBS column ({label}) — the operator's "
+                  f"actual ask was to see the number on the paperwork",
+                  "WBS" in cols, str(cols))
+
+    await _cleanup()
+
+
+
+
+# --- Suite CL: what a night shift actually buys ------------------------------
+async def test_planner_shift_math():
+    """Suite CL — Phase 9b. Nights buy TIME, and the shifts are not the same size.
+
+    Two rulings, both of which change arithmetic that suites CD/CE/CF already
+    pin, so this suite exists to state the NEW behaviour rather than leave it
+    inferable from the absence of a failure.
+
+    ⚠️ RULING Q10 — NIGHTS BUY TIME, NOT A SMALLER PAYROLL. A person works one
+    shift a day, so for a FIXED deadline `manhours / (days x 11)` is the total
+    headcount whatever the shift count — CL-01 keeps that. What running nights
+    buys is calendar time: the site delivers `(day + night) x 11` man-hours per
+    day instead of `day x 11`. A planner that reports only the unchanged
+    headcount reads as though nights bought nothing, which is why CL-02/CL-03
+    exist.
+
+    ⚠️ AND THE SHIFTS ARE NOT THE SAME SIZE. This operator runs a day shift of
+    20 against a night shift of 80 — different equipment, different tasks. Until
+    Phase 9b the per-shift figure was `total / shifts_per_day`, which on those
+    numbers understates the night crew FOURFOLD and overstates the day crew by
+    the same. CL-04 is the check that the split now follows the roster; CL-05
+    and CL-06 are the checks that where the roster cannot say, the output ADMITS
+    it rather than blending an assumption into a number.
+
+    ⚠️ AND THE §2.2 CAPACITY BUG. `days_with_roster` always filtered to the
+    roles a job needs — "idle blasters do not shorten a brick-lining job" — and
+    the overtime arithmetic did not, so an idle blaster inflated normal capacity
+    and understated both the overtime and the hiring advice that clears it.
+    CL-09/CL-10 hire an idle role and assert the numbers do NOT move.
+    """
+    from sqlalchemy import text as _sqt
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _reset():
+        async with SessionLocal() as s:
+            await s.execute(_sqt('DELETE FROM sme_manpower_norm_role WHERE '
+                                 '"Norm_ID" IN (SELECT id FROM sme_manpower_norm '
+                                 'WHERE "Lining_System_Code" LIKE \'SVCL-%\')'))
+            for tbl, col in (("sme_manpower_norm", "Lining_System_Code"),
+                             ("sme_recipe", "Lining_System_Code")):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE "{col}" '
+                                     f"LIKE 'SVCL-%'"))
+            for tbl in ("sme_sqm_progress", "sme_equipment"):
+                await s.execute(_sqt(f'DELETE FROM {tbl} WHERE '
+                                     f'"Equipment_Tag_No" LIKE \'SVCL-%\''))
+            await s.execute(_sqt("DELETE FROM mh_employees WHERE "
+                                 "\"Employee_Code\" LIKE 'SVCL-%'"))
+            await s.commit()
+
+    await _reset()
+
+    # One tag, one system, one role. 1,100 m² at 1 man-hour/m² = 1,100 man-hours,
+    # which is exactly 100 person-days of 11 hours — so every figure below is a
+    # round number and a wrong one is obvious rather than plausible.
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO sme_equipment ("Site_ID", "Equipment_Tag_No", '
+            '"Lining_System_Code", "Type", "Surface_Area_SQM", "Lining_System") '
+            "VALUES ('CNCEC', 'SVCL-T1', 'SVCL-A', 'CV', 1100, 'SVCL alpha')"))
+        await s.execute(_sqt(
+            'INSERT INTO sme_sqm_progress ("Site_ID", "Equipment_Tag_No", '
+            '"Lining_System_Code", "Original_SQM", "Done_SQM") VALUES '
+            "('CNCEC', 'SVCL-T1', 'SVCL-A', 1100, 0)"))
+        await s.execute(_sqt(
+            'INSERT INTO sme_recipe ("Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+            '"For_1_SQM", "Lining_System", "Lining_System_Name") VALUES '
+            "('SVCL-A', 'ESCLA', 'SVCL-MAT', 'SVCL-MAT', 1.0, 'SVCL alpha', "
+            "'SVCLA') ON CONFLICT DO NOTHING"))
+        nid = (await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+            '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+            '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+            "VALUES ('CV', 'SVCL-A', 'ESCLA', 'svcl alpha', '', 1, 11, 100, "
+            "100, 0) RETURNING id"))).scalar_one()
+        await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm_role ("Norm_ID", "Role_Code", '
+            '"Headcount") VALUES (:n, \'MASON\', 1)'), {"n": nid})
+        await s.commit()
+
+    async def _crew(day: int, night: int, role: str = "Mason",
+                    prefix: str = "SVCL") -> None:
+        async with SessionLocal() as s:
+            for shift, n in (("Day", day), ("Night", night)):
+                for i in range(n):
+                    await s.execute(_sqt(
+                        'INSERT INTO mh_employees ("Site_ID", "Employee_Code", '
+                        '"Name", "Designation", "Worker_Type", "Shift", status) '
+                        "VALUES ('CNCEC', :c, :c, :d, 'GI', :s, 'active')"),
+                        {"c": f"{prefix}-{role}-{shift}-{i}", "d": role,
+                         "s": shift})
+            await s.commit()
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        H = await _qsep_login(ac, "SVCQ-hod")
+
+        async def _plan(**body):
+            r = await ac.post("/mh/planner", headers=H,
+                              json={"equipment_tags": ["SVCL-T1"],
+                                    "lining_system_codes": ["SVCL-A"], **body})
+            assert r.status_code == 200, f"{r.status_code} {r.text[:220]}"
+            return r.json()
+
+        # ── 1. no night crew: forced two shifts is an ASSUMPTION, and says so ─
+        await _crew(day=20, night=0)
+        one = await _plan(target_days=10)
+        two = await _plan(target_days=10, shifts_per_day=2)
+
+        check("CL-01 the TOTAL headcount is unchanged by the shift count — a "
+              "person works one shift a day, so 1,100 man-hours over 10 days is "
+              "10 people however you arrange them",
+              one["requirement"]["Total_Required_Headcount"]
+              == two["requirement"]["Total_Required_Headcount"] == 10.0,
+              f"{one['requirement']['Total_Required_Headcount']} / "
+              f"{two['requirement']['Total_Required_Headcount']}")
+
+        check("CL-05 ⚠️ forcing nights onto a roster with none reports the "
+              "split as ASSUMED, not measured. 20 on days and 0 on nights is "
+              "evidence there is no night crew YET — read as a proportion it "
+              "would put 100% of the plan on days and make the option do "
+              "nothing at all",
+              two["requirement"]["Shift_Split_Basis"] == "assumed_even",
+              str(two["requirement"].get("Shift_Split_Basis")))
+        check("CL-06 …and the warning says the days it saves are days you would "
+              "have to staff a night crew to save",
+              any("assumed even" in w and "staff a night crew" in w
+                  for w in two["warnings"]), str(two["warnings"]))
+
+        check("CL-02 with one shift, 1,100 man-hours against 20 masons takes 5 "
+              "days (1,100 / (20 x 11)) — and that is both the day-only and the "
+              "both-shift answer, because there is no night crew",
+              two["requirement"]["Days_Day_Shift_Only"] == 5.0
+              and two["requirement"]["Days_Both_Shifts"] == 5.0
+              and two["requirement"]["Days_Saved_By_Nights"] == 0.0,
+              str(two["requirement"]))
+
+        # ── 2. ⚠️ THE OPERATOR'S OWN NUMBERS: 20 on days, 80 on nights ──────
+        await _crew(day=0, night=80)
+        dispro = await _plan(target_days=10)
+
+        check("CL-03 ⚠️ NIGHTS BUY TIME. 100 masons deliver 1,100 man-hours in "
+              "one day; the 20 on days alone would take five. That saving is "
+              "the whole of ruling Q10, and a planner that showed only the "
+              "unchanged headcount would read as though nights bought nothing",
+              dispro["requirement"]["Days_Day_Shift_Only"] == 5.0
+              and dispro["requirement"]["Days_Both_Shifts"] == 1.0
+              and dispro["requirement"]["Days_Saved_By_Nights"] == 4.0,
+              str(dispro["requirement"]))
+
+        check("CL-04 ⚠️ THE SPLIT FOLLOWS THE ROSTER, NOT THE SHIFT COUNT. "
+              "20 day / 80 night is 2 and 8 of a crew of 10 — an even split "
+              "would say 5 and 5, understating the night crew fourfold and "
+              "overstating the day crew by the same",
+              dispro["requirement"]["Required_Day_Headcount"] == 2
+              and dispro["requirement"]["Required_Night_Headcount"] == 8
+              and dispro["requirement"]["Shift_Split_Basis"] == "roster",
+              str(dispro["requirement"]))
+
+        check("CL-07 …and the per-shift figure is the LARGER crew — the most "
+              "people who have to stand on the deck at one time — not the total "
+              "divided evenly and not the biggest single trade",
+              dispro["requirement"]["Headcount_Per_Shift"] == 8,
+              str(dispro["requirement"]))
+
+        check("CL-08 the two shifts still account for the whole requirement: "
+              "nobody is planned twice and nobody is dropped",
+              dispro["requirement"]["Required_Day_Headcount"]
+              + dispro["requirement"]["Required_Night_Headcount"]
+              >= dispro["requirement"]["Total_Required_Headcount"] - 1e-9,
+              str(dispro["requirement"]))
+
+        check("CL-11 the roster panel reports the day and night halves it "
+              "actually used, so a split that looks wrong can be traced to the "
+              "roster it came from",
+              dispro["roster"]["Day_In_Scope"] == 20
+              and dispro["roster"]["Night_In_Scope"] == 80
+              and dispro["roster"]["In_Scope"] == 100,
+              str(dispro["roster"]))
+
+        role_row = next(r for r in dispro["gap"] if r["Role_Code"] == "MASON")
+        check("CL-12 …and the same split is on the ROLE row, because that is "
+              "where an HOD reads it when hiring",
+              role_row["Required_Day_Headcount"] == 2
+              and role_row["Required_Night_Headcount"] == 8
+              and role_row["Shift_Split_Basis"] == "roster", str(role_row))
+
+        # ── 3. §2.2 — an idle role must not inflate capacity ────────────────
+        before = dispro["strategy"]
+        await _crew(day=50, night=0, role="Blaster", prefix="SVCLX")
+        after = (await _plan(target_days=10))["strategy"]
+
+        check("CL-09 ⚠️ HIRING 50 BLASTERS DOES NOT CHANGE A MASONRY PLAN. "
+              "Normal capacity counts the roles the job NEEDS; counting the "
+              "whole payroll inflated it, which understated the overtime and "
+              "the hiring advice that clears it — the two numbers an HOD "
+              "actually acts on",
+              abs(after["Normal_Capacity_Manhours"]
+                  - before["Normal_Capacity_Manhours"]) < 1e-6,
+              f"{before['Normal_Capacity_Manhours']} → "
+              f"{after['Normal_Capacity_Manhours']}")
+        check("CL-10 …nor the overtime, nor the hire-to-clear advice",
+              after["Overtime_Hours_Incurred"] == before["Overtime_Hours_Incurred"]
+              and after["Hire_GI_To_Clear_Overtime"]
+              == before["Hire_GI_To_Clear_Overtime"],
+              f"{before} → {after}")
+
+        idle = await _plan(target_days=10)
+        check("CL-13 …and the roster panel still shows the whole payroll, so "
+              "the blasters are visible even though they are not counted — "
+              "'we have 150 people' and 'capacity is 100' are both true and "
+              "the gap between them is the point",
+              idle["roster"]["Total"] == 150
+              and idle["roster"]["Capacity_GI"] == 100,
+              str(idle["roster"]))
+
+    await _reset()
+
+
 async def test_database_isolation():
     """Suite BW — the tests must not be able to reach the live database.
 
@@ -18229,6 +18787,12 @@ async def main() -> int:
     print("\n CJ. The corpus and the pipeline that reads it — documentation "
           "drift, and the retrieval that was answering from a stale manual")
     await test_docs_and_assistant()
+    print("\n CL. What a night shift actually buys — calendar time, and a "
+          "split the roster decides rather than a division by two")
+    await test_planner_shift_math()
+    print("\n CK. The WBS nobody could reach — the tap that was plumbed and "
+          "never opened, and the order the two gates run in")
+    await test_wbs_work_types()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

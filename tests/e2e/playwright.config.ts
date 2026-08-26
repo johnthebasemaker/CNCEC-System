@@ -30,7 +30,7 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
       dependencies: ['setup'],
       testMatch: /specs\/.*\.spec\.ts/,
-      testIgnore: /specs\/entry-docs\.spec\.ts/,
+      testIgnore: /specs\/(entry-docs|wbs-work-types)\.spec\.ts/,
     },
     {
       // entry-docs flips the GLOBAL require_entry_documents setting — run it
@@ -39,6 +39,22 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
       dependencies: ['chromium'],
       testMatch: /specs\/entry-docs\.spec\.ts/,
+    },
+    {
+      // ⚠️ SAME HAZARD, ONE LEVEL WORSE. Adding the first WBS number for a site
+      // turns `assert_wbs` ON for that site, and adding the first work type
+      // turns the strict dropdown on — both are conditional gates whose whole
+      // design is that they do nothing until an HOD curates a list. A scoped
+      // HOD can only manage their OWN site, which is the site every other spec
+      // posts entries to, so this cannot be isolated by choosing a different
+      // one. It therefore runs strictly LAST, after `gated`, and closes what it
+      // opened. Run inside the parallel pack it turns the gate on mid-flight
+      // and 422s whichever specs happen to be posting at that moment — which is
+      // exactly what it did, in a different spec each run.
+      name: 'site-config',
+      use: { ...devices['Desktop Chrome'] },
+      dependencies: ['gated'],
+      testMatch: /specs\/wbs-work-types\.spec\.ts/,
     },
   ],
 })

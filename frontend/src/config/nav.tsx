@@ -22,7 +22,7 @@ import {
   DashboardOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, FallOutlined,
   FieldTimeOutlined, FileExcelOutlined, FileProtectOutlined, FileSearchOutlined, FireOutlined,
   FormOutlined, FundProjectionScreenOutlined, InboxOutlined, MessageOutlined, ProfileOutlined,
-  SafetyCertificateOutlined, SafetyOutlined, SolutionOutlined, StockOutlined, TeamOutlined,
+  SafetyCertificateOutlined, SafetyOutlined, SolutionOutlined, TagsOutlined, StockOutlined, TeamOutlined,
   ToolOutlined, ControlOutlined, UserAddOutlined,
 } from '@ant-design/icons'
 import type { User } from '../auth/AuthContext'
@@ -188,6 +188,10 @@ export const NAV: NavGroup[] = [
       { key: '/hod/burn-rate', label: 'Burn Rate', icon: <FireOutlined />, access: { anyRole: ['hod', 'auditor'] } },
       { key: '/hod/lining-coverage', label: 'Lining Coverage', icon: <ExperimentOutlined />, access: { anyRole: ['hod', 'logistics', 'auditor'] } },
       { key: '/hod/documents', label: 'Document Library', icon: <FileSearchOutlined />, access: { anyRole: ['hod', 'auditor'] } },
+      // Phase 9a. The endpoints behind this have existed since the parity
+      // build with no screen to reach them, which is exactly why every
+      // live consumption row has a blank WBS.
+      { key: '/hod/wbs', label: 'WBS & Work Types', icon: <TagsOutlined />, access: w({ anyRole: ['hod'] }) },
       { key: '/hod/low-stock', label: 'Low Stock', icon: <FallOutlined />, access: { anyRole: ['hod', 'auditor'] } },
       { key: '/hod/prs', label: 'Purchase Requests', icon: <ProfileOutlined />, access: { anyRole: ['hod', 'auditor'] } },
       { key: '/hod/requests', label: 'Cross-Site Requests', icon: <SolutionOutlined />, access: { anyRole: ['hod', 'auditor'] } },

@@ -151,6 +151,41 @@ def crew_shifts(norm: dict, sqm: float) -> Optional[float]:
     return (sqm / prod) if prod > 0 else None
 
 
+def shift_split(have: dict, *, site_day: int, site_night: int,
+                shifts_per_day: int) -> tuple[float, float, str]:
+    """(day_share, night_share, basis) for one role — ruling Q10.
+
+    ⚠️ NEVER AN EVEN SPLIT WHERE THE ROSTER CAN SAY OTHERWISE. This operator
+    runs a day shift of 20 against a night shift of 80; halving the requirement
+    would understate the night crew fourfold. The roster's own proportion is the
+    answer whenever it exists, and the `basis` names what was actually used so
+    an assumption is never mistaken for a measurement.
+    """
+    if int(shifts_per_day) < 2:
+        return 1.0, 0.0, "day_only"
+    # A shift value that is neither Day nor Night (or a null, which roster()
+    # counts as Day) must not vanish: derive the day count from the total so
+    # the two shares always sum to 1.
+    total = int(have.get("total", 0))
+    night = int(have.get("Night", 0))
+    day = max(total - night, 0)
+    # ⚠️ `night > 0`, NOT `day + night > 0`. A role with 20 on days and none on
+    # nights cannot describe a two-shift split: it is evidence that there is no
+    # night crew YET, not that the night crew is zero per cent of the plan.
+    # Reading it as a proportion would put 100% of a forced two-shift plan on
+    # days and make the option do nothing at all.
+    if night > 0:
+        return day / (day + night), night / (day + night), "roster"
+    if site_night > 0:
+        # This role has no night presence but the site does. How the site
+        # actually runs is a measurement of something real, unlike half.
+        return (site_day / (site_day + site_night),
+                site_night / (site_day + site_night), "site")
+    # A two-shift plan forced onto an empty roster. There is nothing to derive
+    # from, so the split is an assumption — and it is labelled as one.
+    return 0.5, 0.5, "assumed_even"
+
+
 async def _role_lookup(session: AsyncSession) -> dict:
     """Every spelling of a role → its canonical Role_Code.
 
@@ -910,17 +945,36 @@ async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
     the planner already computed read "per day" without a single formula
     changing.
 
-    ── SHIFTS PER DAY ──────────────────────────────────────────────────────
-    ⚠️ RUNNING NIGHTS SPLITS THE CREW; IT DOES NOT ADD CAPACITY. Two shifts a
-    day means two DISJOINT crews — nobody works both — so the total headcount
-    needed is unchanged and only the per-shift figure halves:
+    ── SHIFTS PER DAY (operator ruling Q10, 2026-08-25: NIGHTS BUY TIME) ───
+    Two shifts a day still means two DISJOINT crews — nobody works both — so
+    for a FIXED deadline the total headcount is unchanged:
 
         Total_Required_Headcount = manhours / (days x 11)     (independent of s)
-        Headcount_Per_Shift      = Total_Required_Headcount / s
 
-    This is counter-intuitive enough that the UI states it, because the natural
-    reading — "two shifts, so half the people" — is wrong and would under-hire
-    by half.
+    What running nights actually buys is CALENDAR TIME. The site delivers
+    `(day_crew + night_crew) x 11` man-hours per calendar day instead of
+    `day_crew x 11`, so the same work finishes sooner:
+
+        Days_Day_Only   = manhours / (day_in_scope x 11)
+        Days_Both       = manhours / (roster_in_scope x 11)
+        Days_Saved      = Days_Day_Only - Days_Both
+
+    ⚠️ THE PER-SHIFT SPLIT IS READ FROM THE ROSTER, NEVER FROM `/ shifts_per_day`.
+    Until Phase 9b this divided the requirement evenly, which is wrong wherever
+    the shifts are not the same size — and at this operator they routinely are
+    not: a day shift of 20 against a night shift of 80, on different equipment
+    and different tasks. An even split understates the night requirement by a
+    factor of four and overstates the day one by the same. The shares come from
+    the roster's OWN day/night proportion, per role, and `Shift_Split_Basis`
+    says which basis was available:
+
+        roster        this role's own day/night counts       — the good case
+        site          the site's proportion, this role having no roster
+        assumed_even  a two-shift plan forced with no roster to derive from
+        day_only      one shift a day; the night share is zero
+
+    Only the last two are ever an assumption, and both are named in the output
+    rather than blended silently into a number.
     """
     if deadline_hours is not None and target_days is not None:
         raise HTTPException(422, "give either target_days or deadline_hours, "
@@ -1049,10 +1103,21 @@ async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
     if shifts_per_day == 2 and night_in_scope == 0:
         warnings.append(
             "a two-shift plan was requested but no active worker in the "
-            "required roles is on the night shift — the split below is what "
-            "you would have to staff, not what exists")
+            "required roles is on the night shift. There is no roster to derive "
+            "a day/night proportion from, so the split below is an assumed even "
+            "one — and the days it saves are days you would have to staff a "
+            "night crew to save")
 
     # ── 3. the gap, per role ────────────────────────────────────────────────
+    # The site's own day/night proportion, used as the fallback basis for a role
+    # that has nobody on the roster. Derived from the total rather than summed
+    # from the two buckets, so a worker whose Shift is neither Day nor Night is
+    # still counted somewhere.
+    site_night = sum(int(v.get("Night", 0)) for v in available.values())
+    site_day = max(sum(int(v.get("total", 0)) for v in available.values())
+                   - site_night, 0)
+    split_bases: set[str] = set()
+
     gap_rows = []
     for rc in sorted(set(role_manhours) | set(available)):
         mh = role_manhours.get(rc, 0.0)
@@ -1061,14 +1126,32 @@ async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
         have_total = int(have.get("total", 0))
         gap = need_exact - have_total
         need_round = math.ceil(need_exact - 1e-9)
+        # ⚠️ THE SPLIT COMES FROM THE ROSTER, NOT FROM DIVIDING BY THE SHIFT
+        # COUNT (Phase 9b, ruling Q10). Day 20 / night 80 is this operator's
+        # normal, and an even split would understate the night crew fourfold.
+        d_share, n_share, basis = shift_split(
+            have, site_day=site_day, site_night=site_night,
+            shifts_per_day=shifts_per_day)
+        split_bases.add(basis)
+        # Rounded UP on each shift rather than apportioned from the total,
+        # because you cannot roster a fraction of a mason and each shift has to
+        # stand on its own crew.
+        need_day = math.ceil(need_exact * d_share - 1e-9)
+        need_night = math.ceil(need_exact * n_share - 1e-9)
+
         gap_rows.append({
             "Role_Code": rc,
             "Required_Manhours": round(mh, 2),
             "Required_Headcount": round(need_exact, 2),
             "Required_Headcount_Rounded": need_round,
-            # Per SHIFT, when nights run. Rounded UP per shift rather than
-            # halving the total, because you cannot roster half a mason.
-            "Headcount_Per_Shift": math.ceil(need_exact / shifts_per_day - 1e-9),
+            "Required_Day_Headcount": need_day,
+            "Required_Night_Headcount": need_night,
+            "Shift_Split_Basis": basis,
+            # Kept for every existing caller. It is now the LARGER of the two
+            # shifts — the crew you actually have to be able to field at once —
+            # rather than the total divided evenly, which was only ever right
+            # when the shifts happened to be the same size.
+            "Headcount_Per_Shift": max(need_day, need_night),
             "Available_Headcount": have_total,
             "Available_GI": int(have.get("GI", 0)),
             "Available_NON_GI": int(have.get("NON_GI", 0)),
@@ -1086,12 +1169,30 @@ async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
     # ── 4. the overtime strategy ────────────────────────────────────────────
     gi_thr = float(thresholds.get("GI", 8.0))
     ng_thr = float(thresholds.get("NON_GI", 10.0))
+    # The whole payroll, for the roster panel — this is what the site employs.
     n_gi = sum(int(v.get("GI", 0)) for v in available.values())
     n_ng = sum(int(v.get("NON_GI", 0)) for v in available.values())
 
-    normal_capacity = (n_gi * gi_thr + n_ng * ng_thr) * shifts
-    ot_capacity = (n_gi * (SHIFT_WORKED_HOURS - gi_thr)
-                   + n_ng * (SHIFT_WORKED_HOURS - ng_thr)) * shifts
+    # ⚠️ CAPACITY IS THE ROLES THIS JOB NEEDS, NOT EVERYONE ON THE PAYROLL
+    # (Phase 9b). `days_with_roster` below has always filtered to `role_manhours`
+    # — "idle blasters do not shorten a brick-lining job" — and the overtime
+    # arithmetic did not. An idle blaster inflated normal capacity, which
+    # understated the overtime AND understated the hiring advice that clears it:
+    # the two numbers an HOD actually acts on. Same reasoning, same filter.
+    #
+    # The one exception is a workload that could not be attributed to any role
+    # at all (a benchmark with no crew composition — already warned about
+    # above). There, an in-scope capacity of zero would report the entire job as
+    # unmet on top of a warning that says why, so the payroll figure stands in.
+    if role_manhours:
+        cap_gi = sum(int(available.get(rc, {}).get("GI", 0)) for rc in role_manhours)
+        cap_ng = sum(int(available.get(rc, {}).get("NON_GI", 0)) for rc in role_manhours)
+    else:
+        cap_gi, cap_ng = n_gi, n_ng
+
+    normal_capacity = (cap_gi * gi_thr + cap_ng * ng_thr) * shifts
+    ot_capacity = (cap_gi * (SHIFT_WORKED_HOURS - gi_thr)
+                   + cap_ng * (SHIFT_WORKED_HOURS - ng_thr)) * shifts
     normal_used = min(total_manhours, normal_capacity)
     ot_used = min(max(total_manhours - normal_capacity, 0.0), ot_capacity)
     unmet = max(total_manhours - normal_capacity - ot_capacity, 0.0)
@@ -1111,6 +1212,19 @@ async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
                           for rc in role_manhours)
     days_with_roster = (total_manhours / (roster_in_scope * SHIFT_WORKED_HOURS)
                         if roster_in_scope > 0 and total_manhours > 0 else None)
+
+    # ⚠️ WHAT RUNNING NIGHTS ACTUALLY BUYS (ruling Q10). Not fewer people — the
+    # total is `manhours / (days x 11)` whatever the shift count, because a
+    # person works one shift a day. What it buys is CALENDAR TIME: the site
+    # delivers `(day + night) x 11` man-hours per day instead of `day x 11`.
+    # Reporting the saving is the whole point of the ruling; a planner that
+    # shows only the unchanged headcount reads as though nights bought nothing.
+    day_in_scope = max(roster_in_scope - night_in_scope, 0)
+    days_day_only = (total_manhours / (day_in_scope * SHIFT_WORKED_HOURS)
+                     if day_in_scope > 0 and total_manhours > 0 else None)
+    days_saved = (round(days_day_only - days_with_roster, 2)
+                  if days_day_only is not None and days_with_roster is not None
+                  else None)
 
     if len(planned) == 1:
         workload = planned[0]["workload"]
@@ -1172,21 +1286,47 @@ async def plan_many(session: AsyncSession, *, site_id: str, jobs: list,
             "Total_Required_Manhours": round(total_manhours, 2),
             "Total_Required_Headcount": round(
                 total_manhours / deadline_hours, 2) if deadline_hours else None,
-            "Headcount_Per_Shift": math.ceil(
-                total_manhours / deadline_hours / shifts_per_day - 1e-9)
-            if deadline_hours and total_manhours > 0 else 0,
+            # Summed from the per-role figures rather than divided from the
+            # total: each role's split follows its OWN roster proportion, so
+            # there is no single site-wide ratio to divide by.
+            "Required_Day_Headcount": sum(r["Required_Day_Headcount"]
+                                          for r in gap_rows),
+            "Required_Night_Headcount": sum(r["Required_Night_Headcount"]
+                                            for r in gap_rows),
+            # The largest crew that has to stand on the deck at one time:
+            # each shift summed across roles, then the bigger of the two. NOT a
+            # max over per-role figures — that would report the biggest single
+            # trade and call it the crew.
+            "Headcount_Per_Shift": max(
+                sum(r["Required_Day_Headcount"] for r in gap_rows),
+                sum(r["Required_Night_Headcount"] for r in gap_rows)),
+            "Shift_Split_Basis": ("roster" if split_bases == {"roster"}
+                                  else "day_only" if split_bases <= {"day_only"}
+                                  else "mixed" if len(split_bases) > 1
+                                  else next(iter(split_bases), "day_only")),
             "Total_Crew_Shifts": round(total_crew_shifts, 3),
             "Total_Days": round(days, 2),
             "Total_Calendar_Shifts": round(days * shifts_per_day, 2),
             "Days_With_Current_Roster": round(days_with_roster, 2)
             if days_with_roster is not None else None,
+            # The Q10 answer, in the three numbers an HOD compares.
+            "Days_Day_Shift_Only": round(days_day_only, 2)
+            if days_day_only is not None else None,
+            "Days_Both_Shifts": round(days_with_roster, 2)
+            if days_with_roster is not None else None,
+            "Days_Saved_By_Nights": days_saved,
             "Activities": len(activities),
             "Jobs": len(planned),
         },
         "roster": {
             "GI": n_gi, "NON_GI": n_ng, "Total": n_gi + n_ng,
             "In_Scope": roster_in_scope,
+            "Day_In_Scope": day_in_scope,
             "Night_In_Scope": night_in_scope,
+            # What the overtime arithmetic actually counted — the roles this job
+            # needs, not the payroll. Published so the two can be compared when
+            # they disagree, which is exactly when somebody is confused.
+            "Capacity_GI": cap_gi, "Capacity_NON_GI": cap_ng,
             "Unmapped": unmapped,
         },
         "gap": gap_rows,

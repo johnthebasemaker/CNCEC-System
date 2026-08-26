@@ -9,11 +9,18 @@
  * ⚠️ IT MUTATES NOTHING. This is advice: the operator's ruling is that the
  * planner suggests, never assigns. Nothing here writes to the roster.
  *
- * ⚠️ TWO SHIFTS SPLITS THE CREW; IT DOES NOT ADD CAPACITY. Nobody works both a
- * day and a night shift, so a two-shift plan needs the SAME total headcount and
- * only halves the per-shift figure. The natural reading — "two shifts, so half
- * the people" — under-hires by half, which is why the page says so in words
- * next to the number rather than leaving it to be inferred.
+ * ⚠️ NIGHTS BUY TIME, NOT A SMALLER PAYROLL (Phase 9b, ruling Q10). Nobody
+ * works both a day and a night shift, so a two-shift plan needs the SAME total
+ * headcount — the natural reading, "two shifts, so half the people", under-hires
+ * by half. What nights DO buy is calendar time: the site delivers
+ * (day + night) x 11 man-hours a day instead of day x 11. The page shows both
+ * facts side by side, because either one alone is misleading.
+ *
+ * ⚠️ AND THE TWO SHIFTS ARE NOT THE SAME SIZE. This operator runs a day shift
+ * of 20 against a night shift of 80. The split shown is read from the ROSTER's
+ * own proportion, never from dividing by the shift count, and `Shift_Split_Basis`
+ * says which basis the API actually had — 'assumed_even' is labelled as an
+ * assumption rather than presented as a measurement.
  *
  * ⚠️ "Prefer non-GI" is arithmetic, not a policy about who to employ. Overtime
  * is whatever will not fit inside NORMAL capacity, and a non-GI worker brings
@@ -346,10 +353,14 @@ export default function ManpowerPlanner() {
               <Statistic title="Total headcount needed"
                 value={n0(req?.Total_Required_Headcount)} /></Card>
             <Card size="small">
-              <Tooltip title="Per shift. Two shifts means two DISJOINT crews —
-                nobody works both — so the TOTAL headcount is unchanged and only
-                this figure halves.">
-                <Statistic title={`Per shift (x${shiftsPerDay})`}
+              <Tooltip title="The biggest crew that has to be on the deck at
+                one time. Two shifts means two DISJOINT crews — nobody works
+                both — so the TOTAL headcount is unchanged; this is the larger
+                of the two, sized from the roster's own day/night proportion
+                rather than by halving.">
+                <Statistic title={shiftsPerDay === 2
+                  ? `Biggest shift crew (${n0(req?.Required_Day_Headcount)} day / ${n0(req?.Required_Night_Headcount)} night)`
+                  : 'Per shift'}
                   value={n0(req?.Headcount_Per_Shift)} />
               </Tooltip></Card>
             <Card size="small">
@@ -367,11 +378,29 @@ export default function ManpowerPlanner() {
 
           {shiftsPerDay === 2 && (
             <Alert type="info" showIcon style={{ marginBottom: 12 }}
-              message="Two shifts splits the crew — it does not halve the hiring"
-              description={`${n0(req?.Total_Required_Headcount)} people are still
-                needed in total; they are split into two crews of about
-                ${n0(req?.Headcount_Per_Shift)}. Nobody works both shifts, so
-                running nights compresses nothing on its own.`} />
+              message="Nights buy time, not a smaller payroll"
+              description={(
+                <>
+                  {n0(req?.Total_Required_Headcount)} people are still needed in
+                  total — nobody works both shifts, so running nights does not
+                  reduce the hiring. What it buys is calendar time:{' '}
+                  <strong>{n2(req?.Days_Day_Shift_Only) ?? '—'}</strong> days with
+                  the day crew alone against{' '}
+                  <strong>{n2(req?.Days_Both_Shifts) ?? '—'}</strong> with both
+                  {Number(req?.Days_Saved_By_Nights ?? 0) > 0
+                    && <> — <strong>{n2(req?.Days_Saved_By_Nights)} days saved</strong></>}.
+                  {' '}The crew splits{' '}
+                  <strong>{n0(req?.Required_Day_Headcount)} day / {n0(req?.Required_Night_Headcount)} night</strong>
+                  {req?.Shift_Split_Basis === 'roster'
+                    && ', in the proportion your roster actually runs.'}
+                  {req?.Shift_Split_Basis === 'site'
+                    && ', in the proportion this site runs — these roles have nobody rostered.'}
+                  {req?.Shift_Split_Basis === 'assumed_even'
+                    && ' — an ASSUMED even split. There is no night crew on the roster to derive a real proportion from.'}
+                  {req?.Shift_Split_Basis === 'mixed'
+                    && '. Roles differ in what the roster could tell us; open a role below to see its own basis.'}
+                </>
+              )} />
           )}
 
           {roster?.Unmapped && Object.keys(roster.Unmapped as object).length > 0 && (
@@ -394,7 +423,7 @@ export default function ManpowerPlanner() {
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                       need <strong>{String(g.Required_Headcount_Rounded)}</strong>
                       {shiftsPerDay === 2
-                        && <> ({String(g.Headcount_Per_Shift)} per shift)</>}
+                        && <> ({String(g.Required_Day_Headcount)} day / {String(g.Required_Night_Headcount)} night)</>}
                       {' · '}have <strong>{String(g.Available_Headcount)}</strong>
                       {' · '}
                       {Number(g.To_Procure ?? 0) > 0
@@ -411,8 +440,15 @@ export default function ManpowerPlanner() {
                       {n0(g.Required_Manhours)}</Descriptions.Item>
                     <Descriptions.Item label="Required headcount">
                       {n2(g.Required_Headcount)}</Descriptions.Item>
-                    <Descriptions.Item label="Per shift">
-                      {String(g.Headcount_Per_Shift)}</Descriptions.Item>
+                    <Descriptions.Item label="Day shift">
+                      {String(g.Required_Day_Headcount)}</Descriptions.Item>
+                    <Descriptions.Item label="Night shift">
+                      {String(g.Required_Night_Headcount)}
+                      {g.Shift_Split_Basis === 'assumed_even'
+                        && <Tag color="orange" style={{ marginLeft: 6 }}>assumed</Tag>}
+                      {g.Shift_Split_Basis === 'site'
+                        && <Tag style={{ marginLeft: 6 }}>site ratio</Tag>}
+                    </Descriptions.Item>
                     <Descriptions.Item label="To assign">
                       {String(g.To_Procure)}</Descriptions.Item>
                     <Descriptions.Item label="Available (GI)">
