@@ -706,6 +706,90 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-27 — Phase 9 slice 9d (`feat/phase9-ocr-workflow`).**
+> Baselines move to **service tests 2,018** (+48, suite CN) and **E2E 121**
+> (+6); legacy 599, UI math 33, nav 49, alembic head **`a2c9f5e81b43`**.
+>
+> **THE BIGGEST BEHAVIOURAL CHANGE IN THE PROJECT SO FAR. Six locked rules:**
+>
+> * **THE WORKFLOW REVERSED: supervisor → SK → HOD.** Phase 5 ran the other way
+>   and forbade the supervisor from touching a material line, because "a
+>   supervisor whose numbers look bad has both the motive and the opportunity to
+>   adjust the consumption they are being measured against". That reasoning has
+>   NOT stopped being true — what changed is where the record starts. The
+>   supervisor fills a printed form in the field, so they author the quantities
+>   and the store keeper verifies them.
+>
+> * ⚠️ **THE REPLACEMENT CONTROL IS FOUR LAYERS, NOT ONE COLOUR.** The
+>   brief asked for the SK's edits in red so an HOD can see the store keeper
+>   altered the claim. That is half a control: nothing in it shows what the
+>   SUPERVISOR changed from what the camera read, so a supervisor could
+>   overwrite the machine's reading of their own handwriting undetected. Every
+>   material line carries `OCR_Qty` (grey) → `Supervisor_Qty` (amber) →
+>   `SK_Qty` (red) → `Actual_Qty` (purple). Each renders ONLY when it differs
+>   from the one before — a colour that appears when nothing changed is a
+>   colour people learn to ignore. Do not "simplify" this to one number.
+>
+> * ⚠️ **APPROVAL NOW DEDUCTS STOCK (ruling Q1-b), AND THE GUARD IS A
+>   STORED id.** `post_progress` still posts area; `post_stock` now writes
+>   `consumption` rows via `ledger.post_consumption` (never a private INSERT —
+>   that function owns FEFO, the over-issue warning and the audit line). This
+>   entry is the ONLY writer for lining consumption now: the SK must stop
+>   raising a parallel `pending_issues` for it, or one drum is deducted twice.
+>   Idempotence is `Consumption_ID` per line, NOT a status check — a status
+>   check is a check-then-write with a window in it.
+>
+> * ⚠️ **`Source_Ref` KEYS ON THE ENTRY'S id, NOT ITS `Entry_No`.**
+>   `next_entry_no` is `COUNT(*) + 1` over surviving rows, so deleting an entry
+>   makes the next one REUSE its number. Harmless while Entry_No was a label;
+>   fatal for a permanent handle on a `consumption` row that outlives the entry.
+>   The pretty number rides in `Remarks`. (Found by two suites colliding — the
+>   collision was the symptom, the reuse was the cause.)
+>
+> * ⚠️ **THE QSEP GATE BLOCKS BY DEFAULT AND CAN BE OVERRIDDEN (Q2-D).**
+>   On a paper-first flow the drum was emptied days ago, so a hard refusal
+>   prevents nothing and only strands the record while stock overstates. The
+>   HOD may override with a written reason; the Head of Qualities is notified
+>   EVERY time. The gate runs AFTER the HOD's edits, because correcting a lot
+>   number is the ordinary way a blocked entry becomes approvable.
+>
+> * **THE LOT IS PER ROW, NOT PER FORM** (operator correction to 9c). One system
+>   draws several materials, each from its own batch, and the gate checks the
+>   certificate PER MATERIAL. A lot against the wrong line is worse than none:
+>   it clears a gate for a batch that was never used.
+>
+> ⚠️ **`Recipe_Fingerprint` IS CHECKED ON EVERY UPLOAD AND REFUSES A STALE
+> SHEET.** Row 3 of the handwriting maps to row 3 of the recipe. Add a material
+> after a form is printed and everything past it lands on the wrong one — with
+> plausible quantities, against real materials, in a real system. There is NO
+> downstream check that would catch it. This is the rule most likely to be
+> softened by somebody who has met an inconvenienced supervisor; it must not be.
+>
+> ⚠️ **A NULL IS AN ANSWER; A GUESS IS NOT.** `read_form` returns
+> `quantity: null` whenever the digits are ambiguous and keeps the raw text
+> beside it. These numbers post straight to stock on approval, so an invented
+> figure is one nobody questions. `_match_rows` also DROPS a row number the
+> form never printed — a hallucinated row 7 must not become a seventh material.
+>
+> ⚠️ **THE FORM'S GEOMETRY IS SHARED BY THE RENDERER AND THE READER**
+> (`consumption_form.ROW_H`, `row_boxes()`, `fiducial_points()`). 9d rectifies a
+> photo onto that millimetre grid to crop a row; a layout tweak living only in
+> `render_pdf` would silently start cropping the wrong strip of handwriting. The
+> four corner fiducials exist because the QR alone gives four points all within
+> 26 mm of one corner. When rectification fails the endpoint returns the WHOLE
+> photo with `X-Crop: unrectified` — never a crop it cannot vouch for.
+>
+> ⚠️ **THE CLOUD SEAM IS TWO ENVIRONMENT VARIABLES** (`ai/client.vision_json`,
+> ruling Q7): `GI_AI_VISION_PROVIDER=anthropic` + `GI_AI_VISION_API_KEY`. If
+> UAT shows local digit accuracy is not good enough, that is the escalation —
+> NOT a bigger local model, which the one-warm-model ruling forbids.
+>
+> ⚠️ **`tests/e2e/specs/ocr-workflow.spec.ts` SEEDS AND THEN DELETES a
+> recipe line and a benchmark.** Leaving them behind grows the SME cascade
+> enough to push `sme-tiers`' 150 s render past its timeout under load — which
+> presented as an unrelated spec failing intermittently. What a spec adds to
+> shared master data, it takes away.
+
 > **Updated 2026-08-26 — Phase 9 slice 9c (`feat/phase9-form-gen`).** Baselines
 > move to **service tests 1,970** (+41: suite CM 38, plus three CJ manual
 > pins) and **E2E 115** (+4); legacy

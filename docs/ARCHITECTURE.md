@@ -263,6 +263,36 @@ of them would ever be checked.
   understating the overtime and the hire-to-clear advice. The payroll totals
   stay published beside them as `roster.Capacity_GI` / `Capacity_NON_GI`.
 
+### 4d. The paper-first consumption workflow (Phase 9d)
+
+    DRAFT_SUPERVISOR → PENDING_SK → PENDING_HOD → APPROVED
+                                                └→ REJECTED (terminal, no bounce-back)
+
+Labour-only activities skip PENDING_SK — a store keeper has nothing to verify.
+`DRAFT_SK` / `PENDING_SUPERVISOR` are RETIRED, not deleted: the 9d migration
+rejects any live row in them and `assert_transition` explains rather than
+returning a lookup miss.
+
+**Modules.** `ai/ocr_form.py` (QR decode → rectify → vision → parse) ·
+`ai/form_jobs.py` (the async worker; the entry is created IN the worker, so the
+model's reading never round-trips through a client and the `Form_UUID` is
+consumed in the same transaction) · `services/form_intake.py` (the four
+refusals: unknown sheet, wrong site, already filed, stale fingerprint) ·
+`services/execution.py` (`sk_verify`, `qsep_status`, `post_stock`).
+
+- ⚠️ **Four layers per material line**, each rendering only when it differs:
+  `OCR_Qty` → `Supervisor_Qty` → `SK_Qty` → `Actual_Qty`.
+- ⚠️ **`post_stock` is the ONLY writer for lining consumption** (Q1-b), calling
+  `ledger.post_consumption` so FEFO, the over-issue warning and the audit line
+  stay in one place. Idempotent on `Consumption_ID`; `Source_Ref` is
+  `SME_EXEC:<entry id>:<line id>` — the **id**, because `next_entry_no` reuses
+  a deleted entry's number.
+- ⚠️ **QSEP blocks by default, HOD may override** (Q2-D) with a mandatory reason
+  and a `qc_hod` dispatch. Checked AFTER the HOD's edits.
+- **Rectification**: `PX_PER_MM = 8`, homography from four corner fiducials,
+  falling back to the QR quad, then to "no crop" — `X-Crop` says which.
+- **Cloud seam**: `client.vision_json()` + `GI_AI_VISION_PROVIDER`.
+
 ## 5. Frontend map (`frontend/src/`)
 
 React Router routes in `App.tsx`; **`config/nav.tsx` is the single

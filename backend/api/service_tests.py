@@ -14830,18 +14830,31 @@ async def test_manpower_norms_and_roster():
 
 # --- Suite CB: the execution workflow (SK → Supervisor → HOD) ----------------
 async def test_execution_workflow():
-    """Suite CB — Phase 5. Three people, three pieces of knowledge, and the
-    controls that stop any one of them holding all of it.
+    """Suite CB — the execution workflow. REVERSED in Phase 9d.
 
-    The checks that matter most are the NEGATIVE ones:
+    Three people, three pieces of knowledge, and the controls that stop any one
+    of them holding all of it. Two of the four checks below changed direction on
+    2026-08-27 and the other two did not — which is the point of keeping them
+    in one place.
 
-      * a supervisor cannot edit the material lines they are measured against;
-      * a supervisor cannot open a material-backed activity directly, because
-        somebody has to have counted what left the store;
+    STILL TRUE, AND STILL THE MOST IMPORTANT:
       * an HOD who changes a number cannot approve without saying why, and the
         supervisor is told what changed;
       * the benchmark is SNAPSHOTTED, so editing master data afterwards does
         not rewrite a variance that was already reported.
+
+    ⚠️ REVERSED BY RULING Q1/Q3 — and NOT weakened. Phase 5 held that "a
+    supervisor cannot edit the material lines they are measured against" and
+    "a supervisor cannot open a material-backed activity directly". Both were
+    right while the record started at the store. It starts in the FIELD now:
+    the supervisor fills a printed form and photographs it, so refusing their
+    numbers would mean refusing the record.
+
+    What replaced that control is in suite CN — four layers on every material
+    line, each with an owner: what the camera read, what the supervisor filed,
+    what the store keeper corrected, what the HOD settled. CB now asserts the
+    NEW direction; CN asserts that the old protection still exists in a
+    different form. Neither alone would tell you the trade was made honestly.
     """
     from sqlalchemy import text as _sqt
 
@@ -14889,38 +14902,48 @@ async def test_execution_workflow():
         Hsup = await _qsep_login(ac, "SVCQ-sup")
         Hhod = await _qsep_login(ac, "SVCQ-hod")
 
-        # ── 1. the material-backed path: SK opens, supervisor cannot ────────
-        direct = await ac.post("/execution/entries", headers=Hsup, json={
-            "work_date": "2026-08-19", "equipment_tag": "SVCB-T1",
-            "lining_system_code": "SVCB-LSC",
-            "execution_sub_activity_code": "SVCB-ESC"})
-        check("CB-01 a supervisor CANNOT open a material-backed activity — "
-              "somebody has to have counted what left the store",
-              direct.status_code == 409, f"{direct.status_code} {direct.text[:140]}")
-
-        opened = await ac.post("/execution/entries", headers=Hsk, json={
+        # ── 1. ⚠️ THE SUPERVISOR OPENS IT NOW (Phase 9d) ────────────────────
+        # Phase 5 refused this with a 409: "somebody has to have counted what
+        # left the store". The record starts in the field now — a printed form,
+        # filled in and photographed — so there is no earlier step for a store
+        # keeper to perform. What the old refusal was protecting is in suite CN.
+        opened = await ac.post("/execution/entries", headers=Hsup, json={
             "work_date": "2026-08-19", "equipment_tag": "SVCB-T1",
             "lining_system_code": "SVCB-LSC",
             "execution_sub_activity_code": "SVCB-ESC",
             "materials": [{"Material_Code": "SVCB-MAT", "SAP_Code": "SVCB-SAP",
                            "Actual_Qty": 230.0, "UOM": "KG"}]})
-        check("CB-02 the store keeper opens it as a draft",
-              opened.status_code == 201 and opened.json()["status"] == "DRAFT_SK",
+        check("CB-01 a supervisor CAN open a material-backed activity, and it "
+              "starts at DRAFT_SUPERVISOR. This reversed in Phase 9d: the paper "
+              "originates with them",
+              opened.status_code == 201
+              and opened.json()["status"] == "DRAFT_SUPERVISOR",
               f"{opened.status_code} {opened.text[:140]}")
         eid = opened.json()["id"]
+
+        sk_opened = await ac.post("/execution/entries", headers=Hsk, json={
+            "work_date": "2026-08-19", "equipment_tag": "SVCB-T1",
+            "lining_system_code": "SVCB-LSC",
+            "execution_sub_activity_code": "SVCB-ESC"})
+        check("CB-02 …and a store keeper may still open one — somebody has to "
+              "be able to enter a form for a supervisor who is off site — but "
+              "it lands in the same state, so there is one workflow and not two",
+              sk_opened.status_code == 201
+              and sk_opened.json()["status"] == "DRAFT_SUPERVISOR",
+              f"{sk_opened.status_code} {sk_opened.text[:140]}")
 
         # ── 2. state machine: no skipping a step ────────────────────────────
         early = await ac.post(f"/execution/entries/{eid}/decision", headers=Hhod,
                               json={"approve": True})
-        check("CB-03 an HOD cannot approve an entry the supervisor has not "
-              "seen", early.status_code == 409,
+        check("CB-03 an HOD cannot approve an entry nobody has filed yet",
+              early.status_code == 409,
               f"{early.status_code} {early.text[:140]}")
 
-        sub = await ac.post(f"/execution/entries/{eid}/submit", headers=Hsk)
-        check("CB-04 SK submit moves it to the supervisor",
-              sub.status_code == 200
-              and sub.json()["status"] == "PENDING_SUPERVISOR",
-              f"{sub.status_code} {sub.text[:140]}")
+        gone = await ac.post(f"/execution/entries/{eid}/submit", headers=Hsk)
+        check("CB-04 ⚠️ the old SK→supervisor route is GONE, not disabled. It "
+              "sent an SK draft TO the supervisor; there is no such draft any "
+              "more, and a route that 409'd would imply one could exist",
+              gone.status_code == 404, f"{gone.status_code} {gone.text[:120]}")
 
         # ── 3. both reasons are ALWAYS mandatory ────────────────────────────
         for miss, label in (({"manpower_variance_reason": "ok"}, "material"),
@@ -14940,8 +14963,9 @@ async def test_execution_workflow():
                                                 "Headcount": 4, "Hours": 11}],
                                   "material_variance_reason": "none — matched",
                                   "manpower_variance_reason": "none — matched"})
-        check("CB-06 the supervisor's submission is accepted with both reasons",
-              sup.status_code == 200 and sup.json()["status"] == "PENDING_HOD",
+        check("CB-06 the supervisor's submission is accepted with both reasons, "
+              "and goes to the STORE KEEPER to verify — the reverse of Phase 5",
+              sup.status_code == 200 and sup.json()["status"] == "PENDING_SK",
               f"{sup.status_code} {sup.text[:200]}")
         body = sup.json()
         check("CB-07 the benchmark is SNAPSHOTTED onto the row, not joined",
@@ -14963,13 +14987,30 @@ async def test_execution_workflow():
               and v["manpower"]["Variance_Pct"] == 0.0,
               str(v["manpower"]))
 
-        # ── 5. the supervisor cannot touch the material lines ───────────────
+        # ── 5. ⚠️ THE SUPERVISOR NOW SENDS MATERIAL FIGURES ─────────────────
+        # Phase 5's control was the SHAPE of the request: no material field, so
+        # no runtime check could be forgotten. Phase 9d hands them the pen,
+        # because they filled in the paper. CB-10 asserts the new shape; the
+        # protection that replaced it — the supervisor's figure kept beside
+        # what the camera read — is CN-10 and CN-14.
         sup_fields = set((await ac.get("/openapi.json")).json()["components"]
                          ["schemas"]["SupervisorIn"]["properties"])
-        check("CB-10 the supervisor's payload has NO material field — the "
-              "control is the shape of the request, not a runtime check",
-              not any("material" in f and "reason" not in f
-                      for f in sup_fields), str(sorted(sup_fields)))
+        check("CB-10 the supervisor's payload CARRIES material lines (reversed "
+              "in 9d), and their figure is preserved as Supervisor_Qty rather "
+              "than overwriting the record silently — see CN-14",
+              "materials" in sup_fields, str(sorted(sup_fields)))
+
+        # ── 5b. the store keeper verifies, which is the new middle step ─────
+        entry = (await ac.get(f"/execution/entries/{eid}", headers=Hhod)).json()
+        mat_id = entry["materials"][0]["id"]
+        ver = await ac.post(f"/execution/entries/{eid}/sk-verify", headers=Hsk,
+                            json={"materials": [{"id": mat_id,
+                                                 "Actual_Qty": 230.0}]})
+        check("CB-10b the store keeper verifies the figures and it reaches the "
+              "HOD. Confirming an unchanged number needs no reason — only "
+              "moving one does",
+              ver.status_code == 200 and ver.json()["status"] == "PENDING_HOD",
+              f"{ver.status_code} {ver.text[:160]}")
 
         # ── 6. an HOD edit demands a justification ──────────────────────────
         entry = (await ac.get(f"/execution/entries/{eid}", headers=Hhod)).json()
@@ -15032,10 +15073,12 @@ async def test_execution_workflow():
             "work_date": "2026-08-19", "equipment_tag": "SVCB-T2",
             "lining_system_code": "",
             "execution_sub_activity_code": "SVCB-BLAST"})
-        check("CB-19 a supervisor opens a labour-only activity DIRECTLY, "
-              "skipping the store keeper entirely",
+        check("CB-19 a labour-only activity opens like any other — the bypass "
+              "moved from the OPENING to the SUBMIT (9d): there is one front "
+              "door now, and what it skips is the store keeper's verification, "
+              "because blasting leaves them nothing to verify",
               byp.status_code == 201
-              and byp.json()["status"] == "PENDING_SUPERVISOR",
+              and byp.json()["status"] == "DRAFT_SUPERVISOR",
               f"{byp.status_code} {byp.text[:160]}")
         bid = byp.json()["id"]
         bsup = await ac.post(f"/execution/entries/{bid}/supervisor", headers=Hsup,
@@ -15044,8 +15087,12 @@ async def test_execution_workflow():
                                                  "Headcount": 2, "Hours": 11}],
                                    "material_variance_reason": "n/a — no material",
                                    "manpower_variance_reason": "on benchmark"})
-        check("CB-20 it reaches the HOD with no material lines at all",
-              bsup.status_code == 200 and bsup.json()["materials"] == [],
+        check("CB-20 it reaches the HOD DIRECTLY, with no material lines at "
+              "all — the store keeper is skipped because there is nothing for "
+              "them to check, and their queue must not fill with entries they "
+              "cannot action",
+              bsup.status_code == 200 and bsup.json()["materials"] == []
+              and bsup.json()["status"] == "PENDING_HOD",
               f"{bsup.status_code} {bsup.text[:160]}")
         bb = bsup.json()
         check("CB-21 the system code stays '' — surface prep belongs to no "
@@ -15167,13 +15214,16 @@ async def test_variance_reporting():
                                "SAP_Code": "SVCC-SAP", "Actual_Qty": qty,
                                "UOM": "KG"}]})
             eid = o.json()["id"]
-            await ac.post(f"/execution/entries/{eid}/submit", headers=Hsk)
+            # Phase 9d order: the supervisor files it, THEN the store keeper
+            # verifies. The old SK-first `submit` step no longer exists.
             await ac.post(f"/execution/entries/{eid}/supervisor", headers=Hsup,
                           json={"actual_sqm": sqm,
                                 "manpower": [{"Role_Code": "MASON",
                                               "Headcount": 4, "Hours": 11}],
                                 "material_variance_reason": "r",
                                 "manpower_variance_reason": "r"})
+            await ac.post(f"/execution/entries/{eid}/sk-verify", headers=Hsk,
+                          json={})
             return eid
 
         # Two entries with DELIBERATELY different sizes, so a percentage-average
@@ -17198,7 +17248,14 @@ async def test_docs_and_assistant():
             # surprised by, and the one a developer is most likely to "fix".
             ("16.6 Printing a consumption form", "the printed form (9c)"),
             ("Every download is a new sheet", "why a re-print is new paper (9c)"),
-            ("There are no spare rows", "the no-write-in-rows rule (9c)")):
+            ("There are no spare rows", "the no-write-in-rows rule (9c)"),
+            # Phase 9d. The rules a person is most likely to be surprised by,
+            # and the two a developer is most likely to "simplify" away.
+            ("16.7 Filing a consumption form", "the paper-first workflow (9d)"),
+            ("The lot is per row, not per form", "the 9c lot correction"),
+            ("stop raising a separate issue", "the double-deduction warning (9d)"),
+            ("EMPTY rather than\nguessed", "the never-guess-a-digit rule (9d)"),
+            ("Rejection is final", "the no-bounce-back ruling Q4")):
         check(f"CJ-23 the manual documents {why}", needle in md, needle)
 
     # And the assistant can actually find them.
@@ -18654,6 +18711,611 @@ async def test_consumption_form():
     await _cleanup()
 
 
+
+
+# --- Suite CN: paper first, and the four people who touch a number -----------
+async def test_ocr_workflow():
+    """Suite CN — Phase 9d. The workflow inverts, and approval starts moving stock.
+
+    ⚠️ THE HIGHEST-SEVERITY THING IN THIS PHASE IS DOUBLE DEDUCTION. Until now
+    `hod_decide` posted AREA and nothing else; material left the shelf on the
+    separate `pending_issues -> consumption` path. Ruling Q1-b makes this entry
+    the ONLY writer for lining consumption, so if approval ever posts twice —
+    a retry, a double-click, an approval of an already-approved entry — one drum
+    is deducted as two and the error is invisible until somebody counts the
+    shelf. CN-20..CN-24 are that guard, and the guard is a STORED id rather
+    than a status check because a status check is a check-then-write with a
+    window in it.
+
+    ⚠️ AND THE CONTROL THAT REVERSED. Phase 5 forbade the supervisor from
+    touching a material line because the store keeper had counted it. The paper
+    starts in the field now, so the supervisor authors those numbers — and the
+    replacement is not one colour but four: what the camera saw, what the
+    supervisor filed, what the store keeper corrected, what the HOD settled.
+    The brief asked only for the store keeper's edits in red; that half alone
+    would let a supervisor overwrite the machine's reading of their own
+    handwriting with nobody able to tell. CN-10..CN-16.
+    """
+    import datetime as _dt
+    import io as _io
+    import json as _json
+    import random as _rnd
+
+    from fastapi import HTTPException
+    from sqlalchemy import text as _sqt
+
+    from .ai import client as _aic
+    from .ai import ocr_form as _OF
+    from .services import consumption_form as _CF
+    from .services import execution as _X
+    from .services import form_intake as _FI
+
+    SITE = "CNCEC"
+    TODAY = _dt.date.today().isoformat()
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    try:
+        import cv2 as _cv2  # noqa: F401
+        import numpy as _np  # noqa: F401
+        import pypdfium2 as _pdfium  # noqa: F401
+        CAN_IMAGE = True
+    except ImportError:
+        CAN_IMAGE = False
+
+    async def _reset():
+        async with SessionLocal() as s:
+            await s.execute(_sqt(
+                'DELETE FROM sme_execution_entry_material WHERE "Entry_ID" IN '
+                '(SELECT id FROM sme_execution_entry WHERE "Entry_No" LIKE :p '
+                'OR "Lining_System_Code" LIKE \'SVCN-%\')'), {"p": "SVCN-%"})
+            await s.execute(_sqt("DELETE FROM sme_execution_entry WHERE "
+                                 "\"Lining_System_Code\" LIKE 'SVCN-%'"))
+            await s.execute(_sqt("DELETE FROM sme_consumption_form WHERE "
+                                 "\"Lining_System_Code\" LIKE 'SVCN-%'"))
+            await s.execute(_sqt("DELETE FROM sme_recipe WHERE "
+                                 "\"Lining_System_Code\" LIKE 'SVCN-%'"))
+            await s.execute(_sqt(
+                'DELETE FROM consumption WHERE "Source_Ref" LIKE \'SME_EXEC:%\' '
+                'AND "Remarks" LIKE \'Execution entry%\' AND "Tank_No" = '
+                "'SVCN-T1'"))
+            await s.execute(_sqt("DELETE FROM inventory WHERE \"SAP_Code\" "
+                                 "LIKE 'SVCN-%'"))
+            await s.execute(_sqt(
+                'DELETE FROM sme_manpower_norm_role WHERE "Norm_ID" IN '
+                '(SELECT id FROM sme_manpower_norm WHERE '
+                '"Lining_System_Code" LIKE \'SVCN-%\')'))
+            await s.execute(_sqt("DELETE FROM sme_manpower_norm WHERE "
+                                 "\"Lining_System_Code\" LIKE 'SVCN-%'"))
+            await s.execute(_sqt("DELETE FROM app_notifications WHERE "
+                                 "event_key LIKE 'sme_exec_%'"))
+            await s.commit()
+
+    await _reset()
+
+    # Two materials: one ORDINARY, one in the controlled category so the QSEP
+    # gate has something real to bite on.
+    MATS = [("SVCN-MAT-1", "SVCN-100", "Plain Primer", "General", 0.5),
+            ("SVCN-MAT-2", "SVCN-200", "Shield Mortar", "Surface Shields", 2.0)]
+    async with SessionLocal() as s:
+        for mc, sap, name, cat, rate in MATS:
+            await s.execute(_sqt(
+                'INSERT INTO inventory ("SAP_Code", "Equipment_Description", '
+                '"Material_Code", "Category", "UOM", "Site_ID", "Opening_Stock") '
+                "VALUES (:s, :n, :m, :c, 'KG', :site, 10000)"),
+                {"s": sap, "n": name, "m": mc, "c": cat, "site": SITE})
+            await s.execute(_sqt(
+                'INSERT INTO sme_recipe ("Lining_System_Code", '
+                '"Lining_System_Name", "Execution_Sub_Activity_Code", '
+                '"Material_Code", "SAP_Code", "Material_Name", "UOM", '
+                '"For_1_SQM") VALUES '
+                "('SVCN-A', 'SVCN system', 'ESCN1', :m, :s, :n, 'KG', :r)"),
+                {"m": mc, "s": sap, "n": name, "r": rate})
+        await s.execute(_sqt(
+            'INSERT INTO sme_equipment ("Site_ID", "Equipment_Tag_No", '
+            '"Lining_System_Code", "Type", "Surface_Area_SQM") VALUES '
+            "(:site, 'SVCN-T1', 'SVCN-A', 'CV', 500)"), {"site": SITE})
+        nid = (await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+            '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+            '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+            "VALUES ('CV', 'SVCN-A', 'ESCN1', 'svcn lining', '', 2, 11, 22, "
+            "100, 0) RETURNING id"))).scalar_one()
+        await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm_role ("Norm_ID", "Role_Code", '
+            '"Headcount") VALUES (:n, \'MASON\', 2)'), {"n": nid})
+        await s.commit()
+
+    CREW = [{"Role_Code": "MASON", "Headcount": 2, "Hours": 8}]
+
+    _DEFAULT = object()
+
+    async def _open(materials=_DEFAULT, code="SVCN-A", esc="ESCN1"):
+        # `materials or [...]` would treat an EXPLICIT empty list — which is
+        # exactly what a labour-only entry has — as "use the default".
+        if materials is _DEFAULT:
+            materials = [{"Material_Code": m[0], "SAP_Code": m[1],
+                          "Actual_Qty": 0, "UOM": "KG"} for m in MATS]
+        async with SessionLocal() as s:
+            async with s.begin():
+                return await _X.open_entry(
+                    s, username="SVCQ-sup", role="supervisor", site_id=SITE,
+                    work_date=TODAY, equipment_tag="SVCN-T1", code=code,
+                    esc=esc, materials=materials)
+
+    # ── 1. the state machine ────────────────────────────────────────────────
+    check("CN-01 an entry now OPENS at DRAFT_SUPERVISOR — the record starts "
+          "with the paper the supervisor filled in, so there is no earlier "
+          "step for a store keeper to perform",
+          (await _open())["status"] == "DRAFT_SUPERVISOR", "wrong opening state")
+
+    check("CN-02 ⚠️ REJECTED IS TERMINAL (ruling Q4) — nothing leaves it, and "
+          "a wrong entry is raised again from a fresh form rather than bounced "
+          "back through states nobody makes a decision in",
+          _X.TRANSITIONS[_X.REJECTED] == set(), str(_X.TRANSITIONS[_X.REJECTED]))
+    check("CN-03 …and APPROVED is too",
+          _X.TRANSITIONS[_X.APPROVED] == set(), str(_X.TRANSITIONS[_X.APPROVED]))
+
+    for retired in ("DRAFT_SK", "PENDING_SUPERVISOR"):
+        try:
+            _X.assert_transition(retired, _X.PENDING_HOD)
+            ok = False
+        except HTTPException as e:
+            ok = "replaced" in str(e.detail) and "printed consumption form" in str(e.detail)
+        check(f"CN-04 a historical row still in {retired} gets an EXPLANATION, "
+              f"not a lookup miss. The states were drained, not deleted — "
+              f"deleting them would strand any live row forever", ok, retired)
+
+    # ── 2. the happy path, and the four layers ──────────────────────────────
+    opened = await _open()
+    eid = opened["id"]
+    async with SessionLocal() as s:
+        lines = (await s.execute(_sqt(
+            'SELECT id, "SAP_Code" FROM sme_execution_entry_material '
+            'WHERE "Entry_ID" = :i ORDER BY "Row_Index"'),
+            {"i": eid})).mappings().all()
+        ids = {r["SAP_Code"]: r["id"] for r in lines}
+        # The grey layer, as though a camera had read it.
+        await s.execute(_sqt(
+            'UPDATE sme_execution_entry_material SET "OCR_Qty" = 20, '
+            '"OCR_Qty_Text" = \'20\' WHERE id = :i'), {"i": ids["SVCN-100"]})
+        await s.execute(_sqt(
+            'UPDATE sme_execution_entry SET "Entry_Origin" = \'ocr\' '
+            "WHERE id = :i"), {"i": eid})
+        await s.commit()
+
+    async with SessionLocal() as s:
+        async with s.begin():
+            res = await _X.supervisor_submit(
+                s, username="SVCQ-sup", entry_id=eid, site_id=SITE,
+                actual_sqm=40, manpower=CREW,
+                material_reason="as measured", manpower_reason="two masons",
+                materials=[{"id": ids["SVCN-100"], "Actual_Qty": 22,
+                            "Lot_No": "LOT-P1"},
+                           {"id": ids["SVCN-200"], "Actual_Qty": 80,
+                            "Lot_No": "LOT-S1"}])
+    check("CN-05 the supervisor's submit sends it to PENDING_SK — the store "
+          "keeper verifies what the field wrote, which is the reverse of "
+          "Phase 5", res["status"] == "PENDING_SK", res["status"])
+
+    async with SessionLocal() as s:
+        row = (await s.execute(_sqt(
+            'SELECT "OCR_Qty","Supervisor_Qty","Actual_Qty","Lot_No" FROM '
+            'sme_execution_entry_material WHERE id = :i'),
+            {"i": ids["SVCN-100"]})).mappings().first()
+    check("CN-10 ⚠️ THE SUPERVISOR'S FIGURE IS KEPT BESIDE WHAT THE CAMERA "
+          "READ. 20 was read, 22 was filed — and both survive. The brief asked "
+          "only for the store keeper's edits to be visible; without this layer "
+          "a supervisor could overwrite the machine's reading of their own "
+          "handwriting and nobody could tell",
+          row["OCR_Qty"] == 20.0 and row["Supervisor_Qty"] == 22.0
+          and row["Actual_Qty"] == 22.0, str(dict(row)))
+    check("CN-11 …and the per-line lot is recorded (the 9c correction): one "
+          "system draws several materials and each arrives from its own batch, "
+          "so a single box at the top of the form could only be right about one",
+          row["Lot_No"] == "LOT-P1", str(dict(row)))
+
+    # ── 3. the store keeper's red layer ─────────────────────────────────────
+    async with SessionLocal() as s:
+        try:
+            async with s.begin():
+                await _X.sk_verify(s, username="SVCQ-sk", entry_id=eid,
+                                   site_id=SITE,
+                                   materials=[{"id": ids["SVCN-100"],
+                                               "Actual_Qty": 18}])
+            needs_reason = False
+        except HTTPException as e:
+            needs_reason = e.status_code == 422 and "say why" in str(e.detail)
+    check("CN-12 a store keeper changing a figure must say WHY. Not because "
+          "they are suspected — because the HOD is about to approve a number "
+          "the supervisor did not write, and 'the SK changed it' with no reason "
+          "is not something an approver can weigh",
+          needs_reason, "the edit was accepted with no reason")
+
+    async with SessionLocal() as s:
+        async with s.begin():
+            res = await _X.sk_verify(
+                s, username="SVCQ-sk", entry_id=eid, site_id=SITE,
+                materials=[{"id": ids["SVCN-100"], "Actual_Qty": 18},
+                           {"id": ids["SVCN-200"], "Actual_Qty": 80}],
+                reason="only 18 left the store")
+    check("CN-13 …and with a reason it moves to PENDING_HOD",
+          res["status"] == "PENDING_HOD", res["status"])
+
+    async with SessionLocal() as s:
+        row = (await s.execute(_sqt(
+            'SELECT "OCR_Qty","Supervisor_Qty","SK_Qty","Actual_Qty",sk_edited '
+            'FROM sme_execution_entry_material WHERE id = :i'),
+            {"i": ids["SVCN-100"]})).mappings().first()
+        untouched = (await s.execute(_sqt(
+            'SELECT "SK_Qty", sk_edited FROM sme_execution_entry_material '
+            'WHERE id = :i'), {"i": ids["SVCN-200"]})).mappings().first()
+    check("CN-14 ⚠️ ALL FOUR LAYERS SURVIVE ON ONE ROW: 20 read, 22 filed, "
+          "18 verified, 18 standing. Each with an owner. This is what replaces "
+          "the Phase 5 rule that the supervisor may not touch a material line",
+          (row["OCR_Qty"], row["Supervisor_Qty"], row["SK_Qty"],
+           row["Actual_Qty"]) == (20.0, 22.0, 18.0, 18.0), str(dict(row)))
+    check("CN-15 …and only the line that MOVED is marked edited. A row the "
+          "store keeper merely confirmed must not render red, or the colour "
+          "stops meaning anything",
+          row["sk_edited"] is True and untouched["sk_edited"] is False
+          and untouched["SK_Qty"] == 80.0,
+          f"{row['sk_edited']} / {dict(untouched)}")
+
+    async with SessionLocal() as s:
+        told = (await s.execute(_sqt(
+            "SELECT COUNT(*) FROM app_notifications WHERE event_key = "
+            "'sme_exec_sk_edited'"))).scalar()
+    check("CN-16 …and the supervisor is told their figure moved BEFORE it is "
+          "approved, not after. Otherwise the first they hear of it is a "
+          "variance report with their name on it", told >= 1, str(told))
+
+    # ── 4. ⚠️ THE QSEP GATE ─────────────────────────────────────────────────
+    async with SessionLocal() as s:
+        q = await _X.qsep_status(s, eid)
+    blocked_saps = {b["SAP_Code"] for b in q["blocked"]}
+    check("CN-17 the controlled material blocks approval and the ordinary one "
+          "does not — the gate covers the category, not the whole entry",
+          "SVCN-200" in blocked_saps and "SVCN-100" not in blocked_saps,
+          str(q["blocked"])[:200])
+
+    async with SessionLocal() as s:
+        try:
+            async with s.begin():
+                await _X.hod_decide(s, username="SVCQ-hod", entry_id=eid,
+                                    site_id=SITE, approve=True)
+            refused = False
+        except HTTPException as e:
+            refused = (e.status_code == 422
+                       and "already been applied" in str(e.detail))
+    check("CN-18 approval is REFUSED while a certificate is missing — and the "
+          "refusal says the material was already applied, so this is a "
+          "paperwork gap rather than something the HOD can prevent",
+          refused, "approval was not blocked")
+
+    async with SessionLocal() as s:
+        try:
+            async with s.begin():
+                await _X.hod_decide(s, username="SVCQ-hod", entry_id=eid,
+                                    site_id=SITE, approve=True,
+                                    qsep_override=True)
+            needs = False
+        except HTTPException as e:
+            needs = "written reason" in str(e.detail)
+    check("CN-19 ⚠️ an override without a reason is refused. The reason is what "
+          "the Head of Qualities reads and what an auditor sees beside an "
+          "uncertified application", needs, "override accepted with no reason")
+
+    # ── 5. ⚠️ APPROVAL POSTS STOCK — AND ONLY ONCE ──────────────────────────
+    async with SessionLocal() as s:
+        async with s.begin():
+            done = await _X.hod_decide(
+                s, username="SVCQ-hod", entry_id=eid, site_id=SITE,
+                approve=True, qsep_override=True,
+                qsep_reason="MTC chased from Logistics, work already lined")
+    check("CN-20 with an override the entry is APPROVED",
+          done["status"] == "APPROVED", done["status"])
+
+    async with SessionLocal() as s:
+        cons = (await s.execute(_sqt(
+            'SELECT "SAP_Code", "Quantity", "Source_Ref", "Lot_Number", '
+            '"Site_ID" FROM consumption WHERE "Source_Ref" LIKE :p '
+            'ORDER BY "SAP_Code"'),
+            {"p": f"SME_EXEC:{eid}:%"})).mappings().all()
+    check("CN-21 ⚠️ APPROVAL DEDUCTED STOCK, WHICH IT NEVER DID BEFORE "
+          "(ruling Q1-b). Phase 5 posted area only; this entry is now the ONLY "
+          "writer for lining consumption, and the store keeper no longer raises "
+          "a parallel issue for it",
+          len(cons) == 2 and {c["SAP_Code"] for c in cons} == {"SVCN-100", "SVCN-200"},
+          str([dict(c) for c in cons])[:260])
+    check("CN-22 …at the VERIFIED quantities, not the supervisor's. 18 left "
+          "the store, so 18 is what leaves the ledger",
+          next(c["Quantity"] for c in cons if c["SAP_Code"] == "SVCN-100") == 18.0,
+          str([dict(c) for c in cons])[:200])
+    check("CN-23 …carrying the lot the field recorded, so an over-issue of "
+          "controlled material can be traced to a batch",
+          next(c["Lot_Number"] for c in cons if c["SAP_Code"] == "SVCN-200")
+          == "LOT-S1", str([dict(c) for c in cons])[:200])
+
+    # THE GUARD. Re-running the posting step is what a retry, a double-click or
+    # a replayed request does; one drum must not become two.
+    async with SessionLocal() as s:
+        async with s.begin():
+            again = await _X.post_stock(s, eid, username="SVCQ-hod")
+        after = (await s.execute(_sqt(
+            "SELECT COUNT(*) FROM consumption WHERE \"Source_Ref\" LIKE :p"),
+            {"p": f"SME_EXEC:{eid}:%"})).scalar()
+    check("CN-24 ⚠️ POSTING AGAIN DEDUCTS NOTHING. The guard is a stored "
+          "Consumption_ID, not a status check — a status check is a "
+          "check-then-write with a window in it, and one drum counted twice is "
+          "invisible until somebody counts the shelf",
+          again["posted"] == 0 and after == 2, f"{again} then {after} rows")
+
+    async with SessionLocal() as s:
+        ov = (await s.execute(_sqt(
+            'SELECT "QSEP_Override", "QSEP_Override_By", "QSEP_Override_Reason", '
+            '"Stock_Posted_At" FROM sme_execution_entry WHERE id = :i'),
+            {"i": eid})).mappings().first()
+        qcs = (await s.execute(_sqt(
+            "SELECT COUNT(*) FROM app_notifications WHERE event_key = "
+            "'sme_exec_qsep_override'"))).scalar()
+    check("CN-25 the override is on the entry, with who and why",
+          ov["QSEP_Override"] is True and ov["QSEP_Override_By"] == "SVCQ-hod"
+          and "Logistics" in (ov["QSEP_Override_Reason"] or ""), str(dict(ov)))
+    check("CN-26 ⚠️ …and the Head of Qualities is NOTIFIED, every time. An "
+          "override that only appeared in an audit table would be an exception "
+          "nobody reads", qcs >= 1, str(qcs))
+    check("CN-27 …and the entry records when stock actually moved",
+          ov["Stock_Posted_At"] is not None, str(dict(ov)))
+
+    # ── 6. labour-only skips the store keeper ───────────────────────────────
+    async with SessionLocal() as s:
+        nid2 = (await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm ("Type", "Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Activity", "Variant_Key", '
+            '"Crew_Size", "Hours_Per_Shift", "Manhours_Per_Shift", '
+            '"Standard_Productivity_Per_Shift", "SQM_Per_Hour_Per_Person") '
+            "VALUES ('CV', 'SVCN-B', 'ESCN9', 'svcn blasting', '', 1, 11, 11, "
+            "100, 0) RETURNING id"))).scalar_one()
+        await s.execute(_sqt(
+            'INSERT INTO sme_manpower_norm_role ("Norm_ID", "Role_Code", '
+            '"Headcount") VALUES (:n, \'MASON\', 1)'), {"n": nid2})
+        await s.commit()
+    bare = await _open(materials=[], code="", esc="ESCN9")
+    async with SessionLocal() as s:
+        async with s.begin():
+            res = await _X.supervisor_submit(
+                s, username="SVCQ-sup", entry_id=bare["id"], site_id=SITE,
+                actual_sqm=25, manpower=CREW, material_reason="none used",
+                manpower_reason="one blaster", materials=[])
+    check("CN-28 a labour-only entry skips the store keeper entirely. Blasting "
+          "consumes no Surface Shield, so an SK has nothing to verify and their "
+          "queue must not fill with entries they cannot action",
+          res["status"] == "PENDING_HOD", res["status"])
+
+    async with SessionLocal() as s:
+        async with s.begin():
+            done2 = await _X.hod_decide(s, username="SVCQ-hod",
+                                        entry_id=bare["id"], site_id=SITE,
+                                        approve=True)
+        n = (await s.execute(_sqt(
+            "SELECT COUNT(*) FROM consumption WHERE \"Source_Ref\" LIKE :p"),
+            {"p": f"SME_EXEC:{bare['id']}:%"})).scalar()
+    check("CN-29 …and approving it posts area but moves NO stock, because "
+          "there was none", done2["status"] == "APPROVED" and n == 0, str(n))
+
+    # ── 7. the OCR intake ───────────────────────────────────────────────────
+    if CAN_IMAGE:
+        import cv2
+        import numpy as np
+        import pypdfium2 as pdfium
+
+        async with SessionLocal() as s:
+            async with s.begin():
+                pdf, reg = await _CF.generate(s, site_id=SITE, code="SVCN-A",
+                                              esc=None, username="SVCQ-sup",
+                                              role="supervisor")
+        page = pdfium.PdfDocument(_io.BytesIO(pdf))[0].render(scale=4)
+        flat = cv2.cvtColor(np.array(page.to_pil().convert("RGB")),
+                            cv2.COLOR_RGB2BGR)
+        h, w = flat.shape[:2]
+        _rnd.seed(11)
+        jit = lambda: _rnd.uniform(-0.04, 0.04)     # noqa: E731
+        M = cv2.getPerspectiveTransform(
+            np.float32([[0, 0], [w, 0], [w, h], [0, h]]),
+            np.float32([[w * (0.05 + jit()), h * (0.04 + jit())],
+                        [w * (0.96 + jit()), h * (0.03 + jit())],
+                        [w * (0.97 + jit()), h * (0.96 + jit())],
+                        [w * (0.04 + jit()), h * (0.95 + jit())]]))
+        photo = cv2.warpPerspective(flat, M, (w, h), borderValue=(118, 122, 126))
+        photo_bytes = cv2.imencode(".jpg", photo,
+                                   [int(cv2.IMWRITE_JPEG_QUALITY), 85])[1].tobytes()
+
+        qr = _OF.decode_qr(photo_bytes)
+        check("CN-30 ⚠️ THE QR DECODES OFF A PERSPECTIVE-DISTORTED PHOTO, so "
+              "the four things most damaging to get wrong — which site, which "
+              "system, which sub-activity, which sheet — are read by a decoder "
+              "and cannot be got wrong at all",
+              qr["form_uuid"] == reg["Form_UUID"] and qr["site_id"] == SITE
+              and qr["lining_system_code"] == "SVCN-A", str(qr)[:180])
+
+        _rect, rect_ok = _OF.rectify(photo_bytes, qr.get("qr_points"))
+        check("CN-31 …and the page rectifies onto its own millimetre grid, "
+              "which is what lets a crop be captioned 'row 3' truthfully. The "
+              "corner fiducials exist for this: the QR alone gives four points "
+              "all within 26 mm of one corner",
+              rect_ok, "rectification failed on a mild perspective")
+
+        # ⚠️ ONE HALLUCINATED ROW AND ONE UNREADABLE DIGIT, on purpose.
+        async def _fake(prompt, *, system, image_b64, num_predict=1400,
+                        timeout_s=0):
+            return _json.dumps({
+                "work_date_text": _dt.date.today().strftime("%d/%m/%y"),
+                "equipment_text": "SVCN-T1", "area_text": "40", "area_sqm": 40,
+                "filled_by": "Ali",
+                "rows": [
+                    {"row": 1, "qty_text": "20", "quantity": 20,
+                     "lot_text": "LOT-P9"},
+                    {"row": 2, "qty_text": "8O", "quantity": None,
+                     "lot_text": "LOT-S9"},
+                    {"row": 7, "qty_text": "99", "quantity": 99,
+                     "lot_text": "GHOST"},
+                ]}), "fake-vlm"
+        saved = _aic.vision_json
+        _aic.vision_json = _fake
+        try:
+            read = await _OF.read_form(photo_bytes)
+        finally:
+            _aic.vision_json = saved
+
+        async with SessionLocal() as s:
+            async with s.begin():
+                built = await _FI.build_entry(
+                    s, read, site_id=SITE, username="SVCQ-sup",
+                    role="supervisor", image_bytes=photo_bytes)
+        check("CN-32 the draft has one line per PRINTED row — two, not the "
+              "three the model returned. ⚠️ A row number the form never printed "
+              "is DROPPED, so a model that hallucinates row 7 on a two-row form "
+              "cannot invent a third material",
+              built["lines"] == 2, str(built)[:200])
+        check("CN-33 …and it lands at DRAFT_SUPERVISOR, not submitted. "
+              "Extraction is the machine's opinion; every figure is reviewed "
+              "and both mandatory reasons supplied before anything moves",
+              built["status"] == "DRAFT_SUPERVISOR", built["status"])
+
+        async with SessionLocal() as s:
+            rows2 = (await s.execute(_sqt(
+                'SELECT "Row_Index","OCR_Qty","OCR_Qty_Text","Actual_Qty",'
+                '"Lot_No" FROM sme_execution_entry_material WHERE '
+                '"Entry_ID" = :i ORDER BY "Row_Index"'),
+                {"i": built["entry_id"]})).mappings().all()
+        r2 = rows2[1]
+        check("CN-34 ⚠️ AN UNCERTAIN DIGIT STAYS NULL AND THE RAW TEXT IS KEPT. "
+              "'8O' is 80 or 8 — the model must not choose, because these "
+              "numbers post straight to stock on approval. A null is a question "
+              "a human answers; an invented figure is one nobody asks",
+              r2["OCR_Qty"] is None and r2["OCR_Qty_Text"] == "8O"
+              and r2["Actual_Qty"] == 0.0, str(dict(r2)))
+        check("CN-35 …and the supervisor is TOLD which rows need checking, "
+              "rather than being left to notice a zero",
+              any("Row(s) 2" in p for p in built["problems"]),
+              str(built["problems"]))
+        check("CN-36 the lot the camera read is carried onto the line, per row",
+              rows2[0]["Lot_No"] == "LOT-P9", str(dict(rows2[0])))
+
+        # ── the four intake refusals ────────────────────────────────────────
+        async with SessionLocal() as s:
+            try:
+                await _FI.validate_sheet(s, read, site_id=SITE)
+                dup = False
+            except HTTPException as e:
+                dup = e.status_code == 409 and "already been filed" in str(e.detail)
+        check("CN-37 ⚠️ THE SAME SHEET CANNOT BE FILED TWICE. Two supervisors "
+              "photographing one form, or one retrying on a bad signal, produce "
+              "byte-different images of identical paper — the Form_UUID is the "
+              "only thing that can tell", dup, "a duplicate was accepted")
+
+        async with SessionLocal() as s:
+            try:
+                await _FI.validate_sheet(s, read, site_id="SVCQ-SITE-B")
+                wrong_site = False
+            except HTTPException as e:
+                wrong_site = e.status_code == 403
+        check("CN-38 …nor filed against a different site than it was printed "
+              "for", wrong_site, "a cross-site form was accepted")
+
+        async with SessionLocal() as s:
+            async with s.begin():
+                pdf2, reg2 = await _CF.generate(s, site_id=SITE, code="SVCN-A",
+                                                esc=None, username="SVCQ-sup",
+                                                role="supervisor")
+            # The recipe changes AFTER the sheet is printed.
+            await s.execute(_sqt(
+                'INSERT INTO sme_recipe ("Lining_System_Code", '
+                '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+                '"Material_Name", "UOM", "For_1_SQM") VALUES '
+                "('SVCN-A', 'ESCN1', 'SVCN-MAT-3', 'SVCN-300', 'Late', 'KG', 1)"))
+            await s.commit()
+            try:
+                await _FI.validate_sheet(
+                    s, {**read, "form_uuid": reg2["Form_UUID"]}, site_id=SITE)
+                stale = False
+            except HTTPException as e:
+                stale = e.status_code == 409 and "no longer line up" in str(e.detail)
+        check("CN-39 ⚠️ A SHEET PRINTED BEFORE A RECIPE CHANGE IS REFUSED. Row 3 "
+              "of the handwriting maps to row 3 of the recipe; add a material "
+              "and everything past it lands on the wrong one — with plausible "
+              "quantities, against real materials, in a real system. There is "
+              "no downstream check that would ever catch it",
+              stale, "a stale sheet was accepted")
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM sme_recipe WHERE \"SAP_Code\" = "
+                                 "'SVCN-300'"))
+            await s.commit()
+
+        async with SessionLocal() as s:
+            try:
+                await _FI.validate_sheet(s, {**read, "form_uuid": "NOTAFORM"},
+                                         site_id=SITE)
+                unknown = False
+            except HTTPException as e:
+                unknown = "not one this system printed" in str(e.detail)
+        check("CN-40 …and a sheet this system never printed is refused with "
+              "what to do instead", unknown, "an unknown form was accepted")
+    else:
+        check("CN-30 SKIPPED — no image stack installed (cv2 + pypdfium2 are "
+              "in the venv but not in requirements.txt), so the QR, the "
+              "rectifier and the intake refusals were NOT exercised", True, "")
+
+    # ── 8. plausibility, and who may do what ────────────────────────────────
+    check("CN-41 ⚠️ a 10x reading is FLAGGED, not blocked. A misread digit "
+          "lands an order of magnitude from the recipe and real over-use rarely "
+          "does — but refusing an unusual day would teach people to write the "
+          "expected number",
+          _X._plausibility(500.0, 2.0, 40.0) is not None
+          and _X._plausibility(80.0, 2.0, 40.0) is None,
+          f"{_X._plausibility(500.0, 2.0, 40.0)} / {_X._plausibility(80.0, 2.0, 40.0)}")
+    check("CN-42 …and a benchmark that does not exist flags nothing, rather "
+          "than flagging everything",
+          _X._plausibility(500.0, None, 40.0) is None
+          and _X._plausibility(500.0, 2.0, 0.0) is None, "flagged with no basis")
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        for who, code in (("SVCQ-sup", 202), ("SVCQ-sk", 202),
+                          ("SVCQ-hod", 202), ("SVCQ-qc", 403),
+                          ("SVCQ-log", 403)):
+            hdr = await _qsep_login(ac, who)
+            r = await ac.post("/execution/ocr/upload", headers=hdr,
+                              files={"file": ("f.txt", b"x", "text/plain")})
+            got = r.status_code
+            check(f"CN-43 {who} → upload {'allowed' if code == 202 else 'refused'}",
+                  (got == 403) == (code == 403), f"{got} {r.text[:90]}")
+
+        hdr = await _qsep_login(ac, "SVCQ-sup")
+        r = await ac.post("/execution/ocr/upload", headers=hdr,
+                          files={"file": ("raw.cr2", b"x" * 32, "image/x-canon-cr2")})
+        check("CN-44 RAW is refused by name (ruling Q6) — it needs libraw, "
+              "weighs 20–50 MB and comes from a camera nobody carries into a "
+              "tank. The message names what to send instead",
+              r.status_code == 415 and "JPG" in r.text, f"{r.status_code} {r.text[:120]}")
+
+    # ── 9. the cloud seam ───────────────────────────────────────────────────
+    check("CN-45 ⚠️ THE CLOUD SEAM IS A RUNTIME SWITCH, NOT A PLAN. If UAT "
+          "shows the local model cannot read digits well enough, the escalation "
+          "is two environment variables — not a bigger model on the same box, "
+          "which the one-warm-model ruling forbids",
+          _aic.vision_provider() == "ollama"
+          and hasattr(_aic, "vision_json"), _aic.vision_provider())
+    check("CN-46 …and a provider named without a key falls back to the local "
+          "model rather than failing at the first upload. A missing key is an "
+          "operator mistake that belongs in /ai/health, not in somebody's "
+          "photograph",
+          _aic.VISION_PROVIDER in ("ollama", "anthropic"), _aic.VISION_PROVIDER)
+
+    await _reset()
+
+
 async def test_database_isolation():
     """Suite BW — the tests must not be able to reach the live database.
 
@@ -19125,6 +19787,9 @@ async def main() -> int:
     print("\n CM. The paper the field fills in — pre-printed names, a QR the "
           "model never has to read, and a hash that outlives the recipe")
     await test_consumption_form()
+    print("\n CN. Paper first — the workflow inverts, approval starts moving "
+          "stock, and four people each own one number")
+    await test_ocr_workflow()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

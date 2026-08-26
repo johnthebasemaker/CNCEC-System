@@ -19,16 +19,24 @@ justification the supervisor is notified of.
 """
 from __future__ import annotations
 
+import base64
 import io
+import json
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import (APIRouter, Body, Depends, File, Form, HTTPException, Query,
+                     Response, UploadFile)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import get_current_user, require_roles, resolve_site_param, site_scope
+from sqlalchemy import insert
+
+from .ai import form_jobs
+from .ai import ocr_form as OF
+from .auth import (get_current_user, require_roles, resolve_site_param,
+                   site_row_visible, site_scope)
 from .db import get_session
 from .services import consumption_form as CF
 from .services import execution as X
@@ -39,6 +47,8 @@ router = APIRouter(prefix="/execution", tags=["execution"])
 norm_t = _MD.tables["sme_manpower_norm"]
 recipe_t = _MD.tables["sme_recipe"]
 form_t = _MD.tables["sme_consumption_form"]
+entry_t = _MD.tables["sme_execution_entry"]
+ai_jobs_t = _MD.tables["ai_jobs"]
 
 
 def _write_site(user: dict, requested: Optional[str]) -> str:
@@ -80,19 +90,37 @@ class ManpowerIn(BaseModel):
     Hours: float = Field(ge=0)
 
 
+class MaterialLineIn(BaseModel):
+    id: int
+    Actual_Qty: Optional[float] = Field(default=None, ge=0)
+    Lot_No: Optional[str] = None
+
+
 class SupervisorIn(BaseModel):
     actual_sqm: float = Field(gt=0)
     manpower: list[ManpowerIn]
     material_variance_reason: str = Field(min_length=1)
     manpower_variance_reason: str = Field(min_length=1)
+    # ⚠️ PHASE 9d: the supervisor now sends material figures, which Phase 5
+    # explicitly refused. They authored the paper; refusing their numbers would
+    # mean refusing the record. What replaces the old control is that their
+    # figure is kept as `Supervisor_Qty` beside what the camera read.
+    materials: list[MaterialLineIn] = []
     execution_sub_activity_code: Optional[str] = None
     variant_key: Optional[str] = None
     site_id: Optional[str] = None
 
 
+class SkVerifyIn(BaseModel):
+    materials: list[MaterialLineIn] = []
+    reason: str = ""
+    site_id: Optional[str] = None
+
+
 class MaterialEdit(BaseModel):
     id: int
-    Actual_Qty: float = Field(ge=0)
+    Actual_Qty: Optional[float] = Field(default=None, ge=0)
+    Lot_No: Optional[str] = None
 
 
 class ManpowerEdit(BaseModel):
@@ -108,6 +136,11 @@ class DecisionIn(BaseModel):
     actual_sqm: Optional[float] = Field(default=None, gt=0)
     materials: list[MaterialEdit] = []
     manpower: list[ManpowerEdit] = []
+    # ⚠️ Ruling Q2-D. Approving past an uncleared certificate is allowed and
+    # costs a written reason plus a notification to the Head of Qualities. The
+    # material was applied days ago; refusing outright only strands the record.
+    qsep_override: bool = False
+    qsep_reason: str = ""
     site_id: Optional[str] = None
 
 
@@ -163,18 +196,27 @@ async def open_entry(body: OpenIn = Body(...),
     return res
 
 
-@router.post("/entries/{entry_id}/submit", summary="SK → supervisor")
-async def sk_submit(entry_id: int, site_id: Optional[str] = None,
+@router.post("/entries/{entry_id}/sk-verify", summary="Store keeper → HOD")
+async def sk_verify(entry_id: int, body: SkVerifyIn = Body(...),
                     user: dict = Depends(require_roles("store_keeper", "hod")),
                     session: AsyncSession = Depends(get_session)):
-    res = await X.sk_submit(session, username=user["username"],
-                            entry_id=entry_id,
-                            site_id=resolve_site_param(user, site_id))
+    """The store keeper checks the supervisor's figures against the store.
+
+    ⚠️ THIS REPLACED `POST /entries/{id}/submit`, and the direction reversed
+    with it. The old route sent an SK draft TO the supervisor; there is no such
+    draft any more — the record starts with the supervisor's paper.
+    """
+    res = await X.sk_verify(
+        session, username=user["username"], entry_id=entry_id,
+        site_id=resolve_site_param(user, body.site_id),
+        materials=[m.model_dump(exclude_unset=True) for m in body.materials],
+        reason=body.reason)
     await session.commit()
     return res
 
 
-@router.post("/entries/{entry_id}/supervisor", summary="Supervisor → HOD")
+@router.post("/entries/{entry_id}/supervisor",
+             summary="Supervisor files the form → SK (or HOD if labour-only)")
 async def supervisor_submit(entry_id: int, body: SupervisorIn = Body(...),
                             user: dict = Depends(require_roles("supervisor", "hod")),
                             session: AsyncSession = Depends(get_session)):
@@ -185,6 +227,7 @@ async def supervisor_submit(entry_id: int, body: SupervisorIn = Body(...),
         manpower=[m.model_dump() for m in body.manpower],
         material_reason=body.material_variance_reason,
         manpower_reason=body.manpower_variance_reason,
+        materials=[m.model_dump(exclude_unset=True) for m in body.materials],
         esc=body.execution_sub_activity_code, variant=body.variant_key)
     await session.commit()
     return res
@@ -198,8 +241,10 @@ async def hod_decision(entry_id: int, body: DecisionIn = Body(...),
         session, username=user["username"], entry_id=entry_id,
         site_id=resolve_site_param(user, body.site_id), approve=body.approve,
         reject_reason=body.reject_reason, justification=body.justification,
+        qsep_override=body.qsep_override, qsep_reason=body.qsep_reason,
         edits={"Actual_SQM": body.actual_sqm,
-               "materials": [m.model_dump() for m in body.materials],
+               "materials": [m.model_dump(exclude_unset=True)
+                             for m in body.materials],
                "manpower": [m.model_dump() for m in body.manpower]})
     await session.commit()
     return res
@@ -409,3 +454,129 @@ async def form_download(system_code: str,
                  "X-Form-UUID": row["Form_UUID"],
                  "X-Form-Rows": str(row["Row_Count"]),
                  "Access-Control-Expose-Headers": "X-Form-UUID, X-Form-Rows"})
+
+
+# ── the OCR lane (Phase 9d) ──────────────────────────────────────────────────
+# ⚠️ A JOB, NOT AN INLINE AWAIT. Vision OCR takes 5–120 s on a 7B model with a
+# cold start — longer than proxy timeouts and far longer than a supervisor
+# standing in a plant on mobile data will hold a page open. Same contract as
+# `ai/jobs.py`: POST returns 202 with an id, React polls, and the state lives in
+# Postgres so a locked phone loses nothing.
+_ALLOWED_UPLOAD = {
+    "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+    "image/heic": "heic", "image/heif": "heic", "application/pdf": "pdf",
+}
+_MAX_UPLOAD = 20 * 1024 * 1024
+
+
+@router.post("/ocr/upload", status_code=202,
+             summary="Photograph a filled consumption form (supervisor)")
+async def ocr_upload(file: UploadFile = File(...),
+                     site_id: Optional[str] = Form(None),
+                     user: dict = Depends(require_roles("supervisor", "hod",
+                                                        "store_keeper")),
+                     session: AsyncSession = Depends(get_session)):
+    """Queue a photographed form for reading.
+
+    ⚠️ RAW IS NOT ACCEPTED (ruling Q6). CR2/NEF/ARW need libraw, weigh 20–50 MB
+    and come from a DSLR nobody carries into a tank. PDF is accepted because
+    office scanners and phone scanner apps default to it.
+    """
+    sid = _write_site(user, site_id)
+    mime = (file.content_type or "").lower()
+    if mime not in _ALLOWED_UPLOAD:
+        raise HTTPException(
+            415, f"{mime or 'that file type'} cannot be read. Send a JPG, PNG, "
+                 f"HEIC or PDF photograph of the whole form.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(422, "that file was empty")
+    if len(raw) > _MAX_UPLOAD:
+        raise HTTPException(
+            413, f"that file is {len(raw) // (1024 * 1024)} MB; the limit is "
+                 f"{_MAX_UPLOAD // (1024 * 1024)} MB. Most phones let you send "
+                 f"a smaller copy.")
+
+    jid = (await session.execute(insert(ai_jobs_t).values(
+        kind="ocr_consumption_form", status="queued", actor=user["username"],
+        Site_ID=sid,
+        payload_json=json.dumps({"image_b64": base64.b64encode(raw).decode(),
+                                 "mime": mime, "role": user["role"]}),
+    ).returning(ai_jobs_t.c["id"]))).scalar_one()
+    await session.commit()
+    form_jobs.spawn(jid)
+    return {"job_id": jid, "status": "queued",
+            "message": "Reading the form — this usually takes under a minute."}
+
+
+@router.get("/ocr/jobs/{job_id}", summary="Poll a form-reading job")
+async def ocr_job(job_id: int, user: dict = Depends(get_current_user),
+                  session: AsyncSession = Depends(get_session)):
+    row = (await session.execute(select(ai_jobs_t)
+           .where(ai_jobs_t.c["id"] == job_id))).mappings().first()
+    if row is None:
+        raise HTTPException(404, "no such job")
+    if not site_row_visible(site_scope(user), row["Site_ID"]):
+        raise HTTPException(403, "that job belongs to another site")
+    out = {"job_id": job_id, "status": row["status"], "error": row["error"]}
+    if row["result_json"]:
+        out["result"] = json.loads(row["result_json"])
+    return out
+
+
+@router.get("/entries/{entry_id}/qsep",
+            summary="What would block this entry's approval")
+async def entry_qsep(entry_id: int, site_id: Optional[str] = None,
+                     user: dict = Depends(require_roles("hod", "store_keeper",
+                                                        "supervisor")),
+                     session: AsyncSession = Depends(get_session)):
+    """⚠️ SHOWN BEFORE THE APPROVE BUTTON IS PRESSED, not after. A blocked entry
+    is something an HOD can see coming and chase Logistics about; a refusal that
+    arrives after they have decided teaches them to press again with the
+    override on."""
+    await X.get_entry(session, entry_id, resolve_site_param(user, site_id))
+    return await X.qsep_status(session, entry_id)
+
+
+@router.get("/entries/{entry_id}/crop", summary="A crop of the photographed form")
+async def entry_crop(entry_id: int,
+                     row: Optional[int] = Query(None, ge=0,
+                                                description="0-based material row"),
+                     field: Optional[str] = Query(None,
+                                                  pattern="^(work_date|equipment|area_sqm|full)$"),
+                     site_id: Optional[str] = None,
+                     user: dict = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """The strip of the photo a number came from.
+
+    ⚠️ WHEN THE PAGE CANNOT BE RECTIFIED THIS RETURNS THE WHOLE IMAGE AND SAYS
+    SO IN A HEADER, rather than cropping by guesswork. A crop captioned "row 3"
+    that is actually row 4 invites a human to confirm a quantity against the
+    wrong material — worse than no crop, because it looks like verification.
+    """
+    entry = await X.get_entry(session, entry_id, resolve_site_param(user, site_id))
+    img = (await session.execute(select(entry_t.c["OCR_Image"])
+           .where(entry_t.c["id"] == entry_id))).scalar()
+    if not img:
+        raise HTTPException(404, "this entry has no photograph — it was typed in")
+
+    if field == "full" or (row is None and field is None):
+        return Response(content=bytes(img), media_type="image/jpeg",
+                        headers={"X-Crop": "full"})
+
+    raw = json.loads(entry.get("OCR_Raw_JSON") or "{}")
+    rect, ok = OF.rectify(bytes(img), raw.get("qr_points"))
+    if rect is None:
+        raise HTTPException(422, "that photograph could not be decoded")
+    if not ok:
+        # Honest fallback: the caller gets the page, and the header says the
+        # crop is not trustworthy so the UI can label it.
+        return Response(content=bytes(img), media_type="image/jpeg",
+                        headers={"X-Crop": "unrectified"})
+
+    if field:
+        box = CF.header_boxes()[field]
+    else:
+        box = CF.row_boxes(int(row))["row"]
+    return Response(content=OF.crop_mm(rect, box), media_type="image/png",
+                    headers={"X-Crop": "row" if row is not None else field})

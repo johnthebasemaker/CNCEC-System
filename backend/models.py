@@ -1175,11 +1175,16 @@ class SmeConsumptionForm(Base):
 class SmeExecutionEntry(Base):
     """One execution report: what was consumed, what area was done, by whom.
 
-    THE STATE MACHINE (Phase 5):
+    THE STATE MACHINE (Phase 9d — paper first; the Phase 5 one is drained):
 
-        DRAFT_SK ─┐
-                  ├─→ PENDING_SUPERVISOR ─→ PENDING_HOD ─→ APPROVED
-        (bypass) ─┘                                     └─→ REJECTED
+        DRAFT_SUPERVISOR ─→ PENDING_SK ─→ PENDING_HOD ─→ APPROVED
+                                                      └─→ REJECTED (terminal)
+
+    ⚠️ THE DIRECTION REVERSED, AND SO DID WHO MAY EDIT A MATERIAL LINE. Phase 5
+    forbade the supervisor from touching one because the store keeper had
+    counted it. The paper originates in the field now, so the supervisor
+    AUTHORS the numbers and the store keeper VERIFIES them — see the four-layer
+    trail on SmeExecutionEntryMaterial for what replaces the old control.
 
     The store keeper records the physical material draw and the equipment. The
     supervisor names the sub-activity and reports the actual area and crew. The
@@ -1254,12 +1259,47 @@ class SmeExecutionEntry(Base):
     hod_edited = Column(Boolean, nullable=False, server_default=text("false"))
     Reject_Reason = Column(Text)
 
+    # ── Phase 9d: where this entry came from ────────────────────────────────
+    # Which printed sheet, which photo, and what the model actually said. The
+    # raw JSON is kept because "what did the machine read" is only answerable
+    # six weeks later if somebody wrote it down at the time.
+    Form_UUID = Column(Text)
+    OCR_Job_ID = Column(Integer)
+    OCR_Image = Column(LargeBinary)
+    OCR_Image_Mime = Column(Text)
+    OCR_Raw_JSON = Column(Text)
+    OCR_Confidence = Column(Float)
+    OCR_Model = Column(Text)
+    # ⚠️ 'ocr' | 'manual' | 'legacy'. A hand-typed entry must never be mistaken
+    # for a scanned one: the grey OCR layer is empty for both, and only this
+    # says whether that means "the model read nothing" or "there was no model".
+    Entry_Origin = Column(Text, nullable=False, server_default=text("'manual'"))
+
+    # ── the SK's verification step (the new middle of the chain) ────────────
+    sk_verified_at = Column(DateTime)
+    sk_edited = Column(Boolean, nullable=False, server_default=text('false'))
+    SK_Edit_Reason = Column(Text)
+
+    # ── the QSEP override (ruling Q2-D) ─────────────────────────────────────
+    # On a paper-first flow the drum was emptied days ago, so a hard block can
+    # only strand the record. It blocks by default and an HOD may override, at
+    # the price of a written reason and a notification to the Head of Qualities.
+    QSEP_Override = Column(Boolean, nullable=False, server_default=text('false'))
+    QSEP_Override_Reason = Column(Text)
+    QSEP_Override_By = Column(Text)
+    QSEP_Override_At = Column(DateTime)
+
+    # ⚠️ APPROVAL NOW MOVES STOCK (ruling Q1-b) — see post_stock().
+    Stock_Posted_At = Column(DateTime)
+    WBS_Number = Column(Text)
+
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     __table_args__ = (
         UniqueConstraint("Site_ID", "Entry_No"),
         Index("ix_sme_exec_entry_status", "Site_ID", "status"),
+        Index("ix_execution_entry_form", "Form_UUID"),
     )
 
 
@@ -1317,6 +1357,25 @@ class SmeExecutionEntryMaterial(Base):
     # What the store keeper originally wrote, kept when an HOD corrects the
     # row. Without it the audit trail says a number changed but not from what.
     Original_Qty = Column(Float)
+
+    # ── Phase 9d: the four layers, each with an owner ──────────────────────
+    # ⚠️ Row_Index IS THE MAPPING. The QR carries no material list, so a
+    # handwritten quantity is matched to a material by its POSITION on the
+    # printed page.
+    Row_Index = Column(Integer)
+    OCR_Qty = Column(Float)              # grey  — what the camera saw
+    OCR_Qty_Text = Column(Text)          #         "2+3" and "~4" kept verbatim
+    OCR_Lot_Text = Column(Text)
+    Supervisor_Qty = Column(Float)       # amber — what the supervisor filed
+    SK_Qty = Column(Float)               # red   — what the store keeper set
+    sk_edited = Column(Boolean, nullable=False, server_default=text('false'))
+    # `Actual_Qty` above is the settled figure (purple when the HOD moved it).
+
+    # The `consumption` row this line became — the double-deduction guard.
+    Consumption_ID = Column(Integer)
+    # Set when the benchmark says this quantity is implausible for the area
+    # reported. A 10x reading is far likelier a misread digit than real use.
+    Plausibility_Flag = Column(Text)
     __table_args__ = (
         UniqueConstraint("Entry_ID", "Material_Code", "SAP_Code"),
     )
