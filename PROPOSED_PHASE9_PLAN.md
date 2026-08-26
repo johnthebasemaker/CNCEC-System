@@ -7,7 +7,7 @@
 > | --- | --- | --- |
 > | **9a** WBS + work types | `feat/phase9-wbs-and-math` | ✅ shipped — suite CK (42), E2E +4, migration `e3a7d9b21f64` |
 > | **9b** planner shift math | `feat/phase9-wbs-and-math` | ✅ shipped — suite CL (13), CI-33b/c, no migration |
-> | **9c** form generation + QR | — | pending green light |
+> | **9c** form generation + QR | `feat/phase9-form-gen` | ✅ shipped — suite CM (38), E2E +4, migration `f4b8e2c07d15` |
 > | **9d** OCR state machine | — | pending; Q1–Q4 answered, see below |
 > | **9e** analytics chart | — | pending |
 > | **9f** rename + docs | — | pending |

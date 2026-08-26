@@ -706,6 +706,59 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-26 — Phase 9 slice 9c (`feat/phase9-form-gen`).** Baselines
+> move to **service tests 1,970** (+41: suite CM 38, plus three CJ manual
+> pins) and **E2E 115** (+4); legacy
+> 599, UI math 33, nav 49, alembic head **`f4b8e2c07d15`** (one additive table).
+>
+> **Four additions to the LOCKED set:**
+>
+> * **THE FORM PRINTS THE MATERIAL NAMES SO THE MODEL NEVER READS ONE.** A 7B
+>   VLM's weakest task is handwritten names and its strongest is a digit in a
+>   box. Pre-printing deletes the hardest half of `ai/handwritten.py` — the
+>   18-entry corrections table, the fuzzy matcher, the candidate picker all
+>   exist to recover from misread names. The QR deletes the other half: site,
+>   system, sub-activity and sheet identity come off a DECODER, not a model.
+>   Do not "improve" the form by letting people write material names on it.
+>
+> * ⚠️ **EVERY DOWNLOAD REGISTERS A NEW `Form_UUID`. THIS IS NOT A CACHING
+>   BUG.** Two prints are two physical sheets, and 9d must distinguish a
+>   RE-PRINT from a RE-PHOTOGRAPH. One identity for both makes duplicate
+>   detection unimplementable. `GET /execution/forms/{code}` is therefore a GET
+>   that WRITES, and the UI says so in words.
+>
+> * ⚠️ **ROW ORDER IS A DATA CONTRACT, AND `Recipe_Fingerprint` PINS IT.**
+>   The QR cannot carry a material list, so 9d maps handwriting POSITIONALLY:
+>   row 3 on the paper is row 3 of the fingerprint. `recipe_rows()` sorts by
+>   (sub-activity, material, SAP) — all three, because seven (system, material)
+>   pairs in the live recipe have more than one row. The hash covers the ORDER;
+>   a reorder that a same-set check would miss mis-files every quantity by one.
+>   It deliberately EXCLUDES `For_1_SQM`: a rate cannot mis-map anything, and
+>   invalidating printed paper for it is its own failure.
+>
+> * ⚠️ **FOUR ROWS CAN SHARE ONE MATERIAL NAME.** LSC8 prints
+>   `GI-8005765` ("Cumicrete PU MF 300 - 3mm") four times, separated only by
+>   `Material_Description` — Comp-A/B/C/D. `_row_label` appends the description
+>   ONLY where the code appears more than once in that form. Printed by name
+>   alone the supervisor gets four identical boxes, on seven of eleven systems.
+>
+> ⚠️ **`/execution/forms`, NOT `/mh/...`.** The operator's brief said
+> `/mh/execution/forms`; Man-Hours is exact-locked to {hod, admin} and the
+> supervisor is the person who carries this paper. `/execution` already belongs
+> to exactly the three roles the ruling names (SK, supervisor, HOD).
+>
+> ⚠️ **fpdf's core fonts are latin-1, and `reports._latin` DROPS what it cannot
+> encode.** `consumption_form._txt` transliterates first (— → -, · → *, ² → 2).
+> Without it "Cumifloor ECO Primer — Primer - Comp-A" silently loses the one
+> character separating the material from the component that distinguishes it.
+> The truncation ellipsis is "..." for the same reason: it is appended AFTER
+> transliteration.
+>
+> ⚠️ **CM-15 decodes the QR out of the RENDERED PAGE** (cv2 + pypdfium2), not
+> out of the string that built it. Neither library is in `requirements.txt`, so
+> the check degrades to a loud SKIP rather than failing — it never claims to
+> have verified the print when it only compared two strings.
+
 > **Updated 2026-08-25 — Phase 9 slices 9a + 9b (`feat/phase9-wbs-and-math`).**
 > Baselines move to **service tests 1,925** (+57: suite CK 42, suite CL 13,
 > CI-33b/c) and **E2E 111** (+4). Legacy 599, UI math 33, nav **49** (+1 route),

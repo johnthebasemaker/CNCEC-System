@@ -18,7 +18,7 @@
  * submits '' and the API stores '' (a real value; NULL would break both the
  * key and every GROUP BY over it).
  */
-import { PlusOutlined } from '@ant-design/icons'
+import { DownloadOutlined, PlusOutlined, PrinterOutlined } from '@ant-design/icons'
 import SystemCode from '../sme/SystemCode'
 import {
   Alert, App, Button, Card, Col, Descriptions, Divider, Form, Input, InputNumber,
@@ -29,6 +29,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 
 import { api } from '../api/client'
+import { downloadConsumptionForm, useFormSystems } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
 
 type Row = Record<string, unknown>
@@ -525,6 +526,81 @@ export function HodApprovalQueueTab() {
   )
 }
 
+/**
+ * Print a blank consumption form (Phase 9c).
+ *
+ * ⚠️ EVERY DOWNLOAD IS A NEW SHEET. Two prints are two physical pieces of
+ * paper, each with its own QR, because the upload side has to tell a RE-PRINT
+ * from a RE-PHOTOGRAPH — one identity for both would make duplicate detection
+ * impossible to get right. The card says so, because "download it again" is
+ * otherwise the obvious thing to do with a form you have mislaid.
+ */
+function FormPrintCard() {
+  const { message } = App.useApp()
+  const { data: systems, isLoading } = useFormSystems()
+  const [code, setCode] = useState<string | undefined>()
+  const [esc, setEsc] = useState<string | undefined>()
+  const [busy, setBusy] = useState(false)
+
+  const picked = (systems ?? []).find((x) => x.Lining_System_Code === code)
+  const rows = picked
+    ? (esc ? undefined : picked.materials)
+    : undefined
+
+  const go = async () => {
+    if (!code) return
+    setBusy(true)
+    try {
+      await downloadConsumptionForm(code, esc)
+      message.success('Form downloaded — each download is a new numbered sheet')
+    } catch (e) {
+      message.error(errMsg(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card size="small" style={{ marginBottom: 12 }}
+      title={<Space><PrinterOutlined />Print a consumption form</Space>}>
+      <Space wrap align="start">
+        <Select
+          style={{ width: 300 }} placeholder="Lining system" loading={isLoading}
+          value={code} showSearch optionFilterProp="label"
+          onChange={(v) => { setCode(v); setEsc(undefined) }}
+          options={(systems ?? []).map((x) => ({
+            value: x.Lining_System_Code,
+            label: `${x.Lining_System_Code} — ${x.Lining_System_Name}`,
+          }))} />
+        <Select
+          style={{ width: 220 }} placeholder="All sub-activities" allowClear
+          value={esc} disabled={!picked?.sub_activities.length}
+          onChange={(v) => setEsc(v)}
+          options={(picked?.sub_activities ?? []).map((x) => ({
+            value: x, label: x }))} />
+        <Button type="primary" icon={<DownloadOutlined />} loading={busy}
+          disabled={!code} onClick={go}>Download</Button>
+        {rows != null && (
+          <Typography.Text type="secondary" style={{ lineHeight: '32px' }}>
+            {rows} material line(s)
+          </Typography.Text>
+        )}
+      </Space>
+      <Typography.Paragraph type="secondary"
+        style={{ marginBottom: 0, marginTop: 10, fontSize: 12 }}>
+        The form prints every material for the system, so nobody writes a
+        material name by hand, and carries a QR code holding the site, system,
+        sub-activity and the sheet&rsquo;s own number. Fill in the date,
+        equipment, area, lot and the quantities, then photograph the whole page
+        including the QR.
+        {' '}<strong>Each download is a separate numbered sheet</strong> —
+        printing again gives you new paper, not another copy of the same form.
+      </Typography.Paragraph>
+    </Card>
+  )
+}
+
+
 // ─── the page ────────────────────────────────────────────────────────────────
 export default function ExecutionPage() {
   const { user } = useAuth()
@@ -603,9 +679,11 @@ export default function ExecutionPage() {
       <Typography.Title level={4} style={{ marginTop: 0 }}>Execution entries</Typography.Title>
       <Typography.Paragraph type="secondary">
         The store keeper records what left the store, the supervisor reports the
-        area and crew, and the HOD approves — approval is what deducts stock, so
-        nothing before it moves a quantity.
+        area and crew, and the HOD approves — approval is what posts the area to
+        the progress ledger, so nothing before it moves a figure anybody reports
+        on.
       </Typography.Paragraph>
+      <FormPrintCard />
       {(isSk || isSup) && (
         <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 12 }}
           onClick={() => setOpenNew(true)}>

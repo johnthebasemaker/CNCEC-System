@@ -213,6 +213,32 @@ judgement, made in the UI. Nothing is seeded by migration —
 `/hod/site-config/work-types/suggestions` offers the ledger's own spellings
 merged and counted instead.
 
+### 4c. The printed consumption form (Phase 9c, `services/consumption_form.py`)
+
+`GET /execution/forms/{code}[?esc=]` — SK, supervisor, HOD. Deliberately NOT
+under `/mh` (exact-locked {hod, admin}; the supervisor is the person who carries
+the paper).
+
+- **Pre-printed names + a QR** is the whole design. The vision model in 9d never
+  reads a material name (its weakest task) and never reads header context; it
+  reads digits in boxes. QR payload is `GIF1|site|system|sub-activity|uuid` —
+  five fields always, version-tagged so a future decoder can refuse rather than
+  guess.
+- ⚠️ **Every download REGISTERS a new `Form_UUID`** in `sme_consumption_form`.
+  A GET that writes, because two prints are two sheets and 9d must tell a
+  re-print from a re-photograph.
+- ⚠️ **`Recipe_Fingerprint` pins ROW ORDER**, which is the mapping contract —
+  9d matches handwriting positionally. Covers (index, esc, material, SAP, uom);
+  EXCLUDES `For_1_SQM`, which cannot mis-map anything.
+- ⚠️ **`_row_label` appends `Material_Description` only where a material code
+  appears more than once in that form.** LSC8 prints one code four times
+  (Comp-A/B/C/D); seven (system, material) pairs live are in this shape.
+- **No write-in rows** (ruling Q9), **blank work date** (ruling Q6 — printed in
+  batches, used same- or next-day; the generation date is in the footer).
+- `_txt()` transliterates before `reports._latin`, which drops what latin-1
+  cannot encode — an em-dash separator vanishing is how four rows become
+  indistinguishable.
+
 ### 4b. The manpower shift model (Phase 9b, ruling Q10)
 
 `services/planner.py` and `services/session_plan.py` share ONE split helper,
