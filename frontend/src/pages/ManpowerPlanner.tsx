@@ -162,7 +162,7 @@ export default function ManpowerPlanner() {
   return (
     <div>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        Works out the labour needed to finish a selection of jobs by a deadline,
+        Works out the manpower needed to finish a selection of jobs by a deadline,
         what the roster already covers, and how to remove the overtime. It is
         advice — nothing here changes the roster or assigns anybody.
       </Typography.Paragraph>

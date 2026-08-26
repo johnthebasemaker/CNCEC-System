@@ -191,7 +191,7 @@ export function ManpowerNormsTab() {
           {r.Variant_Key ? <Tag color="purple">{String(r.Variant_Key)}</Tag> : null}
           {r.Manpower_Only
             ? <Tooltip title="No Surface Shield recipe for this system + sub-activity.
-                This activity is labour only — a supervisor can open it without a
+                This activity is manpower only — a supervisor can open it without a
                 store keeper.">
                 <Tag color="gold">manpower only</Tag>
               </Tooltip>

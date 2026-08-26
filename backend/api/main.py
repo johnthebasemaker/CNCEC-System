@@ -380,7 +380,7 @@ app.include_router(sla_router)
 app.include_router(xsite_router, dependencies=_auth)
 app.include_router(console_public_router, dependencies=_auth)
 
-# Man-Hours & Labor Tracking — mh_* tables, exact-locked {hod, admin} (self-guarded).
+# Man-Hours & Manpower Tracking — mh_* tables, exact-locked {hod, admin} (self-guarded).
 app.include_router(manhours_router)
 # Phase 5 — the SK → supervisor → HOD consumption workflow. Its own gates are
 # per-route (each step names the role that performs it), so no blanket dep here.

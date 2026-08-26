@@ -2688,6 +2688,77 @@ sites will see.
 
 ---
 
+## 14s. Labor → Manpower, and the docs (Phase 9 · slice 9f)
+
+### 14s.1 What you should see
+
+**TC-NAME-01** — the sidebar entry reads **Manpower Tracking**. The page heading
+reads **Man-Hours & Manpower Tracking**. No screen anywhere says "Labor".
+
+**TC-NAME-02** — the scorecard columns read **Done (Manpower)** and
+**Manpower Var**.
+
+**TC-NAME-03** — download the **MH Manpower Roster** and the **Equipment
+Scorecard (Material vs Manpower)** exports. The titles inside the files moved
+too.
+
+### 14s.2 ⚠️ What must NOT have changed
+
+**TC-NAME-04** — call `GET /mh/scorecard`. The JSON keys are still
+**`Done_SQM_Labor`** and **`Labor_Variance_Pct`**.
+
+That mismatch — a heading that says Manpower over a key that says Labor — is
+deliberate (ruling Q13). Those keys are API contract: the frontend reads them
+and suite CD pins them. A rename that looked complete would have broken every
+integration for a cosmetic gain. **Do not "finish" it.**
+
+**TC-NAME-05** — no database column changed. `grep -ri labor` over the
+migrations returns nothing.
+
+### 14s.3 ⚠️ The rename moved what the assistant retrieves
+
+**TC-NAME-06** — ask the Hub Assistant, as an HOD: *"can I open the manpower
+portal?"* The answer must be **yes**, from the access matrix — not a list of
+tabs.
+
+Once the page was renamed, the word "manpower" appeared hundreds of times inside
+the Man-Hours chapter and outweighed the access chapter on term frequency alone.
+The assistant started answering a permission question with a feature tour. Only
+the pinned test caught it.
+
+**TC-NAME-07** — ask the same thing using the **old** name: *"can I open the
+labor tracking page?"* It must still work. People who learned the old name will
+keep typing it for years.
+
+**TC-NAME-08** — ask *"what is the manpower planner?"*. That one must still
+reach the Man-Hours chapter — the access aliases must not drag every mention of
+the module into the permissions section.
+
+### 14s.4 ⚠️ Documentation a role cannot read is not documentation
+
+**TC-NAME-09** — sign in as a **Supervisor** and ask *"how do I file a
+consumption form?"*. You must get the answer.
+
+The consumption-form chapters were originally written under chapter 16
+("Cross-Role Procurement"), which the assistant grants to HOD and Logistics
+only — so the two people who use that workflow every day could not be shown a
+word of it. They now live in chapter 4, which all three roles hold.
+
+**Before adding a manual section, check which roles can read the chapter you
+are putting it in.**
+
+**TC-NAME-10** — the same question as a **Store Keeper** works too.
+
+### 14s.5 The what-changed summary
+
+**TC-NAME-11** — §21.12 of the manual summarises Phase 9 for a reader who has
+been away. It is inside chapter 21 rather than a chapter of its own, because
+the assistant only parses `# <number>.` headings — a "21b" chapter would have
+been invisible to it, and chapter 21 is in every role's allowed set.
+
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

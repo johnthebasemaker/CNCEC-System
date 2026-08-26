@@ -26,9 +26,9 @@
 16. [Cross-Role Procurement Walk-through (NEW in v3.0)](#16-cross-role-procurement-walk-through)
 17. [Operations & Hosting — the after-launch chapter](#17-operations--hosting--the-after-launch-chapter)
 18. [Material Estimator (SME) Manual](#18-material-estimator-sme-manual)
-19. [Man-Hours & Labor Tracking Manual (NEW)](#19-man-hours--labor-tracking-manual)
+19. [Man-Hours & Manpower Tracking Manual (NEW)](#19-man-hours--manpower-tracking-manual)
 20. [Auditor (View-Only) Manual (NEW)](#20-auditor-view-only-manual)
-21. [2026-08 Feature Update — What Changed](#21-2026-08-feature-update--what-changed)
+21. [2026-08 Feature Update — What Changed](#21-2026-08-feature-update--what-changed) — including **§21.12 Phase 9**
 
 ---
 
@@ -175,7 +175,7 @@ reaches every workspace deliberately, for support.
 | 📥 Bulk Excel Import | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | 🏷️ WBS & Work Types | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | 🧪 Material Estimator (SME) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (read) | ✅ |
-| 🕒 Man-Hours / Labor Tracking | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 🕒 Man-Hours / Manpower Tracking | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | 🧾 Execution Entries | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | 📊 Reports | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ (read + download) | ✅ |
 | 🚚 Logistics Portal (Procurement) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (shadow) |
@@ -241,7 +241,7 @@ neither.
 ### 2.3.4 Head of Department (HOD) — what an HOD can and cannot do
 
 **Can — and this is the question people ask most:** open the **🕒 Man-Hours /
-Labor Tracking page** and the **🧪 Material Estimator**. Both are exact-locked
+Manpower Tracking page** and the **🧪 Material Estimator**. Both are exact-locked
 to the HOD (and Admin for support); the lock is what *admits* an HOD, not what
 excludes them. That includes all thirteen Man-Hours tabs — roster, timesheets,
 estimator, variance, scorecard, employee-wise, the four execution views, the
@@ -910,6 +910,188 @@ A: The OCR review grid lets you fix every row before staging. Pick the correct m
 A: Submitted/approved items don't show on your screen. Ask HOD or Admin to filter the audit log by your username.
 
 ---
+
+## 4.9 Printing a consumption form
+
+**Where:** Execution Entries (`/execution`) → **Print a consumption form**.
+Store Keeper, Supervisor and HOD.
+
+The field fills these in by hand and photographs them; the app reads the photo.
+Everything about the form's design exists to make that reading reliable.
+
+### 4.9.1 What is already printed, and what you write
+
+The form prints **every material for the system** — name, component, SAP code
+and unit — so **nobody ever writes a material name by hand**. Reading
+handwritten names is the one thing the vision model is genuinely bad at, and a
+name that is already printed cannot be misread.
+
+You write three things at the top — **Date**, **Equipment / Tank No.** and
+**Area done (m²)** — then, on **every row**, the **quantity used** and the
+**lot / batch number** for that material, and your name at the bottom.
+
+⚠️ **The lot is per row, not per form.** One system draws several materials and
+each one arrives from a different batch, with its own certificate. Writing a
+single batch number at the top would be right about one material and wrong
+about the rest — and the certificate check at approval looks at the lot for
+*each* material, so a batch on the wrong line clears a check for material that
+was never used.
+
+⚠️ **The four small black squares in the corners are not decoration.** They are
+what lets the app square up your photograph and show you the right row. Keep
+them in frame.
+
+⚠️ **The date box is blank on purpose.** Forms are printed in batches and used
+today or tomorrow, so a pre-printed date would be wrong on half of them — and
+the date decides which day's progress your work lands on. The small date in the
+footer is when the *blank* was printed: it tells you if you are holding old
+paper.
+
+⚠️ **There are no spare rows.** Only materials in the system's recipe can be
+recorded. Write **0** for anything you did not use; never add a material by
+hand, because there is no box for it and the app cannot match it.
+
+### 4.9.2 ⚠️ Rows that look almost identical
+
+Some systems list the same product several times as separate components. LSC8
+prints "Cumicrete PU MF 300 - 3mm" four times — as **Comp-A**, **Comp-B**,
+**Comp-C** and **Comp-D**, each with its own SAP code.
+
+They are different materials with different quantities. Check the component
+letter, not just the product name.
+
+### 4.9.3 The QR code
+
+The square in the top-right holds the site, the system, the sub-activity and
+this sheet's own number. It is read by a scanner, not by the AI, which is why
+none of those four things can be got wrong.
+
+⚠️ **Photograph the whole page, including the QR.** A photo that crops it out
+cannot be matched to anything, and you will be asked to retake it.
+
+### 4.9.4 ⚠️ Every download is a new sheet
+
+Downloading the form twice gives you **two different sheets with two different
+numbers** — not two copies of one form.
+
+That is deliberate. The app has to be able to tell "you printed a second sheet"
+from "you photographed the same sheet twice", and it does that by the number on
+the paper. If you print a spare, it is a genuinely separate form.
+
+An HOD can see every form printed and not yet filed, and who printed it.
+
+### 4.9.5 If the materials change after you print
+
+If someone edits the system's recipe after your form was printed — adds a
+material, reorders them, changes a code — the app will **refuse the photo** and
+ask for a fresh form.
+
+It is not being awkward. The app matches your handwriting to materials by row
+*position*, so a sheet printed against different rows would file your quantities
+against the wrong materials — and the numbers would look perfectly reasonable.
+Changing a material's **rate** is fine and does not invalidate printed paper.
+
+## 4.10 Filing a consumption form
+
+**Where:** Execution Entries (`/execution`).
+
+This replaced the old store-keeper-first flow on 27 August 2026. The record now
+starts with the paper you filled in.
+
+    You fill the form  →  Store Keeper verifies  →  HOD approves
+
+### 4.10.1 Step 1 — photograph it
+
+Upload the photo under **Upload a filled form**. JPG, PNG, HEIC or PDF.
+
+⚠️ **Photograph the whole page, including the QR code.** The QR is what tells the
+app which form this is — a photo without it cannot be matched to anything and
+will be refused.
+
+Reading takes up to a minute. You can leave the page; it carries on.
+
+### 4.10.2 Step 2 — check every figure
+
+The app opens a draft with what it read. Beside each row is **the crop of your
+photograph it read that number from**, so you are checking against the paper and
+not against memory.
+
+⚠️ **Where the handwriting was not certain, the box is left EMPTY rather than
+guessed.** Those rows are listed at the top and marked in gold with what was
+actually written. Type the real number in. A guessed figure would post straight
+to stock with nobody questioning it.
+
+Then correct anything else, pick the equipment from the list if it was not read,
+and give the two reasons — material and manpower — which are required on every
+entry, even one with no variance at all.
+
+### 4.10.3 Step 3 — the store keeper verifies
+
+It goes to the **store keeper**, not to the HOD. They check your quantities
+against what actually left the shelf and may change them — every change costs a
+written reason, shows to the HOD in **red**, and you are told about it before
+the entry is approved rather than after.
+
+Blasting and buffing skip this step: there is no material to verify.
+
+### 4.10.4 Step 4 — the HOD approves
+
+⚠️ **Approval is what deducts the material and posts the area.** Nothing before
+it moves a quantity, which is what makes correcting a figure safe at every
+earlier step.
+
+The HOD sees the whole chain on each row:
+
+| Colour | What it is |
+| --- | --- |
+| grey | what the camera read |
+| amber | what you filed |
+| red | what the store keeper corrected |
+| purple | what the HOD settled on |
+
+A row everybody agreed on shows one number and the word "agreed". The colours
+only appear where something actually changed — which is what makes a red one
+worth looking at.
+
+⚠️ **Rejection is final.** A rejected entry cannot be revived; raise a new one
+from a fresh form.
+
+### 4.10.5 ⚠️ Store keepers: stop raising a separate issue
+
+The execution entry is now the **only** way lining material leaves the ledger.
+Raising a material issue for the same drum as well would deduct it twice — and
+nothing would show it until somebody counted the shelf.
+
+### 4.10.6 ⚠️ When a certificate is missing
+
+If a Surface Shield material has no test certificate or no quality clearance,
+the HOD's screen says so **before** they press approve, naming the lines.
+
+The material has already been applied by then, so this is a paperwork gap rather
+than something anyone can prevent. The HOD may approve anyway — the button says
+**"Approve WITHOUT clearance"** and will not work until a reason is typed — and
+the **Head of Qualities is notified every time**.
+
+Often the simpler fix is a corrected lot number: the check runs *after* the
+HOD's edits, so fixing the batch can clear it with no override at all.
+
+### 4.10.7 Things the app will refuse, and why
+
+**The same sheet twice.** Each printed form is filed once. Two people
+photographing one form, or one person retrying on a bad signal, produce
+different files of identical paper — the number on the sheet is the only thing
+that can tell.
+
+**A form printed before the materials changed.** If someone edits the system's
+recipe after your sheet was printed, the rows no longer line up. The app matches
+your handwriting to materials by row *position*, so your quantities would be
+filed against the wrong materials and would look entirely reasonable. Print a
+fresh form and copy the figures across.
+
+**A form printed for another site.**
+
+**A photo it could not read.** It says so rather than creating a blank entry — a
+blank entry that gets submitted is a consumption of zero, recorded silently.
 
 # 5. Supervisor Manual
 
@@ -3583,188 +3765,6 @@ the number; rows without one read `(no WBS)` rather than showing an empty cell.
 entries posted last month. Historical corrections are an Excel sync, not a side
 effect of a settings change.
 
-## 16.6 Printing a consumption form
-
-**Where:** Execution Entries (`/execution`) → **Print a consumption form**.
-Store Keeper, Supervisor and HOD.
-
-The field fills these in by hand and photographs them; the app reads the photo.
-Everything about the form's design exists to make that reading reliable.
-
-### 16.6.1 What is already printed, and what you write
-
-The form prints **every material for the system** — name, component, SAP code
-and unit — so **nobody ever writes a material name by hand**. Reading
-handwritten names is the one thing the vision model is genuinely bad at, and a
-name that is already printed cannot be misread.
-
-You write three things at the top — **Date**, **Equipment / Tank No.** and
-**Area done (m²)** — then, on **every row**, the **quantity used** and the
-**lot / batch number** for that material, and your name at the bottom.
-
-⚠️ **The lot is per row, not per form.** One system draws several materials and
-each one arrives from a different batch, with its own certificate. Writing a
-single batch number at the top would be right about one material and wrong
-about the rest — and the certificate check at approval looks at the lot for
-*each* material, so a batch on the wrong line clears a check for material that
-was never used.
-
-⚠️ **The four small black squares in the corners are not decoration.** They are
-what lets the app square up your photograph and show you the right row. Keep
-them in frame.
-
-⚠️ **The date box is blank on purpose.** Forms are printed in batches and used
-today or tomorrow, so a pre-printed date would be wrong on half of them — and
-the date decides which day's progress your work lands on. The small date in the
-footer is when the *blank* was printed: it tells you if you are holding old
-paper.
-
-⚠️ **There are no spare rows.** Only materials in the system's recipe can be
-recorded. Write **0** for anything you did not use; never add a material by
-hand, because there is no box for it and the app cannot match it.
-
-### 16.6.2 ⚠️ Rows that look almost identical
-
-Some systems list the same product several times as separate components. LSC8
-prints "Cumicrete PU MF 300 - 3mm" four times — as **Comp-A**, **Comp-B**,
-**Comp-C** and **Comp-D**, each with its own SAP code.
-
-They are different materials with different quantities. Check the component
-letter, not just the product name.
-
-### 16.6.3 The QR code
-
-The square in the top-right holds the site, the system, the sub-activity and
-this sheet's own number. It is read by a scanner, not by the AI, which is why
-none of those four things can be got wrong.
-
-⚠️ **Photograph the whole page, including the QR.** A photo that crops it out
-cannot be matched to anything, and you will be asked to retake it.
-
-### 16.6.4 ⚠️ Every download is a new sheet
-
-Downloading the form twice gives you **two different sheets with two different
-numbers** — not two copies of one form.
-
-That is deliberate. The app has to be able to tell "you printed a second sheet"
-from "you photographed the same sheet twice", and it does that by the number on
-the paper. If you print a spare, it is a genuinely separate form.
-
-An HOD can see every form printed and not yet filed, and who printed it.
-
-### 16.6.5 If the materials change after you print
-
-If someone edits the system's recipe after your form was printed — adds a
-material, reorders them, changes a code — the app will **refuse the photo** and
-ask for a fresh form.
-
-It is not being awkward. The app matches your handwriting to materials by row
-*position*, so a sheet printed against different rows would file your quantities
-against the wrong materials — and the numbers would look perfectly reasonable.
-Changing a material's **rate** is fine and does not invalidate printed paper.
-
-## 16.7 Filing a consumption form
-
-**Where:** Execution Entries (`/execution`).
-
-This replaced the old store-keeper-first flow on 27 August 2026. The record now
-starts with the paper you filled in.
-
-    You fill the form  →  Store Keeper verifies  →  HOD approves
-
-### 16.7.1 Step 1 — photograph it
-
-Upload the photo under **Upload a filled form**. JPG, PNG, HEIC or PDF.
-
-⚠️ **Photograph the whole page, including the QR code.** The QR is what tells the
-app which form this is — a photo without it cannot be matched to anything and
-will be refused.
-
-Reading takes up to a minute. You can leave the page; it carries on.
-
-### 16.7.2 Step 2 — check every figure
-
-The app opens a draft with what it read. Beside each row is **the crop of your
-photograph it read that number from**, so you are checking against the paper and
-not against memory.
-
-⚠️ **Where the handwriting was not certain, the box is left EMPTY rather than
-guessed.** Those rows are listed at the top and marked in gold with what was
-actually written. Type the real number in. A guessed figure would post straight
-to stock with nobody questioning it.
-
-Then correct anything else, pick the equipment from the list if it was not read,
-and give the two reasons — material and manpower — which are required on every
-entry, even one with no variance at all.
-
-### 16.7.3 Step 3 — the store keeper verifies
-
-It goes to the **store keeper**, not to the HOD. They check your quantities
-against what actually left the shelf and may change them — every change costs a
-written reason, shows to the HOD in **red**, and you are told about it before
-the entry is approved rather than after.
-
-Blasting and buffing skip this step: there is no material to verify.
-
-### 16.7.4 Step 4 — the HOD approves
-
-⚠️ **Approval is what deducts the material and posts the area.** Nothing before
-it moves a quantity, which is what makes correcting a figure safe at every
-earlier step.
-
-The HOD sees the whole chain on each row:
-
-| Colour | What it is |
-| --- | --- |
-| grey | what the camera read |
-| amber | what you filed |
-| red | what the store keeper corrected |
-| purple | what the HOD settled on |
-
-A row everybody agreed on shows one number and the word "agreed". The colours
-only appear where something actually changed — which is what makes a red one
-worth looking at.
-
-⚠️ **Rejection is final.** A rejected entry cannot be revived; raise a new one
-from a fresh form.
-
-### 16.7.5 ⚠️ Store keepers: stop raising a separate issue
-
-The execution entry is now the **only** way lining material leaves the ledger.
-Raising a material issue for the same drum as well would deduct it twice — and
-nothing would show it until somebody counted the shelf.
-
-### 16.7.6 ⚠️ When a certificate is missing
-
-If a Surface Shield material has no test certificate or no quality clearance,
-the HOD's screen says so **before** they press approve, naming the lines.
-
-The material has already been applied by then, so this is a paperwork gap rather
-than something anyone can prevent. The HOD may approve anyway — the button says
-**"Approve WITHOUT clearance"** and will not work until a reason is typed — and
-the **Head of Qualities is notified every time**.
-
-Often the simpler fix is a corrected lot number: the check runs *after* the
-HOD's edits, so fixing the batch can clear it with no override at all.
-
-### 16.7.7 Things the app will refuse, and why
-
-**The same sheet twice.** Each printed form is filed once. Two people
-photographing one form, or one person retrying on a bad signal, produce
-different files of identical paper — the number on the sheet is the only thing
-that can tell.
-
-**A form printed before the materials changed.** If someone edits the system's
-recipe after your sheet was printed, the rows no longer line up. The app matches
-your handwriting to materials by row *position*, so your quantities would be
-filed against the wrong materials and would look entirely reasonable. Print a
-fresh form and copy the figures across.
-
-**A form printed for another site.**
-
-**A photo it could not read.** It says so rather than creating a blank entry — a
-blank entry that gets submitted is a consumption of zero, recorded silently.
-
 ## 17.1 How the system is put together
 
 Four layers sit between a user and your data, and each has a single job.
@@ -4121,7 +4121,7 @@ The SME does **not** issue stock itself. Day-to-day consumption is entered on th
 
 ---
 
-# 19. Man-Hours & Labor Tracking Manual
+# 19. Man-Hours & Manpower Tracking Manual
 
 > **Access:** `🕒 Man-Hours` page — exact-locked to **HOD + Admin**. HOD is scoped to their own site; Admin gets a sidebar **site picker**. (NEW — 2026-06.)
 
@@ -4758,6 +4758,84 @@ reports, master-data exports and the Material Estimator workbooks alike.
 
 ---
 
+## 21.12 Phase 9 — what changed for you
+
+Five things changed at once, and one of them changes how you work
+every day.
+
+### 21.12.1 ⚠️ Consumption is filed from paper now
+
+**This replaces the store-keeper-first flow entirely.** Full detail in §4.10.
+
+    You fill a printed form  →  Store Keeper verifies  →  HOD approves
+
+- Print a form per lining system (§4.9). It lists every material for that
+  system, so **nobody writes a material name by hand** — that is the one thing
+  the reader is genuinely bad at.
+- Fill in the date, equipment and area at the top, and a **quantity and a lot
+  number on every row**.
+- Photograph the whole page **including the QR code** and upload it.
+- Check every figure. Where the handwriting was not certain the box is left
+  **empty rather than guessed**, and those rows are marked.
+- The **store keeper** verifies your quantities next, not the HOD. Their
+  corrections show to the HOD in red, and you are told before it is approved.
+
+⚠️ **Approval now deducts the material as well as posting the area.** Store
+keepers: **stop raising a separate material issue for lining work** — the
+execution entry is the only writer now, and doing both deducts the same drum
+twice.
+
+⚠️ **Rejection is final.** Raise a new entry from a fresh form.
+
+⚠️ **Each printed sheet is used once**, and a sheet printed before its system's
+materials changed will be refused. Both rules exist because your handwriting is
+matched to materials by row *position*.
+
+### 21.12.2 WBS numbers, at last
+
+The `WBS #` column was blank on every entry in the system — not because the
+feature was missing, but because there was **no screen to reach it**. There is
+one now: HOD → **WBS & Work Types** (§16.5).
+
+- Add your WBS numbers, then map each **work type** to one.
+- An issue that leaves the WBS box blank gets the number its work type maps to.
+- Work types are now a **fixed list** you curate, which is what stops `civil`
+  and `Civil` becoming two cost centres.
+- Nothing is enforced until you add the first row. Turning it on is your act.
+- WBS is applied **forward only**; historical entries are not restamped.
+
+### 21.12.3 A new chart: Efficiency by Day
+
+Man-Hours → **Efficiency by Day** (§19.6). For one lining system, how much
+manpower went into Equipment A against Equipment B — normalised on man-hours
+per m², which is the only figure that survives a change of size.
+
+⚠️ The line is the **running** figure, not the day's, and it **breaks** on a day
+with hours and no area. Both are deliberate; §19.6 explains why.
+
+### 21.12.4 The Manpower Planner tells you what nights actually buy
+
+Three changes to the arithmetic:
+
+- **Nights buy calendar time, not a smaller payroll.** The total headcount is
+  unchanged — nobody works both shifts — but the plan now shows how many days
+  the night crew saves.
+- **The day/night split follows your roster**, not a division by two. This site
+  runs about 20 on days against 80 on nights; halving the requirement
+  understated the night crew fourfold.
+- Hiring idle trades no longer flatters the plan: capacity counts only the
+  roles the job needs.
+
+### 21.12.5 "Labor" is now "Manpower"
+
+The page, the menu entry and every heading now say **Manpower** — the word
+everyone here actually uses.
+
+> **If you have automation reading the API:** the field names did **not**
+> change. `Done_SQM_Labor` and `Labor_Variance_Pct` are still spelled exactly
+> as they were. Only what you see on screen moved, so nothing you have built
+> against those keys needs touching.
+
 # 22. Quality, Safety, Employees & Procurement (QSEP)
 
 Everything in this chapter went live in August 2026. It adds four things that
@@ -5273,7 +5351,7 @@ This manual covers every page, tab, button, table and field in the General
 Industries Hub: the site workspaces (sections 4 to 7), the Reports module
 (section 8), the Logistics and Warehouse portals and the procurement chain
 (sections 14 to 16), hosting and operations (section 17), the Material Estimator
-(section 18), Man-Hours and Labor Tracking (section 19), the Auditor role
+(section 18), Man-Hours and Manpower Tracking (section 19), the Auditor role
 (section 20), the asset-tracking and warehouse-locator features added in
 2026-08 (section 21), and Quality, Safety, Employees and Procurement
 (section 22).

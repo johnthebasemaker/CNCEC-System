@@ -256,14 +256,14 @@ export default function SessionBuilder({ siteId }: { siteId?: string }) {
               {/* ── The bridge to the manpower module (Phase 8 slice 8e) ────
                   The session is handed over IN THE URL, not through shared
                   state. `ScenarioProvider` is mounted inside SmePage and
-                  Labor Tracking is a different route, so lifting the provider
+                  Manpower Tracking is a different route, so lifting the provider
                   to App.tsx was the alternative — a much wider blast radius
                   for one button, and it would have disturbed the provider's
                   per-user/per-site key logic. The encoding is the one already
                   written and tested for `?scenario=`, imported rather than
                   respelt, and nothing global is touched on the way. */}
               <Tooltip title={scenario.order.length
-                ? 'Cost this session in labour: the manpower for what the '
+                ? 'Cost this session in manpower: the manpower for what the '
                   + 'material on site can actually start, the overall total, '
                   + 'and what is waiting on a delivery'
                 : 'Add equipment to the session first — there is nothing to cost'}>

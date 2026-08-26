@@ -215,10 +215,10 @@ function OpenEntryModal({ open, onClose, asSupervisor }: {
   return (
     <Modal open={open} onCancel={onClose} onOk={submit} width={720}
       confirmLoading={create.isPending} destroyOnHidden
-      title={asSupervisor ? 'Open a labour-only entry' : 'Open an execution entry'}>
+      title={asSupervisor ? 'Open a manpower-only entry' : 'Open an execution entry'}>
       {asSupervisor && (
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
-          message="Labour-only activities skip the store keeper"
+          message="Manpower-only activities skip the store keeper"
           description="Blasting and buffing consume no Surface Shield, so there
             is nothing for a store keeper to count and no draft for them to
             raise. Only those activities are listed here." />
@@ -1197,7 +1197,7 @@ export default function ExecutionPage() {
       {(isSk || isSup) && (
         <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 12 }}
           onClick={() => setOpenNew(true)}>
-          {isSup ? 'Open a labour-only entry' : 'Open an entry'}
+          {isSup ? 'Open a manpower-only entry' : 'Open an entry'}
         </Button>
       )}
       <Table sticky={{ offsetHeader: 64 }} size="small" loading={isFetching}

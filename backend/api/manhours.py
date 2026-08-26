@@ -1,5 +1,5 @@
 """
-backend/api/manhours.py — Man-Hour & Labor Tracking portal (Phase-10 parity).
+backend/api/manhours.py — Man-Hour & Manpower Tracking portal (Phase-10 parity).
 
 Async PG port of the legacy manhour portal (pages_internal/manhour_portal.py +
 the mh_* helpers in root database.py). Exact-locked to {hod, admin} via
@@ -512,7 +512,7 @@ class EmployeeIn(BaseModel):
     site_id: Optional[str] = None
 
 
-@router.get("/employees", summary="Labor roster")
+@router.get("/employees", summary="Manpower roster")
 async def list_employees(site_id: Optional[str] = None, status: Optional[str] = None,
                          user: dict = Depends(require_roles("hod")),
                          session: AsyncSession = Depends(get_session)):
@@ -1334,7 +1334,7 @@ async def _productivity_rows(session: AsyncSession, sid: Optional[str]) -> dict:
     return {"items": items, "site_norm": site_norm}
 
 
-@router.get("/productivity", summary="Labor norms per scope + the site norm (MH/SQM)")
+@router.get("/productivity", summary="Manpower norms per scope + the site norm (MH/SQM)")
 async def productivity(site_id: Optional[str] = None,
                        user: dict = Depends(require_roles("hod")),
                        session: AsyncSession = Depends(get_session)):
@@ -1626,7 +1626,7 @@ async def mh_export(key: str, format: str = "xlsx", site_id: Optional[str] = Non
     sid = resolve_site_param(user, site_id)
 
     if key == "employees":
-        title = "MH Labor Roster"
+        title = "MH Manpower Roster"
         items = (await list_employees(site_id, None, user, session))["items"]
     elif key == "timesheets":
         title = "MH Timesheets"
@@ -1637,7 +1637,7 @@ async def mh_export(key: str, format: str = "xlsx", site_id: Optional[str] = Non
         title = "MH Estimate vs Actual"
         items = await _variance_rows(session, sid)
     elif key == "scorecard":
-        title = "Equipment Scorecard (Material vs Labor)"
+        title = "Equipment Scorecard (Material vs Manpower)"
         items = (await _scorecard_rows(session, sid))["items"]
     elif key == "productivity":
         title = "MH Productivity Norms"

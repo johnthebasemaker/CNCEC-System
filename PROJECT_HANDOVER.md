@@ -706,6 +706,65 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-28 — Phase 9 slice 9f (`feat/phase9-naming-docs`).
+> PHASE 9 COMPLETE.** Baselines: **service tests 2,064** · **E2E 125** ·
+> legacy 599 · UI math 33 · nav 49 · alembic head **`a2c9f5e81b43`**.
+>
+> * ⚠️ **"LABOR" BECAME "MANPOWER" IN DISPLAY STRINGS ONLY (ruling Q13).**
+>   `Done_SQM_Labor` and `Labor_Variance_Pct` are UNCHANGED — API contract, read
+>   by the frontend and pinned by suite CD. The column HEADING above each moved
+>   and the key underneath did not; that mismatch is deliberate and CJ-25..27
+>   exist so the next reader does not "finish" the rename. 22 display strings,
+>   two JSON keys, zero database columns.
+>
+> * ⚠️ **A RENAME CHANGES WHAT THE ASSISTANT RETRIEVES, AND CJ-19 CAUGHT
+>   IT.** Once the page was called Manpower Tracking, "manpower" appeared
+>   hundreds of times inside chapter 19 and outweighed section 2 on term
+>   frequency — so "can a HOD open the manpower portal" started answering with
+>   a tab list instead of yes. Fixed by reversing the alias direction
+>   (`manpower -> man hours tracking`, and `labor` KEPT as a key because people
+>   who learned the old name keep typing it) and adding access vocabulary
+>   (`open` / `access` / `allowed` -> permission matrix). CJ-29..31 pin all
+>   three properties, including that a genuine chapter-19 question still
+>   reaches chapter 19.
+>
+> * ⚠️ **9c AND 9d DOCUMENTED THE CONSUMPTION-FORM WORKFLOW IN A CHAPTER
+>   ITS OWN USERS COULD NOT READ.** §16.6/§16.7 sat under chapter 16
+>   ("Cross-Role Procurement"), which `manual_qa._ROLE_ALLOWED` grants to HOD
+>   and Logistics only — so the assistant could not show a supervisor or a
+>   store keeper one word of the workflow they use every day. Moved to §4.9 and
+>   §4.10; chapter 4 is one all three already hold. CJ-32/33 pin the
+>   reachability rather than the chapter number.
+>   **Before adding a manual section, check `_ROLE_ALLOWED` for the roles who
+>   will ask about it.**
+>
+> * **THE PHASE 9 SUMMARY FOLDED INTO CHAPTER 21, NOT A NEW "21b".**
+>   `iter_chapters` matches `# <n>.`, so a `# 21b.` heading parses as nothing
+>   and is invisible to the assistant. Chapter 21 is the August update and is
+>   in EVERY role's allowed set — exactly right for "what changed".
+>
+> ────────────────────────────────────────────────────────────────────────
+> **PHASE 9, THE WHOLE THING — the rulings, in one place:**
+>
+> | Slice | What it changed |
+> |---|---|
+> | 9a | WBS + work types. The tap was plumbed and never opened; `resolve_wbs` runs BEFORE `assert_wbs`; `Work_Type_Norm` is the identity |
+> | 9b | Nights buy TIME, not a smaller payroll; the shift split follows the roster (20/80, never 50/50); capacity counts in-scope roles only |
+> | 9c | The printed form: names pre-printed, QR instead of header OCR, `Recipe_Fingerprint` pins row order, every download is a new sheet |
+> | 9d | Paper first — supervisor → SK → HOD; four layers per line; approval DEDUCTS STOCK (the only writer); QSEP overridable with a reason |
+> | 9e | Efficiency by Day: the RUNNING figure, two divisions by zero, reasons read never invented |
+> | 9f | Labor → Manpower in display only; the docs the workflow's users can now reach |
+>
+> ⚠️ **The three that will bite hardest if softened:** the double-deduction
+> guard (`Consumption_ID`, not a status check), the stale-sheet refusal
+> (`Recipe_Fingerprint`), and the never-guess-a-digit rule. Each is invisible
+> when it works and catastrophic when it does not.
+>
+> ⚠️ **Operational instruction the code cannot enforce:** store keepers must
+> STOP raising a separate material issue for lining work. Both paths together
+> deduct the same drum twice. The SK issue form still exists for everything
+> that is not lining material.
+
 > **Updated 2026-08-28 — Phase 9 slice 9e (`feat/phase9-analytics`).**
 > Baselines move to **service tests 2,052** (+29: suite CO 26, three CJ pins)
 > and **E2E 125** (+4). Legacy 599, UI math 33, nav 49, alembic head

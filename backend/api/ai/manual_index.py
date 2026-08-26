@@ -57,11 +57,17 @@ from dataclasses import dataclass
 # scoring; an alias can only change WHICH allowed chunk wins, never whether a
 # forbidden one becomes a candidate. Suite CJ asserts that directly.
 _ALIASES: dict[str, str] = {
-    # the modules, as people say them out loud
-    "manpower": "man hours labor labour",
-    "man power": "man hours labor",
-    "mph": "man hours manpower labor",
-    "labour": "labor",
+    # the modules, as people say them out loud.
+    # ⚠️ REVERSED BY THE PHASE 9f RENAME. These used to expand towards "labor",
+    # because that is what the manual called the page. It is called Manpower
+    # Tracking now, so the expansion runs the other way — and "labor" is kept
+    # as a key rather than deleted, because people who learned the old name
+    # will keep typing it for years.
+    "manpower": "man hours tracking",
+    "man power": "man hours manpower tracking",
+    "mph": "man hours manpower",
+    "labor": "manpower man hours",
+    "labour": "manpower man hours",
     "sme": "material estimator",
     "estimator": "sme material",
     "planner": "manpower man hours",
@@ -92,6 +98,14 @@ _ALIASES: dict[str, str] = {
     "permissions": "access matrix page",
     "portal": "page access",
     "shield": "surface controlled",
+    # ⚠️ ACCESS QUESTIONS MUST REACH THE ACCESS CHAPTER. "can a HOD open the
+    # manpower portal" is a question about PERMISSION, and after the 9f rename
+    # the word "manpower" appears hundreds of times inside chapter 19 — which
+    # outweighed section 2 on term frequency alone and started answering with a
+    # tab list instead of yes. These pull the access vocabulary back.
+    "open": "access allowed permission",
+    "access": "permission matrix allowed",
+    "allowed": "access permission matrix",
 }
 
 # ⚠️ A VALUE NEVER REPEATS ITS OWN KEY. "planner" -> "manpower planner ..."
