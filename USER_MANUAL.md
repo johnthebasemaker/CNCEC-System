@@ -243,7 +243,7 @@ neither.
 **Can — and this is the question people ask most:** open the **🕒 Man-Hours /
 Labor Tracking page** and the **🧪 Material Estimator**. Both are exact-locked
 to the HOD (and Admin for support); the lock is what *admits* an HOD, not what
-excludes them. That includes all twelve Man-Hours tabs — roster, timesheets,
+excludes them. That includes all thirteen Man-Hours tabs — roster, timesheets,
 estimator, variance, scorecard, employee-wise, the four execution views, the
 Manpower Planner and the SME Session Plan (§19).
 
@@ -4129,9 +4129,9 @@ The SME does **not** issue stock itself. Day-to-day consumption is entered on th
 
 Man-Hours tracks **labor** the way the Material Estimator tracks material: log who worked, where, and for how long; record SQM produced; define the **required** man-hours for a scope; then compare **estimated vs actual** to surface over-runs. It is fully **site-scoped** and **isolated** — it reads the Material Estimator's Equipment / System-Code / Location lists for its dropdowns without ever changing them, and writes only to its own man-hours records. Nothing here touches inventory, the end-of-day path, or the SME data.
 
-## 19.2 Tabs — all twelve
+## 19.2 Tabs — all thirteen
 
-The page has **twelve** tabs. Only about six fit across a laptop screen; the
+The page has **thirteen** tabs. Only about six fit across a laptop screen; the
 rest are reachable through the **"…"** button at the end of the tab bar, or by
 adding `?tab=` to the address (`/manhours?tab=planner`, `?tab=session`).
 
@@ -4284,6 +4284,10 @@ this rule can still be reconciled.
 ### 19.2.12 🔗 SME Session
 The SME planning session costed in labour — see §19.5.
 
+### 19.2.13 📈 Efficiency by Day
+How much manpower a job actually took, day by day — see §19.6. This is where
+you compare one piece of equipment against another.
+
 ## 19.3 Loading an attendance file in bulk
 
 Attendance is normally uploaded through the Man-Hours page itself, which is the
@@ -4380,6 +4384,70 @@ only. **PDF** prints all of it.
 # 20. Auditor (View-Only) Manual
 
 *Added 2026-08-03.*
+
+## 19.6 📈 Efficiency by Day
+
+**Where:** Man-Hours → **Efficiency by Day**.
+
+Answers the question the rest of the portal cannot: *for the same lining system,
+how much manpower went into Equipment A against Equipment B?*
+
+### 19.6.1 Why man-hours per m², and not hours
+
+A 400 m² tank will always show more hours than a 40 m² vessel. That says nothing
+about how well either was done. **Man-hours per square metre** is the only figure
+on this page that survives a change of size, which is what makes two jobs
+comparable at all.
+
+The cards at the top give you that number per job, **best first**. The chart is
+there to show you how it got there.
+
+### 19.6.2 ⚠️ The line is the RUNNING figure, not the day's
+
+The bars are the hours booked each day. The line is **cumulative** — all the
+hours so far divided by all the area so far.
+
+That matters, and it is the easiest thing on the page to misread. A day-by-day
+figure swings far too hard to follow, and on a day with no area it does not
+exist at all. The running figure settles as a job goes on, and it is the number
+you would quote in a meeting.
+
+It also means **setup is included**. A tank that reads 6.6 MH/m² after a
+fortnight of scaffolding is telling you what the job really cost. Its good days
+might read 2.2 on their own — that is the same tank, with the setup left out.
+
+### 19.6.3 ⚠️ Days with hours and no area
+
+Mobilisation, scaffolding, curing and inspection all book hours against zero
+square metres. On those days:
+
+- **the line breaks.** There is no area to divide by, so there is no figure. A
+  zero would read as "this crew achieved nothing per metre", which is a claim
+  about them rather than about the day.
+- **the hours still count** towards the running figure. They are part of what
+  the job cost.
+- **the day is listed underneath**, with whatever the timekeeper wrote in the
+  Remarks box on the timesheet.
+
+⚠️ Where nothing was written, the table says **"no reason recorded"**. The app
+does not guess at "scaffolding" — only the person who was there can say, and a
+guess in that column would become the record.
+
+### 19.6.4 Comparing across lining systems
+
+If your selection covers more than one lining system, the page **warns you**. A
+tile lining and a coat are different work with different benchmarks, so their
+man-hours per m² are not comparable — filter to one system to compare equipment
+against equipment.
+
+It still draws the chart. You may have asked for exactly that view, and refusing
+to show it would teach nothing.
+
+### 19.6.5 If the chart is empty
+
+It fills in from two places: the **Daily Timesheet** (hours) and the team **SQM**
+recorded against a day's work. A site that has entered neither will see a
+sentence saying so, not a broken chart.
 
 ## 20.1 What the Auditor role is for
 

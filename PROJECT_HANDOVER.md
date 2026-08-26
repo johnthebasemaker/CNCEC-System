@@ -706,6 +706,44 @@ of each kind.
 
 ## PRESENT — current state and baselines
 
+> **Updated 2026-08-28 — Phase 9 slice 9e (`feat/phase9-analytics`).**
+> Baselines move to **service tests 2,052** (+29: suite CO 26, three CJ pins)
+> and **E2E 125** (+4). Legacy 599, UI math 33, nav 49, alembic head
+> **`a2c9f5e81b43`** UNCHANGED — this slice adds no table and no column.
+>
+> * ⚠️ **THE CHART'S LINE IS CUMULATIVE, AND THERE ARE TWO DIVISIONS BY
+>   ZERO, NOT ONE** (ruling Q11/Q12). `sqm == 0` on a day kills the DAILY
+>   ratio; `cum_sqm == 0` so far kills the RUNNING one for everybody. A day can
+>   fail the first and pass the second. Collapsing them loses the distinction
+>   between "no area today" and "this job has produced nothing yet", and the
+>   second is a real gap at the start of every job.
+>
+> * ⚠️ **A ZERO-AREA DAY IS A GAP, NEVER A ZERO, AND THE LINE IS NOT
+>   BRIDGED.** `connectNulls={false}` is load-bearing: zero reads as "this crew
+>   achieved nothing per metre" (a claim about them), and bridging draws a
+>   number that does not exist. The hours still count towards the running
+>   figure — they are part of what the job cost.
+>
+> * ⚠️ **THE REASON IS READ FROM `mh_timesheets.Remarks`, NEVER INVENTED.**
+>   There is no mobilisation/scaffolding/curing taxonomy in this database.
+>   Where nothing was written the UI says "no reason recorded", which is
+>   actionable; a guess would become the record.
+>
+> * **MH/m² IS THE NORMALISATION** the operator asked for — a 400 m² tank and a
+>   40 m² vessel are comparable on it and on nothing else. The KPI cards lead
+>   best-first, so the answer is readable before the chart is interpreted.
+>
+> ⚠️ **`efficiency-chart.spec.ts` DEACTIVATES the employees it seeds.** Eight
+> active masons change `roster.In_Scope`, `Days_With_Current_Roster` and the
+> hire advice for every planner spec that runs after it — the same
+> cross-spec interference class as 9a's WBS gate and 9d's recipe seed.
+> `planner.roster()` counts only active rows, which is why deactivating is what
+> actually removes them from the arithmetic.
+>
+> ⚠️ **CJ-04 CAUGHT THE 13th TAB, which is what it is for.** It counts tabs in
+> `ManHoursPage.tsx` and requires §19 to document that many. Adding the tab
+> turned it red before any human noticed the manual was short.
+
 > **Updated 2026-08-27 — Phase 9 slice 9d (`feat/phase9-ocr-workflow`).**
 > Baselines move to **service tests 2,018** (+48, suite CN) and **E2E 121**
 > (+6); legacy 599, UI math 33, nav 49, alembic head **`a2c9f5e81b43`**.

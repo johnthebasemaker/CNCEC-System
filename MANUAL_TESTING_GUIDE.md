@@ -2603,6 +2603,91 @@ sit resident beside the first.
 
 ---
 
+## 14r. Efficiency by day (Phase 9 · slice 9e)
+
+**Where:** Man-Hours → **Efficiency by Day** (or `/manhours?tab=efficiency`).
+
+**TC-EFF-01** — HOD and Admin only. A supervisor, store keeper or logistics
+account gets a 403 from `/mh/analytics/daily`; the Man-Hours portal is
+exact-locked and the new route inherits that.
+
+### 14r.1 The comparison, before the chart
+
+**TC-EFF-02** — the cards at the top read **man-hours per m² per job, best
+first**. That is the operator's actual question — which tank cost more manpower
+per metre — and it must be answerable without interpreting a single bar.
+
+**TC-EFF-03** — a 400 m² tank and a 40 m² vessel are comparable on this figure
+and on nothing else. Check that a job with **more hours** can still show a
+**better** MH/m².
+
+### 14r.2 ⚠️ The line is the RUNNING figure
+
+**TC-EFF-04** — the page says so in words. This is the most misreadable thing on
+the screen: a reader who takes 6.6 for one day's performance draws the wrong
+conclusion.
+
+**TC-EFF-05** — seed a job with two scaffolding days (hours, no area) then a
+productive day. The productive day's own ratio might be 2.2 while the running
+figure reads 6.6. **Both are right.** The running one includes the setup, which
+is what the job actually cost.
+
+**TC-EFF-06** — the running figure is *cumulative hours ÷ cumulative area*,
+never the average of the daily ratios. Averaging would weight a 20 m² day the
+same as a 40 m² one.
+
+### 14r.3 ⚠️ Days with hours and no area
+
+**TC-EFF-07** — on such a day the **line breaks**. It must not be drawn as zero
+and must not be bridged: zero reads as "this crew achieved nothing per metre",
+and bridging draws a number that does not exist.
+
+**TC-EFF-08** — the hours still count towards the running figure. They are part
+of what the job cost.
+
+**TC-EFF-09** — the day appears in **Days with hours but no area** underneath,
+carrying whatever the timekeeper wrote in the timesheet Remarks box.
+
+**TC-EFF-10** — ⚠️ leave the Remarks blank on such a day. The table must say
+**"no reason recorded"**. It must NOT say mobilisation, scaffolding or curing —
+the app has no such field, and a guess in that column becomes the record.
+
+**TC-EFF-11** — a warning at the top counts the unexplained days, so a
+fortnight of them is not something you have to notice.
+
+**TC-EFF-12** — a day with **neither** hours nor area is idle, not a gap. It
+carries no reason, because there is nothing to explain about a day nobody
+worked.
+
+### 14r.4 Two divisions by zero, not one
+
+**TC-EFF-13** — before the **first** square metre of a job, the running figure is
+undefined too, so the line has a genuine gap at the start. That is a week of
+mobilisation showing up as what it was.
+
+**TC-EFF-14** — once any area exists, the running figure is defined on every
+later day, including days that produced none.
+
+### 14r.5 Selection and guards
+
+**TC-EFF-15** — select two lining systems. A **warning** appears: a tile lining
+and a coat are different work, so their man-hours per m² are not comparable. It
+still draws the chart — you may have asked for exactly that view.
+
+**TC-EFF-16** — the equipment picker offers only tags that **have hours**. A tag
+with none produces an empty chart and a shrug.
+
+**TC-EFF-17** — every calendar day between the first and last observation shows,
+including quiet ones. An axis that skipped them would compress a fortnight of
+drift into what looks like a steady run.
+
+**TC-EFF-18** — on a site with no timesheets the page shows a **sentence**, not a
+broken chart. Both source tables start empty, so this is the first thing most
+sites will see.
+
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

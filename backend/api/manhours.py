@@ -25,7 +25,8 @@ import datetime as _dt
 import io
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import (APIRouter, Body, Depends, File, HTTPException, Query,
+                     UploadFile)
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import require_roles, resolve_site_param, site_scope
 from .db import get_session
+from .services import mh_analytics as mh_an
 from .services.ledger import _MD, write_audit
 
 employees_t = _MD.tables["mh_employees"]
@@ -1654,3 +1656,39 @@ async def mh_export(key: str, format: str = "xlsx", site_id: Optional[str] = Non
     return StreamingResponse(io.BytesIO(data), media_type=media,
                              headers={"Content-Disposition":
                                       f'attachment; filename="mh-{key}.{fmt}"'})
+
+
+# ── Phase 9e: date-wise efficiency ───────────────────────────────────────────
+@router.get("/analytics/scope",
+            summary="Equipment and systems that have timesheet hours")
+async def analytics_scope(site_id: Optional[str] = None,
+                          user: dict = Depends(require_roles("hod")),
+                          session: AsyncSession = Depends(get_session)):
+    return await mh_an.scope_options(session,
+                                     site_id=resolve_site_param(user, site_id))
+
+
+@router.get("/analytics/daily",
+            summary="Man-hours per m² over time, per equipment")
+async def analytics_daily(
+    system_code: Optional[str] = Query(None),
+    equipment: Optional[list[str]] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    site_id: Optional[str] = None,
+    user: dict = Depends(require_roles("hod")),
+    session: AsyncSession = Depends(get_session),
+):
+    """The operator's question: how much manpower went into Equipment A against
+    Equipment B on the same lining system?
+
+    ⚠️ THE LINE IS CUMULATIVE, NOT DAILY (ruling Q11). See
+    `services/mh_analytics` for why a per-day ratio is undefined on every
+    mobilisation, scaffolding and curing day, and misleading on the rest.
+    """
+    return await mh_an.daily_efficiency(
+        session, site_id=resolve_site_param(user, site_id),
+        system_code=(system_code or "").strip() or None,
+        equipment=[e for e in (equipment or []) if e.strip()] or None,
+        date_from=(date_from or "").strip() or None,
+        date_to=(date_to or "").strip() or None)

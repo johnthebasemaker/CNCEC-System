@@ -293,6 +293,26 @@ refusals: unknown sheet, wrong site, already filed, stale fingerprint) ·
   falling back to the QR quad, then to "no crop" — `X-Crop` says which.
 - **Cloud seam**: `client.vision_json()` + `GI_AI_VISION_PROVIDER`.
 
+### 4e. Efficiency over time (Phase 9e, `services/mh_analytics.py`)
+
+`GET /mh/analytics/daily` + `/scope` — HOD/Admin, inheriting the Man-Hours lock.
+Reads `mh_timesheets` (hours, remarks) and `mh_production` (SQM). No migration:
+both tables already carry `Work_Date`, `Equipment_Tag`, `System_Code`.
+
+- ⚠️ **Two divisions by zero.** `sqm == 0` → `daily_mh_per_sqm = null`;
+  `cum_sqm == 0` → `cum_mh_per_sqm = null` as well. A day can fail the first
+  and pass the second.
+- ⚠️ **`gap` vs `idle`.** Hours with no area is a gap (ruling Q12, carries a
+  reason); neither hours nor area is idle. They look identical on a chart and
+  mean opposite things.
+- ⚠️ **The reason is `mh_timesheets.Remarks`, verbatim.** No taxonomy is
+  inferred.
+- Every calendar day between the first and last observation is emitted; the
+  window is the OBSERVED range, not the requested one. `_date_span` caps at 730
+  days so one typo'd year cannot ask a browser for 700,000 bars.
+- Mixed lining systems WARN rather than refuse — the HOD may have wanted that
+  view.
+
 ## 5. Frontend map (`frontend/src/`)
 
 React Router routes in `App.tsx`; **`config/nav.tsx` is the single
