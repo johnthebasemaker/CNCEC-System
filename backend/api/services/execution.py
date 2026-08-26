@@ -1,34 +1,60 @@
 """
-backend/api/services/execution.py — Phase 5: the consumption workflow.
+backend/api/services/execution.py — the consumption workflow. PAPER FIRST.
 
-    DRAFT_SK ─┐
-              ├─→ PENDING_SUPERVISOR ─→ PENDING_HOD ─→ APPROVED
-    (bypass) ─┘                                     └─→ REJECTED
+    DRAFT_SUPERVISOR ─→ PENDING_SK ─→ PENDING_HOD ─→ APPROVED
+                                                  └─→ REJECTED (terminal)
 
-Three people, three different pieces of knowledge, and none of them holds all
-of it:
+⚠️ THE DIRECTION REVERSED IN PHASE 9d, AND SO DID WHO MAY EDIT A NUMBER.
+Phase 5 ran SK → supervisor → HOD and forbade the supervisor from touching a
+material line, on the reasoning that "a supervisor whose numbers look bad has
+both the motive and the opportunity to adjust the consumption they are being
+measured against". That reasoning has not stopped being true. What changed is
+where the record starts: the supervisor fills a printed form in the field and
+photographs it, so they now AUTHOR the quantities and the store keeper VERIFIES
+them.
 
-  * the STORE KEEPER knows what physically left the store — materials and lots,
-    against an equipment tag. They do not know what area it covered.
-  * the SUPERVISOR knows the sub-activity, the area actually done, and who did
-    it. They must NOT be able to edit the material lines: the store keeper
-    counted those, and a supervisor whose numbers look bad has both the motive
-    and the opportunity to adjust the consumption they are being measured
-    against.
-  * the HOD can edit BOTH, and pays for it with a mandatory justification and a
-    notification back to the supervisor. An approval that silently rewrote the
-    figures would leave the supervisor answering for numbers they never typed.
+THE REPLACEMENT CONTROL IS FOUR LAYERS, NOT ONE. The operator asked for the
+SK's edits in red so an HOD can see the store keeper altered the supervisor's
+claim. That is half of it. Nothing in that scheme shows what the SUPERVISOR
+changed from what the camera read — so a supervisor could overwrite the
+machine's reading of their own handwriting and no one could tell. Every material
+line therefore carries:
 
-⚠️ THE MANPOWER-ONLY BYPASS IS A SECOND FRONT DOOR, NOT AN EXCEPTION.
-Blasting and buffing consume no Surface Shield, so there is no material for a
-store keeper to record and no draft for them to raise. A supervisor opens those
-entries directly at PENDING_SUPERVISOR. Modelling it as "an SK draft with zero
-material lines" would put a store keeper's signature on a step nobody
-performed, and their queue would fill with drafts they cannot action.
+    OCR_Qty          what the camera saw          grey    never editable
+    Supervisor_Qty   what the supervisor filed    amber   when != OCR_Qty
+    SK_Qty           what the store keeper set    red     when != Supervisor_Qty
+    Actual_Qty       what the HOD settled         purple  when != SK_Qty
 
-⚠️ APPROVAL IS WHAT MOVES STOCK. Nothing before PENDING_HOD → APPROVED deducts
-a quantity, which is what makes an HOD edit safe: they are correcting a
-proposal, not reversing a posting.
+Four numbers, four owners, four timestamps. The colour is the UI's business;
+the chain is this module's.
+
+⚠️ APPROVAL NOW MOVES STOCK, WHICH IT NEVER DID BEFORE (ruling Q1-b).
+Phase 5's `post_progress` posted AREA to `sme_sqm_progress` and nothing else;
+material left the shelf on the separate `pending_issues → consumption` path.
+From 9d this entry is the ONLY way lining material is deducted, and
+`post_stock()` writes the `consumption` rows. `Consumption_ID` per line makes
+that idempotent: a second approval finds the row already posted rather than
+deducting twice. That is the single highest-severity risk in this phase and the
+reason the guard is a stored id rather than a status check.
+
+⚠️ THE QSEP GATE BLOCKS BY DEFAULT AND CAN BE OVERRIDDEN (ruling Q2-D).
+MTC and QC clearance used to be enforced before material left the store. On a
+paper-first flow the drum was emptied days ago, so a hard block prevents
+nothing — it only strands the record, and stock then silently overstates. The
+gate therefore refuses by default, and an HOD may override it explicitly at the
+price of a written reason and a notification to the Head of Qualities. An
+uncertified application becomes a visible, attributed exception instead of an
+invisible one.
+
+⚠️ REJECTION IS TERMINAL AND THERE IS NO BOUNCE-BACK (ruling Q4). An entry that
+is wrong is rejected and raised again from a fresh form. Bounce-back loops were
+considered and declined: they multiply the states without adding a decision
+anybody actually makes, and the paper has to be re-photographed either way.
+
+⚠️ THE MANPOWER-ONLY BYPASS SURVIVES. Blasting and buffing consume no Surface
+Shield, so there is no form to fill and no material to verify. A supervisor
+opens those entries directly and they skip the SK step entirely — a store
+keeper's queue must not fill with entries that have nothing for them to check.
 """
 from __future__ import annotations
 
@@ -49,21 +75,38 @@ norm_t = _MD.tables["sme_manpower_norm"]
 recipe_t = _MD.tables["sme_recipe"]
 prep_t = _MD.tables["sme_surface_prep_progress"]
 sqm_progress_t = _MD.tables["sme_sqm_progress"]
+# Phase 9d: approval writes here now. See post_stock().
+cons_t = _MD.tables["consumption"]
 
-DRAFT_SK = "DRAFT_SK"
-PENDING_SUPERVISOR = "PENDING_SUPERVISOR"
+DRAFT_SUPERVISOR = "DRAFT_SUPERVISOR"
+PENDING_SK = "PENDING_SK"
 PENDING_HOD = "PENDING_HOD"
 APPROVED = "APPROVED"
 REJECTED = "REJECTED"
 
+# ⚠️ RETIRED, NOT DELETED (ruling Q3). No new entry ever enters these, and the
+# 9d migration rejected any that were sitting in them. The names stay so that a
+# historical row still renders with a label instead of a raw string, and so
+# that `assert_transition` can give it a reason rather than a lookup miss.
+DRAFT_SK = "DRAFT_SK"
+PENDING_SUPERVISOR = "PENDING_SUPERVISOR"
+RETIRED_STATES = frozenset({DRAFT_SK, PENDING_SUPERVISOR})
+
 # Every legal move. Written as data so an illegal one is a lookup miss with a
 # readable message, not an `if` somebody forgets to add.
+#
+# ⚠️ NOTHING LEAVES REJECTED. Ruling Q4: a wrong entry is rejected and raised
+# again from a fresh form. There is deliberately no edge back to an earlier
+# state — see the module docstring.
 TRANSITIONS = {
-    DRAFT_SK: {PENDING_SUPERVISOR},
-    PENDING_SUPERVISOR: {PENDING_HOD},
+    DRAFT_SUPERVISOR: {PENDING_SK, PENDING_HOD, REJECTED},
+    PENDING_SK: {PENDING_HOD, REJECTED},
     PENDING_HOD: {APPROVED, REJECTED},
     APPROVED: set(),
     REJECTED: set(),
+    # Drained. Present so a stranded historical row gets an explanation.
+    DRAFT_SK: set(),
+    PENDING_SUPERVISOR: set(),
 }
 
 
@@ -72,10 +115,16 @@ def _now() -> _dt.datetime:
 
 
 def assert_transition(current: str, target: str) -> None:
-    if target not in TRANSITIONS.get(current, set()):
-        raise HTTPException(409, f"an entry in {current} cannot move to "
-                                 f"{target} (allowed: "
-                                 f"{sorted(TRANSITIONS.get(current, set())) or 'nothing — it is final'})")
+    if target in TRANSITIONS.get(current, set()):
+        return
+    if current in RETIRED_STATES:
+        raise HTTPException(
+            409, f"{current} belongs to the store-keeper-first workflow, which "
+                 f"was replaced on 2026-08-27. This entry cannot be advanced; "
+                 f"raise a new one from a printed consumption form.")
+    raise HTTPException(409, f"an entry in {current} cannot move to "
+                             f"{target} (allowed: "
+                             f"{sorted(TRANSITIONS.get(current, set())) or 'nothing — it is final'})")
 
 
 async def is_manpower_only(session: AsyncSession, code: str, esc: str) -> bool:
@@ -208,13 +257,16 @@ async def get_entry(session: AsyncSession, entry_id: int,
 async def open_entry(session: AsyncSession, *, username: str, role: str,
                      site_id: str, work_date: str, equipment_tag: str,
                      code: str, esc: str, variant: str = "",
-                     materials: list[dict] | None = None) -> dict:
-    """Create an entry.
+                     materials: list[dict] | None = None,
+                     origin: str = "manual", form_uuid: str | None = None
+                     ) -> dict:
+    """Create an entry at DRAFT_SUPERVISOR.
 
-    A store keeper creates it at DRAFT_SK with the material lines. A supervisor
-    may create it directly at PENDING_SUPERVISOR — but ONLY for a
-    manpower-only activity, because an activity that consumes Surface Shield
-    has a physical draw that a store keeper has to have counted.
+    ⚠️ THE SUPERVISOR OPENS IT NOW, not the store keeper. The record starts
+    with the paper the supervisor filled in, so there is no earlier step for
+    anybody else to perform. An SK or HOD may still open one — somebody has to
+    be able to enter a form for a supervisor who is off site — and `role` is
+    recorded so that a stand-in is visible rather than implied.
     """
     code = (code or "").strip()
     esc = (esc or "").strip()
@@ -224,90 +276,82 @@ async def open_entry(session: AsyncSession, *, username: str, role: str,
         raise HTTPException(422, "Equipment_Tag_No is required")
 
     manpower_only = await is_manpower_only(session, code, esc)
-    if role == "supervisor":
-        if not manpower_only:
-            raise HTTPException(
-                409, f"{esc} consumes materials, so a store keeper has to "
-                     f"record the physical draw first. The direct route is "
-                     f"only for labour-only activities such as blasting.")
-        status, sk_user, sk_at = PENDING_SUPERVISOR, None, None
-    else:
-        status, sk_user, sk_at = DRAFT_SK, username, _now()
-
     entry_no = await next_entry_no(session, site_id)
     new_id = (await session.execute(insert(entry_t).values(
         Site_ID=site_id, Entry_No=entry_no, Work_Date=str(work_date)[:10],
         Equipment_Tag_No=equipment_tag.strip(), Lining_System_Code=code,
         Execution_Sub_Activity_Code=esc, Variant_Key=(variant or "").strip(),
-        status=status, sk_username=sk_user, sk_submitted_at=sk_at,
+        status=DRAFT_SUPERVISOR, supervisor_username=username,
+        Entry_Origin=origin, Form_UUID=form_uuid,
         created_by=username).returning(entry_t.c["id"]))).scalar_one()
 
-    for m in (materials or []):
+    for i, m in enumerate(materials or []):
+        qty = float(m.get("Actual_Qty") or 0.0)
         await session.execute(insert(mat_t).values(
             Entry_ID=new_id, Material_Code=str(m["Material_Code"]).strip(),
             SAP_Code=str(m.get("SAP_Code") or "").strip(),
-            Actual_Qty=float(m.get("Actual_Qty") or 0.0),
-            Original_Qty=float(m.get("Actual_Qty") or 0.0),
+            Actual_Qty=qty, Original_Qty=qty,
+            # The grey layer. Present only for a scanned entry — a hand-typed
+            # one leaves it null, and `Entry_Origin` is what says which.
+            OCR_Qty=m.get("OCR_Qty"), OCR_Qty_Text=m.get("OCR_Qty_Text"),
+            OCR_Lot_Text=m.get("OCR_Lot_Text"),
+            Row_Index=m.get("Row_Index", i),
             UOM=m.get("UOM"), Lot_No=m.get("Lot_No")))
 
     await write_audit(session, username, "SME_EXEC_OPEN", "sme_execution_entry",
                       f"{entry_no} {equipment_tag}/{code or '(none)'}/{esc} "
-                      f"status={status}")
-    if status == DRAFT_SK:
-        await dispatch(session, event_key="sme_exec_drafted",
-                       title="Execution entry raised",
-                       body=f"{entry_no}: {equipment_tag} {esc} awaiting your "
-                            f"area and crew figures.",
-                       recipient_role="supervisor", recipient_site=site_id,
-                       link_page="/supervisor", related_table="sme_execution_entry",
-                       related_ref=str(new_id), created_by=username)
-    return {"id": new_id, "Entry_No": entry_no, "status": status,
+                      f"origin={origin}"
+                      + (f" form={form_uuid}" if form_uuid else ""))
+    return {"id": new_id, "Entry_No": entry_no, "status": DRAFT_SUPERVISOR,
             "manpower_only": manpower_only}
 
 
-async def sk_submit(session: AsyncSession, *, username: str, entry_id: int,
-                    site_id: Optional[str]) -> dict:
-    entry = await get_entry(session, entry_id, site_id)
-    assert_transition(entry["status"], PENDING_SUPERVISOR)
-    if not entry["materials"]:
-        raise HTTPException(422, "record at least one material line, or open "
-                                 "the entry as a labour-only activity")
-    await session.execute(update(entry_t).where(entry_t.c["id"] == entry_id)
-                          .values(status=PENDING_SUPERVISOR,
-                                  sk_username=entry.get("sk_username") or username,
-                                  sk_submitted_at=_now(), updated_at=_now()))
-    await write_audit(session, username, "SME_EXEC_SK_SUBMIT",
-                      "sme_execution_entry", entry["Entry_No"])
-    await dispatch(session, event_key="sme_exec_to_supervisor",
-                   title="Execution entry ready for your figures",
-                   body=f"{entry['Entry_No']}: {entry['Equipment_Tag_No']} "
-                        f"{entry['Execution_Sub_Activity_Code']}.",
-                   recipient_role="supervisor",
-                   recipient_site=entry["Site_ID"], link_page="/supervisor",
-                   related_table="sme_execution_entry",
-                   related_ref=str(entry_id), created_by=username)
-    return {"id": entry_id, "status": PENDING_SUPERVISOR}
+def _plausibility(qty: float, bench_per_sqm: Optional[float],
+                  sqm: float) -> Optional[str]:
+    """Whether a quantity is credible for the area reported.
+
+    ⚠️ A GUARD AGAINST MISREAD DIGITS, NOT AGAINST PEOPLE. `4` read as `9`,
+    `1` as `7`, or a lost decimal point are the failure modes of a 7B vision
+    model on handwriting, and every one of them lands an order of magnitude
+    away from the recipe. Real over-use rarely does. The flag is advisory and
+    NEVER blocks: an unusual day is a thing that happens, and refusing it would
+    teach people to write the expected number.
+    """
+    if not bench_per_sqm or bench_per_sqm <= 0 or sqm <= 0:
+        return None
+    expected = bench_per_sqm * sqm
+    if expected <= 0:
+        return None
+    ratio = qty / expected
+    if ratio >= 5.0:
+        return f"{ratio:.1f}x the benchmark ({expected:.2f} expected)"
+    if qty > 0 and ratio <= 0.2:
+        return f"{ratio:.2f}x the benchmark ({expected:.2f} expected)"
+    return None
 
 
 async def supervisor_submit(session: AsyncSession, *, username: str,
                             entry_id: int, site_id: Optional[str],
                             actual_sqm: float, manpower: list[dict],
                             material_reason: str, manpower_reason: str,
+                            materials: list[dict] | None = None,
                             esc: Optional[str] = None,
                             variant: Optional[str] = None) -> dict:
-    """Report the area and the crew, and snapshot the benchmark.
+    """The supervisor files the form: area, crew, quantities and lots.
 
-    ⚠️ BOTH REASONS ARE MANDATORY, whatever the variance (operator ruling). A
-    reason demanded only past a threshold trains people to aim just under it,
-    and a zero-variance entry carrying a stated reason is evidence the
-    supervisor actually looked at the comparison.
+    ⚠️ THIS NOW ACCEPTS MATERIAL FIGURES, which Phase 5 explicitly refused. The
+    supervisor is the author of the paper, so refusing their numbers would mean
+    refusing the record. What replaces the old control is that their figure is
+    kept as `Supervisor_Qty` FOREVER, beside what the camera read — an HOD can
+    see any gap between the two, which is the thing the Phase 5 rule was
+    actually protecting against.
 
-    ⚠️ The supervisor may change the SUB-ACTIVITY but never the material lines.
-    They are measured against that consumption; letting them edit it would let
-    a bad number be tidied by the person it reflects on.
+    ⚠️ BOTH REASONS STAY MANDATORY, whatever the variance (Phase 5 ruling, still
+    good). A reason demanded only past a threshold trains people to aim just
+    under it, and a zero-variance entry carrying a stated reason is evidence
+    the supervisor actually looked at the comparison.
     """
     entry = await get_entry(session, entry_id, site_id)
-    assert_transition(entry["status"], PENDING_HOD)
     if float(actual_sqm or 0) <= 0:
         raise HTTPException(422, "actual SQM must be greater than zero")
     if not (material_reason or "").strip():
@@ -324,6 +368,13 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
                else entry.get("Variant_Key") or "").strip()
     code = entry["Lining_System_Code"]
 
+    # ⚠️ WHERE IT GOES NEXT DEPENDS ON WHETHER THERE IS ANYTHING TO VERIFY.
+    # Blasting and buffing consume no Surface Shield, so a store keeper has
+    # nothing to check and their queue must not fill with entries they cannot
+    # action. Those skip straight to the HOD.
+    target = PENDING_SK if entry["materials"] else PENDING_HOD
+    assert_transition(entry["status"], target)
+
     # ── the benchmark snapshot ──────────────────────────────────────────────
     norm = (await session.execute(
         select(norm_t).where(
@@ -331,9 +382,6 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
             norm_t.c["Execution_Sub_Activity_Code"] == esc,
             norm_t.c["Variant_Key"] == variant))).mappings().first()
     if norm is None:
-        # Fall back to the sub-activity alone: a system-agnostic entry stores
-        # code '' while the blasting benchmark is filed under the workbook's
-        # 'ESC1'. Matching on the sub-activity is what bridges the two.
         norm = (await session.execute(
             select(norm_t).where(
                 norm_t.c["Execution_Sub_Activity_Code"] == esc,
@@ -350,7 +398,8 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
             "Bench_Productivity_Per_Shift": norm["Standard_Productivity_Per_Shift"],
             "Bench_SQM_Per_Hour_Per_Person": norm["SQM_Per_Hour_Per_Person"],
         }
-    # Snapshot the recipe side too, per material line.
+
+    by_id = {int(m["id"]): m for m in (materials or []) if m.get("id") is not None}
     for m in entry["materials"]:
         per = (await session.execute(
             select(recipe_t.c["For_1_SQM"]).where(
@@ -362,11 +411,19 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
             per = (await session.execute(
                 select(recipe_t.c["For_1_SQM"]).where(
                     recipe_t.c["Lining_System_Code"] == code,
-                    recipe_t.c["Execution_Sub_Activity_Code"] == esc,
                     recipe_t.c["Material_Code"] == m["Material_Code"])
                 .limit(1))).scalar()
+        sent = by_id.get(int(m["id"]), {})
+        qty = (float(sent["Actual_Qty"]) if sent.get("Actual_Qty") is not None
+               else float(m["Actual_Qty"] or 0.0))
+        lot = sent.get("Lot_No", m.get("Lot_No"))
         await session.execute(update(mat_t).where(mat_t.c["id"] == m["id"])
-                              .values(Bench_For_1_SQM=per))
+                              .values(Bench_For_1_SQM=per,
+                                      Actual_Qty=qty,
+                                      Supervisor_Qty=qty,
+                                      Lot_No=(str(lot).strip() if lot else None),
+                                      Plausibility_Flag=_plausibility(
+                                          qty, per, float(actual_sqm))))
 
     await session.execute(delete(man_t).where(man_t.c["Entry_ID"] == entry_id))
     bench_crew = {}
@@ -386,7 +443,7 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
             Original_Headcount=head, Original_Hours=hours))
 
     await session.execute(update(entry_t).where(entry_t.c["id"] == entry_id)
-                          .values(status=PENDING_HOD, Actual_SQM=float(actual_sqm),
+                          .values(status=target, Actual_SQM=float(actual_sqm),
                                   Execution_Sub_Activity_Code=esc,
                                   Variant_Key=variant,
                                   supervisor_username=username,
@@ -397,15 +454,114 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
                                   **snap))
     await write_audit(session, username, "SME_EXEC_SUPERVISOR_SUBMIT",
                       "sme_execution_entry",
-                      f"{entry['Entry_No']} sqm={actual_sqm} "
-                      f"norm={snap.get('Norm_ID')}")
+                      f"{entry['Entry_No']} sqm={actual_sqm} → {target}")
+    if target == PENDING_SK:
+        await dispatch(session, event_key="sme_exec_to_sk",
+                       title="Consumption entry to verify",
+                       body=f"{entry['Entry_No']}: {entry['Equipment_Tag_No']} "
+                            f"{esc}, {actual_sqm} m² — check the quantities and "
+                            f"lots against what left the store.",
+                       recipient_role="store_keeper",
+                       recipient_site=entry["Site_ID"], link_page="/execution",
+                       related_table="sme_execution_entry",
+                       related_ref=str(entry_id), created_by=username)
+    else:
+        await dispatch(session, event_key="sme_exec_to_hod",
+                       title="Execution entry awaiting approval",
+                       body=f"{entry['Entry_No']}: {entry['Equipment_Tag_No']} "
+                            f"{esc}, {actual_sqm} m² reported (labour only).",
+                       recipient_role="hod", recipient_site=entry["Site_ID"],
+                       link_page="/hod", related_table="sme_execution_entry",
+                       related_ref=str(entry_id), created_by=username)
+    return await get_entry(session, entry_id, site_id)
+
+
+async def sk_verify(session: AsyncSession, *, username: str, entry_id: int,
+                    site_id: Optional[str], materials: list[dict] | None = None,
+                    reason: str = "") -> dict:
+    """The store keeper checks the supervisor's figures against the store.
+
+    ⚠️ AN EDIT HERE IS THE POINT OF THE STEP, NOT AN EXCEPTION. The store keeper
+    knows what physically left the shelf; the supervisor knows what went onto
+    the wall. When they disagree, the store keeper's number is the one with a
+    stock movement behind it — so they may change it, and every change is kept
+    as `SK_Qty` and shown to the HOD in red.
+
+    ⚠️ AND AN EDIT COSTS A REASON. Not because the store keeper is suspected,
+    but because the HOD is about to approve a number the supervisor did not
+    write, and "the store keeper changed it" without a why is not something an
+    approver can weigh.
+    """
+    entry = await get_entry(session, entry_id, site_id)
+    assert_transition(entry["status"], PENDING_HOD)
+
+    changed: list[str] = []
+    by_id = {int(m["id"]): m for m in (materials or []) if m.get("id") is not None}
+    for row in entry["materials"]:
+        sent = by_id.get(int(row["id"]))
+        if sent is None:
+            continue
+        vals: dict = {}
+        if sent.get("Actual_Qty") is not None:
+            new_q = float(sent["Actual_Qty"])
+            if abs(new_q - float(row["Actual_Qty"] or 0)) > 1e-9:
+                changed.append(f"{row['Material_Code']} "
+                               f"{row['Actual_Qty']} → {new_q}")
+                vals.update(Actual_Qty=new_q, SK_Qty=new_q, sk_edited=True)
+            else:
+                vals["SK_Qty"] = new_q
+        if "Lot_No" in sent:
+            lot = str(sent.get("Lot_No") or "").strip() or None
+            if lot != (row.get("Lot_No") or None):
+                changed.append(f"{row['Material_Code']} lot "
+                               f"{row.get('Lot_No') or '—'} → {lot or '—'}")
+                vals.update(Lot_No=lot, sk_edited=True)
+        if vals:
+            await session.execute(update(mat_t).where(mat_t.c["id"] == row["id"])
+                                  .values(**vals))
+
+    if changed and not (reason or "").strip():
+        raise HTTPException(
+            422, "you changed " + "; ".join(changed[:3])
+                 + (" and more" if len(changed) > 3 else "")
+                 + " — say why. The HOD is about to approve a number the "
+                   "supervisor did not write.")
+
+    await session.execute(update(entry_t).where(entry_t.c["id"] == entry_id)
+                          .values(status=PENDING_HOD, sk_username=username,
+                                  sk_verified_at=_now(),
+                                  sk_edited=bool(changed),
+                                  SK_Edit_Reason=(reason.strip() if changed
+                                                  else None),
+                                  updated_at=_now()))
+    await write_audit(session, username, "SME_EXEC_SK_VERIFY",
+                      "sme_execution_entry",
+                      f"{entry['Entry_No']}"
+                      + (f" edited: {'; '.join(changed)}" if changed else " (no change)"))
     await dispatch(session, event_key="sme_exec_to_hod",
                    title="Execution entry awaiting approval",
-                   body=f"{entry['Entry_No']}: {entry['Equipment_Tag_No']} "
-                        f"{esc}, {actual_sqm} m² reported.",
+                   body=f"{entry['Entry_No']}: {entry['Equipment_Tag_No']}"
+                        + (f" — the store keeper changed {len(changed)} figure(s)"
+                           if changed else " — verified unchanged"),
+                   severity="warning" if changed else "info",
                    recipient_role="hod", recipient_site=entry["Site_ID"],
                    link_page="/hod", related_table="sme_execution_entry",
                    related_ref=str(entry_id), created_by=username)
+    if changed:
+        # The supervisor learns their figure moved BEFORE it is approved, not
+        # after — otherwise the first they hear of it is a variance report.
+        await dispatch(session, event_key="sme_exec_sk_edited",
+                       title="The store keeper changed your figures",
+                       severity="warning",
+                       body=f"{entry['Entry_No']}: {'; '.join(changed[:3])}"
+                            + (" …" if len(changed) > 3 else "")
+                            + f" — {reason.strip()[:140]}",
+                       recipient_user=entry.get("supervisor_username"),
+                       recipient_role=None if entry.get("supervisor_username")
+                       else "supervisor",
+                       recipient_site=entry["Site_ID"], link_page="/execution",
+                       related_table="sme_execution_entry",
+                       related_ref=str(entry_id), created_by=username)
     return await get_entry(session, entry_id, site_id)
 
 
@@ -482,23 +638,152 @@ async def post_progress(session: AsyncSession, entry_id: int) -> dict:
     return {"posted": "lining", "sqm": sqm}
 
 
+# ─── QSEP: the certificate gate, now with a way past it ──────────────────────
+async def qsep_status(session: AsyncSession, entry_id: int) -> dict:
+    """What would block this entry's approval, per material line.
+
+    ⚠️ REPORTS, NEVER RAISES. The HOD screen shows this BEFORE the approve
+    button is pressed, so a blocked entry is a thing you can see coming and
+    chase Logistics about — not a refusal that arrives after you have decided.
+    The blocking itself happens in `hod_decide`.
+    """
+    from . import quality
+
+    row = (await session.execute(select(entry_t)
+           .where(entry_t.c["id"] == entry_id))).mappings().first()
+    if row is None:
+        return {"blocked": [], "clear": True}
+    mats = (await session.execute(select(mat_t)
+            .where(mat_t.c["Entry_ID"] == entry_id))).mappings().all()
+
+    blocked = []
+    for m in mats:
+        sap = str(m["SAP_Code"] or "").strip()
+        qty = float(m["Actual_Qty"] or 0)
+        if not sap or qty <= 0:
+            continue
+        if not await quality.is_controlled(session, sap_code=sap):
+            continue
+        for kind, fn in (
+                ("MTC", lambda: quality.assert_mtc_for_issue(
+                    session, sap_code=sap, site_id=row["Site_ID"],
+                    actor="qsep-check")),
+                ("QC", lambda: quality.assert_qc_cleared(
+                    session, sap_code=sap, site_id=row["Site_ID"], qty=qty,
+                    lot=(m["Lot_No"] or None), actor="qsep-check"))):
+            try:
+                await fn()
+            except HTTPException as e:
+                blocked.append({"line_id": int(m["id"]),
+                                "Material_Code": m["Material_Code"],
+                                "SAP_Code": sap, "gate": kind,
+                                "Lot_No": m["Lot_No"],
+                                "detail": str(e.detail)})
+                break
+    return {"blocked": blocked, "clear": not blocked}
+
+
+async def post_stock(session: AsyncSession, entry_id: int, *,
+                     username: str) -> dict:
+    """⚠️ THIS IS WHERE LINING MATERIAL LEAVES THE SHELF (ruling Q1-b).
+
+    Until Phase 9d nothing in this module moved a quantity: `post_progress`
+    posted AREA, and material was issued on the separate
+    `pending_issues → consumption` path. From 9d this entry is the ONLY writer
+    for lining consumption, and the store keeper no longer raises a parallel
+    issue for it. Two writers would have meant two deductions for one drum.
+
+    ⚠️ IDEMPOTENT ON `Consumption_ID`, NOT ON STATUS. A status check ("only
+    post if PENDING_HOD") is a check-then-write with a window in it; a stored
+    id is a fact.
+
+    ⚠️ `Source_Ref` KEYS ON THE ENTRY'S id, NOT ITS `Entry_No`. It follows the
+    existing `SMR:<no>:<item>` shape but deliberately not its choice of key:
+    `next_entry_no` is `COUNT(*) + 1` over surviving rows, so deleting an entry
+    makes the next one REUSE its number. That is harmless while Entry_No is a
+    label — the unique constraint still rejects a live duplicate — but a
+    `consumption` row outlives the entry that produced it, and two of them
+    carrying one Source_Ref would make the ledger unreconcilable. The id is a
+    surrogate key and is never reissued. The human-readable number rides in
+    `Remarks`, where being pretty matters and being unique does not.
+
+    ⚠️ IT CALLS `ledger.post_consumption`, NOT AN INSERT OF ITS OWN. That
+    function owns FEFO lot selection, the allow-and-log over-issue warning and
+    the audit line, and a second copy here would drift from it the first time
+    any of the three changed.
+    """
+    from .ledger import post_consumption
+
+    row = (await session.execute(select(entry_t)
+           .where(entry_t.c["id"] == entry_id))).mappings().first()
+    if row is None:
+        return {"posted": 0, "lines": []}
+    mats = (await session.execute(select(mat_t)
+            .where(mat_t.c["Entry_ID"] == entry_id))).mappings().all()
+
+    posted, warnings = [], []
+    for m in mats:
+        if m["Consumption_ID"]:
+            continue                      # already posted — see the docstring
+        sap = str(m["SAP_Code"] or "").strip()
+        qty = float(m["Actual_Qty"] or 0)
+        if not sap or qty <= 0:
+            continue
+        res = await post_consumption(session, username=username, data={
+            "Date": row["Work_Date"], "SAP_Code": sap, "Quantity": qty,
+            "Site_ID": row["Site_ID"],
+            "Work_Type": row["Execution_Sub_Activity_Code"],
+            "Tank_No": row["Equipment_Tag_No"],
+            "Issued_To": row.get("supervisor_username"),
+            "Issued_By": username,
+            "Lot_Number": m["Lot_No"] or None,
+            "Remarks": f"Execution entry {row['Entry_No']}",
+            "Source_Ref": f"SME_EXEC:{row['id']}:{m['id']}",
+        })
+        cid = res.get("consumption_id")
+        await session.execute(update(mat_t).where(mat_t.c["id"] == m["id"])
+                              .values(Consumption_ID=cid))
+        # `post_consumption` does not persist Source_Ref or WBS itself — the
+        # commit path sets those afterwards, and so do we, for the same reason:
+        # the id is only known once the row exists.
+        await session.execute(update(cons_t).where(cons_t.c["id"] == cid).values(
+            Source_Ref=f"SME_EXEC:{row['id']}:{m['id']}",
+            **({"WBS": row["WBS_Number"]} if row.get("WBS_Number") else {})))
+        posted.append({"line_id": int(m["id"]), "consumption_id": cid,
+                       "SAP_Code": sap, "Quantity": qty})
+        if res.get("warning"):
+            warnings.append(res["warning"])
+
+    if posted:
+        await session.execute(update(entry_t).where(entry_t.c["id"] == entry_id)
+                              .values(Stock_Posted_At=_now()))
+    return {"posted": len(posted), "lines": posted, "warnings": warnings}
+
+
 # ─── HOD: approve (optionally correcting), or reject ─────────────────────────
 async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
                      site_id: Optional[str], approve: bool,
                      reject_reason: str = "",
                      edits: dict | None = None,
-                     justification: str = "") -> dict:
+                     justification: str = "",
+                     qsep_override: bool = False,
+                     qsep_reason: str = "") -> dict:
     """Approve or reject, with the HOD's power to correct either side.
 
-    ⚠️ AN EDIT COSTS A JUSTIFICATION AND A NOTIFICATION. The HOD may change the
-    store keeper's material quantities and the supervisor's area and crew — but
-    the moment any number differs, `justification` is required and the
-    supervisor is told what changed. Without that the supervisor is left
-    answering for figures they never entered, and the variance report shows a
-    number with no author.
+    ⚠️ AN EDIT COSTS A JUSTIFICATION AND A NOTIFICATION. The moment any number
+    differs from what the store keeper verified, `justification` is required and
+    the supervisor is told what changed. Without that the supervisor is left
+    answering for figures they never entered.
 
-    Original_* columns keep what was first written. An audit line saying "a
-    quantity changed" without saying from what is not an audit trail.
+    ⚠️ APPROVAL POSTS AREA *AND* STOCK (ruling Q1-b), in that order and inside
+    the caller's transaction, so a failure in either leaves neither.
+
+    ⚠️ THE QSEP GATE BLOCKS BY DEFAULT AND CAN BE OVERRIDDEN (ruling Q2-D). On
+    a paper-first flow the material was applied days ago, so refusing outright
+    only strands the record and lets stock overstate. `qsep_override=True`
+    demands a written reason and notifies the Head of Qualities — an
+    uncertified application becomes a visible, attributed exception rather than
+    an invisible one.
     """
     entry = await get_entry(session, entry_id, site_id)
     assert_transition(entry["status"], APPROVED if approve else REJECTED)
@@ -516,11 +801,13 @@ async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
                           "sme_execution_entry", entry["Entry_No"])
         await dispatch(session, event_key="sme_exec_rejected",
                        title="Execution entry rejected", severity="warning",
-                       body=f"{entry['Entry_No']}: {reject_reason.strip()[:180]}",
+                       body=f"{entry['Entry_No']}: {reject_reason.strip()[:180]}"
+                            " — rejection is final; raise a new entry from a "
+                            "fresh form.",
                        recipient_user=entry.get("supervisor_username"),
                        recipient_role=None if entry.get("supervisor_username")
                        else "supervisor",
-                       recipient_site=entry["Site_ID"], link_page="/supervisor",
+                       recipient_site=entry["Site_ID"], link_page="/execution",
                        related_table="sme_execution_entry",
                        related_ref=str(entry_id), created_by=username)
         return await get_entry(session, entry_id, site_id)
@@ -542,11 +829,21 @@ async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
         if row is None:
             raise HTTPException(422, f"material line {m.get('id')} is not on "
                                      f"this entry")
-        new_q = float(m.get("Actual_Qty"))
-        if abs(new_q - float(row["Actual_Qty"] or 0)) > 1e-9:
-            changed.append(f"{row['Material_Code']} {row['Actual_Qty']} → {new_q}")
+        vals: dict = {}
+        if m.get("Actual_Qty") is not None:
+            new_q = float(m["Actual_Qty"])
+            if abs(new_q - float(row["Actual_Qty"] or 0)) > 1e-9:
+                changed.append(f"{row['Material_Code']} {row['Actual_Qty']} → {new_q}")
+                vals["Actual_Qty"] = new_q
+        if "Lot_No" in m:
+            lot = str(m.get("Lot_No") or "").strip() or None
+            if lot != (row.get("Lot_No") or None):
+                changed.append(f"{row['Material_Code']} lot "
+                               f"{row.get('Lot_No') or '—'} → {lot or '—'}")
+                vals["Lot_No"] = lot
+        if vals:
             await session.execute(update(mat_t).where(mat_t.c["id"] == row["id"])
-                                  .values(Actual_Qty=new_q))
+                                  .values(**vals))
 
     for r in (edits.get("manpower") or []):
         row = next((x for x in entry["manpower"] if x["id"] == r.get("id")), None)
@@ -573,9 +870,39 @@ async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
                  + " — a justification is required, and the supervisor is "
                    "notified of it")
 
-    # ⚠️ APPROVAL IS WHERE AREA IS POSTED, and WHICH ledger it lands on is the
-    # whole point of the split. See post_progress.
+    # ── ⚠️ THE QSEP GATE, on the figures as they now stand ──────────────────
+    # Checked AFTER the edits, because an HOD correcting a lot number is the
+    # ordinary way a blocked entry becomes approvable — running it first would
+    # refuse the very fix being applied.
+    qsep = await qsep_status(session, entry_id)
+    if qsep["blocked"]:
+        if not qsep_override:
+            names = "; ".join(f"{b['Material_Code']} ({b['gate']})"
+                              for b in qsep["blocked"][:3])
+            raise HTTPException(
+                422,
+                f"{len(qsep['blocked'])} material line(s) are not cleared for "
+                f"issue: {names}"
+                + (" and more" if len(qsep["blocked"]) > 3 else "")
+                + ". The material has already been applied, so this is a "
+                  "paperwork gap rather than something you can prevent — chase "
+                  "the certificate, or approve with an override and say why. "
+                  "An override notifies the Head of Qualities.")
+        if not (qsep_reason or "").strip():
+            raise HTTPException(
+                422, "an override needs a written reason. It is what the Head "
+                     "of Qualities reads, and what an auditor sees beside an "
+                     "uncertified application.")
+        await session.execute(update(entry_t).where(entry_t.c["id"] == entry_id)
+                              .values(QSEP_Override=True,
+                                      QSEP_Override_Reason=qsep_reason.strip(),
+                                      QSEP_Override_By=username,
+                                      QSEP_Override_At=_now()))
+
+    # ⚠️ AREA, THEN STOCK. Both inside the caller's transaction.
     await post_progress(session, entry_id)
+    stock = await post_stock(session, entry_id, username=username)
+
     await session.execute(update(entry_t).where(entry_t.c["id"] == entry_id)
                           .values(status=APPROVED, hod_username=username,
                                   hod_decided_at=_now(),
@@ -585,11 +912,25 @@ async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
                                   updated_at=_now()))
     await write_audit(session, username, "SME_EXEC_APPROVE",
                       "sme_execution_entry",
-                      f"{entry['Entry_No']}"
-                      + (f" edited: {'; '.join(changed)}" if changed else ""))
+                      f"{entry['Entry_No']} stock_lines={stock['posted']}"
+                      + (f" edited: {'; '.join(changed)}" if changed else "")
+                      + (" QSEP_OVERRIDE" if qsep["blocked"] else ""))
+
+    if qsep["blocked"]:
+        # ⚠️ THE HEAD OF QUALITIES IS TOLD, EVERY TIME. An override that only
+        # appeared in an audit table would be an exception nobody reads.
+        await dispatch(session, event_key="sme_exec_qsep_override",
+                       title="Uncertified material approved on an execution entry",
+                       severity="critical",
+                       body=f"{entry['Entry_No']} at {entry['Site_ID']}: "
+                            + "; ".join(f"{b['Material_Code']} ({b['gate']})"
+                                        for b in qsep["blocked"][:3])
+                            + f" — {qsep_reason.strip()[:160]}",
+                       recipient_role="qc_hod", link_page="/qc-hod",
+                       related_table="sme_execution_entry",
+                       related_ref=str(entry_id), created_by=username)
 
     if changed:
-        # The supervisor is told WHAT changed and WHY, not merely that it did.
         await dispatch(session, event_key="sme_exec_hod_edited",
                        title="Your execution entry was corrected",
                        severity="warning",
@@ -599,10 +940,12 @@ async def hod_decide(session: AsyncSession, *, username: str, entry_id: int,
                        recipient_user=entry.get("supervisor_username"),
                        recipient_role=None if entry.get("supervisor_username")
                        else "supervisor",
-                       recipient_site=entry["Site_ID"], link_page="/supervisor",
+                       recipient_site=entry["Site_ID"], link_page="/execution",
                        related_table="sme_execution_entry",
                        related_ref=str(entry_id), created_by=username)
-    return await get_entry(session, entry_id, site_id)
+    out = await get_entry(session, entry_id, site_id)
+    out["stock"] = stock
+    return out
 
 
 async def list_entries(session: AsyncSession, *, site_id: Optional[str],

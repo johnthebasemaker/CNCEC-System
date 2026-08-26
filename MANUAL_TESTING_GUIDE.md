@@ -2436,6 +2436,173 @@ not notice.
 
 ---
 
+## 14q. Paper first — the OCR consumption workflow (Phase 9 · slice 9d)
+
+The workflow reversed. **Supervisor → Store Keeper → HOD**, and approval now
+deducts stock as well as posting area.
+
+### 14q.1 ⚠️ The correction to the printed form
+
+**TC-OCR-01** — print any form. The **Lot / Batch No.** box is **no longer at the
+top**. There is a **Lot / Batch column on every row**, beside Qty Used.
+
+One system draws several materials and each arrives from its own batch — LSC8's
+Primer Comp-A and Mortar Comp-C are separate deliveries with separate
+certificates. A single box at the top could only ever be right about one of
+them, and the certificate gate at approval checks the lot **per material**. A lot
+recorded against the wrong line is worse than none: it clears a gate for a batch
+that was never used.
+
+**TC-OCR-02** — the header now has three boxes: Date, Equipment / Tank No.,
+Area done.
+
+**TC-OCR-03** — there are four small black squares at the page corners. Do not
+crop them out when photographing: they are what lets the app square up your
+photo and show you the right row.
+
+### 14q.2 The new order
+
+**TC-OCR-04** — as a **Supervisor**, open Execution Entries. You can now open an
+entry for a material-backed activity, which Phase 5 refused. It starts at
+**Draft (supervisor)**.
+
+**TC-OCR-05** — file it. It goes to **With store keeper**, not to the HOD.
+
+**TC-OCR-06** — as a **Store Keeper**, the entry shows a **Verify** button.
+Change a quantity → it must demand a reason. Confirm without changing → no
+reason needed.
+
+**TC-OCR-07** — as an **HOD**, review it. You see the store keeper's reason and
+the trail.
+
+**TC-OCR-08** — a **labour-only** entry (blasting) goes straight to the HOD. A
+store keeper has nothing to verify, and their queue must not fill with entries
+they cannot action.
+
+**TC-OCR-09** — ⚠️ **rejection is final.** A rejected entry cannot be revived.
+Raise a new one from a fresh form.
+
+**TC-OCR-10** — the old `POST /execution/entries/{id}/submit` route returns
+**404**. It is gone, not disabled — a route that 409'd would imply an SK draft
+could still exist.
+
+### 14q.3 ⚠️ The four layers
+
+**TC-OCR-11** — on a scanned entry, one material row can show up to four values:
+
+| Colour | Means | Set by |
+| --- | --- | --- |
+| grey | what the camera read | the vision model, never editable |
+| amber | what the supervisor filed | the supervisor |
+| red | what the store keeper set | the store keeper |
+| purple | what the HOD settled | the HOD |
+
+**TC-OCR-12** — a row everybody agreed on shows **one number and the word
+"agreed"**. A colour that appears when nothing changed teaches people to ignore
+it, so each layer renders only when it differs from the one before.
+
+**TC-OCR-13** — ⚠️ the **amber** layer is the one the original brief did not ask
+for. Without it a supervisor could overwrite the machine's reading of their own
+handwriting and nobody could tell. Change a figure as a supervisor on a scanned
+entry and confirm the grey number survives beside it.
+
+### 14q.4 ⚠️ Stock, and the double-deduction guard
+
+**TC-OCR-14** — approve an entry with material lines. Check the **Records →
+Consumption** ledger: there is now one row per material, tagged
+`SME_EXEC:<entry id>:<line id>`, at the **store keeper's** verified quantity —
+not the supervisor's.
+
+**TC-OCR-15** — ⚠️ **the store keeper must stop raising a separate issue for
+lining material.** This entry is now the only writer. Raising both deducts the
+same drum twice, and the error is invisible until somebody counts the shelf.
+
+**TC-OCR-16** — the lot from each row lands on its consumption row.
+
+**TC-OCR-17** — approving is idempotent. A retry or a double-click posts
+nothing further; the guard is a stored consumption id on each line, not a
+status check.
+
+### 14q.5 ⚠️ The certificate gate, and the way past it
+
+**TC-OCR-18** — put a Surface Shield material on an entry with no MTC. The HOD's
+review screen shows a **red banner naming the blocked lines before the button is
+pressed** — a refusal that only arrives on submit teaches people to press again
+with the override on.
+
+**TC-OCR-19** — the Approve button reads **"Approve WITHOUT clearance"** and is
+disabled until a reason is typed.
+
+**TC-OCR-20** — approve with an override. Sign in as the **Head of Qualities**:
+a **critical** notification is waiting, naming the entry, the material and the
+reason. Every override, every time.
+
+**TC-OCR-21** — fixing the lot number on the HOD screen can clear the gate
+without any override. The gate is checked **after** the HOD's edits, because
+correcting a lot is the ordinary way a blocked entry becomes approvable.
+
+### 14q.6 Reading a photograph
+
+**TC-OCR-22** — photograph a filled form and upload it (JPG, PNG, HEIC or PDF).
+It returns immediately and reads in the background — you can leave the page.
+
+**TC-OCR-23** — **RAW is refused by name.** It needs libraw, weighs 20–50 MB and
+comes from a camera nobody carries into a tank.
+
+**TC-OCR-24** — a photo **without the QR in frame** is refused. The QR is what
+identifies the sheet; nothing else can.
+
+**TC-OCR-25** — ⚠️ **the same sheet cannot be filed twice.** Upload the same
+photo again → refused, naming the entry it already became. Two supervisors
+photographing one form, or one retrying on a bad signal, produce
+byte-different images of identical paper.
+
+**TC-OCR-26** — ⚠️ **a sheet printed before a recipe change is refused.** Print a
+form, add a material to that system in the Material Estimator, then upload the
+form. Refused. Row 3 of your handwriting maps to row 3 of the recipe; with an
+extra material everything past it would land on the wrong one — with plausible
+quantities, against real materials. Nothing downstream would ever catch it.
+
+**TC-OCR-27** — a form printed for **another site** is refused.
+
+**TC-OCR-28** — ⚠️ **an uncertain digit is left blank, never guessed.** Write an
+ambiguous figure (a 4 that could be a 9). The row arrives with an empty quantity,
+a gold "unread" tag showing the raw text, and a note telling the supervisor to
+check it. An invented number would post to stock with nobody asking.
+
+**TC-OCR-29** — a **row number the form never printed** is dropped. The model
+cannot invent a seventh material on a six-row form.
+
+**TC-OCR-30** — each row shows a **crop of the photograph** beside it. Confirm
+the crop matches the row it sits on. If the page could not be squared up you get
+the **whole photo with a "whole page" tag** instead — a strip captioned "row 3"
+that is actually row 4 would invite you to confirm a quantity against the wrong
+material.
+
+**TC-OCR-31** — a quantity far off the benchmark shows a **"check" tag**. It
+never blocks: an unusual day happens, and refusing one would teach people to
+write the expected number.
+
+### 14q.7 If the local model struggles
+
+**TC-OCR-32** — the vision model is swapped by environment variable, not by a
+release:
+
+```
+GI_AI_VISION_PROVIDER=anthropic
+GI_AI_VISION_API_KEY=<key>
+```
+
+Nothing else changes — the pipeline calls one function and does not know which
+engine answered. The entry records which model read it.
+
+⚠️ **Do not install a second local vision model instead.** One warm model on the
+box is a standing ruling; a second would either cold-start on every switch or
+sit resident beside the first.
+
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

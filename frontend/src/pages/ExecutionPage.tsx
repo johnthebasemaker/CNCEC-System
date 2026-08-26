@@ -1,16 +1,31 @@
 /**
- * Phase 5 — the consumption workflow: SK → Supervisor → HOD.
+ * The consumption workflow. PAPER FIRST since Phase 9d:
+ * Supervisor → Store Keeper → HOD.
  *
  * One page, three views, because the three roles look at the SAME entry and
  * each is allowed to change a different part of it:
  *
- *  · a STORE KEEPER opens an entry and records what physically left the store;
- *  · a SUPERVISOR reports the area and the crew — and sees the material lines
- *    READ-ONLY. That is the control, not an oversight: they are measured
- *    against that consumption, so the person it reflects on must not be able
- *    to tidy it;
+ *  · a SUPERVISOR fills a printed form in the field, photographs it, then
+ *    reviews what the camera read and files the area, the crew, the
+ *    quantities and the per-line lots;
+ *  · a STORE KEEPER verifies those quantities against what actually left the
+ *    shelf, and may correct them — every correction costs a reason and shows
+ *    to the HOD in RED;
  *  · an HOD may correct either side, and the moment any number changes a
  *    justification becomes mandatory and the supervisor is notified.
+ *
+ * ⚠️ THE DIRECTION REVERSED, AND SO DID WHO MAY EDIT A MATERIAL LINE. Phase 5
+ * showed the supervisor those lines read-only, because the store keeper had
+ * counted them. The record starts in the field now, so the supervisor authors
+ * them — and what replaces that control is FOUR LAYERS, each with an owner:
+ *
+ *     grey    what the camera read       never editable
+ *     amber   what the supervisor filed  when it differs from grey
+ *     red     what the store keeper set  when it differs from amber
+ *     purple  what the HOD settled       when it differs from red
+ *
+ * One colour alone would have let a supervisor overwrite the machine's reading
+ * of their own handwriting with nobody able to tell.
  *
  * ⚠️ The lining-system field disappears for a system-agnostic activity
  * (blasting, buffing). Surface prep belongs to no lining system, and forcing a
@@ -18,15 +33,19 @@
  * submits '' and the API stores '' (a real value; NULL would break both the
  * key and every GROUP BY over it).
  */
-import { DownloadOutlined, PlusOutlined, PrinterOutlined } from '@ant-design/icons'
+import {
+  CameraOutlined, DownloadOutlined, PlusOutlined, PrinterOutlined,
+  UploadOutlined,
+} from '@ant-design/icons'
 import SystemCode from '../sme/SystemCode'
 import {
   Alert, App, Button, Card, Col, Descriptions, Divider, Form, Input, InputNumber,
   Modal, Popconfirm, Row, Select, Space, Statistic, Table, Tag, Tooltip, Typography,
+  Upload,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { api } from '../api/client'
 import { downloadConsumptionForm, useFormSystems } from '../api/hooks'
@@ -40,11 +59,78 @@ const errMsg = (e: unknown): string => {
 }
 
 const STATUS_META: Record<string, { color: string; label: string }> = {
-  DRAFT_SK: { color: 'default', label: 'Draft (store keeper)' },
-  PENDING_SUPERVISOR: { color: 'gold', label: 'With supervisor' },
+  DRAFT_SUPERVISOR: { color: 'gold', label: 'Draft (supervisor)' },
+  PENDING_SK: { color: 'orange', label: 'With store keeper' },
   PENDING_HOD: { color: 'blue', label: 'With HOD' },
   APPROVED: { color: 'green', label: 'Approved' },
   REJECTED: { color: 'red', label: 'Rejected' },
+  // Drained in 9d. Kept so a historical row renders with a label rather than a
+  // raw string — the states were retired, not deleted.
+  DRAFT_SK: { color: 'default', label: 'Draft (retired flow)' },
+  PENDING_SUPERVISOR: { color: 'default', label: 'Retired flow' },
+}
+
+/**
+ * ⚠️ THE FOUR LAYERS, AND WHY EACH COLOUR IS EARNED.
+ *
+ * A colour that appears when nothing changed teaches people to ignore it, so
+ * each layer renders ONLY when it differs from the one before. A row everybody
+ * agreed on shows one plain number — which is what makes a red one worth
+ * looking at.
+ */
+function QtyTrail({ line }: { line: Row }) {
+  const n = (v: unknown) => (v == null ? null : Number(v))
+  const ocr = n(line.OCR_Qty)
+  const sup = n(line.Supervisor_Qty)
+  const sk = n(line.SK_Qty)
+  const act = n(line.Actual_Qty) ?? 0
+  const differs = (a: number | null, b: number | null) =>
+    a != null && b != null && Math.abs(a - b) > 1e-9
+
+  return (
+    <Space size={4} wrap>
+      {ocr != null && (
+        <Tooltip title="What the camera read. Never editable — it is the record
+          of what was on the paper.">
+          <Tag color="default">{ocr}</Tag>
+        </Tooltip>
+      )}
+      {differs(sup, ocr) && (
+        <Tooltip title="The supervisor changed the machine's reading.">
+          <Tag color="orange">→ {sup}</Tag>
+        </Tooltip>
+      )}
+      {differs(sk, sup) && (
+        <Tooltip title="The store keeper changed the supervisor's figure —
+          this is what actually left the shelf.">
+          <Tag color="red">→ {sk}</Tag>
+        </Tooltip>
+      )}
+      {differs(act, sk ?? sup ?? ocr) && (
+        <Tooltip title="The HOD settled on this figure.">
+          <Tag color="purple">→ {act}</Tag>
+        </Tooltip>
+      )}
+      {ocr == null && sup == null && <strong>{act}</strong>}
+      {ocr != null && !differs(sup, ocr) && !differs(sk, sup)
+        && !differs(act, sk ?? ocr) && (
+        <Typography.Text type="secondary" style={{ fontSize: 11 }}>agreed</Typography.Text>
+      )}
+      {line.OCR_Qty == null && line.OCR_Qty_Text ? (
+        <Tooltip title={`The camera read "${String(line.OCR_Qty_Text)}" but could
+          not be sure of the number, so it did not guess.`}>
+          <Tag color="gold">unread: {String(line.OCR_Qty_Text)}</Tag>
+        </Tooltip>
+      ) : null}
+      {line.Plausibility_Flag ? (
+        <Tooltip title={`This is ${String(line.Plausibility_Flag)}. A misread
+          digit lands an order of magnitude out; an unusual day is also
+          possible, which is why this only flags and never blocks.`}>
+          <Tag color="volcano">check</Tag>
+        </Tooltip>
+      ) : null}
+    </Space>
+  )
 }
 
 const num = (v: unknown) => (v == null ? null : Number(v))
@@ -205,6 +291,168 @@ function OpenEntryModal({ open, onClose, asSupervisor }: {
   )
 }
 
+/**
+ * The crop of the photograph a figure came from.
+ *
+ * ⚠️ AUTHENTICATED, SO IT CANNOT BE A BARE <img src>. The token lives in
+ * localStorage and never in a URL — putting it in a query string would write
+ * it into every proxy log between here and the server. The blob is fetched
+ * through the same axios instance as everything else and handed to the tag as
+ * an object URL, which is revoked on unmount.
+ */
+function RowCrop({ entryId, row }: { entryId: number; row: number }) {
+  const [url, setUrl] = useState<string>('')
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let live = true
+    let made = ''
+    api.get(`/execution/entries/${entryId}/crop`, {
+      params: { row }, responseType: 'blob',
+    }).then((r) => {
+      if (!live) return
+      made = URL.createObjectURL(r.data as Blob)
+      setUrl(made)
+      // ⚠️ THE SERVER SAYS WHETHER THE CROP IS TRUSTWORTHY. When the page could
+      // not be rectified it returns the WHOLE photo rather than cropping by
+      // guesswork — a strip captioned "row 3" that is actually row 4 invites
+      // somebody to confirm a quantity against the wrong material.
+      setFailed(String(r.headers['x-crop'] ?? '') !== 'row')
+    }).catch(() => { if (live) setFailed(true) })
+    return () => { live = false; if (made) URL.revokeObjectURL(made) }
+  }, [entryId, row])
+
+  if (!url) {
+    return <Typography.Text type="secondary" style={{ fontSize: 11 }}>—</Typography.Text>
+  }
+  return (
+    <Tooltip title={failed
+      ? 'The page could not be squared up, so this is the whole photo rather '
+        + 'than this row. Check the figure against the paper.'
+      : `Row ${row + 1} of the form, as photographed`}>
+      <span>
+        <img src={url} alt={`row ${row + 1} of the form`}
+          style={{ width: 120, borderRadius: 3,
+                   border: failed ? '1px solid #d4b106'
+                                  : '1px solid rgba(128,128,128,.35)' }} />
+        {failed && <Tag color="warning" style={{ marginTop: 2 }}>whole page</Tag>}
+      </span>
+    </Tooltip>
+  )
+}
+
+
+/**
+ * Store keeper: verify the supervisor's figures against what left the shelf.
+ *
+ * ⚠️ AN EDIT HERE IS THE POINT OF THE STEP, NOT AN EXCEPTION — and it costs a
+ * reason, because the HOD is about to approve a number the supervisor did not
+ * write. "The store keeper changed it" with no why is not something an
+ * approver can weigh.
+ */
+function SkVerifyModal({ entry, onClose }: { entry: Row | null; onClose: () => void }) {
+  const { message } = App.useApp()
+  const qc = useQueryClient()
+  const [mats, setMats] = useState<Record<string, Row>>({})
+  const [reason, setReason] = useState('')
+
+  useEffect(() => { setMats({}); setReason('') }, [entry?.id])
+
+  const lines = (entry?.materials as Row[]) ?? []
+  const changed = lines.filter((r) => {
+    const e = mats[String(r.id)]
+    if (!e) return false
+    const q = e.Actual_Qty != null
+      && Math.abs(Number(e.Actual_Qty) - Number(r.Actual_Qty ?? 0)) > 1e-9
+    const l = e.Lot_No != null && String(e.Lot_No) !== String(r.Lot_No ?? '')
+    return q || l
+  })
+
+  const save = useMutation({
+    mutationFn: (b: Row) =>
+      api.post(`/execution/entries/${entry?.id}/sk-verify`, b).then((r) => r.data),
+    onSuccess: () => {
+      message.success('Sent to the HOD')
+      qc.invalidateQueries({ queryKey: ['/execution/entries'] })
+      onClose()
+    },
+    onError: (e) => message.error(errMsg(e)),
+  })
+
+  return (
+    <Modal open={!!entry} onCancel={onClose} width={860} destroyOnHidden
+      title={entry ? `Verify what left the store — ${entry.Entry_No}` : ''}
+      okText={changed.length ? `Confirm ${changed.length} change(s)` : 'Verify as correct'}
+      confirmLoading={save.isPending}
+      onOk={() => save.mutate({
+        materials: lines.map((r) => ({
+          id: Number(r.id),
+          Actual_Qty: Number(mats[String(r.id)]?.Actual_Qty ?? r.Actual_Qty ?? 0),
+          Lot_No: String(mats[String(r.id)]?.Lot_No ?? r.Lot_No ?? ''),
+        })),
+        reason,
+      })}>
+      {entry && (
+        <>
+          <Alert type="info" showIcon style={{ marginBottom: 10 }}
+            message="You are checking the supervisor's figures against the shelf"
+            description="Where they disagree, yours is the number with a stock
+              movement behind it — change it and say why. Anything you leave
+              alone is recorded as verified, not as ignored." />
+          <Table size="small" pagination={false} rowKey={(r) => String(r.id)}
+            dataSource={lines}
+            columns={[
+              { title: '#', width: 44,
+                render: (_: unknown, r: Row) =>
+                  (r.Row_Index == null ? '—' : Number(r.Row_Index) + 1) },
+              { title: 'Material', dataIndex: 'Material_Code' },
+              { title: 'SAP', dataIndex: 'SAP_Code', width: 92 },
+              { title: 'Trail', width: 160,
+                render: (_: unknown, r: Row) => <QtyTrail line={r} /> },
+              {
+                title: 'Left the store', width: 130, align: 'right',
+                render: (_: unknown, r: Row) => (
+                  <InputNumber min={0} style={{ width: 110 }}
+                    value={num(mats[String(r.id)]?.Actual_Qty ?? r.Actual_Qty)}
+                    onChange={(v) => setMats((x) => ({
+                      ...x, [String(r.id)]: { ...x[String(r.id)],
+                                             Actual_Qty: v ?? 0 } }))} />
+                ),
+              },
+              {
+                title: 'Lot / batch', width: 150,
+                render: (_: unknown, r: Row) => (
+                  <Input style={{ width: 135 }}
+                    value={String(mats[String(r.id)]?.Lot_No ?? r.Lot_No ?? '')}
+                    onChange={(e) => setMats((x) => ({
+                      ...x, [String(r.id)]: { ...x[String(r.id)],
+                                             Lot_No: e.target.value } }))} />
+                ),
+              },
+              ...(String(entry.Entry_Origin) === 'ocr' ? [{
+                title: 'Photo', width: 132,
+                render: (_: unknown, r: Row) => (r.Row_Index == null ? '—' : (
+                  <RowCrop entryId={Number(entry.id)} row={Number(r.Row_Index)} />
+                )),
+              }] : []),
+            ]} />
+          {changed.length > 0 && (
+            <>
+              <Alert type="warning" showIcon style={{ margin: '10px 0 8px' }}
+                message={`You changed ${changed.length} figure(s) — the HOD sees
+                  these in red, and the supervisor is told`}
+                description={changed.map((r) => String(r.Material_Code)).join(', ')} />
+              <Input.TextArea rows={2} value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="Why did the figure change? e.g. only 18 KG left the store" />
+            </>
+          )}
+        </>
+      )}
+    </Modal>
+  )
+}
+
+
 // ─── Supervisor: the area, the crew, and the two mandatory reasons ───────────
 function SupervisorModal({ entry, onClose }: { entry: Row | null; onClose: () => void }) {
   const { message } = App.useApp()
@@ -219,13 +467,20 @@ function SupervisorModal({ entry, onClose }: { entry: Row | null; onClose: () =>
   const save = useMutation({
     mutationFn: (b: Row) =>
       api.post(`/execution/entries/${entry?.id}/supervisor`, b).then((r) => r.data),
-    onSuccess: () => {
-      message.success('Sent to the HOD')
+    onSuccess: (d: Row) => {
+      message.success(String(d?.status) === 'PENDING_SK'
+        ? 'Sent to the store keeper to verify'
+        : 'Sent to the HOD')
       qc.invalidateQueries({ queryKey: ['/execution/entries'] })
-      form.resetFields(); setCrew([]); onClose()
+      form.resetFields(); setCrew([]); setMats({}); onClose()
     },
     onError: (e) => message.error(errMsg(e)),
   })
+
+  // Only the lines the supervisor actually touched are sent; the API keeps the
+  // rest at whatever the camera read.
+  const [mats, setMats] = useState<Record<string, Row>>({})
+  const isOcr = String(entry?.Entry_Origin ?? '') === 'ocr'
 
   const submit = async () => {
     const v = await form.validateFields()
@@ -234,6 +489,11 @@ function SupervisorModal({ entry, onClose }: { entry: Row | null; onClose: () =>
       manpower: crew.filter((c) => c.Role_Code),
       material_variance_reason: v.material_variance_reason,
       manpower_variance_reason: v.manpower_variance_reason,
+      materials: (entry?.materials as Row[] ?? []).map((r) => ({
+        id: Number(r.id),
+        Actual_Qty: Number(mats[String(r.id)]?.Actual_Qty ?? r.Actual_Qty ?? 0),
+        Lot_No: String(mats[String(r.id)]?.Lot_No ?? r.Lot_No ?? ''),
+      })),
     })
   }
 
@@ -255,19 +515,62 @@ function SupervisorModal({ entry, onClose }: { entry: Row | null; onClose: () =>
 
           {(entry.materials as Row[])?.length > 0 && (
             <>
-              <Alert type="info" showIcon style={{ marginBottom: 8 }}
-                message="Material lines are read-only here"
-                description="The store keeper counted what left the store. Your
-                  figures are measured against it, so it is not yours to edit —
-                  ask the HOD if it is wrong." />
+              <Alert
+                type={isOcr ? 'warning' : 'info'} showIcon
+                style={{ marginBottom: 8 }}
+                message={isOcr
+                  ? 'Check every figure against your form before you send it'
+                  : 'Enter what you actually used, per material'}
+                description={isOcr
+                  ? 'The grey number is what the camera read. Where it could not '
+                    + 'be sure it left the box empty rather than guessing — those '
+                    + 'rows are marked, and the photo of each line is beside it.'
+                  : 'Write 0 for anything you did not use. The store keeper '
+                    + 'checks these against what left the shelf next.'} />
               <Table size="small" pagination={false} rowKey={(r) => String(r.id)}
                 style={{ marginBottom: 12 }}
                 dataSource={entry.materials as Row[]}
                 columns={[
+                  { title: '#', width: 46,
+                    render: (_: unknown, r: Row) =>
+                      (r.Row_Index == null ? '—' : Number(r.Row_Index) + 1) },
                   { title: 'Material', dataIndex: 'Material_Code' },
-                  { title: 'SAP', dataIndex: 'SAP_Code' },
-                  { title: 'Qty', dataIndex: 'Actual_Qty', align: 'right' },
-                  { title: 'UOM', dataIndex: 'UOM' },
+                  { title: 'SAP', dataIndex: 'SAP_Code', width: 96 },
+                  { title: 'Read', width: 150,
+                    render: (_: unknown, r: Row) => <QtyTrail line={r} /> },
+                  {
+                    title: 'Qty used', width: 130, align: 'right',
+                    render: (_: unknown, r: Row) => (
+                      <InputNumber min={0} style={{ width: 110 }}
+                        value={num(mats[String(r.id)]?.Actual_Qty
+                                   ?? r.Actual_Qty)}
+                        onChange={(v) => setMats((x) => ({
+                          ...x, [String(r.id)]: { ...x[String(r.id)],
+                                                  Actual_Qty: v ?? 0 } }))} />
+                    ),
+                  },
+                  { title: 'UOM', dataIndex: 'UOM', width: 70 },
+                  {
+                    // ⚠️ PER LINE, NOT PER FORM. Each material arrives from its
+                    // own batch, and the certificate gate at approval checks
+                    // the lot for THAT material.
+                    title: 'Lot / batch', width: 160,
+                    render: (_: unknown, r: Row) => (
+                      <Input style={{ width: 145 }} placeholder="batch no."
+                        value={String(mats[String(r.id)]?.Lot_No
+                                      ?? r.Lot_No ?? '')}
+                        onChange={(e) => setMats((x) => ({
+                          ...x, [String(r.id)]: { ...x[String(r.id)],
+                                                 Lot_No: e.target.value } }))} />
+                    ),
+                  },
+                  ...(isOcr ? [{
+                    title: 'Photo', width: 132,
+                    render: (_: unknown, r: Row) => (r.Row_Index == null ? '—' : (
+                      <RowCrop entryId={Number(entry.id)}
+                        row={Number(r.Row_Index)} />
+                    )),
+                  }] : []),
                 ]} />
             </>
           )}
@@ -332,6 +635,18 @@ function HodModal({ entry, onClose }: { entry: Row | null; onClose: () => void }
   const [crew, setCrew] = useState<Record<number, { Headcount?: number; Hours?: number }>>({})
   const [why, setWhy] = useState('')
   const [reject, setReject] = useState('')
+  const [qsepReason, setQsepReason] = useState('')
+
+  // ⚠️ ASKED BEFORE THE BUTTON IS PRESSED, not after. A blocked entry is
+  // something an HOD can see coming and chase Logistics about; a refusal that
+  // only arrives on submit teaches them to press again with the override on.
+  const qsep = useQuery({
+    queryKey: ['/execution/qsep', entry?.id],
+    enabled: !!entry?.id && String(entry?.status) === 'PENDING_HOD',
+    queryFn: async () => (await api.get<{ blocked: Row[]; clear: boolean }>(
+      `/execution/entries/${entry?.id}/qsep`)).data,
+  })
+  const blocked = qsep.data?.blocked ?? []
 
   const v = entry?.variance as Row | undefined
   const mv = v?.material_total as Row | undefined
@@ -343,7 +658,8 @@ function HodModal({ entry, onClose }: { entry: Row | null; onClose: () => void }
     onSuccess: (_d, b) => {
       message.success((b as Row).approve ? 'Approved' : 'Rejected')
       qc.invalidateQueries({ queryKey: ['/execution/entries'] })
-      setSqm(null); setMats({}); setCrew({}); setWhy(''); setReject(''); onClose()
+      setSqm(null); setMats({}); setCrew({}); setWhy('')
+      setReject(''); setQsepReason(''); onClose()
     },
     onError: (e) => message.error(errMsg(e)),
   })
@@ -362,6 +678,8 @@ function HodModal({ entry, onClose }: { entry: Row | null; onClose: () => void }
           <Button danger>Reject</Button>
         </Popconfirm>,
         <Button key="a" type="primary" loading={decide.isPending}
+          danger={blocked.length > 0}
+          disabled={blocked.length > 0 && !qsepReason.trim()}
           onClick={() => decide.mutate({
             approve: true,
             justification: why,
@@ -369,12 +687,48 @@ function HodModal({ entry, onClose }: { entry: Row | null; onClose: () => void }
             materials: Object.entries(mats).map(([id, q]) =>
               ({ id: Number(id), Actual_Qty: q })),
             manpower: Object.entries(crew).map(([id, c]) => ({ id: Number(id), ...c })),
+            ...(blocked.length > 0
+              ? { qsep_override: true, qsep_reason: qsepReason } : {}),
           })}>
-          {edited ? 'Approve with corrections' : 'Approve'}
+          {blocked.length > 0
+            ? 'Approve WITHOUT clearance'
+            : edited ? 'Approve with corrections' : 'Approve'}
         </Button>,
       ]}>
       {entry && (
         <>
+          {blocked.length > 0 && (
+            <Alert type="error" showIcon style={{ marginBottom: 12 }}
+              message={`${blocked.length} material line(s) are not cleared for issue`}
+              description={(
+                <>
+                  <ul style={{ margin: '4px 0 8px 18px', padding: 0 }}>
+                    {blocked.map((b) => (
+                      <li key={String(b.line_id)}>
+                        <strong>{String(b.Material_Code)}</strong>{' '}
+                        <Tag color="red">{String(b.gate)}</Tag>{' '}
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          {String(b.detail).slice(0, 160)}
+                        </Typography.Text>
+                      </li>
+                    ))}
+                  </ul>
+                  {/* ⚠️ THE HONEST FRAMING. The drum was emptied days ago, so
+                      refusing outright would only strand the record and let
+                      stock overstate. The override exists — and costs a written
+                      reason plus a notification to the Head of Qualities. */}
+                  <Typography.Paragraph style={{ marginBottom: 6 }}>
+                    The material has already been applied, so this is a
+                    paperwork gap rather than something you can prevent. Chase
+                    the certificate, or approve anyway and say why — the Head of
+                    Qualities is told either way.
+                  </Typography.Paragraph>
+                  <Input.TextArea rows={2} value={qsepReason}
+                    onChange={(e) => setQsepReason(e.target.value)}
+                    placeholder="Why is this being approved without clearance?" />
+                </>
+              )} />
+          )}
           <Row gutter={12} style={{ marginBottom: 12 }}>
             <Col span={8}><Card size="small">
               <Statistic title="Area reported" value={String(entry.Actual_SQM ?? '—')} suffix="m²" />
@@ -402,9 +756,25 @@ function HodModal({ entry, onClose }: { entry: Row | null; onClose: () => void }
             <Descriptions.Item label="Supervisor — manpower reason">
               {String(entry.Manpower_Variance_Reason ?? '—')}
             </Descriptions.Item>
+            {entry.sk_edited ? (
+              <Descriptions.Item label={
+                <span>Store keeper <Tag color="red">changed figures</Tag></span>}>
+                {String(entry.SK_Edit_Reason ?? '—')}
+              </Descriptions.Item>
+            ) : null}
+            {String(entry.Entry_Origin) === 'ocr' ? (
+              <Descriptions.Item label="Read from">
+                <Space size={4}>
+                  <Tag>form {String(entry.Form_UUID ?? '—')}</Tag>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    by {String(entry.OCR_Model ?? 'the vision model')}
+                  </Typography.Text>
+                </Space>
+              </Descriptions.Item>
+            ) : null}
           </Descriptions>
 
-          <Divider plain>Material (store keeper) — editable</Divider>
+          <Divider plain>Material — editable</Divider>
           <Table size="small" pagination={false} rowKey={(r) => String(r.id)}
             dataSource={(v?.materials as Row[]) ?? []}
             columns={[
@@ -412,6 +782,24 @@ function HodModal({ entry, onClose }: { entry: Row | null; onClose: () => void }
               { title: 'Benchmark', dataIndex: 'Benchmark_Qty', align: 'right',
                 render: (x) => x ?? '—' },
               { title: 'Actual', dataIndex: 'Actual_Qty', align: 'right' },
+              {
+                // ⚠️ WHO TOUCHED THIS NUMBER, IN ORDER. Grey what the camera
+                // read, amber the supervisor, red the store keeper, purple the
+                // HOD. The whole reason four layers exist rather than one is
+                // that the approver can see the chain, not just the answer.
+                title: 'Who changed it', key: 'trail', width: 175,
+                render: (_: unknown, r: Row) => {
+                  const line = (entry.materials as Row[])
+                    ?.find((m: Row) => m.Material_Code === r.Material_Code)
+                  return line ? <QtyTrail line={line} /> : '—'
+                },
+              },
+              { title: 'Lot / batch', key: 'lot', width: 130,
+                render: (_: unknown, r: Row) => {
+                  const line = (entry.materials as Row[])
+                    ?.find((m: Row) => m.Material_Code === r.Material_Code)
+                  return String(line?.Lot_No ?? '—')
+                } },
               { title: 'Variance', dataIndex: 'Variance_Pct', align: 'right',
                 render: (x) => <VarianceTag value={x} /> },
               { title: 'Correct to', key: 'e', width: 140,
@@ -490,7 +878,16 @@ export function HodApprovalQueueTab() {
   const [row, setRow] = useState<Row | null>(null)
   const rows = data ?? []
   const columns: ColumnsType<Row> = [
-    { title: 'Entry', dataIndex: 'Entry_No', width: 150 },
+    { title: 'Entry', dataIndex: 'Entry_No', width: 165,
+      render: (v: string, r: Row) => (
+        <Space size={4}>
+          {String(v)}
+          {String(r.Entry_Origin) === 'ocr' && (
+            <Tooltip title="Read from a photographed form">
+              <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>OCR</Tag>
+            </Tooltip>
+          )}
+        </Space>) },
     { title: 'Date', dataIndex: 'Work_Date', width: 105 },
     { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 165 },
     { title: 'System', dataIndex: 'Lining_System_Code', width: 145,
@@ -590,11 +987,116 @@ function FormPrintCard() {
         style={{ marginBottom: 0, marginTop: 10, fontSize: 12 }}>
         The form prints every material for the system, so nobody writes a
         material name by hand, and carries a QR code holding the site, system,
-        sub-activity and the sheet&rsquo;s own number. Fill in the date,
-        equipment, area, lot and the quantities, then photograph the whole page
-        including the QR.
+        sub-activity and the sheet&rsquo;s own number. Fill in the date, equipment and area at the top, then a
+        quantity and a lot number on each row, and photograph the whole
+        page including the QR.
         {' '}<strong>Each download is a separate numbered sheet</strong> —
         printing again gives you new paper, not another copy of the same form.
+      </Typography.Paragraph>
+    </Card>
+  )
+}
+
+
+/**
+ * Upload a photographed form.
+ *
+ * ⚠️ A JOB, NOT A REQUEST. Reading a form takes 5–120 s on a 7B vision model
+ * with a cold start — longer than proxy timeouts and far longer than somebody
+ * standing in a plant on mobile data will hold a page open. The upload returns
+ * an id, this polls, and the state lives in Postgres so a locked phone loses
+ * nothing.
+ *
+ * ⚠️ AND IT LANDS ON A DRAFT, NEVER A SUBMISSION. Extraction is the machine's
+ * opinion. Every figure is reviewed and both mandatory reasons supplied before
+ * anything moves.
+ */
+function OcrUploadCard({ onDraft }: { onDraft: (id: number) => void }) {
+  const { message } = App.useApp()
+  const qc = useQueryClient()
+  const [jobId, setJobId] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const job = useQuery({
+    queryKey: ['/execution/ocr/jobs', jobId],
+    enabled: jobId != null,
+    refetchInterval: (q) => {
+      const st = (q.state.data as Row | undefined)?.status
+      return st === 'done' || st === 'error' ? false : 2000
+    },
+    queryFn: async () => (await api.get<Row>(
+      `/execution/ocr/jobs/${jobId}`)).data,
+  })
+
+  useEffect(() => {
+    if (job.data?.status !== 'done') return
+    const res = job.data.result as Row | undefined
+    if (!res) return
+    qc.invalidateQueries({ queryKey: ['/execution/entries'] })
+    message.success(`Read ${String(res.lines)} line(s) — check them before filing`)
+    onDraft(Number(res.entry_id))
+    setJobId(null)
+  }, [job.data?.status])
+
+  const upload = async (file: File) => {
+    setBusy(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await api.post<Row>('/execution/ocr/upload', fd)
+      setJobId(Number(r.data.job_id))
+    } catch (e) {
+      message.error(errMsg(e))
+    } finally {
+      setBusy(false)
+    }
+    return false
+  }
+
+  const running = jobId != null && job.data?.status !== 'error'
+  const problems = (job.data?.result as Row | undefined)?.problems as string[] | undefined
+
+  return (
+    <Card size="small" style={{ marginBottom: 12 }}
+      title={<Space><CameraOutlined />Upload a filled form</Space>}>
+      <Space wrap align="start">
+        <Upload beforeUpload={upload} showUploadList={false}
+          accept=".jpg,.jpeg,.png,.heic,.heif,.pdf">
+          <Button type="primary" icon={<UploadOutlined />}
+            loading={busy || running} disabled={busy || running}>
+            {running ? 'Reading the form…' : 'Photograph or upload'}
+          </Button>
+        </Upload>
+        {running && (
+          <Typography.Text type="secondary" style={{ lineHeight: '32px' }}>
+            This usually takes under a minute. You can leave the page — it
+            carries on.
+          </Typography.Text>
+        )}
+      </Space>
+
+      {job.data?.status === 'error' && (
+        <Alert type="error" showIcon style={{ marginTop: 10 }}
+          message="That form could not be read"
+          description={String(job.data.error ?? '')}
+          action={<Button size="small" onClick={() => setJobId(null)}>Dismiss</Button>} />
+      )}
+      {problems && problems.length > 0 && (
+        <Alert type="warning" showIcon style={{ marginTop: 10 }}
+          message="Read, but check these before filing"
+          description={<ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+            {problems.map((x) => <li key={x}>{x}</li>)}
+          </ul>} />
+      )}
+
+      <Typography.Paragraph type="secondary"
+        style={{ marginBottom: 0, marginTop: 10, fontSize: 12 }}>
+        Photograph the <strong>whole page including the QR code</strong> — it is
+        what tells us which form this is, and a photo without it cannot be
+        matched to anything. JPG, PNG, HEIC or PDF.
+        {' '}Where the handwriting is not certain the number is left
+        <strong> blank rather than guessed</strong>, and those rows are marked
+        for you to fill in.
       </Typography.Paragraph>
     </Card>
   )
@@ -612,23 +1114,21 @@ export default function ExecutionPage() {
   const { data, isFetching } = useEntries()
   const [openNew, setOpenNew] = useState(false)
   const [supRow, setSupRow] = useState<Row | null>(null)
+  const [skRow, setSkRow] = useState<Row | null>(null)
   const [hodRow, setHodRow] = useState<Row | null>(null)
-  const { message } = App.useApp()
-  const qc = useQueryClient()
-
-  const submitSk = useMutation({
-    mutationFn: (id: number) =>
-      api.post(`/execution/entries/${id}/submit`).then((r) => r.data),
-    onSuccess: () => {
-      message.success('Sent to the supervisor')
-      qc.invalidateQueries({ queryKey: ['/execution/entries'] })
-    },
-    onError: (e) => message.error(errMsg(e)),
-  })
 
   const rows = data ?? []
   const columns: ColumnsType<Row> = [
-    { title: 'Entry', dataIndex: 'Entry_No', width: 150 },
+    { title: 'Entry', dataIndex: 'Entry_No', width: 165,
+      render: (v: string, r: Row) => (
+        <Space size={4}>
+          {String(v)}
+          {String(r.Entry_Origin) === 'ocr' && (
+            <Tooltip title="Read from a photographed form">
+              <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>OCR</Tag>
+            </Tooltip>
+          )}
+        </Space>) },
     { title: 'Date', dataIndex: 'Work_Date', width: 110 },
     { title: 'Equipment', dataIndex: 'Equipment_Tag_No', width: 170 },
     { title: 'System', dataIndex: 'Lining_System_Code', width: 145,
@@ -657,13 +1157,15 @@ export default function ExecutionPage() {
       title: 'Action', key: 'a', fixed: 'right', width: 170,
       render: (_: unknown, r: Row) => {
         const st = String(r.status)
-        if (isSk && st === 'DRAFT_SK') {
-          return <Button size="small" type="primary" loading={submitSk.isPending}
-            onClick={() => submitSk.mutate(Number(r.id))}>Send to supervisor</Button>
-        }
-        if (isSup && st === 'PENDING_SUPERVISOR') {
+        if ((isSup || isHod) && st === 'DRAFT_SUPERVISOR') {
           return <Button size="small" type="primary"
-            onClick={() => setSupRow(r)}>Report area & crew</Button>
+            onClick={() => setSupRow(r)}>
+            {String(r.Entry_Origin) === 'ocr' ? 'Check & file' : 'Report'}
+          </Button>
+        }
+        if ((isSk || isHod) && st === 'PENDING_SK') {
+          return <Button size="small" type="primary"
+            onClick={() => setSkRow(r)}>Verify</Button>
         }
         if (isHod && st === 'PENDING_HOD') {
           return <Button size="small" type="primary"
@@ -678,12 +1180,20 @@ export default function ExecutionPage() {
     <div>
       <Typography.Title level={4} style={{ marginTop: 0 }}>Execution entries</Typography.Title>
       <Typography.Paragraph type="secondary">
-        The store keeper records what left the store, the supervisor reports the
-        area and crew, and the HOD approves — approval is what posts the area to
-        the progress ledger, so nothing before it moves a figure anybody reports
-        on.
+        The supervisor fills a printed form in the field and photographs it, the
+        store keeper verifies the quantities against what left the shelf, and
+        the HOD approves — approval is what posts the area <em>and</em> deducts
+        the material, so nothing before it moves a figure or a quantity.
       </Typography.Paragraph>
       <FormPrintCard />
+      {(isSup || isHod || isSk) && (
+        <OcrUploadCard onDraft={(id) => {
+          // Land the supervisor straight on the draft they just created —
+          // otherwise the next step is hunting for it in a queue.
+          const found = (data ?? []).find((r) => Number(r.id) === id)
+          if (found) setSupRow(found)
+        }} />
+      )}
       {(isSk || isSup) && (
         <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 12 }}
           onClick={() => setOpenNew(true)}>
@@ -698,6 +1208,7 @@ export default function ExecutionPage() {
       <OpenEntryModal open={openNew} onClose={() => setOpenNew(false)}
         asSupervisor={isSup} />
       <SupervisorModal entry={supRow} onClose={() => setSupRow(null)} />
+      <SkVerifyModal entry={skRow} onClose={() => setSkRow(null)} />
       <HodModal entry={hodRow} onClose={() => setHodRow(null)} />
     </div>
   )

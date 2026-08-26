@@ -3598,9 +3598,20 @@ and unit — so **nobody ever writes a material name by hand**. Reading
 handwritten names is the one thing the vision model is genuinely bad at, and a
 name that is already printed cannot be misread.
 
-You write four things at the top — **Date**, **Equipment / Tank No.**,
-**Area done (m²)** and **Lot / Batch No.** — a quantity in each row's box, and
-your name at the bottom.
+You write three things at the top — **Date**, **Equipment / Tank No.** and
+**Area done (m²)** — then, on **every row**, the **quantity used** and the
+**lot / batch number** for that material, and your name at the bottom.
+
+⚠️ **The lot is per row, not per form.** One system draws several materials and
+each one arrives from a different batch, with its own certificate. Writing a
+single batch number at the top would be right about one material and wrong
+about the rest — and the certificate check at approval looks at the lot for
+*each* material, so a batch on the wrong line clears a check for material that
+was never used.
+
+⚠️ **The four small black squares in the corners are not decoration.** They are
+what lets the app square up your photograph and show you the right row. Keep
+them in frame.
 
 ⚠️ **The date box is blank on purpose.** Forms are printed in batches and used
 today or tomorrow, so a pre-printed date would be wrong on half of them — and
@@ -3651,6 +3662,108 @@ It is not being awkward. The app matches your handwriting to materials by row
 *position*, so a sheet printed against different rows would file your quantities
 against the wrong materials — and the numbers would look perfectly reasonable.
 Changing a material's **rate** is fine and does not invalidate printed paper.
+
+## 16.7 Filing a consumption form
+
+**Where:** Execution Entries (`/execution`).
+
+This replaced the old store-keeper-first flow on 27 August 2026. The record now
+starts with the paper you filled in.
+
+    You fill the form  →  Store Keeper verifies  →  HOD approves
+
+### 16.7.1 Step 1 — photograph it
+
+Upload the photo under **Upload a filled form**. JPG, PNG, HEIC or PDF.
+
+⚠️ **Photograph the whole page, including the QR code.** The QR is what tells the
+app which form this is — a photo without it cannot be matched to anything and
+will be refused.
+
+Reading takes up to a minute. You can leave the page; it carries on.
+
+### 16.7.2 Step 2 — check every figure
+
+The app opens a draft with what it read. Beside each row is **the crop of your
+photograph it read that number from**, so you are checking against the paper and
+not against memory.
+
+⚠️ **Where the handwriting was not certain, the box is left EMPTY rather than
+guessed.** Those rows are listed at the top and marked in gold with what was
+actually written. Type the real number in. A guessed figure would post straight
+to stock with nobody questioning it.
+
+Then correct anything else, pick the equipment from the list if it was not read,
+and give the two reasons — material and manpower — which are required on every
+entry, even one with no variance at all.
+
+### 16.7.3 Step 3 — the store keeper verifies
+
+It goes to the **store keeper**, not to the HOD. They check your quantities
+against what actually left the shelf and may change them — every change costs a
+written reason, shows to the HOD in **red**, and you are told about it before
+the entry is approved rather than after.
+
+Blasting and buffing skip this step: there is no material to verify.
+
+### 16.7.4 Step 4 — the HOD approves
+
+⚠️ **Approval is what deducts the material and posts the area.** Nothing before
+it moves a quantity, which is what makes correcting a figure safe at every
+earlier step.
+
+The HOD sees the whole chain on each row:
+
+| Colour | What it is |
+| --- | --- |
+| grey | what the camera read |
+| amber | what you filed |
+| red | what the store keeper corrected |
+| purple | what the HOD settled on |
+
+A row everybody agreed on shows one number and the word "agreed". The colours
+only appear where something actually changed — which is what makes a red one
+worth looking at.
+
+⚠️ **Rejection is final.** A rejected entry cannot be revived; raise a new one
+from a fresh form.
+
+### 16.7.5 ⚠️ Store keepers: stop raising a separate issue
+
+The execution entry is now the **only** way lining material leaves the ledger.
+Raising a material issue for the same drum as well would deduct it twice — and
+nothing would show it until somebody counted the shelf.
+
+### 16.7.6 ⚠️ When a certificate is missing
+
+If a Surface Shield material has no test certificate or no quality clearance,
+the HOD's screen says so **before** they press approve, naming the lines.
+
+The material has already been applied by then, so this is a paperwork gap rather
+than something anyone can prevent. The HOD may approve anyway — the button says
+**"Approve WITHOUT clearance"** and will not work until a reason is typed — and
+the **Head of Qualities is notified every time**.
+
+Often the simpler fix is a corrected lot number: the check runs *after* the
+HOD's edits, so fixing the batch can clear it with no override at all.
+
+### 16.7.7 Things the app will refuse, and why
+
+**The same sheet twice.** Each printed form is filed once. Two people
+photographing one form, or one person retrying on a bad signal, produce
+different files of identical paper — the number on the sheet is the only thing
+that can tell.
+
+**A form printed before the materials changed.** If someone edits the system's
+recipe after your sheet was printed, the rows no longer line up. The app matches
+your handwriting to materials by row *position*, so your quantities would be
+filed against the wrong materials and would look entirely reasonable. Print a
+fresh form and copy the figures across.
+
+**A form printed for another site.**
+
+**A photo it could not read.** It says so rather than creating a blank entry — a
+blank entry that gets submitted is a consumption of zero, recorded silently.
 
 ## 17.1 How the system is put together
 

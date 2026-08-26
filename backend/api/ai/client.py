@@ -36,6 +36,83 @@ KEEP_ALIVE = "30m"  # hold the KV cache warm between calls (legacy behavior)
 GEN_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("GI_AI_CONCURRENCY", "2")))
 
 
+# ── ⚠️ THE CLOUD SEAM (Phase 9d, ruling Q7) ─────────────────────────────────
+# Local `qwen2.5vl:7b` reads the consumption form today. Its weakest task is a
+# handwritten DIGIT — 4/9, 1/7, 3/8 and a lost decimal point are the failure
+# modes — and slice 9c's form is built to make that as easy as possible
+# (pre-printed names, a QR instead of header text, one boxed figure per row).
+# If UAT still shows it is not good enough, the escalation is NOT a bigger local
+# model: one warm 6 GB VLM is the standing on-box ruling, and a second would
+# either cold-start on every switch or sit resident beside it.
+#
+# The escalation is this one function. Set GI_AI_VISION_PROVIDER=anthropic and
+# GI_AI_VISION_API_KEY, and vision calls route to a cloud VLM instead. Nothing
+# else in the pipeline changes: `ocr_form.py` calls `vision_json()` and neither
+# knows nor cares which answered. Deliberately a runtime switch and not a code
+# branch to be written later — a seam that has never been exercised is a plan,
+# not a seam.
+VISION_PROVIDER = os.environ.get("GI_AI_VISION_PROVIDER", "ollama").lower()
+VISION_API_KEY = os.environ.get("GI_AI_VISION_API_KEY", "")
+VISION_CLOUD_MODEL = os.environ.get("GI_AI_VISION_CLOUD_MODEL",
+                                    "claude-sonnet-4-5")
+VISION_CLOUD_URL = os.environ.get("GI_AI_VISION_CLOUD_URL",
+                                  "https://api.anthropic.com/v1/messages")
+
+
+def vision_provider() -> str:
+    """Which engine vision calls will actually reach.
+
+    Reports `ollama` when a cloud provider is named but unconfigured, rather
+    than failing at the first upload: a missing key is an operator mistake that
+    should surface in /ai/health, not in somebody's photograph.
+    """
+    if VISION_PROVIDER == "anthropic" and VISION_API_KEY:
+        return "anthropic"
+    return "ollama"
+
+
+async def vision_json(prompt: str, *, system: str, image_b64: str,
+                      num_predict: int = 1400,
+                      timeout_s: float = GEN_TIMEOUT_S) -> tuple[str, str]:
+    """One vision completion. Returns `(raw_text, model_id)`.
+
+    The model id comes back with the text because it is stored on the entry:
+    "which engine read this" is the first question asked when a quantity is
+    disputed, and it is unanswerable later if nobody recorded it.
+    """
+    if vision_provider() == "anthropic":
+        body = {
+            "model": VISION_CLOUD_MODEL,
+            "max_tokens": num_predict,
+            "system": system,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/jpeg",
+                                             "data": image_b64}},
+                {"type": "text", "text": prompt}]}],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as c:
+                r = await c.post(VISION_CLOUD_URL, json=body, headers={
+                    "x-api-key": VISION_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"})
+                r.raise_for_status()
+                parts = r.json().get("content", [])
+                text = "".join(p.get("text", "") for p in parts
+                               if p.get("type") == "text")
+                return text, VISION_CLOUD_MODEL
+        except Exception as e:
+            raise RuntimeError(
+                f"Cloud vision failed: {type(e).__name__}: {e}") from e
+
+    async with GEN_SEMAPHORE:
+        text = await generate(MODEL_VISION, prompt, system=system,
+                              temperature=0.0, num_predict=num_predict,
+                              images=[image_b64], timeout_s=timeout_s)
+    return text, MODEL_VISION
+
+
 async def health() -> bool:
     """True when the Ollama server answers /api/tags within 2s."""
     try:

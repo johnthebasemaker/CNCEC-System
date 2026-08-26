@@ -39,6 +39,15 @@ order. If somebody edits `sme_recipe` after a sheet is printed, the hash stops
 matching and 9d refuses the sheet instead of reading row 3's handwriting into a
 different material.
 
+⚠️ THE LOT/BATCH IS A COLUMN, NOT A HEADER FIELD (operator correction,
+2026-08-26). One lining system draws several materials and each arrives from a
+different batch: LSC8's Primer Comp-A and Mortar Comp-C are separate deliveries
+with separate certificates. A single box at the top of the page can only record
+one of them, so it would either be left blank or filled with whichever batch the
+supervisor happened to think of — and the QSEP gate in slice 9d checks the
+certificate PER MATERIAL. A lot recorded against the wrong line is worse than
+none: it clears a gate for a batch that was never used.
+
 ⚠️ THE DATE FIELD IS BLANK, AND THAT IS DELIBERATE. Forms are printed in
 batches and used same-day or next-day (ruling Q6), so a pre-printed work date
 would be wrong on half of them — and wrong in the one direction that matters,
@@ -92,6 +101,28 @@ QR_SEP = "|"
 # A4 portrait, millimetres.
 PAGE_W, PAGE_H = 210.0, 297.0
 MARGIN = 12.0
+
+# ⚠️ THE RENDERER AND THE READER SHARE ONE GEOMETRY. Slice 9d rectifies a phone
+# photo onto this coordinate system and crops each row by these numbers, so a
+# layout tweak that lived only in `render_pdf` would silently start cropping the
+# wrong strip of somebody's handwriting. Everything positional is here.
+ROW_H = 11.0
+ROWS_PER_PAGE = 18
+HEADER_FIELD_Y = MARGIN + 30.0
+FIELD_BOX_H = 9.0
+TABLE_HEAD_H = 7.0
+FIRST_ROW_Y = HEADER_FIELD_Y + 3.6 + FIELD_BOX_H + 6.0 + TABLE_HEAD_H
+
+C_NO, C_QTY, C_UOM, C_LOT = 11.0, 30.0, 16.0, 38.0
+C_NAME = (PAGE_W - 2 * MARGIN) - C_NO - C_UOM - C_QTY - C_LOT
+
+# Corner registration marks. Four known points let a photo be rectified onto the
+# page; the QR alone gives four points too, but they are all within 26 mm of one
+# corner, so extrapolating a homography from them across an A4 sheet magnifies
+# every pixel of detection error. Marks at the corners bound the error instead
+# of amplifying it.
+FIDUCIAL = 6.0
+FIDUCIAL_INSET = 4.0
 
 
 def qr_payload(*, form_uuid: str, site_id: str, code: str, esc: str) -> str:
@@ -245,16 +276,32 @@ def render_pdf(*, rows: list[dict], site_id: str, code: str, esc: str,
     inner = PAGE_W - 2 * MARGIN
 
     # Column geometry, shared by the header band and every row.
-    C_NO, C_QTY = 11.0, 34.0
-    C_UOM = 18.0
-    C_NAME = inner - C_NO - C_UOM - C_QTY
 
     payload = qr_payload(form_uuid=form_uuid, site_id=site_id, code=code, esc=esc)
     qr_buf = _qr_png(payload)
-    pages = max(1, (len(rows) + 17) // 18)
+    pages = max(1, (len(rows) + ROWS_PER_PAGE - 1) // ROWS_PER_PAGE)
+
+    def _fiducials() -> None:
+        """Four solid corner squares, at known page coordinates.
+
+        ⚠️ NOT DECORATION. Slice 9d rectifies a hand-held photo onto this page's
+        millimetre grid before it crops a row, and a homography needs four
+        correspondences. The QR supplies four — but all within 26 mm of one
+        corner, so every pixel of detection error is multiplied by the distance
+        to the far side of an A4 sheet. Corner marks bound that error instead of
+        amplifying it. Kept solid black and clear of every writable box.
+        """
+        pdf.set_fill_color(0, 0, 0)
+        for fx, fy in ((FIDUCIAL_INSET, FIDUCIAL_INSET),
+                       (PAGE_W - FIDUCIAL_INSET - FIDUCIAL, FIDUCIAL_INSET),
+                       (FIDUCIAL_INSET, PAGE_H - FIDUCIAL_INSET - FIDUCIAL),
+                       (PAGE_W - FIDUCIAL_INSET - FIDUCIAL,
+                        PAGE_H - FIDUCIAL_INSET - FIDUCIAL)):
+            pdf.rect(fx, fy, FIDUCIAL, FIDUCIAL, style="F")
 
     def _page_header(page_no: int) -> float:
         pdf.add_page()
+        _fiducials()
         qr_size = 26.0
         pdf.image(qr_buf, x=PAGE_W - MARGIN - qr_size, y=MARGIN, w=qr_size,
                   h=qr_size)
@@ -278,31 +325,31 @@ def render_pdf(*, rows: list[dict], site_id: str, code: str, esc: str,
                  new_y="NEXT")
 
         # ── the fields a human fills in ────────────────────────────────────
-        y = MARGIN + 30.0
-        gap = 4.0
-        w4 = (inner - 3 * gap) / 4
-        _field(pdf, MARGIN, y, w4, "Date (dd/mm/yy)")
-        _field(pdf, MARGIN + (w4 + gap), y, w4, "Equipment / Tank No.")
-        _field(pdf, MARGIN + 2 * (w4 + gap), y, w4, "Area done (m2)")
-        # ⚠️ Ruling Q2: the lot is how a consumption is tied back to the
-        # certificate that cleared it. Without it an over-issue of controlled
-        # material cannot be traced to a batch, and the QC gate protects an
-        # issue nobody can later identify.
-        _field(pdf, MARGIN + 3 * (w4 + gap), y, w4, "Lot / Batch No.")
+        # ⚠️ THREE header fields, not four. The Lot/Batch is a per-row COLUMN —
+        # see the module docstring. Each material comes from its own batch, and
+        # one box at the top can only ever be right about one of them.
+        y = HEADER_FIELD_Y
+        gap = 5.0
+        w3 = (inner - 2 * gap) / 3
+        _field(pdf, MARGIN, y, w3, "Date (dd/mm/yy)")
+        _field(pdf, MARGIN + (w3 + gap), y, w3, "Equipment / Tank No.")
+        _field(pdf, MARGIN + 2 * (w3 + gap), y, w3, "Area done (m2)")
         y += 3.6 + 9.0 + 6.0
 
         # ── the table head ────────────────────────────────────────────────
         pdf.set_fill_color(232, 236, 242)
         pdf.set_draw_color(140, 140, 140)
         pdf.set_line_width(0.25)
-        pdf.rect(MARGIN, y, inner, 7, style="FD")
+        pdf.rect(MARGIN, y, inner, TABLE_HEAD_H, style="FD")
         pdf.set_font("helvetica", "B", 8)
         pdf.set_text_color(30, 40, 60)
-        for label, x, w, align in (("#", MARGIN, C_NO, "C"),
-                                   ("MATERIAL", MARGIN + C_NO, C_NAME, "L"),
-                                   ("UOM", MARGIN + C_NO + C_NAME, C_UOM, "C"),
-                                   ("QTY USED", MARGIN + C_NO + C_NAME + C_UOM,
-                                    C_QTY, "C")):
+        for label, x, w, align in (
+                ("#", MARGIN, C_NO, "C"),
+                ("MATERIAL", MARGIN + C_NO, C_NAME, "L"),
+                ("UOM", MARGIN + C_NO + C_NAME, C_UOM, "C"),
+                ("QTY USED", MARGIN + C_NO + C_NAME + C_UOM, C_QTY, "C"),
+                ("LOT / BATCH No.", MARGIN + C_NO + C_NAME + C_UOM + C_QTY,
+                 C_LOT, "C")):
             pdf.set_xy(x + 1, y + 2)
             pdf.cell(w - 2, 3, label, align=align)
         if pages > 1:
@@ -310,15 +357,15 @@ def render_pdf(*, rows: list[dict], site_id: str, code: str, esc: str,
             pdf.set_text_color(130, 130, 130)
             pdf.set_xy(MARGIN, y - 4.5)
             pdf.cell(inner, 3, f"page {page_no} of {pages}", align="R")
-        return y + 7
+        return y + TABLE_HEAD_H
 
     y = _page_header(1)
-    row_h = 11.0
+    row_h = ROW_H
 
     for idx, r in enumerate(rows):
-        if idx and idx % 18 == 0:
+        if idx and idx % ROWS_PER_PAGE == 0:
             _footer(pdf, form_uuid, generated_on, len(rows))
-            y = _page_header(idx // 18 + 1)
+            y = _page_header(idx // ROWS_PER_PAGE + 1)
 
         name, small = _row_label(r)
         # A very light alternating ground. Both readers of this page track
@@ -334,6 +381,8 @@ def render_pdf(*, rows: list[dict], site_id: str, code: str, esc: str,
             pdf.rect(MARGIN, y, inner, row_h)
         pdf.line(MARGIN + C_NO, y, MARGIN + C_NO, y + row_h)
         pdf.line(MARGIN + C_NO + C_NAME, y, MARGIN + C_NO + C_NAME, y + row_h)
+        pdf.line(MARGIN + C_NO + C_NAME + C_UOM, y,
+                 MARGIN + C_NO + C_NAME + C_UOM, y + row_h)
 
         # The number the OCR maps by. Printed large and alone in its column so
         # it is never confused with a handwritten figure.
@@ -356,14 +405,17 @@ def render_pdf(*, rows: list[dict], site_id: str, code: str, esc: str,
         pdf.set_xy(MARGIN + C_NO + C_NAME, y + 3)
         pdf.cell(C_UOM, 5, _txt(str(r.get("UOM") or "")), align="C")
 
-        # ⚠️ THE QTY BOX IS THE ONLY THING THE MODEL HAS TO READ. Give it a
-        # clean white rectangle with a heavy border and nothing else inside —
-        # no rule, no hint text, no shading for a digit to sit on top of.
+        # ⚠️ TWO WHITE BOXES ARE ALL THE MODEL HAS TO READ. Clean rectangles
+        # with a heavy border and nothing inside — no rule, no hint text, no
+        # shading for a digit to sit on top of. The zebra ground stops at their
+        # edge for the same reason.
         pdf.set_fill_color(255, 255, 255)
         pdf.set_draw_color(40, 40, 40)
         pdf.set_line_width(0.4)
         pdf.rect(MARGIN + C_NO + C_NAME + C_UOM + 2.5, y + 1.6,
                  C_QTY - 5, row_h - 3.2, style="FD")
+        pdf.rect(MARGIN + C_NO + C_NAME + C_UOM + C_QTY + 2.5, y + 1.6,
+                 C_LOT - 5, row_h - 3.2, style="FD")
         y += row_h
 
     # ── who filled it in ───────────────────────────────────────────────────
@@ -414,6 +466,56 @@ def _footer(pdf, form_uuid: str, generated_on: _dt.date, n: int) -> None:
         f"Form {form_uuid}   ·   {n} material line(s)   ·   blank printed "
         f"{generated_on.isoformat()} — write the WORK date in the box above   "
         f"·   photograph the whole page, including the QR code"))
+
+
+# ── the page geometry, as data the reader can use ────────────────────────────
+def fiducial_points() -> list[tuple[float, float]]:
+    """The four registration marks' CENTRES, in page millimetres, in the order
+    top-left, top-right, bottom-left, bottom-right. The rectifier matches these
+    against what it finds in the photo."""
+    h = FIDUCIAL / 2
+    return [(FIDUCIAL_INSET + h, FIDUCIAL_INSET + h),
+            (PAGE_W - FIDUCIAL_INSET - h, FIDUCIAL_INSET + h),
+            (FIDUCIAL_INSET + h, PAGE_H - FIDUCIAL_INSET - h),
+            (PAGE_W - FIDUCIAL_INSET - h, PAGE_H - FIDUCIAL_INSET - h)]
+
+
+def row_boxes(row_index: int) -> dict:
+    """Where row `row_index` (0-based, across pages) sits on its page, in mm.
+
+    ⚠️ COMPUTED FROM THE SAME CONSTANTS THE RENDERER USES, never from a second
+    copy of the numbers. A crop offered to a human as "what the camera saw on
+    line 3" that is actually line 4 is worse than no crop at all: it invites
+    them to confirm a quantity against the wrong material.
+
+    Returns page (1-based) plus rectangles for the whole row, the quantity box
+    and the lot box.
+    """
+    page = row_index // ROWS_PER_PAGE + 1
+    slot = row_index % ROWS_PER_PAGE
+    y = FIRST_ROW_Y + slot * ROW_H
+    inner = PAGE_W - 2 * MARGIN
+    qx = MARGIN + C_NO + C_NAME + C_UOM
+    lx = qx + C_QTY
+    return {
+        "page": page,
+        "row": (MARGIN, y, inner, ROW_H),
+        "qty": (qx + 2.5, y + 1.6, C_QTY - 5, ROW_H - 3.2),
+        "lot": (lx + 2.5, y + 1.6, C_LOT - 5, ROW_H - 3.2),
+    }
+
+
+def header_boxes() -> dict:
+    """The three hand-filled header fields, in page millimetres."""
+    inner = PAGE_W - 2 * MARGIN
+    gap = 5.0
+    w3 = (inner - 2 * gap) / 3
+    y = HEADER_FIELD_Y + 3.6
+    return {
+        "work_date": (MARGIN, y, w3, FIELD_BOX_H),
+        "equipment": (MARGIN + w3 + gap, y, w3, FIELD_BOX_H),
+        "area_sqm": (MARGIN + 2 * (w3 + gap), y, w3, FIELD_BOX_H),
+    }
 
 
 async def generate(session: AsyncSession, *, site_id: str, code: str,
