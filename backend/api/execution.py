@@ -19,15 +19,18 @@ justification the supervisor is notified of.
 """
 from __future__ import annotations
 
+import io
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import get_current_user, require_roles, resolve_site_param, site_scope
 from .db import get_session
+from .services import consumption_form as CF
 from .services import execution as X
 from .services.ledger import _MD
 
@@ -35,6 +38,7 @@ router = APIRouter(prefix="/execution", tags=["execution"])
 
 norm_t = _MD.tables["sme_manpower_norm"]
 recipe_t = _MD.tables["sme_recipe"]
+form_t = _MD.tables["sme_consumption_form"]
 
 
 def _write_site(user: dict, requested: Optional[str]) -> str:
@@ -325,3 +329,83 @@ async def report_surface_prep(site_id: Optional[str] = None,
     rows = [[r.get(c) for c in _PREP_COLUMNS] for r in data["items"]]
     return _export(format, "Surface Prep Progress", _PREP_COLUMNS, rows,
                    user["username"])
+
+
+# ── the printed consumption form (Phase 9c) ──────────────────────────────────
+# ⚠️ MOUNTED HERE, NOT UNDER `/mh`. Man-Hours is exact-locked to {hod, admin}
+# and a supervisor is the person who actually carries this paper into the
+# plant — putting the download behind that lock would hand the form to
+# everybody except its user. `/execution` already belongs to exactly the three
+# roles the ruling names (SK, supervisor, HOD), which is why the queue they
+# share lives here too.
+_FORM_ROLES = ("store_keeper", "supervisor", "hod")
+
+
+@router.get("/forms", summary="Lining systems that have a printable form")
+async def form_systems(user: dict = Depends(require_roles(*_FORM_ROLES)),
+                       session: AsyncSession = Depends(get_session)):
+    """The picker. Only systems that HAVE a recipe are offered — a menu entry
+    that always errors is worse than no entry."""
+    return {"items": await CF.available_systems(session)}
+
+
+@router.get("/forms/generated",
+            summary="Forms printed for this site, newest first")
+async def forms_generated(status: Optional[str] = Query(None,
+                                                        pattern="^(open|consumed|void)$"),
+                          limit: int = Query(50, ge=1, le=500),
+                          site_id: Optional[str] = Query(None),
+                          user: dict = Depends(require_roles(*_FORM_ROLES)),
+                          session: AsyncSession = Depends(get_session)):
+    """What has been printed and not yet filed — the supervisor's own question,
+    and the one an HOD asks when paper goes missing."""
+    site = resolve_site_param(user, site_id)
+    stmt = select(form_t)
+    if site is not None:
+        stmt = stmt.where(form_t.c["Site_ID"] == site)
+    if status:
+        stmt = stmt.where(form_t.c["status"] == status)
+    rows = (await session.execute(
+        stmt.order_by(form_t.c["id"].desc()).limit(limit))).mappings().all()
+    return {"items": [dict(r) | {"created_at": str(dict(r).get("created_at") or ""),
+                                 "consumed_at": str(dict(r).get("consumed_at") or "")}
+                      for r in rows]}
+
+
+@router.get("/forms/{system_code}",
+            summary="Generate and download a printable consumption form")
+async def form_download(system_code: str,
+                        esc: Optional[str] = Query(
+                            None, description="One sub-activity; omit for every "
+                                              "material on the system"),
+                        site_id: Optional[str] = Query(None),
+                        user: dict = Depends(require_roles(*_FORM_ROLES)),
+                        session: AsyncSession = Depends(get_session)):
+    """⚠️ THIS IS A WRITE, despite being a GET. Every download REGISTERS a new
+    form with its own `Form_UUID`, because two prints of "the same" form are two
+    physical sheets and slice 9d has to be able to tell them apart on the way
+    back in. Downloading twice deliberately gives you two different papers, not
+    one paper twice — the alternative is a duplicate-detection rule that cannot
+    distinguish a re-print from a re-photograph.
+
+    It stays a GET so a browser can open it in a new tab and the native shells
+    can hand it to the OS viewer; the audit row records who printed what.
+    """
+    site = _write_site(user, site_id)
+    async with session.begin():
+        pdf, row = await CF.generate(session, site_id=site,
+                                     code=system_code.strip(),
+                                     esc=(esc or "").strip() or None,
+                                     username=user["username"], role=user["role"])
+    fname = (f"consumption-{row['Lining_System_Code']}"
+             + (f"-{row['Execution_Sub_Activity_Code']}"
+                if row["Execution_Sub_Activity_Code"] else "")
+             + f"-{row['Form_UUID']}.pdf")
+    return StreamingResponse(
+        io.BytesIO(pdf), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                 # The UI needs the id it just created without parsing the PDF,
+                 # so the registry row rides back on the headers.
+                 "X-Form-UUID": row["Form_UUID"],
+                 "X-Form-Rows": str(row["Row_Count"]),
+                 "Access-Control-Expose-Headers": "X-Form-UUID, X-Form-Rows"})

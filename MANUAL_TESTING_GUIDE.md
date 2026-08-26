@@ -2335,6 +2335,107 @@ the gap between them is the point.
 
 ---
 
+## 14p. The printed consumption form (Phase 9 · slice 9c)
+
+The paper slice 9d will read. Everything about it exists to make a 7B vision
+model's job small: it prints every material name itself, and hands the site,
+system, sub-activity and sheet identity to a QR **decoder** rather than to a
+language model.
+
+### 14p.1 Getting one
+
+**TC-FORM-01** — sign in as a **Supervisor**, then a **Store Keeper**, then an
+**HOD**. All three see **Print a consumption form** on `/execution`. The
+supervisor is the one who carries it into the plant; a download hidden behind
+the Man-Hours lock would have reached everyone except its user.
+
+**TC-FORM-02** — sign in as QC, Logistics or Warehouse. No card, and the API
+refuses directly (`/execution/forms/LSC8` → 403).
+
+**TC-FORM-03** — pick a system, download. A PDF arrives named
+`consumption-<system>-<FORMID>.pdf`.
+
+**TC-FORM-04** — pick a sub-activity as well. Fewer rows: only that
+sub-activity's materials.
+
+### 14p.2 ⚠️ Every download is a new sheet
+
+**TC-FORM-05** — download the same system twice. **The two files must have
+different form numbers.** This is deliberate and is the thing most likely to
+look like a bug: two prints are two physical pieces of paper, and slice 9d has
+to tell a *re-print* from a *re-photograph*. One identity for both would make
+duplicate detection impossible to get right.
+
+**TC-FORM-06** — as an HOD, check the printed log
+(`GET /execution/forms/generated?status=open`). Both downloads are there, with
+who printed them and when. This is the question asked when paper goes missing.
+
+### 14p.3 ⚠️ Four rows that look the same
+
+**TC-FORM-07** — print **LSC8**. It lists `GI-8005765` four times — the same
+material code, the same name — at four different rates.
+
+Every row must read differently: **Comp-A**, **Comp-B**, **Comp-C**, **Comp-D**,
+from `Material_Description`. If they ever print identically, a supervisor
+writing 20 in "the Cumicrete one" cannot say which, and seven of the eleven
+live systems are in this shape.
+
+**TC-FORM-08** — a material with only one row prints its plain name, with no
+qualifier. The description appears only where it disambiguates.
+
+**TC-FORM-09** — every row carries its SAP code in small print.
+
+### 14p.4 The QR code
+
+**TC-FORM-10** — scan the QR with any phone scanner. It reads
+`GIF1|<site>|<system>|<sub-activity>|<form id>` — five fields, always five, with
+an empty sub-activity on a whole-system form.
+
+**TC-FORM-11** — the form id in the QR matches the one printed in the footer and
+in the filename. Three places, one number.
+
+### 14p.5 What the form does and does not pre-fill
+
+**TC-FORM-12** — the **Date** box is **blank**. Forms are printed in batches and
+used same-day or next-day, so a pre-printed work date would be wrong on half of
+them — and wrong in the direction that matters, since the date decides which
+day's progress the consumption lands on. The *generation* date is in the footer
+instead: it tells you how old a blank sheet is without claiming to be the day
+the work happened.
+
+**TC-FORM-13** — **Equipment**, **Area (m²)** and **Lot / Batch No.** are blank
+boxes. The lot is there per the QSEP ruling: without it, a consumption of
+controlled material cannot be tied back to the certificate that cleared it.
+
+**TC-FORM-14** — there are **no blank write-in rows**. Supervisors use only
+recipe-defined materials (they may write 0), so a spare row is an invitation to
+write a name the system cannot map.
+
+**TC-FORM-15** — a system with no recipe returns a **404 that says what to do**,
+not an empty PDF.
+
+### 14p.6 ⚠️ Paper outlives the recipe it was printed from
+
+This is the subtle one, and it is what slice 9d will lean on.
+
+**TC-FORM-16** — print a form. Now **add a material** to that system's recipe in
+the Material Estimator. The printed sheet still shows the old rows, and the
+system knows: `Recipe_Fingerprint` on the registered form no longer matches.
+9d will refuse the stale sheet rather than read row 3's handwriting into a
+different material.
+
+**TC-FORM-17** — now change a material's **rate** (`For_1_SQM`) instead. The
+fingerprint must **not** change. A rate moves the benchmark comparison, never
+which box the supervisor writes in, and invalidating printed paper for a change
+that cannot mis-map anything is its own failure.
+
+**TC-FORM-18** — reorder two recipe rows. The fingerprint **must** change: read
+positionally, a swap mis-files every quantity by one, and a same-set check would
+not notice.
+
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do

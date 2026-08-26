@@ -17193,7 +17193,12 @@ async def test_docs_and_assistant():
             ("Nights buy time, not a smaller payroll", "what nights buy (9b)"),
             ("the split is read from your\nroster", "the roster-derived shift split (9b)"),
             ("16.5 WBS numbers and work types", "the WBS manager (9a)"),
-            ("One work type, one spelling", "the normalised work-type key (9a)")):
+            ("One work type, one spelling", "the normalised work-type key (9a)"),
+            # Phase 9c. The two rules a supervisor is most likely to be
+            # surprised by, and the one a developer is most likely to "fix".
+            ("16.6 Printing a consumption form", "the printed form (9c)"),
+            ("Every download is a new sheet", "why a re-print is new paper (9c)"),
+            ("There are no spare rows", "the no-write-in-rows rule (9c)")):
         check(f"CJ-23 the manual documents {why}", needle in md, needle)
 
     # And the assistant can actually find them.
@@ -18325,6 +18330,330 @@ async def test_planner_shift_math():
     await _reset()
 
 
+
+
+# --- Suite CM: the paper the field fills in ----------------------------------
+async def test_consumption_form():
+    """Suite CM — Phase 9c. The printed form, its QR, and the registry behind it.
+
+    WHAT THIS FORM IS FOR. Slice 9d reads these sheets with `qwen2.5vl:7b`. A 7B
+    vision model's weakest task is reading handwritten NAMES and its strongest is
+    reading a digit in a box, so the form prints every material itself and asks
+    for nothing but numbers — and the QR hands Site, system, sub-activity and
+    form identity to a DECODER rather than a language model. Everything below
+    exists to make sure the paper can still be trusted weeks after it is printed.
+
+    ⚠️ THE ROW ORDER IS A DATA CONTRACT, NOT A LAYOUT CHOICE. The QR cannot
+    carry a material list, so 9d maps handwriting POSITIONALLY: row 3 on the
+    paper is row 3 of the fingerprint. CM-10..CM-14 are the checks that a
+    recipe edit which would shift that mapping changes the hash — and that one
+    which cannot shift it does not, because invalidating printed paper for a
+    harmless change is its own failure.
+
+    ⚠️ FOUR ROWS CAN SHARE ONE MATERIAL NAME. LSC8 prints `GI-8005765`
+    ("Cumicrete PU MF 300 - 3mm") four times at four rates, separated only by
+    `Material_Description` — Comp-A/B/C/D. CM-06 is the check that the printed
+    label distinguishes them; without it a supervisor writing 20 in "the
+    Cumicrete one" has no way to say which, on seven of the eleven systems.
+    """
+    import datetime as _dt
+    import io as _io
+
+    from fastapi import HTTPException
+    from sqlalchemy import text as _sqt
+
+    from .services import consumption_form as CF
+
+    SITE = "CNCEC"
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    # cv2 / pypdfium2 are in the venv but NOT in requirements.txt, so the
+    # strongest check here is opportunistic. It reports which one it ran rather
+    # than quietly downgrading — a suite that says "QR verified" when it only
+    # compared two strings is worse than one that admits the decoder was absent.
+    try:
+        import cv2 as _cv2  # noqa: F401
+        import numpy as _np  # noqa: F401
+        import pypdfium2 as _pdfium  # noqa: F401
+        CAN_DECODE = True
+    except ImportError:
+        CAN_DECODE = False
+
+    async def _cleanup():
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM sme_consumption_form WHERE "
+                                 "\"Lining_System_Code\" LIKE 'SVCM-%'"))
+            await s.execute(_sqt("DELETE FROM sme_recipe WHERE "
+                                 "\"Lining_System_Code\" LIKE 'SVCM-%'"))
+            await s.commit()
+
+    await _cleanup()
+
+    # A fixture in the LSC8 shape: one material code on three rows, separated
+    # only by SAP and description. That is the case the form has to survive.
+    RECIPE = [
+        ("SVCM-A", "ESCM1", "SVCM-MAT-1", "1900", "Alpha Primer", "Comp-A", "KG", 0.10),
+        ("SVCM-A", "ESCM1", "SVCM-MAT-1", "1900-1", "Alpha Primer", "Comp-B", "KG", 0.20),
+        ("SVCM-A", "ESCM2", "SVCM-MAT-2", "1901", "Beta Mortar", "", "KG", 0.65),
+        ("SVCM-A", "ESCM2", "SVCM-MAT-1", "1900-2", "Alpha Primer", "Comp-C", "KG", 0.30),
+    ]
+    async with SessionLocal() as s:
+        for code, esc, mat, sap, name, desc, uom, rate in RECIPE:
+            await s.execute(_sqt(
+                'INSERT INTO sme_recipe ("Lining_System_Code", '
+                '"Lining_System_Name", "Execution_Sub_Activity_Code", '
+                '"Material_Code", "SAP_Code", "Material_Name", '
+                '"Material_Description", "UOM", "For_1_SQM") VALUES '
+                "(:c, 'SVCM system', :e, :m, :s, :n, :d, :u, :r)"),
+                {"c": code, "e": esc, "m": mat, "s": sap, "n": name,
+                 "d": desc, "u": uom, "r": rate})
+        await s.commit()
+
+    # ── 1. the QR payload ───────────────────────────────────────────────────
+    p = CF.qr_payload(form_uuid="ABC123", site_id=SITE, code="SVCM-A", esc="ESCM1")
+    check("CM-01 the QR payload leads with a VERSION tag, so a decoder meeting "
+          "an unknown one can say 'newer app' instead of guessing at the field "
+          "order", p.startswith("GIF1|"), p)
+    check("CM-02 …and carries exactly the four things the model must not have "
+          "to read: site, system, sub-activity, form identity",
+          CF.parse_qr(p) == {"site_id": SITE, "lining_system_code": "SVCM-A",
+                             "esc": "ESCM1", "form_uuid": "ABC123"}, str(CF.parse_qr(p)))
+    empty = CF.parse_qr(CF.qr_payload(form_uuid="X", site_id=SITE,
+                                      code="SVCM-A", esc=""))
+    check("CM-03 a whole-system form still has five fields with an EMPTY "
+          "sub-activity — a payload whose shape changes with the content is one "
+          "the decoder has to guess at",
+          empty["esc"] == "" and empty["form_uuid"] == "X", str(empty))
+    try:
+        CF.qr_payload(form_uuid="X", site_id="A|B", code="C", esc="")
+        sep_ok = False
+    except HTTPException as e:
+        sep_ok = "separator" in str(e.detail)
+    check("CM-04 a value containing the separator is REFUSED at encode time. "
+          "Encoded anyway it would silently shift every field after it, and the "
+          "failure would surface as a wrong site on somebody's consumption",
+          sep_ok, "the separator was not rejected")
+    for bad in ("", "nonsense", "GIF9|a|b|c|d", "GIF1|too|few"):
+        try:
+            CF.parse_qr(bad)
+            ok = False
+        except HTTPException:
+            ok = True
+        check(f"CM-05 {bad!r} is rejected as not a GI form", ok, bad)
+
+    # ── 2. ⚠️ the rows a human has to tell apart ────────────────────────────
+    async with SessionLocal() as s:
+        rows = await CF.recipe_rows(s, code="SVCM-A")
+        labels = [CF._row_label(r)[0] for r in rows]
+    check("CM-06 ⚠️ three rows share ONE material code and name, and the "
+          "printed labels are still DISTINCT. Separated only by "
+          "Material_Description (Comp-A/B/C), a form that printed the name "
+          "alone would give a supervisor three identical boxes — the live "
+          "recipe is in this shape on seven of eleven systems",
+          len(labels) == len(set(labels)) == 4, str(labels))
+    check("CM-07 …and the qualifier appears only where it DISAMBIGUATES — the "
+          "one material with a single row prints its plain name, because "
+          "adding a description everywhere pushes the real names off the line",
+          any(l == "Beta Mortar" for l in labels), str(labels))
+    check("CM-08 every row carries its SAP code in small print, so the paper "
+          "holds the machine-readable identity too",
+          all("SAP " in CF._row_label(r)[1] for r in rows),
+          str([CF._row_label(r)[1] for r in rows]))
+
+    # ── 3. the order, and the hash that pins it ─────────────────────────────
+    check("CM-09 the row order is deterministic — sub-activity, then material, "
+          "then SAP. Row N on the paper is row N forever, because that is how "
+          "9d maps a handwritten quantity back to a material",
+          [r["SAP_Code"] for r in rows] == ["1900", "1900-1", "1900-2", "1901"],
+          str([r["SAP_Code"] for r in rows]))
+
+    base_fp = CF.fingerprint(rows)
+    check("CM-10 the fingerprint is stable across two reads of the same recipe",
+          base_fp == CF.fingerprint(rows), base_fp)
+    reordered = [rows[1], rows[0]] + rows[2:]
+    check("CM-11 ⚠️ REORDERING CHANGES THE HASH. A recipe edit that merely "
+          "swaps two rows would pass a same-SET check and mis-file every "
+          "quantity by one, so order is inside the hash",
+          CF.fingerprint(reordered) != base_fp, "reorder did not change the hash")
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt('UPDATE sme_recipe SET "For_1_SQM" = 9.99 WHERE '
+                             "\"SAP_Code\" = '1901'"))
+        await s.commit()
+        rate_rows = await CF.recipe_rows(s, code="SVCM-A")
+    check("CM-12 changing a RATE does not change the hash. The rate moves the "
+          "benchmark comparison, never which box the supervisor writes in — "
+          "invalidating printed paper for a change that cannot mis-map "
+          "anything is its own failure",
+          CF.fingerprint(rate_rows) == base_fp, CF.fingerprint(rate_rows))
+
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO sme_recipe ("Lining_System_Code", '
+            '"Execution_Sub_Activity_Code", "Material_Code", "SAP_Code", '
+            '"Material_Name", "UOM", "For_1_SQM") VALUES '
+            "('SVCM-A', 'ESCM2', 'SVCM-MAT-3', '1902', 'Gamma', 'KG', 0.4)"))
+        await s.commit()
+        more = await CF.recipe_rows(s, code="SVCM-A")
+    check("CM-13 ⚠️ ADDING A MATERIAL CHANGES THE HASH. A sheet already in "
+          "somebody's pocket now lists four rows where the system has five; "
+          "read positionally, everything after the insertion point lands on "
+          "the wrong material",
+          CF.fingerprint(more) != base_fp and len(more) == 5,
+          f"{len(more)} rows, fp={CF.fingerprint(more)}")
+    async with SessionLocal() as s:
+        await s.execute(_sqt("DELETE FROM sme_recipe WHERE \"SAP_Code\" = '1902'"))
+        await s.execute(_sqt('UPDATE sme_recipe SET "For_1_SQM" = 0.65 WHERE '
+                             "\"SAP_Code\" = '1901'"))
+        await s.commit()
+
+    # ── 4. the PDF, and the QR inside it ────────────────────────────────────
+    async with SessionLocal() as s:
+        rows = await CF.recipe_rows(s, code="SVCM-A")
+        pdf = CF.render_pdf(rows=rows, site_id=SITE, code="SVCM-A", esc="",
+                            system_name="SVCM system", form_uuid="CMTEST01")
+    check("CM-14 the form renders to a real PDF", pdf[:5] == b"%PDF-", str(pdf[:16]))
+
+    if CAN_DECODE:
+        import cv2
+        import numpy as np
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(_io.BytesIO(pdf))
+        img = doc[0].render(scale=3).to_pil().convert("RGB")
+        arr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        decoded, _pts, _qr = cv2.QRCodeDetector().detectAndDecode(arr)
+        want = CF.qr_payload(form_uuid="CMTEST01", site_id=SITE,
+                             code="SVCM-A", esc="")
+        check("CM-15 ⚠️ THE QR DECODES OUT OF THE RENDERED PAGE, not merely out "
+              "of the string that built it. This is the half of the pipeline "
+              "that replaces the vision model, and a QR that survives the "
+              "encoder but not the print is one nobody finds until the field "
+              "has a camera on it",
+              decoded == want, f"decoded={decoded!r} want={want!r}")
+        check("CM-16 …and what comes off the page parses back to the same four "
+              "fields", CF.parse_qr(decoded)["form_uuid"] == "CMTEST01",
+              str(decoded))
+    else:
+        check("CM-15 SKIPPED — no QR decoder installed (cv2 + pypdfium2 are in "
+              "the venv but not in requirements.txt), so only the payload "
+              "round-trip above was verified, NOT the printed page",
+              True, "")
+
+    # ── 5. no write-in rows, and a system with nothing to print ─────────────
+    check("CM-17 the form prints exactly the recipe — no blank write-in rows "
+          "(ruling Q9). Supervisors use only recipe-defined materials, so a "
+          "spare row is an invitation to write a name 9d cannot resolve",
+          len(rows) == 4, f"{len(rows)} rows for 4 recipe lines")
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        SUP = await _qsep_login(ac, "SVCQ-sup")
+        SK = await _qsep_login(ac, "SVCQ-sk")
+        H = await _qsep_login(ac, "SVCQ-hod")
+
+        r = await ac.get("/execution/forms/SVCM-NOPE", headers=SUP)
+        check("CM-18 a system with no recipe is a 404 that says what to do "
+              "about it, not an empty PDF",
+              r.status_code == 404 and "Material Estimator" in r.text, r.text[:160])
+
+        # ── 6. who may print one ────────────────────────────────────────────
+        # Ruling: SK, Supervisor and HOD can all download this. The supervisor
+        # is the one who carries it into the plant.
+        for who, hdr in (("supervisor", SUP), ("store keeper", SK), ("HOD", H)):
+            r = await ac.get("/execution/forms/SVCM-A", headers=hdr)
+            check(f"CM-19 a {who} can print the form",
+                  r.status_code == 200
+                  and r.headers["content-type"] == "application/pdf",
+                  f"{r.status_code} {r.text[:120]}")
+
+        for who in ("SVCQ-qc", "SVCQ-log", "SVCQ-wh"):
+            hdr = await _qsep_login(ac, who)
+            r = await ac.get("/execution/forms/SVCM-A", headers=hdr)
+            check(f"CM-20 {who} cannot — the form is the execution workflow's, "
+                  f"and that workflow belongs to three roles",
+                  r.status_code == 403, f"{r.status_code} {r.text[:100]}")
+
+        # ── 7. ⚠️ every download is a NEW sheet ─────────────────────────────
+        a = await ac.get("/execution/forms/SVCM-A", headers=SUP)
+        b = await ac.get("/execution/forms/SVCM-A", headers=SUP)
+        ua, ub = a.headers.get("x-form-uuid"), b.headers.get("x-form-uuid")
+        check("CM-21 ⚠️ DOWNLOADING TWICE GIVES TWO DIFFERENT FORMS, on purpose. "
+              "Two prints are two physical sheets, and 9d has to tell a "
+              "RE-PRINT from a RE-PHOTOGRAPH — one UUID for both would make "
+              "duplicate detection impossible to get right",
+              ua and ub and ua != ub, f"{ua} / {ub}")
+        check("CM-22 …and the UUID and row count come back on headers, so the "
+              "UI knows what it just created without parsing the PDF",
+              b.headers.get("x-form-rows") == "4", str(dict(b.headers)))
+
+        # ── 8. the registry ─────────────────────────────────────────────────
+        async with SessionLocal() as s:
+            reg = (await s.execute(_sqt(
+                'SELECT * FROM sme_consumption_form WHERE "Form_UUID" = :u'),
+                {"u": ub})).mappings().first()
+        check("CM-23 the form is REGISTERED before it is rendered — a PDF that "
+              "reached a printer with no row would be paper the system cannot "
+              "recognise on the way back in",
+              reg is not None, str(ub))
+        check("CM-24 …carrying the fingerprint of what was printed, the row "
+              "count, and the site it was printed for",
+              reg["Recipe_Fingerprint"] == base_fp and reg["Row_Count"] == 4
+              and reg["Site_ID"] == SITE and reg["status"] == "open",
+              str(dict(reg)))
+        check("CM-25 …and who printed it, in which role. Paper that turns up "
+              "filled in is traced back through this row",
+              reg["created_by"] == "SVCQ-sup"
+              and reg["created_by_role"] == "supervisor", str(dict(reg)))
+
+        async with SessionLocal() as s:
+            audited = (await s.execute(_sqt(
+                "SELECT COUNT(*) FROM system_audit_log WHERE action_type = "
+                "'CONSUMPTION_FORM_PRINT' AND details LIKE :d"),
+                {"d": f"%{ub}%"})).scalar()
+        check("CM-26 …and printing is audited, like every other act that puts "
+              "a document into the world", audited == 1, str(audited))
+
+        # ── 9. the sub-activity filter ──────────────────────────────────────
+        r = await ac.get("/execution/forms/SVCM-A", params={"esc": "ESCM1"},
+                         headers=SUP)
+        check("CM-27 a form for ONE sub-activity prints only its materials — "
+              "two of the four here",
+              r.status_code == 200 and r.headers.get("x-form-rows") == "2",
+              f"{r.status_code} rows={r.headers.get('x-form-rows')}")
+        async with SessionLocal() as s:
+            narrow = (await s.execute(_sqt(
+                'SELECT * FROM sme_consumption_form WHERE "Form_UUID" = :u'),
+                {"u": r.headers["x-form-uuid"]})).mappings().first()
+        check("CM-28 …and its fingerprint differs from the whole-system form's, "
+              "because it is a different piece of paper with a different row "
+              "mapping",
+              narrow["Recipe_Fingerprint"] != base_fp
+              and narrow["Execution_Sub_Activity_Code"] == "ESCM1",
+              str(dict(narrow)))
+
+        # ── 10. the picker and the log ──────────────────────────────────────
+        r = await ac.get("/execution/forms", headers=SUP)
+        codes = {i["Lining_System_Code"] for i in r.json()["items"]}
+        check("CM-29 the picker offers systems that HAVE a recipe — a menu "
+              "entry that always 404s is worse than no entry",
+              "SVCM-A" in codes and all(
+                  i["materials"] > 0 for i in r.json()["items"]), str(sorted(codes))[:200])
+        entry = next(i for i in r.json()["items"]
+                     if i["Lining_System_Code"] == "SVCM-A")
+        check("CM-30 …and names each system's sub-activities, so a supervisor "
+              "can print the narrow form without knowing the codes by heart",
+              entry["sub_activities"] == ["ESCM1", "ESCM2"], str(entry))
+
+        r = await ac.get("/execution/forms/generated", params={"status": "open"},
+                         headers=H)
+        mine = [i for i in r.json()["items"] if i["Lining_System_Code"] == "SVCM-A"]
+        check("CM-31 an HOD can see what has been printed and not yet filed — "
+              "the question asked when paper goes missing",
+              len(mine) >= 3, f"{len(mine)} open forms")
+
+    await _cleanup()
+
+
 async def test_database_isolation():
     """Suite BW — the tests must not be able to reach the live database.
 
@@ -18793,6 +19122,9 @@ async def main() -> int:
     print("\n CK. The WBS nobody could reach — the tap that was plumbed and "
           "never opened, and the order the two gates run in")
     await test_wbs_work_types()
+    print("\n CM. The paper the field fills in — pre-printed names, a QR the "
+          "model never has to read, and a hash that outlives the recipe")
+    await test_consumption_form()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

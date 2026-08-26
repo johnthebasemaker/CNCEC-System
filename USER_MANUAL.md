@@ -3583,6 +3583,75 @@ the number; rows without one read `(no WBS)` rather than showing an empty cell.
 entries posted last month. Historical corrections are an Excel sync, not a side
 effect of a settings change.
 
+## 16.6 Printing a consumption form
+
+**Where:** Execution Entries (`/execution`) → **Print a consumption form**.
+Store Keeper, Supervisor and HOD.
+
+The field fills these in by hand and photographs them; the app reads the photo.
+Everything about the form's design exists to make that reading reliable.
+
+### 16.6.1 What is already printed, and what you write
+
+The form prints **every material for the system** — name, component, SAP code
+and unit — so **nobody ever writes a material name by hand**. Reading
+handwritten names is the one thing the vision model is genuinely bad at, and a
+name that is already printed cannot be misread.
+
+You write four things at the top — **Date**, **Equipment / Tank No.**,
+**Area done (m²)** and **Lot / Batch No.** — a quantity in each row's box, and
+your name at the bottom.
+
+⚠️ **The date box is blank on purpose.** Forms are printed in batches and used
+today or tomorrow, so a pre-printed date would be wrong on half of them — and
+the date decides which day's progress your work lands on. The small date in the
+footer is when the *blank* was printed: it tells you if you are holding old
+paper.
+
+⚠️ **There are no spare rows.** Only materials in the system's recipe can be
+recorded. Write **0** for anything you did not use; never add a material by
+hand, because there is no box for it and the app cannot match it.
+
+### 16.6.2 ⚠️ Rows that look almost identical
+
+Some systems list the same product several times as separate components. LSC8
+prints "Cumicrete PU MF 300 - 3mm" four times — as **Comp-A**, **Comp-B**,
+**Comp-C** and **Comp-D**, each with its own SAP code.
+
+They are different materials with different quantities. Check the component
+letter, not just the product name.
+
+### 16.6.3 The QR code
+
+The square in the top-right holds the site, the system, the sub-activity and
+this sheet's own number. It is read by a scanner, not by the AI, which is why
+none of those four things can be got wrong.
+
+⚠️ **Photograph the whole page, including the QR.** A photo that crops it out
+cannot be matched to anything, and you will be asked to retake it.
+
+### 16.6.4 ⚠️ Every download is a new sheet
+
+Downloading the form twice gives you **two different sheets with two different
+numbers** — not two copies of one form.
+
+That is deliberate. The app has to be able to tell "you printed a second sheet"
+from "you photographed the same sheet twice", and it does that by the number on
+the paper. If you print a spare, it is a genuinely separate form.
+
+An HOD can see every form printed and not yet filed, and who printed it.
+
+### 16.6.5 If the materials change after you print
+
+If someone edits the system's recipe after your form was printed — adds a
+material, reorders them, changes a code — the app will **refuse the photo** and
+ask for a fresh form.
+
+It is not being awkward. The app matches your handwriting to materials by row
+*position*, so a sheet printed against different rows would file your quantities
+against the wrong materials — and the numbers would look perfectly reasonable.
+Changing a material's **rate** is fine and does not invalidate printed paper.
+
 ## 17.1 How the system is put together
 
 Four layers sit between a user and your data, and each has a single job.

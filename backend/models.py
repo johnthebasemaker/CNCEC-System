@@ -1140,6 +1140,38 @@ class SmeManpowerNorm(Base):
     )
 
 
+class SmeConsumptionForm(Base):
+    """A printed consumption form, registered at the moment it was generated.
+
+    ⚠️ `Recipe_Fingerprint` records what was ON THE PAPER, not what the recipe
+    says now. Paper outlives the recipe it was printed from: a sheet in
+    somebody's pocket still lists row 3 as whatever it listed last week, and
+    resolving the recipe again at upload would show today's materials against
+    yesterday's handwriting and call it agreement. Slice 9d compares the two
+    and refuses a stale sheet.
+    """
+    __tablename__ = "sme_consumption_form"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Form_UUID = Column(Text, nullable=False)
+    Site_ID = Column(Text, nullable=False)
+    Lining_System_Code = Column(Text, nullable=False)
+    # '' = every sub-activity of the system, matching sme_execution_entry.
+    Execution_Sub_Activity_Code = Column(Text, nullable=False,
+                                         server_default=text("''"))
+    Recipe_Fingerprint = Column(Text, nullable=False)
+    Row_Count = Column(Integer, nullable=False, server_default=text("0"))
+    status = Column(Text, nullable=False, server_default=text("'open'"))
+    consumed_entry_id = Column(Integer)
+    consumed_at = Column(DateTime)
+    created_by = Column(Text)
+    created_by_role = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    __table_args__ = (
+        UniqueConstraint("Form_UUID", name="uq_consumption_form_uuid"),
+        Index("ix_consumption_form_site_status", "Site_ID", "status"),
+    )
+
+
 class SmeExecutionEntry(Base):
     """One execution report: what was consumed, what area was done, by whom.
 

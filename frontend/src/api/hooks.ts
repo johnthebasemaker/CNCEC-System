@@ -299,6 +299,38 @@ export function useDeleteWorkType() {
   })
 }
 
+// ── Phase 9c: the printed consumption form ──────────────────────────────────
+export interface FormSystem {
+  Lining_System_Code: string; Lining_System_Name: string
+  sub_activities: string[]; materials: number
+}
+
+export function useFormSystems() {
+  return useQuery<FormSystem[]>({
+    queryKey: ['/execution/forms'],
+    staleTime: 300_000,
+    queryFn: async () => (await api.get<{ items: FormSystem[] }>(
+      '/execution/forms')).data.items,
+  })
+}
+
+export function useGeneratedForms(status?: string) {
+  return useQuery<Row[]>({
+    queryKey: ['/execution/forms/generated', status],
+    queryFn: async () => (await api.get<{ items: Row[] }>(
+      '/execution/forms/generated',
+      { params: status ? { status } : {} })).data.items,
+  })
+}
+
+// ⚠️ EVERY DOWNLOAD REGISTERS A NEW FORM, so the generated list is stale the
+// moment this resolves. Two prints are two physical sheets — see the endpoint's
+// docstring for why that is deliberate rather than a caching bug.
+export async function downloadConsumptionForm(code: string, esc?: string) {
+  await downloadDocument('/execution/forms/' + encodeURIComponent(code),
+    esc ? { esc } : {}, `consumption-${code}.pdf`)
+}
+
 // Parity A1 — is the supporting-document gate on? (drives the required marks)
 export function useDocsRequired() {
   return useQuery<boolean>({
