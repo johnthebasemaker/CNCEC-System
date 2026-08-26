@@ -17099,7 +17099,7 @@ async def test_docs_and_assistant():
           documented == tabs_in_code, f"code={tabs_in_code} manual={documented}")
     check("CJ-05 …and the count is stated in prose too, so a reader is not "
           "left to count headings",
-          "twelve" in md[md.index("## 19.2"):md.index("## 19.3")].lower(),
+          "thirteen" in md[md.index("## 19.2"):md.index("## 19.3")].lower(),
           "the tab count is not written out in §19.2")
 
     # Roles: every role the API knows must have a capability list a person can
@@ -17255,7 +17255,13 @@ async def test_docs_and_assistant():
             ("The lot is per row, not per form", "the 9c lot correction"),
             ("stop raising a separate issue", "the double-deduction warning (9d)"),
             ("EMPTY rather than\nguessed", "the never-guess-a-digit rule (9d)"),
-            ("Rejection is final", "the no-bounce-back ruling Q4")):
+            ("Rejection is final", "the no-bounce-back ruling Q4"),
+            # Phase 9e. The line is the single most misreadable thing on the
+            # new chart, and the empty-reason rule is the one most likely to be
+            # "helpfully" filled in with a guess.
+            ("19.6 📈 Efficiency by Day", "the efficiency chart (9e)"),
+            ("The line is the RUNNING figure", "what the chart's line means (9e)"),
+            ("no reason recorded", "the never-guess-a-reason rule (9e)")):
         check(f"CJ-23 the manual documents {why}", needle in md, needle)
 
     # And the assistant can actually find them.
@@ -19316,6 +19322,257 @@ async def test_ocr_workflow():
     await _reset()
 
 
+
+
+# --- Suite CO: efficiency over time, and the days it cannot divide -----------
+async def test_daily_efficiency():
+    """Suite CO — Phase 9e. Man-hours per m², day by day.
+
+    ⚠️ THE WHOLE SUITE IS ABOUT DIVISION BY ZERO, and there are TWO of them,
+    which is the thing most likely to be collapsed into one by a later
+    refactor:
+
+      · `sqm == 0` on a day  → the DAILY ratio does not exist. Mobilisation,
+        scaffolding and curing all book hours against no area, so this is not
+        an edge case, it is most of the first week.
+      · `cum_sqm == 0` so far → the RUNNING ratio does not exist either, for
+        anybody. That is a real gap at the start of a job, not a nuisance to
+        paper over.
+
+    A day can fail the first and pass the second; a day that fails both is a
+    job that has produced nothing yet. CO-06..CO-11 pin both.
+
+    ⚠️ AND WHY CUMULATIVE IS THE COMPARISON (ruling Q11). In the fixture below
+    the daily ratio says tank T1 runs at 2.2 MH/m² on the days it produces
+    anything. Its true cost including the scaffolding is 6.6 — three times
+    that. A chart plotting the daily figure would show a tank performing well
+    and hide a fortnight of setup; CO-05 is the check that the two disagree
+    and that the API leads with the honest one.
+    """
+    from sqlalchemy import text as _sqt
+
+    from .services import mh_analytics as _A
+
+    SITE = "CNCEC"
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _reset():
+        async with SessionLocal() as s:
+            await s.execute(_sqt("DELETE FROM mh_timesheets WHERE "
+                                 "\"Employee_Code\" LIKE 'SVCO-%'"))
+            await s.execute(_sqt("DELETE FROM mh_production WHERE "
+                                 "\"Equipment_Tag\" LIKE 'SVCO-%'"))
+            await s.commit()
+
+    await _reset()
+
+    # ⚠️ NUMBERS CHOSEN SO A WRONG ANSWER IS OBVIOUS RATHER THAN PLAUSIBLE.
+    #   T1: 88 + 88 scaffolding hours, then 88 h → 40 m², then 44 h → 20 m²,
+    #       then 88 h with no area and NO note.
+    #       daily on productive days = 2.2 · true cumulative = 396/60 = 6.6
+    #   T2: 22 h → 40 m² twice. 44/80 = 0.55 — twelve times better.
+    ROWS = [
+        ("2026-08-01", "SVCO-T1", 88, 0, "Scaffolding erection"),
+        ("2026-08-02", "SVCO-T1", 88, 0, "Scaffolding erection"),
+        ("2026-08-03", "SVCO-T1", 88, 40, ""),
+        ("2026-08-05", "SVCO-T1", 44, 20, ""),
+        ("2026-08-06", "SVCO-T1", 88, 0, ""),
+        ("2026-08-03", "SVCO-T2", 22, 40, ""),
+        ("2026-08-05", "SVCO-T2", 22, 40, ""),
+    ]
+    async with SessionLocal() as s:
+        for i, (d, tag, h, sq, rem) in enumerate(ROWS):
+            await s.execute(_sqt(
+                'INSERT INTO mh_timesheets ("Site_ID", "Employee_Code", '
+                '"Work_Date", "Equipment_Tag", "System_Code", "Total_Hours", '
+                '"Remarks") VALUES (:s, :e, :d, :t, \'SVCO-SYS\', :h, :r)'),
+                {"s": SITE, "e": f"SVCO-{i}", "d": d, "t": tag, "h": h, "r": rem})
+            if sq:
+                await s.execute(_sqt(
+                    'INSERT INTO mh_production ("Site_ID", "Work_Date", '
+                    '"Equipment_Tag", "System_Code", "SQM_Done") VALUES '
+                    "(:s, :d, :t, 'SVCO-SYS', :q)"),
+                    {"s": SITE, "d": d, "t": tag, "q": sq})
+        await s.commit()
+
+    async with SessionLocal() as s:
+        out = await _A.daily_efficiency(s, site_id=SITE, system_code="SVCO-SYS")
+    by_key = {ser["Equipment_Tag"]: ser for ser in out["series"]}
+    t1 = by_key["SVCO-T1"]
+    t2 = by_key["SVCO-T2"]
+    p1 = {p["date"]: p for p in t1["points"]}
+
+    # ── 1. the axis ─────────────────────────────────────────────────────────
+    check("CO-01 every calendar day between the first and last observation is "
+          "emitted, including the ones with nothing on them. An axis that "
+          "skipped the quiet days would compress a fortnight of drift into "
+          "what looks like a steady run",
+          out["days"] == ["2026-08-01", "2026-08-02", "2026-08-03",
+                          "2026-08-04", "2026-08-05", "2026-08-06"],
+          str(out["days"]))
+    check("CO-02 …and the window is the OBSERVED range, not the requested one. "
+          "Padding the edges with empty days would claim work happened there "
+          "and produced nothing",
+          len(t1["points"]) == 6 and len(t2["points"]) == 6,
+          f"{len(t1['points'])} / {len(t2['points'])}")
+
+    # ── 2. ⚠️ the two divisions by zero ─────────────────────────────────────
+    check("CO-06 ⚠️ A DAY WITH HOURS AND NO AREA HAS NO DAILY RATIO — null, "
+          "never 0 and never a large number. Zero reads as 'this crew achieved "
+          "nothing per metre', which is a claim about efficiency; the truth is "
+          "there were no metres to divide by",
+          p1["2026-08-01"]["daily_mh_per_sqm"] is None
+          and p1["2026-08-01"]["hours"] == 88.0, str(p1["2026-08-01"]))
+    check("CO-07 ⚠️ …and the RUNNING ratio is null too while the job has "
+          "produced nothing AT ALL. That is a real gap at the start of a job, "
+          "not a nuisance to paper over — two different divisions by zero, and "
+          "collapsing them into one loses the distinction",
+          p1["2026-08-01"]["cum_mh_per_sqm"] is None
+          and p1["2026-08-02"]["cum_mh_per_sqm"] is None,
+          f"{p1['2026-08-01']['cum_mh_per_sqm']} / "
+          f"{p1['2026-08-02']['cum_mh_per_sqm']}")
+    check("CO-08 …but once ANY area exists the running figure is defined, even "
+          "on a later day that produced none. 396 h over 60 m² is 6.6, and the "
+          "scaffolding hours are part of what the job cost",
+          p1["2026-08-06"]["cum_mh_per_sqm"] == 6.6
+          and p1["2026-08-06"]["daily_mh_per_sqm"] is None,
+          str(p1["2026-08-06"]))
+
+    check("CO-09 a day with hours and no area is flagged `gap`; a day with "
+          "NEITHER is `idle`. They look the same on a chart and mean opposite "
+          "things — one is unexplained effort, the other is a day off",
+          p1["2026-08-01"]["gap"] is True and p1["2026-08-01"]["idle"] is False
+          and p1["2026-08-04"]["gap"] is False
+          and p1["2026-08-04"]["idle"] is True,
+          f"{p1['2026-08-01']} / {p1['2026-08-04']}")
+
+    # ── 3. ⚠️ the reason is read, not invented ──────────────────────────────
+    check("CO-10 ⚠️ THE REASON IS WHAT THE TIMEKEEPER WROTE. There is no "
+          "'mobilisation / scaffolding / curing' taxonomy in this database, "
+          "and inventing one would put a label on somebody's day that they "
+          "never chose",
+          p1["2026-08-01"]["reason"] == "Scaffolding erection",
+          str(p1["2026-08-01"]["reason"]))
+    check("CO-11 …and where nothing was written the reason is None, not a "
+          "guess. 'No reason recorded' is a thing a manager can act on",
+          p1["2026-08-06"]["reason"] is None and p1["2026-08-06"]["gap"] is True,
+          str(p1["2026-08-06"]))
+    check("CO-12 …and the API SAYS how many such days there were, so an "
+          "unexplained fortnight is not something you have to notice",
+          any("no area and no note" in w for w in out["warnings"]),
+          str(out["warnings"]))
+    check("CO-13 an idle day carries no reason — there is nothing to explain "
+          "about a day nobody worked",
+          p1["2026-08-04"]["reason"] is None, str(p1["2026-08-04"]))
+
+    # ── 4. ⚠️ why cumulative is the comparison ──────────────────────────────
+    check("CO-05 ⚠️ THE DAILY AND CUMULATIVE FIGURES DISAGREE, AND THAT IS THE "
+          "POINT (ruling Q11). T1's productive days read 2.2 MH/m²; including "
+          "the two scaffolding days it actually cost 6.6 — three times as much. "
+          "A chart plotting the daily figure would show a tank performing well "
+          "and hide a fortnight of setup",
+          p1["2026-08-03"]["daily_mh_per_sqm"] == 2.2
+          and t1["MH_per_SQM"] == 6.6,
+          f"daily={p1['2026-08-03']['daily_mh_per_sqm']} cum={t1['MH_per_SQM']}")
+
+    check("CO-03 the running figure is cumulative hours over cumulative area, "
+          "recomputed each day rather than averaged: 308/60 on the 5th",
+          p1["2026-08-05"]["cum_mh_per_sqm"] == 5.133,
+          str(p1["2026-08-05"]))
+    check("CO-04 …and it is NOT the mean of the daily ratios, which would be "
+          "2.2 here and would weight a 20 m² day like a 40 m² one",
+          p1["2026-08-05"]["cum_mh_per_sqm"] != 2.2,
+          str(p1["2026-08-05"]["cum_mh_per_sqm"]))
+
+    # ── 5. the comparison the operator actually asked for ───────────────────
+    check("CO-14 ⚠️ TWO TANKS OF DIFFERENT SIZE ARE COMPARABLE ON MH/m² AND ON "
+          "NOTHING ELSE. T2 did 80 m² in 44 hours against T1's 60 m² in 396: "
+          "0.55 against 6.6. On raw hours T1 merely looks busier",
+          t2["MH_per_SQM"] == 0.55 and t1["Total_Hours"] > t2["Total_Hours"]
+          and t2["Total_SQM"] > t1["Total_SQM"],
+          f"{t1['MH_per_SQM']} vs {t2['MH_per_SQM']}")
+    check("CO-15 …and each series reports how many days it worked and how many "
+          "produced nothing, so 'efficient' can be read against 'present'",
+          t1["Days_Worked"] == 5 and t1["Days_Without_Area"] == 3
+          and t2["Days_Worked"] == 2 and t2["Days_Without_Area"] == 0,
+          f"{t1['Days_Worked']}/{t1['Days_Without_Area']} "
+          f"{t2['Days_Worked']}/{t2['Days_Without_Area']}")
+
+    # ── 6. ⚠️ comparability is a property of the SELECTION ──────────────────
+    async with SessionLocal() as s:
+        await s.execute(_sqt(
+            'INSERT INTO mh_timesheets ("Site_ID", "Employee_Code", '
+            '"Work_Date", "Equipment_Tag", "System_Code", "Total_Hours") '
+            "VALUES (:s, 'SVCO-X', '2026-08-03', 'SVCO-T3', 'SVCO-OTHER', 40)"),
+            {"s": SITE})
+        await s.commit()
+        mixed = await _A.daily_efficiency(s, site_id=SITE)
+    check("CO-16 ⚠️ mixing lining systems is WARNED ABOUT, not refused. A tile "
+          "lining and a coat are different work, so their man-hours per m² are "
+          "not comparable — but the HOD may have asked for exactly that view, "
+          "and refusing to draw it teaches nothing",
+          any("not comparable across them" in w for w in mixed["warnings"])
+          and len(mixed["series"]) >= 3, str(mixed["warnings"])[:220])
+
+    # ── 7. nothing to chart is an ANSWER ───────────────────────────────────
+    async with SessionLocal() as s:
+        empty = await _A.daily_efficiency(s, site_id=SITE,
+                                          system_code="SVCO-NOTHING")
+    check("CO-17 an empty selection returns a sentence, not an empty object. "
+          "Both mh_ tables are empty on a fresh site, so 'no data yet' is the "
+          "FIRST thing most people will see and it must not look broken",
+          empty["series"] == [] and empty["days"] == []
+          and any("nothing to compare yet" in w for w in empty["warnings"]),
+          str(empty)[:200])
+
+    # ── 8. the guards ───────────────────────────────────────────────────────
+    check("CO-18 the date span is capped, so one typo'd year in a timesheet "
+          "cannot ask a browser to draw 700,000 bars",
+          len(_A._date_span("2020-01-01", "2030-01-01")) == 731,
+          str(len(_A._date_span("2020-01-01", "2030-01-01"))))
+    check("CO-19 …and a reversed or unparseable range degrades rather than "
+          "raising — a bad date is bad data, not a reason to fail the page",
+          len(_A._date_span("2026-08-05", "2026-08-01")) == 5
+          and _A._date_span("bad", "worse") == ["bad", "worse"],
+          str(_A._date_span("2026-08-05", "2026-08-01")))
+
+    # ── 9. who may ask ──────────────────────────────────────────────────────
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        for who, allowed in (("SVCQ-hod", True), ("SVCQ-admin", True),
+                             ("SVCQ-sup", False), ("SVCQ-sk", False),
+                             ("SVCQ-log", False)):
+            hdr = await _qsep_login(ac, who)
+            r = await ac.get("/mh/analytics/daily", headers=hdr,
+                             params={"system_code": "SVCO-SYS"})
+            check(f"CO-20 {who} → {'allowed' if allowed else 'refused'}. The "
+                  f"Man-Hours portal is exact-locked to {{hod, admin}} and the "
+                  f"new route inherits that rather than restating it",
+                  (r.status_code == 200) == allowed,
+                  f"{r.status_code} {r.text[:90]}")
+
+        hdr = await _qsep_login(ac, "SVCQ-hod")
+        r = await ac.get("/mh/analytics/scope", headers=hdr)
+        codes = {s["System_Code"] for s in r.json()["systems"]}
+        check("CO-21 the picker offers only equipment that HAS hours — a tag "
+              "with none produces an empty chart and a shrug",
+              "SVCO-SYS" in codes
+              and all(s["equipment"] for s in r.json()["systems"]),
+              str(sorted(codes))[:160])
+
+        r = await ac.get("/mh/analytics/daily", headers=hdr,
+                         params={"system_code": "SVCO-SYS",
+                                 "equipment": ["SVCO-T2"]})
+        body = r.json()
+        check("CO-22 filtering to one tag returns one series, and its figures "
+              "are unchanged by the filter — the running total is per job, not "
+              "per view",
+              len(body["series"]) == 1
+              and body["series"][0]["MH_per_SQM"] == 0.55, str(body)[:200])
+
+    await _reset()
+
+
 async def test_database_isolation():
     """Suite BW — the tests must not be able to reach the live database.
 
@@ -19790,6 +20047,9 @@ async def main() -> int:
     print("\n CN. Paper first — the workflow inverts, approval starts moving "
           "stock, and four people each own one number")
     await test_ocr_workflow()
+    print("\n CO. Efficiency over time — the running figure, and the two "
+          "divisions by zero it has to survive")
+    await test_daily_efficiency()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

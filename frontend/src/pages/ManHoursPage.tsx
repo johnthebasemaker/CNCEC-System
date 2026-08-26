@@ -17,6 +17,7 @@ import { useSites, downloadDocument } from '../api/hooks'
 import { HodApprovalQueueTab } from './ExecutionPage'
 import { ExecVarianceTab, ReasonLogTab, SurfacePrepTab } from './ExecutionReportTabs'
 import ManpowerPlanner from './ManpowerPlanner'
+import EfficiencyChartTab from './EfficiencyChartTab'
 import SessionManpowerReport from './SessionManpowerReport'
 
 function errMsg(e: unknown): string {
@@ -1005,6 +1006,10 @@ export default function ManHoursPage() {
             children: <ManpowerPlanner /> },
           // Phase 8 slice 8e — the SME session, costed in labour. Arrived at
           // from the Session Builder's 📊 button, which lands on ?tab=session.
+          // Phase 9e. Placed beside the planner: one answers "how many people
+          // will this need", the other "how many did the last one take".
+          { key: 'efficiency', label: '📈 Efficiency by Day',
+            children: <EfficiencyChartTab site={effSite} /> },
           { key: 'session', label: '🔗 SME Session',
             children: <SessionManpowerReport site={effSite} /> },
         ]}
