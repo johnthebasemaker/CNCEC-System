@@ -173,6 +173,7 @@ reaches every workspace deliberately, for support.
 | 📋 HOD Portal → Executive Summary, Burn Rate, Documents, Low Stock, PRs, Cross-Site | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (read) | ✅ |
 | 🧪 Lining Coverage | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ |
 | 📥 Bulk Excel Import | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 🏷️ WBS & Work Types | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | 🧪 Material Estimator (SME) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ (read) | ✅ |
 | 🕒 Man-Hours / Labor Tracking | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | 🧾 Execution Entries | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
@@ -3499,6 +3500,89 @@ the task is, who performs it and how long it takes. The step-by-step procedures
 live in the technical runbooks listed in section 17.8, kept separately for
 whoever administers the server.
 
+## 16.5 WBS numbers and work types (HOD)
+
+**Where:** HOD → **WBS & Work Types** (`/hod/wbs`). HOD and Admin only.
+
+Every issue and receipt can carry a **WBS number** — the cost centre the
+material is charged to. Until 2026-08-25 the column was blank on every entry in
+the system, and the reason was not a missing feature: the table, the rule and
+the endpoints all existed and there was **no screen to reach them**. This page
+is that screen.
+
+### 16.5.1 Nothing is enforced until you turn it on
+
+Both rules are **conditional**. A site with no WBS numbers is never asked for
+one; a site with no work types keeps a free-text Work Type box. Adding the first
+row turns the rule on **for that site**, and the banner at the top of the page
+always says which state you are in.
+
+That is deliberate: switching the requirement on is an act you take, recorded in
+the audit log, not something a software release does to your site overnight.
+
+### 16.5.2 The two tabs
+
+**WBS Numbers** — the cost centres themselves. Add them, and close ones that are
+finished. Closing a number stops it being offered; it does not touch entries
+already posted against it.
+
+**Work Types** — the canonical list your Issue form offers, and the WBS each one
+charges to. A work type with no WBS is perfectly legal — it simply will not fill
+one in automatically.
+
+**Import from history** reads the work types your site has actually used and
+offers them one at a time, with how often each was used. Nothing is pre-loaded
+on purpose: see the next section for why.
+
+### 16.5.3 ⚠️ One work type, one spelling
+
+The system stores work types by a **normalised** spelling — lower case, trimmed,
+with repeated spaces collapsed. `Civil` and `civil` are the *same* work type and
+the second one is refused, naming the first.
+
+This matters because the live ledger already contains both spellings of four
+work types (`civil`/`Civil`, `coating`/`Coating`, `In yard`/`In Yard`,
+`others`/`Others`). Left as separate entries they would take different WBS
+numbers, and the report would split in two with nothing on the page to explain
+why.
+
+What it does **not** do is merge things that merely look similar. `Arrangement`
+and `Site Arrangement` stay two work types, as do `Blasting` and `Sweep blast`.
+Whether those are really the same work is a judgement about the work — it is
+yours to make here, not a rule the software should apply behind your back.
+
+Whatever casing you choose is what gets **stored on every entry** from then on.
+
+### 16.5.4 Where the WBS on an entry comes from
+
+In order, first match wins:
+
+1. **the number picked on the form** — a human chose it, and it is never
+   overridden. The map is a default, not a correction.
+2. **the work-type map** for that site.
+3. **the equipment master's WBS** (`sme_equipment.WBS_No`), where the SME
+   workbook carries one.
+4. **nothing** — and that stays legal.
+
+The audit line for the entry records which of these supplied the number, because
+the first question about a wrong cost centre is always "who chose this?".
+
+### 16.5.5 ⚠️ Two names that are not work types
+
+`SUPERVISOR_REQUEST` and `STOCK_ADJUSTMENT` appear in the Work Type column but
+are **markers the app writes itself**, not descriptions of work anybody did.
+They cannot be added to the list, cannot be given a WBS, and are never refused
+by the strict dropdown — stock adjustments keep working exactly as before.
+
+### 16.5.6 Reporting
+
+**Consumption**, **Daily Consumption** and the dedicated **WBS Report** all print
+the number; rows without one read `(no WBS)` rather than showing an empty cell.
+
+⚠️ **WBS is applied forward only.** Setting up a map today does not restamp
+entries posted last month. Historical corrections are an Excel sync, not a side
+effect of a settings change.
+
 ## 17.1 How the system is put together
 
 Four layers sit between a user and your data, and each has a single job.
@@ -3974,13 +4058,38 @@ Three sections: **workload** (area remaining → man-hours), **gap** (per role:
 need, have, assign — collapsible, with the jobs that asked for each role), and
 **strategy** (where overtime comes from and how to remove it).
 
-⚠️ **Two shifts splits the crew; it does not halve the hiring.** Nobody works
-both a day and a night shift, so a two-shift plan needs the **same total
-headcount** and only the per-shift figure halves. The natural reading — "two
-shifts, so half the people" — under-hires by half, which is why the page says
-so in words beside the number. Shifts default to 2 when anyone in a required
-role is on nights; the HOD can force two anyway, and the plan then shows the
-crew you would have to staff.
+⚠️ **Nights buy time, not a smaller payroll.** Nobody works both a day and a
+night shift, so a two-shift plan needs the **same total headcount** — the
+natural reading, "two shifts, so half the people", under-hires by half. What
+running nights buys is **calendar time**: the site delivers
+`(day crew + night crew) × 11` man-hours per day instead of `day crew × 11`, so
+the page shows **days with the day crew alone**, **days with both**, and the
+saving between them. Shifts default to 2 when anyone in a required role is on
+nights; the HOD can force two anyway.
+
+⚠️ **The two shifts are not the same size, and the split is read from your
+roster.** This site runs a day shift of about 20 against a night shift of about
+80 — different equipment, different tasks. The plan divides each role in the
+proportion **your roster actually runs**, never by dividing by the number of
+shifts: on those numbers an even split understates the night crew fourfold and
+overstates the day crew by the same. Where the roster cannot say, the page says
+so rather than blending a guess into a number:
+
+| Basis shown | What it means |
+| --- | --- |
+| *(nothing)* | the split came from this role's own day/night counts |
+| **site ratio** | this role has nobody rostered, so the site's proportion was used |
+| **assumed** | two shifts were forced with no night crew anywhere — this is a guess |
+
+A role with day workers and **no** night workers is not a valid basis: it means
+there is no night crew *yet*, and reading it as a proportion would put 100% of a
+forced two-shift plan on days and make the option do nothing at all.
+
+⚠️ **Idle roles do not add capacity.** Hiring fifty blasters does not change a
+masonry plan. Normal capacity, the overtime and the hire-to-clear advice all
+count only the roles the job actually needs — the roster panel still shows the
+whole payroll beside them, and the gap between "we have 150 people" and
+"capacity is 100" is the point.
 
 ⚠️ **It changes nothing.** The planner is advice. It never assigns anybody,
 never edits the roster, and never writes to a timesheet.

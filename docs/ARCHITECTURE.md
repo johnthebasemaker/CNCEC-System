@@ -182,6 +182,61 @@ the row is absent; admin-editable):
 Independent of the switch: MTC hard-block for `Surface Shields` receipts,
 WBS requirement once a site has active WBS rows, UoM conversion.
 
+### 4a. WBS + work types (Phase 9a, `services/wbs.py`)
+
+Two CONDITIONAL gates — both no-ops until an HOD curates a list for the site,
+which is what lets the feature ship without a flag day. Managed at `/hod/wbs`
+(HOD/Admin); the endpoints predate the screen by a whole phase, which is exactly
+why every one of the 1,674 live consumption rows carries a blank WBS.
+
+- `assert_work_type` — the strict dropdown. Skipped entirely for the reserved
+  markers `SUPERVISOR_REQUEST` / `STOCK_ADJUSTMENT` (written by
+  `supervisor.approve_smr` and `ledger.stage_adjustment`; `rep_intent_vs_actual`
+  joins on the first). A gate that refused those would break stock adjustments.
+- `resolve_wbs` — precedence **explicit → work-type map → `sme_equipment.WBS_No`
+  → none**, returning the `source` as well as the number. The explicit value is
+  never overridden: the map is a default, not a correction.
+- `assert_wbs` — moved here from `entry_docs` so the gate and the resolver read
+  one list.
+
+⚠️ **ORDER.** For an ISSUE the sequence is resolve → assert, inside
+`stage_consumption` (the same place the QSEP gates sit, and for the same reason:
+`supervisor.approve_smr` is the other mouth of the path). Asserting the form's
+raw `wbs` first — which the router used to do — rejects every blank-box entry
+for want of the number the map is about to supply, making the map unreachable.
+RECEIPTS still assert in the router: they have no work type to resolve from.
+
+`wbs_work_type_map` is keyed `(Site_ID, Work_Type_Norm)` where the norm is
+lower + trim + collapse-whitespace. That merges the four case-collisions the
+live ledger actually holds and nothing else; near-duplicates are the HOD's
+judgement, made in the UI. Nothing is seeded by migration —
+`/hod/site-config/work-types/suggestions` offers the ledger's own spellings
+merged and counted instead.
+
+### 4b. The manpower shift model (Phase 9b, ruling Q10)
+
+`services/planner.py` and `services/session_plan.py` share ONE split helper,
+`planner.shift_split`. Two planners reading the same roster and disagreeing
+about how it divides would be worse than either being wrong, because only one
+of them would ever be checked.
+
+- **Total headcount is invariant to the shift count**:
+  `manhours / (target_days × 11)`. A person works one shift a day, so nobody
+  works both — "two shifts, so half the people" under-hires by half.
+- **What nights buy is calendar time.** `Days_Day_Shift_Only`,
+  `Days_Both_Shifts`, `Days_Saved_By_Nights`, from
+  `manhours / (crew × 11)` on the day-only and the whole in-scope roster.
+- **The per-shift split comes from the ROSTER**, never `/ shifts_per_day`.
+  This operator runs ~20 day against ~80 night; an even split understates the
+  night crew fourfold. `Shift_Split_Basis` names the basis: `roster` · `site` ·
+  `assumed_even` · `day_only`. ⚠️ A role with day workers and **no night
+  workers** is NOT a valid basis — that says there is no night crew yet, and
+  read as a proportion it puts 100% of a forced two-shift plan on days.
+- **Capacity counts the roles the job needs**, matching `days_with_roster`,
+  which always did. An idle blaster used to inflate `normal_capacity`,
+  understating the overtime and the hire-to-clear advice. The payroll totals
+  stay published beside them as `roster.Capacity_GI` / `Capacity_NON_GI`.
+
 ## 5. Frontend map (`frontend/src/`)
 
 React Router routes in `App.tsx`; **`config/nav.tsx` is the single

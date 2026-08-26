@@ -134,7 +134,7 @@ test('a plan renders the days, the per-shift split and the per-role dashboard',
       .toBeVisible()
   })
 
-test('a two-shift plan says in words that it splits the crew rather than halving the hiring',
+test('a two-shift plan says in words what nights buy — time, not a smaller payroll',
   async ({ page }) => {
     await seedBenchmark()
     await openPlanner(page)
@@ -146,11 +146,21 @@ test('a two-shift plan says in words that it splits the crew rather than halving
     await page.locator('.ant-radio-button-wrapper', { hasText: 'Day + Night' }).click()
     await page.getByRole('button', { name: 'Plan' }).click()
 
-    // THE MISREADING THIS GUARDS: "two shifts, so half the people". Nobody
-    // works both shifts, so the total headcount is unchanged and only the
-    // per-shift figure halves. If this banner is ever tidied away, a planner
-    // reading the smaller number will under-hire by half.
+    // TWO MISREADINGS, AND THE BANNER HAS TO BLOCK BOTH (ruling Q10).
+    //  1. "two shifts, so half the people" — nobody works both shifts, so the
+    //     TOTAL headcount is unchanged. A planner reading a halved number
+    //     under-hires by half.
+    //  2. "so nights buy nothing" — they buy CALENDAR TIME, which is the whole
+    //     reason to run them. The banner carries the day-only and both-shift
+    //     day counts side by side so the saving is visible.
     await expect(page.getByText(
-      /Two shifts splits the crew — it does not halve the hiring/)).toBeVisible()
-    await expect(page.getByText(/Per shift \(x2\)/)).toBeVisible()
+      /Nights buy time, not a smaller payroll/)).toBeVisible()
+    await expect(page.getByText(/days with the day crew alone against/))
+      .toBeVisible()
+
+    // ⚠️ AND THE SPLIT IS NAMED AS AN ASSUMPTION WHEN IT IS ONE. This fixture
+    // has no night crew on the roster, so there is no proportion to derive and
+    // the even split shown is a guess. Presenting a guess as a measurement is
+    // how somebody staffs 50/50 against a site that runs 20/80.
+    await expect(page.getByText(/an ASSUMED even split/)).toBeVisible()
   })

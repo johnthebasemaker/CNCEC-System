@@ -2174,6 +2174,167 @@ that survived.
 
 ---
 
+## 14n. WBS numbers and work types (Phase 9 · slice 9a)
+
+The `WBS #` column was reported as "mostly blank". It is blank in **all 1,674**
+live consumption rows, and the cause was not a missing feature: `wbs_master`,
+the `assert_wbs` gate and three HOD endpoints shipped with the parity build and
+**nothing in the frontend ever called them**. Zero rows means the gate is a
+permanent no-op. The plumbing was complete; the tap was never opened.
+
+### 14n.1 The screen that was missing
+
+**TC-WBS-01** — sign in as an HOD. **WBS & Work Types** is in the sidebar and
+`/hod/wbs` loads. This is the whole of the original bug.
+
+**TC-WBS-02** — the banner at the top says whether entry forms are *currently*
+asking for a WBS. Both rules are conditional, so an HOD who cannot tell "not
+configured" from "not working" will configure it twice.
+
+### 14n.2 ⚠️ Turning it on is an act, not a release
+
+**TC-WBS-03** — on a site with **no** WBS numbers, post an issue leaving the WBS
+box blank. It must be **accepted**. Nothing is enforced until the first number
+is added.
+
+**TC-WBS-04** — add one WBS number. Now post the same issue. It must be
+**refused** with "site … requires a WBS Number". The rule turned on because an
+HOD turned it on, and the audit log says who.
+
+**TC-WBS-05** — same for work types: with an empty list the Issue form keeps its
+free-text box; add the first work type and it becomes a strict dropdown.
+
+### 14n.3 ⚠️ The order the two gates run in
+
+**TC-WBS-06** — this is the one to re-test after any refactor of
+`stage_consumption`. With an active WBS at the site **and** a work type mapped
+to it, post an issue that picks the work type and **leaves the WBS box blank**.
+
+It must be **accepted**, carrying the mapped number.
+
+Before slice 9a the router asserted the form's raw `wbs` *before* staging, which
+refuses a blank outright — so the map would never get to speak and every such
+entry would be rejected for want of the number the map was about to supply. The
+gate now runs on the **resolved** value. Suite CK-26 pins this.
+
+**TC-WBS-07** — post an issue that names a WBS **different** from the one its
+work type maps to. The one you typed must survive. The map is a default, not a
+correction.
+
+### 14n.4 The spelling trap
+
+**TC-WBS-08** — add work type `Civil`, then try to add `civil`. The second must
+be **refused**, naming the first. The live ledger holds both spellings of four
+work types (`civil`/`Civil`, `coating`/`Coating`, `In yard`/`In Yard`,
+`others`/`Others`); keyed on raw text those take different WBS numbers and the
+report splits with nothing to show why.
+
+**TC-WBS-09** — `Arrangement` and `Site Arrangement` must both be addable. They
+are different strings, and merging them is a judgement about the work that
+belongs to the HOD, not to a normalising regex.
+
+**TC-WBS-10** — **Import from history** lists what the ledger has actually used,
+already merged, with the variant spellings shown. Adopting one is one click.
+Nothing is seeded by migration on purpose — seeding would have enshrined both
+`civil` and `Civil` as blessed options.
+
+### 14n.5 ⚠️ Two names that are not work types
+
+**TC-WBS-11** — try to add `SUPERVISOR_REQUEST` or `STOCK_ADJUSTMENT`. Both must
+be **refused**. They are markers the app writes itself (`supervisor.approve_smr`
+and `ledger.stage_adjustment`), and `reports.rep_intent_vs_actual` joins on the
+first.
+
+**TC-WBS-12** — and with a strict list active, a **stock adjustment must still
+post**. A gate that blocked these would break adjustments, which is a long way
+from where anyone would look for the cause.
+
+### 14n.6 Mapping and reporting
+
+**TC-WBS-13** — try to map a work type to a WBS that does not exist, or to one
+that is closed. Both refused. A typo here stamps a wrong cost centre onto every
+issue of that work type — and the report still balances, which is what makes it
+hard to notice.
+
+**TC-WBS-14** — close a WBS that a work type maps to. The mapping stays. It
+records a decision, and "this charges to a number we have since closed" is
+information.
+
+**TC-WBS-15** — download the **Consumption**, **Daily Consumption** and **WBS**
+reports. All three carry a WBS column. Rows with none read `(no WBS)`, never an
+empty cell.
+
+**TC-WBS-16** — WBS is applied **forward only** (ruling Q15). Historical rows are
+not restamped; retro-writing posted records is not something a mapping change
+should do silently.
+
+---
+
+## 14o. What a night shift actually buys (Phase 9 · slice 9b)
+
+Ruling Q10 changed the shift model. Two things moved, and one deliberately
+did not.
+
+### 14o.1 ⚠️ The half that did NOT change
+
+**TC-MPS-01** — plan a job, then switch **Day only → Day + Night**. The **total
+headcount must not change**. Nobody works both shifts, so the same number of
+people is still needed. The natural reading — "two shifts, so half the people" —
+under-hires by half, and the banner still says so.
+
+### 14o.2 Nights buy calendar time
+
+**TC-MPS-02** — the two-shift banner now reports **days with the day crew alone**
+against **days with both**, and the saving between them. That saving is what
+running nights actually buys, and a planner that showed only the unchanged
+headcount read as though nights bought nothing.
+
+**TC-MPS-03** — with 1,100 man-hours, 20 day and 80 night workers: day-only is
+5 days, both shifts is 1 day, saving 4. Suite CL-03 pins exactly this.
+
+### 14o.3 ⚠️ The shifts are not the same size
+
+**TC-MPS-04** — with a roster of **20 on days and 80 on nights**, a requirement
+of 10 people must split **2 day / 8 night**, not 5/5. The old arithmetic divided
+by the shift count, which on this operator's real numbers understates the night
+crew **fourfold** and overstates the day crew by the same.
+
+**TC-MPS-05** — open a role in the gap list. The day and night figures are on the
+role row too, because that is where an HOD reads them when hiring.
+
+**TC-MPS-06** — with **no night crew on the roster**, force two shifts. The split
+shows as an **assumed** even one and is labelled as such, both in the banner and
+as an "assumed" tag on the role. Presenting a guess as a measurement is how
+somebody staffs 50/50 against a site that runs 20/80.
+
+**TC-MPS-07** — a role with nobody rostered borrows the **site's** proportion and
+says so ("site ratio"). Only two of the four bases are ever an assumption, and
+both are named.
+
+**TC-MPS-08** — the same numbers appear in the **SME Session Report** (Session
+tab) and its Excel/CSV/PDF export. Both planners use one split helper: two
+planners reading the same roster and disagreeing about how it divides would be
+worse than either being wrong, because only one of them would ever be checked.
+
+### 14o.4 ⚠️ Idle roles no longer inflate capacity
+
+**TC-MPS-09** — plan a masonry job and note **normal capacity**, **overtime** and
+the **hire-to-clear** advice. Now hire 50 blasters and re-plan. **Nothing must
+move.**
+
+Before slice 9b it did: `days_with_roster` filtered to the roles a job needs
+("idle blasters do not shorten a brick-lining job") and the overtime arithmetic
+did not, so an idle blaster inflated normal capacity — which understated the
+overtime and understated the hiring advice that clears it. Those are the two
+numbers an HOD acts on. Suite CL-09/CL-10 pin it.
+
+**TC-MPS-10** — but the roster panel still shows the **whole payroll** beside the
+capacity figure. "We have 150 people" and "capacity is 100" are both true, and
+the gap between them is the point.
+
+
+---
+
 ## 15. Do's and Don'ts
 
 ### Do
