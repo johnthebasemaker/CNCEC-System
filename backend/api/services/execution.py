@@ -400,19 +400,44 @@ async def supervisor_submit(session: AsyncSession, *, username: str,
         }
 
     by_id = {int(m["id"]): m for m in (materials or []) if m.get("id") is not None}
+
+    # ⚠️ THE RECIPE IS FETCHED ONCE, NOT ONCE PER LINE. This loop used to issue
+    # TWO SELECTs against `sme_recipe` for every material on the entry — the
+    # exact-match lookup and its fallback — so a 30-line recipe cost up to 60
+    # round trips inside a single supervisor submit, all of them reading the
+    # same handful of rows. One query for the whole system code, then dictionary
+    # lookups.
+    #
+    # The two dictionaries preserve the two original queries EXACTLY, including
+    # their difference: the first keys on (sub-activity, material, SAP) and the
+    # second deliberately ignores the sub-activity, which is what let a material
+    # shared across sub-activities still find its benchmark. Collapsing them
+    # into one lookup would silently change which number a line is measured
+    # against.
+    #
+    # `_RECIPE_MISSING` separates "no such recipe row" from "a row whose
+    # For_1_SQM is NULL". The original `.scalar()` could not tell them apart —
+    # it returned None for both and fell through to the fallback for both — so
+    # the two are deliberately treated the same way on the next line. The
+    # sentinel is here to make that sameness a decision somebody can see, rather
+    # than an accident of `dict.get` returning None for a missing key.
+    _RECIPE_MISSING = object()
+    exact: dict[tuple, object] = {}
+    by_material: dict[str, object] = {}
+    for rr in (await session.execute(
+            select(recipe_t.c["Execution_Sub_Activity_Code"],
+                   recipe_t.c["Material_Code"], recipe_t.c["SAP_Code"],
+                   recipe_t.c["For_1_SQM"])
+            .where(recipe_t.c["Lining_System_Code"] == code)
+            .order_by(recipe_t.c["id"]))).all():
+        exact.setdefault((rr[0], rr[1], rr[2]), rr[3])
+        by_material.setdefault(rr[1], rr[3])
+
     for m in entry["materials"]:
-        per = (await session.execute(
-            select(recipe_t.c["For_1_SQM"]).where(
-                recipe_t.c["Lining_System_Code"] == code,
-                recipe_t.c["Execution_Sub_Activity_Code"] == esc,
-                recipe_t.c["Material_Code"] == m["Material_Code"],
-                recipe_t.c["SAP_Code"] == (m["SAP_Code"] or None)))).scalar()
-        if per is None:
-            per = (await session.execute(
-                select(recipe_t.c["For_1_SQM"]).where(
-                    recipe_t.c["Lining_System_Code"] == code,
-                    recipe_t.c["Material_Code"] == m["Material_Code"])
-                .limit(1))).scalar()
+        per = exact.get((esc, m["Material_Code"], m["SAP_Code"] or None),
+                        _RECIPE_MISSING)
+        if per is _RECIPE_MISSING or per is None:
+            per = by_material.get(m["Material_Code"])
         sent = by_id.get(int(m["id"]), {})
         qty = (float(sent["Actual_Qty"]) if sent.get("Actual_Qty") is not None
                else float(m["Actual_Qty"] or 0.0))
@@ -657,12 +682,16 @@ async def qsep_status(session: AsyncSession, entry_id: int) -> dict:
             .where(mat_t.c["Entry_ID"] == entry_id))).mappings().all()
 
     blocked = []
+    # Read once. The controlled category is an `app_settings` row; asking for it
+    # per material added one query per line and could not return a different
+    # answer within the loop.
+    cat = await quality.controlled_category(session)
     for m in mats:
         sap = str(m["SAP_Code"] or "").strip()
         qty = float(m["Actual_Qty"] or 0)
         if not sap or qty <= 0:
             continue
-        if not await quality.is_controlled(session, sap_code=sap):
+        if not await quality.is_controlled(session, sap_code=sap, category=cat):
             continue
         for kind, fn in (
                 ("MTC", lambda: quality.assert_mtc_for_issue(

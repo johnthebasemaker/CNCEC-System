@@ -45,6 +45,31 @@ JOB_KINDS = ("ocr_consumption", "ocr_delivery_note", "tool_identify",
              # zero extractable text, which pdfplumber can never read.
              "ocr_purchase_doc")
 
+# ⚠️ THE OUTPUT BUDGET IS PER LANE, AND ONE NUMBER FOR ALL OF THEM WAS A BUG.
+#
+# Every image lane used to share `num_predict=1024`, which is a property of the
+# ANSWER, not of the model — and the four lanes have answers of wildly different
+# size. Measured 2026-09-01 on the operator's own files:
+#
+#   a delivery note ....... 4 items x 3 fields ... ~350 tokens ... finished
+#   a consumption log .... 30 rows x 9 fields ... ~2,400 tokens ... CUT at 13
+#
+# So the DN lane always fitted and the consumption lane never could, which is
+# precisely why the failure presented as "the model cannot read free-form
+# tables" and survived a whole phase. It read them fine; it was interrupted.
+#
+# `ocr.salvage_truncated_json` now rescues a clipped reply rather than throwing
+# the whole page away, and these budgets are what stop it being needed. Both
+# halves matter: a budget alone still loses the tail of an unusually long sheet,
+# and salvage alone silently drops rows nobody knows are missing.
+NUM_PREDICT = {
+    "ocr_consumption": 3072,    # the 30-row daily log, with headroom
+    "ocr_delivery_note": 1536,
+    "ocr_purchase_doc": 2560,   # a PO line table plus its header block
+    "tool_identify": 384,       # a name and two alternatives
+}
+DEFAULT_NUM_PREDICT = 1024
+
 
 def _now() -> _dt.datetime:
     return _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
@@ -52,7 +77,16 @@ def _now() -> _dt.datetime:
 
 async def create_job(session, *, kind: str, actor: str, site_id: str | None,
                      image_b64: str) -> int:
-    """Insert a queued job row. The caller commits and then spawns run_job."""
+    """Insert a queued job row. The caller commits and then spawns run_job.
+
+    ⚠️ THE IMAGE LIVES ONLY UNTIL THE JOB FINISHES. `run_job` sets
+    `payload_json = NULL` on both terminal transitions, because this column
+    holds a base64 photograph and nothing reads it after the worker has. Kept,
+    it made `ai_jobs` grow by the size of every photo ever OCR'd — and it made
+    every sequential scan of the table (the orphan sweep, the summary cache)
+    drag those photographs through shared buffers to read a status column.
+    Alembic b8d3f1a72c94 indexes those scans and reclaims the existing rows.
+    """
     from sqlalchemy import insert
     payload = json.dumps({"image_b64": image_b64})
     return (await session.execute(insert(ai_jobs_t).values(
@@ -144,14 +178,24 @@ async def run_job(job_id: int) -> None:
                 raw = await aic.generate(
                     aic.MODEL_VISION, "Identify the tool.",
                     system=ocr.tool_prompt(catalogue), images=[image_b64],
-                    temperature=0.1, num_predict=256)
+                    temperature=0.1,
+                    num_predict=NUM_PREDICT["tool_identify"],
+                    timeout_s=aic.VISION_TIMEOUT_S)
             result = ocr.parse_tool_reply(raw, catalogue)
         else:
             async with aic.GEN_SEMAPHORE:
+                # ⚠️ THE VISION BUDGET, NOT THE CHAT ONE. A full page of tabular
+                # handwriting runs for minutes; `GEN_TIMEOUT_S` is sized for a
+                # chat reply and killed every long read at 240 s mid-generation.
+                # Nothing waits on this call — the browser is polling ai_jobs —
+                # so the only cost of the longer ceiling is a row sitting at
+                # status='running'.
                 raw = await aic.generate(
                     aic.MODEL_VISION, ocr.USER_PROMPTS[kind],
                     system=ocr.SYSTEM_PROMPTS[kind], images=[image_b64],
-                    temperature=0.1, num_predict=1024)
+                    temperature=0.1,
+                    num_predict=NUM_PREDICT.get(kind, DEFAULT_NUM_PREDICT),
+                    timeout_s=aic.VISION_TIMEOUT_S)
             parsed = ocr.parse_vision_reply(kind, raw)
 
         async with SessionLocal() as s:
@@ -159,6 +203,7 @@ async def run_job(job_id: int) -> None:
                 result = await _resolve(kind, parsed, s)
             await s.execute(update(ai_jobs_t).where(ai_jobs_t.c["id"] == job_id)
                             .values(status="done", finished_at=_now(),
+                                    payload_json=None,
                                     result_json=json.dumps(result, ensure_ascii=False)))
             await s.commit()
     except Exception as e:
@@ -166,6 +211,7 @@ async def run_job(job_id: int) -> None:
         async with SessionLocal() as s:
             await s.execute(update(ai_jobs_t).where(ai_jobs_t.c["id"] == job_id)
                             .values(status="error", finished_at=_now(),
+                                    payload_json=None,
                                     error=str(e)[:500]))
             await s.commit()
 

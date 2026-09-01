@@ -786,6 +786,48 @@ async def register_warehouses(session: AsyncSession = Depends(get_session)):
     return {"warehouses": [{"id": r[0], "name": r[1]} for r in rows]}
 
 
+@router.get("/username-available",
+            summary="Is this username free? (Bloom-accelerated, advisory)",
+            dependencies=[rate_limit(60, 60)])
+async def username_available(u: str,
+                             session: AsyncSession = Depends(get_session)):
+    """Live availability for the registration form, as the person types.
+
+    ⚠️ ADVISORY, AND THE ANSWER IS DELIBERATELY ASYMMETRIC. A Bloom filter can
+    say "definitely not in the set" exactly, and "maybe" only probabilistically
+    — so a FREE name is answered from memory with no query at all, and a name
+    that looks taken is CONFIRMED against both registries before this endpoint
+    will say so. That is the right way round: somebody trying candidate names is
+    asking about free ones, and being told "taken" about a name that is actually
+    free would be the one wrong answer they cannot work around.
+
+    Nothing is reserved by asking. `POST /auth/register` re-checks, and the
+    `UNIQUE` indexes on `users.username` and `pending_users.username` remain the
+    only things that decide — see `services/bloom.py` for why that separation is
+    load-bearing rather than merely tidy.
+    """
+    from .services import bloom
+    uname = (u or "").strip()
+    if not uname:
+        raise HTTPException(422, "username is required")
+
+    bf = bloom.get(bloom.USERNAMES)
+    if bf is not None and not bf.probably_present(uname):
+        # DEFINITELY absent from the snapshot — no query needed.
+        return {"username": uname, "available": True, "checked": "bloom"}
+
+    # Either the filter is not built yet, or it said "maybe". Confirm.
+    taken = (await session.execute(
+        select(func.count()).select_from(users_t)
+        .where(func.lower(users_t.c["username"]) == uname.lower()))).scalar_one()
+    if not taken:
+        taken = (await session.execute(
+            select(func.count()).select_from(pending_users_t)
+            .where(func.lower(pending_users_t.c["username"])
+                   == uname.lower()))).scalar_one()
+    return {"username": uname, "available": not taken, "checked": "db"}
+
+
 @router.post("/register", status_code=201,
              summary="Request access → a pending_users row for an admin to approve",
              dependencies=[rate_limit(5, 60)])
@@ -856,6 +898,11 @@ async def register(body: RegisterIn, session: AsyncSession = Depends(get_session
     else:
         await session.execute(insert(pending_users_t).values(**values))
     await session.commit()
+    # The write happened here, so this process's filter learns about it now
+    # rather than at the next refresh. Other workers close the gap on their
+    # own timer; the UNIQUE index covers the interval for both.
+    from .services import bloom as _bloom
+    _bloom.add(_bloom.USERNAMES, uname)
     await _audit(session, uname, "REQUEST_ACCESS",
                  f"role={body.role} site={site or '-'} location={location or '-'}")
     return {"requested": True, "username": uname}

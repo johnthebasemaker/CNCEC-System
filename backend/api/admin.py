@@ -353,6 +353,24 @@ async def audit_log(username: Optional[str] = None, action_type: Optional[str] =
 # the safety the generic CRUD lacks: opening-stock audit + a delete guard that
 # refuses to orphan an item that already has ledger movements.
 async def _sap_exists(session: AsyncSession, sap: str) -> bool:
+    """Does this SAP code already exist in the master?
+
+    Bloom-accelerated (2026-09-01). `inventory` is the most-read table in the
+    system and almost never written: 491 rows, touched by every entry form,
+    every fuzzy match and every bulk import, and grown by a handful of rows a
+    month. A filter over its primary key answers the common case — a code that
+    is NOT there — without a round trip.
+
+    ⚠️ THE FAST PATH IS ONLY TAKEN FOR "DEFINITELY ABSENT", never for "present".
+    A Bloom filter's false positives are ~1%; its false negatives about its own
+    contents are impossible. So "maybe present" still asks the database, and the
+    `SAP_Code` primary key still decides — this helper is a guard that produces
+    a friendlier 409 than an IntegrityError, not the uniqueness rule itself.
+    """
+    from .services import bloom
+    bf = bloom.get(bloom.SAP_CODES)
+    if bf is not None and not bf.probably_present(sap):
+        return False
     return (await session.execute(select(func.count()).select_from(inventory_t)
             .where(func.trim(inventory_t.c["SAP_Code"]) == sap))).scalar_one() > 0
 
@@ -387,6 +405,8 @@ async def create_inventory(body: InventoryCreateIn,
         raise HTTPException(409, f"IntegrityError: {e.orig}")
     except DataError as e:
         raise HTTPException(400, f"DataError: {e.orig}")
+    from .services import bloom as _bloom
+    _bloom.add(_bloom.SAP_CODES, sap)
     return {"created": True, "SAP_Code": sap}
 
 

@@ -19,6 +19,7 @@ justification the supervisor is notified of.
 """
 from __future__ import annotations
 
+import asyncio as _aio
 import base64
 import io
 import json
@@ -34,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import insert
 
 from .ai import form_jobs
+from .ai import ocr
 from .ai import ocr_form as OF
 from .auth import (get_current_user, require_roles, resolve_site_param,
                    site_row_visible, site_scope)
@@ -497,11 +499,32 @@ async def ocr_upload(file: UploadFile = File(...),
                  f"{_MAX_UPLOAD // (1024 * 1024)} MB. Most phones let you send "
                  f"a smaller copy.")
 
+    # ⚠️ NORMALISED AT THE DOOR, not deep inside the worker.
+    #
+    # This used to base64 the raw upload straight into `payload_json`: a 20 MB
+    # HEIC became ~27 MB of text in a job row, kept forever, and a 300 dpi A4
+    # scan reached the model at full resolution where every extra tile is
+    # wall-clock the supervisor waits for. `prep_source_image` caps the long
+    # edge at a size that still decodes the QR and still rectifies for row
+    # crops (see its docstring), and rasterising the PDF here rather than in the
+    # worker means an unreadable file is refused NOW — while the person who
+    # took the photo is still standing at the desk — instead of surfacing as a
+    # dead job minutes later.
+    if mime == "application/pdf":
+        raw = await _aio.to_thread(form_jobs._pdf_first_page, raw)
+    try:
+        raw = await _aio.to_thread(ocr.prep_source_image, raw)
+    except ocr.ImagePrepError as e:
+        raise HTTPException(422, str(e)) from e
+
     jid = (await session.execute(insert(ai_jobs_t).values(
         kind="ocr_consumption_form", status="queued", actor=user["username"],
         Site_ID=sid,
         payload_json=json.dumps({"image_b64": base64.b64encode(raw).decode(),
-                                 "mime": mime, "role": user["role"]}),
+                                 # Always a JPEG by this point — the worker's
+                                 # PDF branch stays for jobs queued before this
+                                 # change and for any future caller.
+                                 "mime": "image/jpeg", "role": user["role"]}),
     ).returning(ai_jobs_t.c["id"]))).scalar_one()
     await session.commit()
     form_jobs.spawn(jid)

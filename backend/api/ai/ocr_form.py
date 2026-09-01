@@ -52,12 +52,21 @@ from fastapi import HTTPException
 
 from ..services import consumption_form as CF
 from . import client as aic
-from .ocr import ImagePrepError, prep_image_for_vision
+from .ocr import (ImagePrepError, extract_json_object,
+                  prep_image_for_vision)
 
 # How many pixels wide the rectified page is rendered at. 8 px/mm gives a
 # ~1680x2380 page, which is enough for a legible crop of an 8 mm-tall box
 # without holding a 40 MB array per upload.
 PX_PER_MM = 8.0
+
+# ⚠️ SIZED FOR THE LONGEST RECIPE, NOT THE SAMPLE SHEET. The output is five
+# short fields per printed row plus a small header block. A 30-row system is
+# ~1,900 tokens, and the old 1,400 default clipped it — which `_clean_json`
+# then reported as "did not return a readable result", sending a supervisor to
+# retake a photo that was fine. `ocr.salvage_truncated_json` is the second
+# guard behind this one; a budget that fits is the first.
+FORM_NUM_PREDICT = 2600
 
 _FENCE = re.compile(r"^\s*```(?:json)?|```\s*$", re.M)
 _ADDITIVE = re.compile(r"^\d+(?:\.\d+)?(?:\s*\+\s*\d+(?:\.\d+)?)+$")
@@ -120,18 +129,22 @@ def _clean_json(text: str) -> dict:
     """
     raw = _FENCE.sub("", str(text or "")).strip()
     start = raw.find("{")
-    end = raw.rfind("}")
-    if start < 0 or end <= start:
+    if start < 0:
         raise HTTPException(
             422, "the vision model did not return a readable result for this "
                  "photo. Retake it with the whole page in frame and even "
                  "lighting, or type the entry in by hand.")
-    try:
-        out = json.loads(raw[start:end + 1])
-    except json.JSONDecodeError as e:
+    # ⚠️ A CLIPPED REPLY IS NOT AN UNREADABLE PHOTO, and telling the supervisor
+    # it was sent them out to re-photograph a sheet the model had read
+    # correctly. `extract_json_object` parses the reply and, when it simply
+    # stops, rebuilds the complete prefix and drops the unfinished row — see
+    # `ocr.salvage_truncated_json` for why the cut is only ever made at a
+    # closing bracket.
+    out = extract_json_object(raw[start:])
+    if out is None:
         raise HTTPException(
             422, "the vision model's answer could not be parsed. Retake the "
-                 "photo, or type the entry in by hand.") from e
+                 "photo, or type the entry in by hand.")
     if not isinstance(out, dict) or not isinstance(out.get("rows"), list):
         raise HTTPException(
             422, "the vision model returned no rows for this form. Check the "
@@ -326,11 +339,18 @@ async def read_form(image_bytes: bytes) -> dict:
     b64 = base64.b64encode(prepped).decode()
     try:
         raw, model_id = await aic.vision_json(FORM_USER, system=FORM_SYSTEM,
-                                              image_b64=b64)
+                                              image_b64=b64,
+                                              num_predict=FORM_NUM_PREDICT)
     except RuntimeError as e:
+        # ⚠️ "NOT REACHABLE" WAS THE WRONG DIAGNOSIS FOR THE COMMON FAILURE.
+        # Every long read used to die on a 240 s read timeout and be reported
+        # as an outage, so the operator went and checked a service that was
+        # running perfectly while the real cause — a page that needed longer
+        # than the budget allowed — went unnamed for a whole phase. The client
+        # now distinguishes the two; this passes the distinction through.
         raise HTTPException(
-            503, f"the vision model is not reachable right now — {e}. You can "
-                 f"still type the entry in by hand.") from e
+            503, f"the form could not be read — {e}. You can still type the "
+                 f"entry in by hand.") from e
 
     parsed = _clean_json(raw)
     rows = []

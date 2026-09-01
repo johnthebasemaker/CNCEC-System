@@ -179,8 +179,42 @@ the row is absent; admin-editable):
   30-day window; 365-day override needs a justification → `override_required=1`
   red-flagged in HOD approvals); qty capped to the source receipt.
 - OFF ⇒ legacy-optional behaviour (tests run this way).
-Independent of the switch: MTC hard-block for `Surface Shields` receipts,
-WBS requirement once a site has active WBS rows, UoM conversion.
+Independent of the switch: the **MTC gate for `Surface Shields`, which binds at
+ISSUE and nowhere else** (see §4b), WBS requirement once a site has active WBS
+rows, UoM conversion.
+
+### 4b. The MTC rule, stated once and precisely
+
+> **Material with no MTC CAN be received, and CAN be sent to site. It CANNOT be
+> issued or consumed at the site.**
+
+This line is the whole rule. It is repeated here because the sentence it
+replaced — "MTC hard-block for `Surface Shields` receipts" — described the
+pre-2026-08-12 behaviour and was left behind when the gate moved, so a reader
+of this document would have concluded the opposite of what the code does.
+
+| Step | Certificate required? | Enforced by |
+|---|---|---|
+| Warehouse goods-in (`warehouse.receive`) | **No** — recorded, and Logistics is notified to chase it | `quality.note_mtc` / `quality.warn_mtc_missing` |
+| Site receipt staging (`POST /entry/receipts`, `/entry/bulk`) | **No** — same: recorded and chased | `quality.warn_mtc_missing` |
+| Delivery Note creation and shipping (`warehouse.create_dn`, `ship_dn`) | **No** — travel is never gated | *(deliberately no call — suite BM asserts its absence)* |
+| **Issue to a worker** (`ledger.stage_consumption`, `supervisor.approve_smr`) | **YES — hard block** | `quality.assert_mtc_for_issue` |
+| **Consumption posted from an execution entry** (`execution.post_stock`) | **YES — hard block** | `quality.assert_mtc_for_issue` via the QSEP pre-check |
+
+Refusing to RECORD something that has physically happened is the one thing an
+inventory system must never do: the truck is in the yard, the certificate is in
+somebody's inbox, and a receipt block makes real stock invisible to the shelf
+report, to planning and to everyone. What the system controls is what happens
+NEXT — and the moment before material reaches a worker is the moment the
+certificate actually protects anyone.
+
+The same reasoning is why the block is absent from DN creation specifically:
+leaving it there would have reproduced the identical stall one hop later, with
+the warehouse able to receive material and unable to send it anywhere.
+
+Certificates are **inherited down the chain**, not re-uploaded — see
+`quality.visible_mtc` for the precedence (PO line → DN → shipping warehouse →
+site) and for why a certificate for site A does not clear site B.
 
 ### 4a. WBS + work types (Phase 9a, `services/wbs.py`)
 
@@ -477,6 +511,63 @@ memory — deliberately not reproduced here).
    `POST /ai/ocr/handwritten-process` — READ-ONLY (posting stays in the
    Issue flow). Changing a preserved rule: edit the owning spec file first,
    then the module, then the suite-AM pins.
+
+### 7a. ⚠️ The vision envelope — three numbers that are ONE decision
+
+Fixed 2026-09-01 after two production reports ("the Consumption Log fails
+silently", "the new PDF hangs with a ReadTimeout"). Both were diagnosed as the
+model being bad at tables. It is not. Reproduced on the operator's own files,
+the model read both correctly and was cut off by the limits around it.
+
+| Knob | Where | Value | Why that number |
+|---|---|---|---|
+| output budget | `ai/jobs.py: NUM_PREDICT`, `ai/ocr_form.py: FORM_NUM_PREDICT` | per lane (3072 / 1536 / 2560 / 384 / 2600) | a DN is 4 items × 3 fields (~350 tok); a consumption log is 30 rows × 9 fields (~2,400 tok). One number for both clipped the sheet at row 14 and never clipped the note |
+| context window | `ai/client.py: VISION_NUM_CTX` | 8192, image calls only | **Ollama runs this model at `n_ctx=4096` whatever the 128k model card says.** An 1800 px page is 3,120 prompt tokens of that |
+| HTTP timeout | `ai/client.py: VISION_TIMEOUT_S` | 900 s | measured: the form lane takes 269–444 s and the consumption lane 361 s. The old shared 240 s ceiling could not physically be met |
+
+⚠️ **Raising the output budget without raising `num_ctx` is WORSE than leaving
+it alone.** Asking for 4,096 predicted tokens over a 1,400-token image aborted
+the Ollama runner outright (`ggml_abort`, SIGABRT, "llama runner terminated"),
+taking every other queued job with it and answering with an empty body and no
+error field. Suite CP-05 pins the relationship.
+
+Behind the budget sits a second guard: `ocr.salvage_truncated_json` rebuilds the
+complete prefix of a reply that simply stops, **cutting only at a closing
+bracket** and dropping the unfinished element. A clipped reply used to be
+discarded whole — thirteen correctly-read rows thrown away to punish one clipped
+row, reported to the store keeper as "unparseable, try the Paste tab".
+
+Three more rules the lanes now share:
+- **nothing read is a FAILURE, not a result.** An empty row list raises instead
+  of finishing at `status='done'` with a blank grid, which was indistinguishable
+  from a photo of a blank form.
+- **an unreadable quantity stays `null`.** The prompt has always said "never
+  invent 0 or 1"; `clean_consumption_row` invented it anyway, because
+  `_to_float(None)` is `0.0`. The paste lane keeps its `0.0` default — a cell
+  typed empty by a human is a different fact from a box a camera could not read.
+- **images are capped twice**: `MAX_VISION_BYTES` for what reaches the model,
+  `SOURCE_MAX_DIM`/`SOURCE_MAX_BYTES` for the copy kept for the QR decode and the
+  row-crop rectifier. `/execution/ocr/upload` normalises at the door, so a 20 MB
+  HEIC no longer arrives base64'd at ~27 MB in `ai_jobs.payload_json` — and the
+  workers now NULL that column on both terminal transitions.
+
+### 7b. Uniqueness Bloom filters (`services/bloom.py`)
+
+Three sets — `usernames` (both registries), `sap_codes`, `asset_serials` —
+built at boot and refreshed every 300 s. ~2.4 KB and ~5 µs per lookup each.
+
+⚠️ **The filter is an accelerator; the database is the authority.** A Bloom
+filter answers "definitely NOT present" exactly and "maybe" probabilistically,
+so it can retire the round trip for a FREE name and never for a taken one. The
+rule that makes this safe under multiple uvicorn workers: **a "definitely not
+present" may skip a READ and may never authorise a WRITE** — this process holds
+its own copy of the bits, so a username another worker registered is absent from
+it until the next refresh. Every `UNIQUE` index and `IntegrityError` handler is
+untouched. Suite CP-20..CP-29.
+
+`GET /auth/username-available` is the live case: a free name is answered from
+memory (`checked: "bloom"`), a name that looks taken is CONFIRMED against both
+`users` and `pending_users` before the endpoint will say so (`checked: "db"`).
 
 ## 8. Testing — the gates
 

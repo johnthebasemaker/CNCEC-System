@@ -711,6 +711,18 @@ class AiJob(Base):
     transition is an atomic claim UPDATE (multi-worker safe, same discipline
     as the report scheduler); orphaned 'running' rows are failed on startup."""
     __tablename__ = "ai_jobs"
+    # ⚠️ DECLARED HERE AS WELL AS IN ALEMBIC. `tools/migration/cutover_migrate.py`
+    # builds production from `metadata.create_all`, so an index that lives only
+    # in a revision does not exist on a freshly cut database (ARCHITECTURE §3).
+    #
+    # Two scans this closes, both on a table whose rows carry base64 images:
+    #   · the startup orphan sweep, `WHERE status IN ('queued','running')`;
+    #   · the submission-summary cache, `WHERE kind = … AND status = 'done'
+    #     AND created_at >= …`, which ran on every review-screen open.
+    __table_args__ = (
+        Index("ix_ai_jobs_kind_status_created", "kind", "status", "created_at"),
+        Index("ix_ai_jobs_status", "status"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     kind = Column(Text, nullable=False)          # ocr_consumption | ocr_delivery_note
     status = Column(Text, nullable=False, server_default=text("'queued'"))

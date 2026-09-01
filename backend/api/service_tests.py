@@ -19398,6 +19398,375 @@ async def test_ocr_workflow():
 
 
 
+# --- Suite CP: the OCR envelope, and the uniqueness filters ------------------
+async def test_ocr_envelope_and_bloom():
+    """Suite CP — 2026-09-01. Two failures reported from production, and the
+    accelerator added alongside the fix.
+
+    ⚠️ THE OCR HALF IS ABOUT AN ENVELOPE, NOT ABOUT READING. Both reported
+    failures — "the Consumption Log fails silently" and "the new PDF hangs with
+    a ReadTimeout" — were diagnosed as the model being bad at tables. It is not.
+    Reproduced on the operator's own files, the model read both correctly and
+    was cut off by limits around it:
+
+      · the SK consumption lane ran out of OUTPUT BUDGET at 1,024 tokens, mid-
+        row-14 of a 30-row sheet. The reply then had no closing brace, so
+        `json.loads` refused ALL of it and thirteen good rows were discarded to
+        punish one clipped row. A Delivery Note is four items and always fitted,
+        which is exactly why the bug looked like "free-form tables";
+      · the Phase 9d form lane finished its answer in 286 tokens and took
+        269 s to do it, against a 240 s HTTP read timeout — and the resulting
+        `httpx.ReadTimeout` stringifies to the empty string, so the operator was
+        shown "the vision model is not reachable" about a model that was
+        reachable, working, and 29 s from done.
+
+    ⚠️ AND THE THIRD THING, WHICH IS THE ONE A FUTURE EDIT WILL BREAK. Raising
+    the output budget without raising `num_ctx` is WORSE than leaving it alone.
+    Ollama runs this model at n_ctx=4096 regardless of the 128k on its model
+    card, an 1800 px page is 3,120 prompt tokens of that, and asking for 4,096
+    more aborted the runner outright (`ggml_abort`, SIGABRT) — taking every
+    other queued job with it and answering with an empty body and no error.
+    CP-05 is the guard: the two settings are ONE decision.
+
+    The Bloom half is a different kind of check. A Bloom filter's false
+    negatives are impossible *about its own contents* and entirely possible
+    about a set another worker has since written to, so CP-20..CP-24 pin the
+    asymmetry the code depends on: a "definitely absent" may retire a READ and
+    may never authorise a WRITE.
+    """
+    import json as _cpjson
+
+    from .ai import client as _cpaic
+    from .ai import jobs as _cpjobs
+    from .ai import ocr as _cpocr
+    from .ai import ocr_form as _cpOF
+    from .services import bloom as _bloom
+
+    # ── 1. the truncated reply, which is the whole reported bug ─────────────
+    # The exact shape the model produced: complete rows, then the budget ends
+    # inside the next one.
+    clipped = ('{"date_text": "25/08/26 (Night)", "rows": ['
+               '{"sno": 1, "material_text": "Green coated gloves", '
+               '"uom": "Pcs", "qty_text": "1", "quantity": 1}, '
+               '{"sno": 2, "material_text": "Dust Mash", "uom": "Nos", '
+               '"qty_text": "1", "quantity": 1}, '
+               '{"sno": 3, "issued_to": "Gunday", "qty_text": "5", "quantity": 5')
+    salvaged = _cpocr.extract_json_object(clipped)
+    check("CP-01 a reply that simply STOPS is salvaged, not discarded. The "
+          "operator's real photo produced thirteen good rows and one clipped "
+          "one, and the old parser threw away all fourteen — reported to the "
+          "store keeper as 'Vision model returned an unparseable response'",
+          salvaged is not None and len(salvaged["rows"]) == 2,
+          f"{salvaged if salvaged is None else len(salvaged['rows'])}")
+    check("CP-02 …and the INCOMPLETE row is dropped rather than patched. The "
+          "cut is only ever made at a closing bracket, which is proof the "
+          "value before it was written in full; cutting at the last comma "
+          "would keep a row whose material was read and whose quantity was not",
+          salvaged is not None
+          and [r["sno"] for r in salvaged["rows"]] == [1, 2],
+          f"{salvaged and [r.get('sno') for r in salvaged['rows']]}")
+    check("CP-03 the date survives the salvage — it is written before the rows "
+          "and is what files the whole sheet against a day",
+          salvaged is not None and salvaged["date_text"] == "25/08/26 (Night)",
+          f"{salvaged and salvaged.get('date_text')}")
+    for label, garbage in (("prose", "sorry, I cannot read this image"),
+                           ("mismatched brackets", '{"rows": [}]}'),
+                           ("nothing but an open bracket", '{"rows": [')):
+        check(f"CP-04 …and {label} still FAILS. A salvage that rescued "
+              "everything would be a parser that never says no, and 'no' is "
+              "how the store keeper learns to retake the photo",
+              _cpocr.extract_json_object(garbage) is None,
+              f"{_cpocr.extract_json_object(garbage)}")
+
+    # ── 2. the envelope: budget, context and timeout are one decision ───────
+    vision_opts = _cpaic._payload("m", "p", system=None, temperature=0.0,
+                                  num_predict=_cpjobs.NUM_PREDICT["ocr_consumption"],
+                                  images=["x"])["options"]
+    check("CP-05 ⚠️ EVERY IMAGE CALL PINS num_ctx, and pins it above its own "
+          "output budget. Ollama runs this model at 4,096 whatever the model "
+          "card says; an 1800 px page is 3,120 of that; asking for more "
+          "predicted tokens than the remainder ABORTED the runner (SIGABRT) "
+          "and returned an empty body. Raising num_predict alone is worse than "
+          "not raising it",
+          vision_opts.get("num_ctx", 0)
+          >= _cpjobs.NUM_PREDICT["ocr_consumption"] * 2
+          and vision_opts["num_ctx"] >= 8192, f"{vision_opts}")
+    text_opts = _cpaic._payload("m", "p", system=None, temperature=0.2,
+                                num_predict=512)["options"]
+    check("CP-06 …and a TEXT call does not pay for it. num_ctx costs KV cache "
+          "linearly, and the chat lane has no image to fit",
+          "num_ctx" not in text_opts, f"{text_opts}")
+    check("CP-07 the consumption lane gets a bigger budget than the delivery "
+          "note, because the answers differ by an order of magnitude — 30 rows "
+          "x 9 fields against 4 items x 3. One number for both is what clipped "
+          "the sheet and never clipped the note",
+          _cpjobs.NUM_PREDICT["ocr_consumption"]
+          > _cpjobs.NUM_PREDICT["ocr_delivery_note"] > 1024,
+          f"{_cpjobs.NUM_PREDICT}")
+    check("CP-08 vision gets a LONGER timeout than chat, and both clear the "
+          "measured cost of a real page (269 s for the form)",
+          _cpaic.VISION_TIMEOUT_S >= 600 and _cpaic.GEN_TIMEOUT_S >= 300
+          and _cpaic.VISION_TIMEOUT_S > _cpaic.GEN_TIMEOUT_S,
+          f"vision={_cpaic.VISION_TIMEOUT_S} gen={_cpaic.GEN_TIMEOUT_S}")
+
+    # ── 3. nothing read is a failure, not a result ──────────────────────────
+    for kind, empty in (("ocr_consumption", '{"date_text":"x","rows":[]}'),
+                        ("ocr_delivery_note", '{"header":{},"items":[]}'),
+                        ("ocr_purchase_doc", '{"header":{},"items":[]}')):
+        raised = False
+        try:
+            _cpocr.parse_vision_reply(kind, empty)
+        except ValueError:
+            raised = True
+        check(f"CP-09 {kind}: a parse that yields NOTHING raises. It used to "
+              "finish at status='done' with an empty grid, which is "
+              "indistinguishable from a photo of a blank form — so the store "
+              "keeper retried the same picture, or submitted the emptiness",
+              raised, "returned an empty result instead of failing")
+
+    # ⚠️ AND THE ONE LANE WHERE "EMPTY" IS NOT EMPTY. A DN's header is
+    # independently useful — parity C3 feeds it straight into the Receive
+    # form's DN No. / driver / vehicle fields — so a note whose item table was
+    # cropped out of frame must still succeed. Suite AK drives exactly this
+    # shape end to end through the job worker; making the rule uniform across
+    # all three lanes broke it, which is how this distinction was found.
+    header_only = _cpocr.parse_vision_reply(
+        "ocr_delivery_note",
+        '{"header":{"DN_No":"15733","Driver_Name":"Imran"},"items":[]}')
+    check("CP-09b a delivery note with a readable HEADER and no items still "
+          "succeeds. Refusing it would delete a working feature in order to "
+          "report a partial one",
+          header_only["header"]["DN_No"] == "15733"
+          and header_only["items"] == [], f"{header_only}")
+
+    row = _cpocr.clean_consumption_row(
+        {"material_text": "Gloves", "quantity": None, "qty_text": ""})
+    check("CP-10 ⚠️ an unreadable quantity stays None. The prompt tells the "
+          "model 'never invent 0 or 1' and the cleaner then invented it "
+          "anyway, because _to_float(None) is 0.0 — so every ambiguous box "
+          "reached the grid as a confident zero, and nobody re-reads a number "
+          "somebody wrote",
+          row["quantity"] is None, f"{row}")
+    check("CP-11 …and a readable one still parses as a number",
+          _cpocr.clean_consumption_row({"quantity": 3, "qty_text": "3"}
+                                       )["quantity"] == 3.0, "")
+    check("CP-12 the PASTE lane keeps its 0.0 default. An empty cell typed by "
+          "a human who was looking at it is not the same fact as a box a "
+          "camera could not read",
+          _cpocr.parse_consumption_paste("Ram, Gloves, Pcs")["rows"][0]
+          ["quantity"] == 0.0, "")
+
+    # ── 4. the image envelope ───────────────────────────────────────────────
+    try:
+        from PIL import Image as _PILImage
+        _io_mod = __import__("io")
+        big = _PILImage.new("RGB", (2480, 3508), (255, 255, 255))
+        for y in range(0, 3508, 5):          # texture, so JPEG cannot cheat
+            for x in range(0, 2480, 3):
+                big.putpixel((x, y), ((x * 7 + y * 13) % 256,) * 3)
+        buf = _io_mod.BytesIO()
+        big.save(buf, "JPEG", quality=95)
+        raw300 = buf.getvalue()
+        vis = _cpocr.prep_image_for_vision(raw300)
+        vw, vh = _PILImage.open(_io_mod.BytesIO(vis)).size
+        check("CP-13 a 300 dpi A4 page is capped on BOTH axes before it "
+              "reaches the model — the long edge, and the byte budget. The "
+              "long edge alone does not bound the payload, and prefill cost "
+              "is what the supervisor waits through",
+              max(vw, vh) <= 1600 and len(vis) <= _cpocr.MAX_VISION_BYTES
+              and len(vis) < len(raw300),
+              f"{vw}x{vh} {len(vis)}B of {len(raw300)}B")
+        src = _cpocr.prep_source_image(raw300)
+        sw, sh = _PILImage.open(_io_mod.BytesIO(src)).size
+        check("CP-14 …and the SOURCE copy is capped separately and higher. It "
+              "still has two jobs after the model is done with the small one: "
+              "decoding the QR at full resolution, and rectifying the page for "
+              "per-row crops at 8 px/mm",
+              max(sw, sh) <= _cpocr.SOURCE_MAX_DIM
+              and max(sw, sh) >= 2000 and len(src) <= _cpocr.SOURCE_MAX_BYTES,
+              f"{sw}x{sh} {len(src)}B")
+    except ImportError:
+        check("CP-13 SKIPPED — Pillow not installed", True, "")
+
+    # ── 5. the form lane inherits the same salvage ──────────────────────────
+    clipped_form = ('{"work_date_text":"27/8/26","rows":['
+                    '{"row":1,"qty_text":"2","quantity":2},'
+                    '{"row":2,"qty_text":"3","quantity":3},'
+                    '{"row":3,"qty_text":"1')
+    form_out = _cpOF._clean_json(clipped_form)
+    check("CP-15 the Phase 9d form lane salvages a clipped reply too. It used "
+          "to report one as 'did not return a readable result for this photo', "
+          "sending a supervisor out to re-photograph a sheet the model had read",
+          len(form_out["rows"]) == 2, f"{form_out}")
+    check("CP-16 …and the form budget clears its own measured need (286 tokens "
+          "for the sample sheet, ~1,900 for a 30-row recipe)",
+          _cpOF.FORM_NUM_PREDICT >= 2000, f"{_cpOF.FORM_NUM_PREDICT}")
+
+    # ── 6. the Bloom filters ────────────────────────────────────────────────
+    bf = _bloom.BloomFilter("cp-test", capacity=5000, error_rate=0.01)
+    for i in range(2000):
+        bf.add(f"user{i}")
+    misses = [f"user{i}" for i in range(2000) if not bf.probably_present(f"user{i}")]
+    check("CP-20 ⚠️ ZERO false negatives about its OWN contents. This is the "
+          "one property the whole design leans on: everything added is always "
+          "reported present, so a 'no' is exact",
+          not misses, f"{len(misses)} keys the filter forgot")
+    fp = sum(1 for i in range(20000) if bf.probably_present(f"absent{i}"))
+    check("CP-21 …and the false-POSITIVE rate stays near spec (a 'maybe' costs "
+          "one confirming query, which is the price being paid on purpose)",
+          fp / 20000 <= bf.error_rate * 3, f"measured {fp/20000:.4f}")
+    check("CP-22 keys are casefolded and stripped ONCE, inside the filter. The "
+          "queries it fronts compare case-insensitively, and a filter that "
+          "treated 'Sunil' and 'sunil' as different keys would answer "
+          "'definitely free' about a name that is taken — a false negative "
+          "manufactured by the wrapper rather than by the mathematics",
+          bf.probably_present("  USER7  ") and bf.probably_present("User7"), "")
+    empty = _bloom.BloomFilter("cp-empty", capacity=100)
+    check("CP-23 an EMPTY filter says 'definitely not present' to everything, "
+          "which is why `get()` returns None rather than an empty filter "
+          "before one is built — every username would look free during the "
+          "startup window",
+          not empty.probably_present("anything")
+          and _bloom.get("cp-never-registered") is None, "")
+
+    built = await _bloom.refresh_all()
+    real = await _bloom._load_usernames()
+    ubf = _bloom.get(_bloom.USERNAMES)
+    check("CP-24 the username filter is loaded from BOTH registries. A name is "
+          "free only if it is free in `users` AND in `pending_users`, and a "
+          "filter built from one would answer 'definitely free' for a name "
+          "somebody requested an hour ago",
+          ubf is not None and all(ubf.probably_present(u) for u in real)
+          and len(real) >= 1, f"{built.get('usernames')}")
+    sbf = _bloom.get(_bloom.SAP_CODES)
+    codes = await _bloom._load_sap_codes()
+    check("CP-25 the SAP filter holds the whole inventory master and reports "
+          "an absent code as absent",
+          sbf is not None and all(sbf.probably_present(c) for c in codes)
+          and not sbf.probably_present("GI-NO-SUCH-CODE-0000"),
+          f"{built.get('sap_codes')}")
+    check("CP-26 asset identity is the PAIR, joined by a character that cannot "
+          "appear in either half — ('AB','C') and ('A','BC') are different "
+          "units and must not collide",
+          _bloom.asset_key("AB", "C") != _bloom.asset_key("A", "BC"), "")
+
+    # ── 7. and the endpoint that uses it ────────────────────────────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        taken = real[0]
+        r = await ac.get("/auth/username-available", params={"u": taken})
+        body = r.json() if r.status_code == 200 else {}
+        check("CP-27 a name that IS taken is reported taken — and was CONFIRMED "
+              "against the database, never answered from the filter. A Bloom "
+              "'maybe' is not evidence, and telling somebody a free name is "
+              "taken is the one wrong answer they cannot work around",
+              r.status_code == 200 and body.get("available") is False
+              and body.get("checked") == "db", f"{r.status_code} {r.text[:120]}")
+        r = await ac.get("/auth/username-available",
+                         params={"u": "zzz-definitely-not-taken-9182"})
+        body = r.json() if r.status_code == 200 else {}
+        check("CP-28 …and a free one is answered from memory with no query at "
+              "all, which is the whole point: somebody trying candidate names "
+              "is asking about free ones",
+              r.status_code == 200 and body.get("available") is True
+              and body.get("checked") == "bloom",
+              f"{r.status_code} {r.text[:120]}")
+        r = await ac.get("/auth/username-available", params={"u": "   "})
+        check("CP-29 a blank name is refused rather than reported available",
+              r.status_code == 422, f"{r.status_code}")
+
+    # ── 8. the MTC rule, as the DOCUMENTS state it ──────────────────────────
+    # ⚠️ THIS IS A DOC-DRIFT CHECK, and the drift it exists for was real. The
+    # code has bound the MTC gate at ISSUE since 2026-08-12 and suite BM has
+    # asserted the absence of a dispatch block ever since — but ARCHITECTURE.md
+    # still carried the pre-ruling sentence "MTC hard-block for Surface Shields
+    # receipts", so anybody reading the architecture document to learn the rule
+    # learned the opposite of what the system does. A rule that is enforced
+    # correctly and documented backwards gets "corrected" by the next person.
+    import pathlib as _cppath
+    _root = _cppath.Path(__file__).resolve().parents[2]
+    arch = (_root / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    manual = (_root / "USER_MANUAL.md").read_text(encoding="utf-8")
+    # The phrase still appears ONCE, quoted inside §4b as the sentence that was
+    # wrong — deliberately, because a correction that erases what it corrected
+    # tells the next reader nothing. What must not survive is the phrase as a
+    # live CLAIM, which is how it read in the entry-gates list.
+    stale_live = [ln for ln in arch.splitlines()
+                  if "MTC hard-block" in ln and "replaced" not in ln]
+    check("CP-30 ARCHITECTURE.md no longer claims a receipt-time MTC block. "
+          "That sentence described behaviour removed on 2026-08-12 and "
+          "survived the removal by three phases, listed among the gates that "
+          "apply 'independent of the switch'",
+          not stale_live, f"still asserted at: {stale_live[:1]}")
+    check("CP-31 …and states the rule positively instead, naming BOTH halves. "
+          "Deleting the wrong sentence without writing the right one leaves "
+          "the next reader to guess",
+          "binds at\nISSUE and nowhere else" in arch
+          and "### 4b. The MTC rule" in arch, "ARCHITECTURE §4b is missing")
+    # ── 9. the N+1 that was replaced, proved equivalent on real data ───────
+    # ⚠️ A PERFORMANCE FIX THAT CHANGES AN ANSWER IS NOT A PERFORMANCE FIX.
+    # `execution.submit_supervisor` used to issue TWO SELECTs against
+    # `sme_recipe` per material line — the exact match, then a fallback that
+    # deliberately IGNORES the sub-activity — so a 30-line recipe cost up to 60
+    # round trips reading the same handful of rows. They are now one query and
+    # two dictionaries. This check replays both queries against every real
+    # (sub-activity, material, SAP) triple in the master and asserts the
+    # dictionaries return what the queries did, including for the triples that
+    # only the fallback could answer.
+    from sqlalchemy import select as _cpsel
+    _recipe_t = _MD.tables["sme_recipe"]
+    async with SessionLocal() as s:
+        codes = [r[0] for r in (await s.execute(
+            _cpsel(_recipe_t.c["Lining_System_Code"]).distinct().limit(6))).all()]
+        mismatches, compared = [], 0
+        for code in codes:
+            rows = (await s.execute(
+                _cpsel(_recipe_t.c["Execution_Sub_Activity_Code"],
+                       _recipe_t.c["Material_Code"], _recipe_t.c["SAP_Code"],
+                       _recipe_t.c["For_1_SQM"])
+                .where(_recipe_t.c["Lining_System_Code"] == code)
+                .order_by(_recipe_t.c["id"]))).all()
+            exact, by_material = {}, {}
+            for rr in rows:
+                exact.setdefault((rr[0], rr[1], rr[2]), rr[3])
+                by_material.setdefault(rr[1], rr[3])
+            for esc, mat, sap, _ in rows:
+                old_val = (await s.execute(
+                    _cpsel(_recipe_t.c["For_1_SQM"]).where(
+                        _recipe_t.c["Lining_System_Code"] == code,
+                        _recipe_t.c["Execution_Sub_Activity_Code"] == esc,
+                        _recipe_t.c["Material_Code"] == mat,
+                        _recipe_t.c["SAP_Code"] == (sap or None)))).scalar()
+                if old_val is None:
+                    old_val = (await s.execute(
+                        _cpsel(_recipe_t.c["For_1_SQM"]).where(
+                            _recipe_t.c["Lining_System_Code"] == code,
+                            _recipe_t.c["Material_Code"] == mat)
+                        .limit(1))).scalar()
+                sentinel = object()
+                new_val = exact.get((esc, mat, sap or None), sentinel)
+                if new_val is sentinel or new_val is None:
+                    new_val = by_material.get(mat)
+                compared += 1
+                if old_val != new_val:
+                    mismatches.append((code, esc, mat, sap, old_val, new_val))
+    check("CP-33 the recipe benchmark lookup gives the SAME answer after the "
+          "N+1 was collapsed into one query. `SAP_Code == None` renders as "
+          "IS NULL, and the fallback deliberately ignores the sub-activity — "
+          "either detail got wrong silently changes which number a consumption "
+          "line is measured against",
+          not mismatches and compared > 0,
+          f"{len(mismatches)} of {compared} differ: {mismatches[:2]}")
+
+    check("CP-32 the USER MANUAL says it in one line, in the chapter the Hub "
+          "Assistant retrieves from. The manual IS the assistant's corpus "
+          "(ai/manual_index.py), so a rule the manual states loosely is a rule "
+          "the assistant answers loosely",
+          "CAN be sent and dispatched to site" in manual
+          and "CANNOT be\n> issued or consumed at the site" in manual,
+          "USER_MANUAL §22.1 does not state the rule in one line")
+
+
 # --- Suite CO: efficiency over time, and the days it cannot divide -----------
 async def test_daily_efficiency():
     """Suite CO — Phase 9e. Man-hours per m², day by day.
@@ -20124,6 +20493,10 @@ async def main() -> int:
     print("\n CO. Efficiency over time — the running figure, and the two "
           "divisions by zero it has to survive")
     await test_daily_efficiency()
+    print("\n CP. The envelope around the model — an output budget, a context "
+          "window and a timeout that have to be decided together; and the "
+          "filters that answer 'definitely not' without asking the database")
+    await test_ocr_envelope_and_bloom()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

@@ -2974,9 +2974,16 @@ If startup appears to hang for more than a few seconds after an update, the upda
 
 ## 13.13 Category rename — Rubber Materials → Surface Shields
 
-The category that triggers the MTC-required workflow on Receipt Staging is now **Surface Shields** instead of "Rubber Materials". Everywhere the system used to look for `Rubber materials`, it now looks for `Surface Shields`. The behaviour is identical:
+The category that triggers the MTC workflow is now **Surface Shields** instead of "Rubber Materials". Everywhere the system used to look for `Rubber materials`, it now looks for `Surface Shields`. The behaviour is identical:
 - SK selects a Surface Shields item on Receipt Staging → MTC Number + MTC File uploader appear.
 - Missing MTC = HOD sees the red banner on Pending Receipts with **✉️ Draft Logistics Email**.
+
+⚠️ **The certificate is never required to receive material, and never required
+to send it to site.** The uploader appears at Receipt Staging because that is a
+convenient moment to file a document somebody is holding — not because the
+receipt is blocked without it. The one place a missing certificate stops work is
+**issue to a worker**. See §22.1 for the full rule and for who is expected to
+file the document.
 
 Which category requires a material certificate is a single setting, so extending the requirement to another category is a one-line change for your administrator rather than a development task.
 
@@ -4836,6 +4843,56 @@ everyone here actually uses.
 > as they were. Only what you see on screen moved, so nothing you have built
 > against those keys needs touching.
 
+## 21.13 Photo reading — the two failures that are fixed
+
+If you tried to read a photographed **Daily Consumption log** or the new
+**printed consumption form** and it did not work, this is what was happening and
+what has changed. Nothing about how you use it is different — you still
+photograph the page and wait.
+
+### 21.13.1 "The log came back empty, or said it could not be read"
+
+The reader was being **cut off part-way through a long sheet**. It read your
+page correctly, got as far as about row 13 or 14 of a 30-row log, and ran out
+of room — and because the answer was incomplete, the system threw away *all* of
+it, including the thirteen rows it had read perfectly.
+
+This is also why **Delivery Notes always worked**: a note is four or five items
+and always finished comfortably. It was never that the reader could not handle
+your handwriting or the free-form table.
+
+**Now:** it is given enough room for a full 30-row sheet, and if a page is ever
+still too long, the rows it *did* read are kept and only the unfinished one is
+dropped. On the operator's own test photo this went from **nothing at all** to
+**all 30 rows**.
+
+### 21.13.2 "The new PDF just hangs, then fails"
+
+A full page of handwriting genuinely takes the reader several minutes. The
+system was giving up after four — often within seconds of it finishing — and
+then telling you *"the vision model is not reachable"*, which sent people off to
+check a service that was running perfectly.
+
+**Now:** it waits long enough for a real page, and if something genuinely is
+wrong it says which of the two it is: still working, or actually unreachable.
+
+### 21.13.3 Two smaller things you may notice
+
+- **A quantity the reader could not make out now arrives BLANK, not as `0`.**
+  It used to show a confident zero, which reads like a number somebody wrote and
+  nobody re-checks. A blank box is a question, and the row will not submit until
+  you answer it.
+- **A photo that produced nothing now says so.** Previously a failed read could
+  finish looking merely "empty", which is indistinguishable from a photo of a
+  blank form. If the page could not be read, you are told to retake it.
+
+### 21.13.4 If a photo still will not read
+
+Nothing has changed about the advice, but it is worth repeating: get the whole
+page in frame, keep the lighting even, and hold the camera square to the paper.
+The **Paste tab** works with the AI switched off entirely and is always
+available. Typing the entry in by hand is never wrong.
+
 # 22. Quality, Safety, Employees & Procurement (QSEP)
 
 Everything in this chapter went live in August 2026. It adds four things that
@@ -4855,6 +4912,16 @@ A Quality Control inspector checks material that carries risk if it is wrong.
 Today that means the **Surface Shields** category — 36 materials out of the 466
 in the master list. Nothing else in the catalogue is affected by any rule in this
 section.
+
+> ### The rule, in one line
+>
+> **Material without an MTC CAN be sent and dispatched to site. It CANNOT be
+> issued or consumed at the site.**
+>
+> Receiving it is fine. Putting it on a Delivery Note and driving it to site is
+> fine. Handing it to a worker is not. If you have been told otherwise, that
+> came from a document written before 2026-08-12 — the rule below is what the
+> system actually does.
 
 There are two separate gates. Both apply at the **same moment** — the instant
 before material goes to a worker — but they are satisfied by **different

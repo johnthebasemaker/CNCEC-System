@@ -1476,6 +1476,62 @@ of them is a regression, not a new normal.
 >   are now received and shipped with or without a certificate; nothing may be
 >   ISSUED without one.** Both gates therefore bind at the same moment, at
 >   `stage_consumption` **and** `approve_smr`.
+>   * **Stated once, in the operator's own words (re-confirmed 2026-09-01):**
+>     *material without an MTC CAN be sent/dispatched to the site; it CANNOT be
+>     issued or consumed at the site.* Audited on 2026-09-01 against
+>     `services/quality.py`, `warehouse.create_dn`/`ship_dn`, `entry.py`,
+>     `ledger.stage_consumption`, `supervisor.approve_smr` and
+>     `execution.post_stock`: **the code already does exactly this and needed no
+>     change.** What did need correcting was `docs/ARCHITECTURE.md`, which still
+>     carried the pre-2026-08-12 sentence "MTC hard-block for `Surface Shields`
+>     receipts" and told a reader the opposite of the truth. The rule now has a
+>     table of its own at ARCHITECTURE §4b and a one-line statement at
+>     USER_MANUAL §22.1, which is also what the Hub Assistant retrieves.
+
+> **Updated 2026-09-01 — the OCR envelope, and three Bloom filters.**
+>
+> * **⚠️ THE VISION MODEL WAS NEVER THE PROBLEM.** Two production reports — "the
+>   Consumption Log fails silently" and "the new Phase 9 PDF hangs with a
+>   ReadTimeout" — were both diagnosed as `qwen2.5vl:7b` being bad at free-form
+>   tables. Reproduced on the operator's own three files, it read every one of
+>   them correctly and was cut off by the limits AROUND it. The Delivery Note
+>   lane never failed for exactly the reason it looked like a model problem: a
+>   DN is four items and always fitted the envelope.
+> * **THE THREE NUMBERS ARE ONE DECISION** (ARCHITECTURE §7a): the per-lane
+>   output budget, `num_ctx`, and the HTTP timeout. **Ollama runs this model at
+>   `n_ctx=4096` regardless of the 128k on its model card**, and an 1800 px page
+>   is 3,120 prompt tokens of that — so raising `num_predict` alone ABORTED the
+>   runner (`ggml_abort`, SIGABRT), took every queued job with it, and returned
+>   an empty body with no error field. Never move one of the three without the
+>   others; suite CP-05 fails if you do.
+> * **A CLIPPED REPLY IS SALVAGED, NOT DISCARDED** (`ocr.salvage_truncated_json`).
+>   The cut is only ever made at a CLOSING BRACKET — proof the value before it
+>   was written in full — and the unfinished element is dropped, never patched.
+>   Cutting at the last comma would keep a row whose material was read and whose
+>   quantity was not.
+> * **Measured, on this hardware, 2026-09-01:** DN 98 s / 4 items · consumption
+>   log 361 s / **30 rows** (was: total failure) · Phase 9 form PDF 444 s /
+>   5 rows + QR (was: ReadTimeout at 240 s). The 900 s vision ceiling is sized
+>   from those, not guessed.
+> * **Nothing read is a FAILURE, not a result**, and **an unreadable quantity
+>   stays `null`** — the prompt always said "never invent 0 or 1" and
+>   `clean_consumption_row` invented it anyway (`_to_float(None) == 0.0`), so
+>   every ambiguous box reached the review grid as a confident zero.
+> * **Bloom filters** on username / SAP code / asset serial (ARCHITECTURE §7b).
+>   ⚠️ The discipline that makes them safe on more than one uvicorn worker: **a
+>   "definitely not present" may retire a READ and may NEVER authorise a WRITE.**
+>   Every UNIQUE index stays exactly where it was. Do not "simplify" this by
+>   letting the filter decide an insert — this process's bits are a snapshot,
+>   and another worker's write is not in them.
+> * **`ai_jobs` stopped keeping photographs forever** (alembic `b8d3f1a72c94`).
+>   The workers NULL `payload_json` on both terminal transitions, and the table
+>   is now indexed on `(kind, status, created_at)` — the orphan sweep and the
+>   submission-summary cache were both sequential scans over rows carrying
+>   base64 images. `kind='submission_summary'` is EXCLUDED from the purge: it
+>   stores its cache KEY there, and purging it would silently disable the cache.
+> * **`SAP_INTEGRATION_QUESTIONNAIRE.md`** (repo root) is the scoping document
+>   for the legacy SAP ERP feed — Employee / Equipment / Material, read-only,
+>   one-way. No application code exists for it yet, deliberately.
 >   * The receipt block was traded for a **chase-up to Logistics**
 >     (`quality.warn_mtc_missing`) — without that the ruling deletes a control
 >     rather than moving it.

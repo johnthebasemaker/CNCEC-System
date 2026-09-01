@@ -28,7 +28,31 @@ MODEL_CODER = os.environ.get("GI_AI_CODER_MODEL", "qwen2.5-coder:7b")
 MODEL_VISION = os.environ.get("GI_AI_VISION_MODEL", "qwen2.5vl:7b")
 
 HEALTH_TIMEOUT_S = 2.0
-GEN_TIMEOUT_S = float(os.environ.get("GI_AI_TIMEOUT_S", "240"))  # 7B cold start
+GEN_TIMEOUT_S = float(os.environ.get("GI_AI_TIMEOUT_S", "300"))  # 7B cold start
+
+# ⚠️ VISION IS NOT CHAT, AND ONE TIMEOUT FOR BOTH WAS THE BUG.
+#
+# A chat answer is a few hundred tokens over a text prompt. Reading a full page
+# of tabular handwriting is a few THOUSAND tokens over an image prompt, and on
+# the standing one-warm-7B-model box that is a different order of magnitude of
+# wall clock. Measured here on the real files, 2026-09-01:
+#
+#   consumption log JPEG, 1024 output tokens ......... 189 s   (~5.4 tok/s)
+#   the same page needs ~2,500-3,500 tokens to finish  460-650 s
+#
+# So the old single 240 s ceiling could not physically be met by the one job
+# that most needed it: every full-page read died on `httpx.ReadTimeout` at 240 s
+# with the model still generating, and the operator saw "the vision model is not
+# reachable" about a model that was reachable and working.
+#
+# Vision therefore gets its own, much longer budget. This is NOT a licence to
+# hang a request: nothing user-facing awaits it. Every vision call in this
+# codebase runs inside a JOB WORKER (`ai/jobs.py`, `ai/form_jobs.py`) that the
+# browser polls, so the only thing a long timeout costs is a row sitting in
+# `ai_jobs` at status='running' for longer. A timeout that fires BEFORE the
+# model finishes costs the whole read.
+VISION_TIMEOUT_S = float(os.environ.get("GI_AI_VISION_TIMEOUT_S", "900"))
+
 KEEP_ALIVE = "30m"  # hold the KV cache warm between calls (legacy behavior)
 
 # At most N generations in flight; the rest wait (the /ai endpoints emit a
@@ -73,7 +97,7 @@ def vision_provider() -> str:
 
 async def vision_json(prompt: str, *, system: str, image_b64: str,
                       num_predict: int = 1400,
-                      timeout_s: float = GEN_TIMEOUT_S) -> tuple[str, str]:
+                      timeout_s: float = VISION_TIMEOUT_S) -> tuple[str, str]:
     """One vision completion. Returns `(raw_text, model_id)`.
 
     The model id comes back with the text because it is stored on the entry:
@@ -134,11 +158,44 @@ async def list_models() -> list[str]:
         return []
 
 
+# ⚠️ THE CONTEXT WINDOW IS 4,096 BY DEFAULT, AND THE MODEL CARD SAYS 128,000.
+#
+# `ollama show qwen2.5vl:7b` reports a 128k context length. That is the model's
+# TRAINING context. What the runner actually allocates is `num_ctx`, and Ollama
+# defaults it to 4,096 regardless — visible in its own log as
+# `llama_context: n_ctx = 4096` next to `n_ctx_train = 131072`.
+#
+# An image is not free in that budget. Measured 2026-09-01 on the Phase 9 form:
+#
+#   page rendered at 1800 px long edge ... 3,120 prompt tokens  (76% of 4,096)
+#   the same page at 1400 px ............. 2,247 prompt tokens
+#   the same page at 1120 px ............. 1,617 prompt tokens
+#
+# So the image alone can consume three quarters of the window, and
+# `prompt + num_predict` then exceeds it. That is not a soft failure: asking for
+# 4,096 predicted tokens over a 1,400-token image ABORTED the runner outright
+# (`ggml_abort`, SIGABRT, "llama runner terminated"), and the API answered with
+# an empty body and no error field.
+#
+# ⚠️ WHICH MEANS RAISING `num_predict` WITHOUT RAISING THIS IS WORSE THAN
+# LEAVING IT ALONE — it converts a truncated answer into a crashed model host,
+# taking every other queued job with it. The two settings are one decision and
+# must be changed together.
+VISION_NUM_CTX = int(os.environ.get("GI_AI_VISION_NUM_CTX", "8192"))
+
+
 def _payload(model: str, prompt: str, *, system: Optional[str], temperature: float,
              num_predict: int, images: Optional[list[str]] = None) -> dict:
+    options: dict = {"temperature": temperature, "num_predict": num_predict}
+    if images:
+        # Sized for the worst case measured above: a 1800 px page (~3,120
+        # tokens) plus the largest per-lane budget, with headroom. The KV cache
+        # cost is linear — 512 MiB at 4,096 on the measurement box, so ~1 GiB
+        # here, which the one-warm-model ruling leaves room for.
+        options["num_ctx"] = max(VISION_NUM_CTX, num_predict * 2)
     body: dict = {
         "model": model, "prompt": prompt, "keep_alive": KEEP_ALIVE,
-        "options": {"temperature": temperature, "num_predict": num_predict},
+        "options": options,
     }
     if system:
         body["system"] = system
@@ -160,6 +217,19 @@ async def generate(model: str, prompt: str, *, system: Optional[str] = None,
             r = await c.post(f"{OLLAMA_HOST}/api/generate", json=body)
             r.raise_for_status()
             return r.json().get("response", "")
+    except httpx.TimeoutException as e:
+        # ⚠️ A TIMEOUT IS NOT AN OUTAGE, and saying so sent people the wrong way.
+        # `httpx.ReadTimeout` stringifies to the empty string, so the old
+        # catch-all produced "Ollama generate failed: ReadTimeout: " and the
+        # caller rendered it as "the vision model is not reachable right now".
+        # An operator then checks a service that is running fine. The model was
+        # reachable, answering, and simply not finished — which is a budget
+        # problem with a named fix, and this sentence is what names it.
+        raise RuntimeError(
+            f"the model did not finish within {timeout_s:g}s (it was still "
+            f"generating — this is a time budget, not an outage; raise "
+            f"GI_AI_VISION_TIMEOUT_S if this page is genuinely this long)"
+        ) from e
     except Exception as e:  # normalized like legacy — caller shows a friendly msg
         raise RuntimeError(f"Ollama generate failed: {type(e).__name__}: {e}") from e
 
