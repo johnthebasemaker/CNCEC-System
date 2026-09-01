@@ -129,13 +129,21 @@ async def controlled_category(session: AsyncSession) -> str:
 
 
 async def is_controlled(session: AsyncSession, *, sap_code: str | None = None,
-                        material_code: str | None = None) -> bool:
+                        material_code: str | None = None,
+                        category: str | None = None) -> bool:
     """True when this material is in the controlled (Surface Shields) category.
 
     Accepts EITHER key. `dn_items` have only `Material_Code`, so a
     SAP-only signature is how the DN gate would silently pass everything.
+
+    `category` lets a caller that is looping over many materials read
+    `controlled_category()` ONCE and hand it in. Without it every iteration
+    re-read the same `app_settings` row — a value that cannot change inside the
+    loop — which doubled the query count of `execution.qsep_check` for no
+    information. Omitted, the behaviour is exactly as it was.
     """
-    cat = (await controlled_category(session)).lower()
+    cat = (category if category is not None
+           else await controlled_category(session)).lower()
     if sap_code:
         row = (await session.execute(text(
             'SELECT "Category" FROM inventory WHERE TRIM("SAP_Code") = TRIM(:s) LIMIT 1'

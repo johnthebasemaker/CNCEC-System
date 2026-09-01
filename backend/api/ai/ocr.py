@@ -21,6 +21,7 @@ byte-identical to legacy — they're calibrated against real site paperwork.
 from __future__ import annotations
 
 import json
+import os
 import re
 from io import BytesIO
 from typing import Any, Optional
@@ -46,11 +47,74 @@ def _looks_like_heif(raw: bytes) -> bool:
         b in raw[8:32] for b in (b"heic", b"heix", b"heif", b"mif1", b"msf1", b"hevc"))
 
 
+# ⚠️ TWO CAPS, AND THE SECOND ONE IS THE ONE THAT WAS MISSING.
+#
+# The long-edge cap alone does not bound what reaches Ollama. A 1600x1600 photo
+# of a dense ruled table re-encodes to well over a megabyte at q85, and the
+# request body is that payload base64'd — 33% larger again. Worse, a JPEG that
+# was ALREADY small could come back BIGGER than it went in: a 904x1280 site
+# photo measured here on 2026-09-01 went 131 KB -> 135 KB, because nothing under
+# the long-edge cap was resized and the re-encode was pure loss.
+#
+# `MAX_VISION_BYTES` is the second cap. When the encode overshoots it, quality
+# steps down and then the long edge does, until the payload fits. The stepping
+# is deliberate in that order: dropping JPEG quality blurs strokes far less than
+# throwing away pixels, and a handwritten 4 is told from a 9 by stroke geometry.
+MAX_VISION_BYTES = int(os.environ.get("GI_AI_MAX_IMAGE_BYTES",
+                                      str(1_400_000)))
+_QUALITY_LADDER = (85, 72, 60)
+_DIM_LADDER = (1.0, 0.8, 0.65)
+
+# ── the SOURCE cap, which is a different number for a different reason ───────
+# The vision cap above is sized for the model. This one is sized for the two
+# jobs the ORIGINAL bytes still have to do after the model is finished with a
+# downscaled copy: decoding the QR (`ocr_form.decode_qr` reads the original
+# deliberately, because 1600 px can push a small QR under the detector's
+# minimum module size) and rectifying the page for per-row crops (8 px/mm over
+# a 210 mm sheet = 1,680 px of useful width).
+#
+# 2,600 px on the long edge covers both with room to spare — a 26 mm QR lands
+# at ~320 px — while bounding what a phone can push into `ai_jobs.payload_json`
+# and into `sme_execution_entry.OCR_Image`. Before this, a 20 MB HEIC arrived
+# base64'd at ~27 MB in a text column, per upload, kept forever.
+SOURCE_MAX_DIM = int(os.environ.get("GI_AI_SOURCE_MAX_DIM", "2600"))
+SOURCE_MAX_BYTES = int(os.environ.get("GI_AI_SOURCE_MAX_BYTES", str(4_000_000)))
+
+
+def prep_source_image(raw_bytes: bytes) -> bytes:
+    """Normalise an uploaded photograph ONCE, at the door.
+
+    EXIF-orients, flattens to RGB JPEG and caps the long edge at
+    `SOURCE_MAX_DIM` — large enough for the QR decode and the rectifier, small
+    enough that nothing downstream has to defend itself against a 20 MB phone
+    photo. Raises `ImagePrepError` (the endpoint turns it into a friendly 422)
+    so a corrupt or HEIC-without-codec upload fails while the supervisor is
+    still standing at the desk, rather than as a dead job minutes later.
+    """
+    return prep_image_for_vision(raw_bytes, max_dim=SOURCE_MAX_DIM,
+                                 quality=88, max_bytes=SOURCE_MAX_BYTES)
+
+
 def prep_image_for_vision(raw_bytes: bytes, *, max_dim: int = 1600,
-                          quality: int = 85) -> bytes:
-    """EXIF auto-orient → RGB → long-edge cap 1600px → JPEG q85. Turns a
-    3–6 MB smartphone photo into ~100–200 KB without hurting OCR accuracy
-    (qwen2.5vl's tile preprocessor caps around 1600px anyway)."""
+                          quality: int = 85,
+                          max_bytes: Optional[int] = None) -> bytes:
+    """EXIF auto-orient → RGB → long-edge cap → JPEG, under a byte budget.
+
+    Turns a 3–6 MB smartphone photo or a 300 dpi page raster into ~100–400 KB
+    without hurting OCR accuracy (qwen2.5vl's tile preprocessor caps around
+    1600px anyway, so pixels above the cap cost time and buy nothing).
+
+    Two guarantees the caller can rely on, both added 2026-09-01 after a
+    ReadTimeout hunt:
+
+      * the long edge is at most `max_dim`, and
+      * the result is at most `MAX_VISION_BYTES`, and never larger than the
+        bytes handed in when those bytes were already a usable JPEG.
+
+    The second is what stops an oversized page from reaching the model at all:
+    the VLM's wall-clock cost is dominated by how many tiles it has to prefill,
+    and an unbounded upload is an unbounded prefill.
+    """
     from PIL import Image, ImageOps, UnidentifiedImageError
 
     global _HEIF_REGISTERED
@@ -81,10 +145,26 @@ def prep_image_for_vision(raw_bytes: bytes, *, max_dim: int = 1600,
         if img.mode != "RGB":
             img = img.convert("RGB")
         img.thumbnail((int(max_dim), int(max_dim)), Image.LANCZOS)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=int(quality), optimize=True,
-                 progressive=False)
-        return buf.getvalue()
+
+        def _encode(im, q: int) -> bytes:
+            buf = BytesIO()
+            im.save(buf, format="JPEG", quality=int(q), optimize=True,
+                    progressive=False)
+            return buf.getvalue()
+
+        budget = MAX_VISION_BYTES if max_bytes is None else int(max_bytes)
+        out = _encode(img, quality)
+        if len(out) > budget:
+            base_w, base_h = img.size
+            for scale in _DIM_LADDER:
+                trial = (img if scale == 1.0 else img.resize(
+                    (max(int(base_w * scale), 1), max(int(base_h * scale), 1)),
+                    Image.LANCZOS))
+                for q in _QUALITY_LADDER:
+                    out = _encode(trial, q)
+                    if len(out) <= budget:
+                        return out
+        return out
     except Exception as e:
         raise ImagePrepError(f"Image transformation failed: {e}") from e
 
@@ -221,18 +301,100 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.+\})\s*```", re.IGNORECASE | re.DO
 
 def extract_json_object(raw: str) -> Optional[dict]:
     """First JSON object out of a model reply, fence or no fence; trims to
-    the outermost braces so trailing prose can't poison json.loads."""
+    the outermost braces so trailing prose can't poison json.loads.
+
+    Falls back to `salvage_truncated_json` when the reply is a well-formed
+    object that simply STOPS — see that function for why losing the whole read
+    to a clipped tail was the single most damaging bug in this lane.
+    """
     if not raw:
         return None
     m = _JSON_FENCE.search(raw)
     candidate = m.group(1) if m else raw
-    first, last = candidate.find("{"), candidate.rfind("}")
-    if first < 0 or last <= first:
+    first = candidate.find("{")
+    last = candidate.rfind("}")
+    if first < 0:
         return None
+    if last > first:
+        try:
+            return json.loads(candidate[first:last + 1])
+        except json.JSONDecodeError:
+            pass
+    return salvage_truncated_json(candidate[first:])
+
+
+def salvage_truncated_json(text: str) -> Optional[dict]:
+    """Rebuild the complete prefix of a JSON object the model never finished.
+
+    ⚠️ THIS IS THE FIX FOR THE BUG THE OPERATOR CALLED "FAILING SILENTLY".
+    Reproduced 2026-09-01 on the real Consumption Log photo: `qwen2.5vl:7b` read
+    the page correctly, emitted thirteen good rows, and was cut off in the
+    middle of the fourteenth by the 1024-token budget. The reply therefore had
+    no closing brace; `json.loads` refused all of it; and the store keeper was
+    told "Vision model returned an unparseable response. Try the Paste tab."
+    Thirteen correctly-read rows were thrown away to punish one clipped row.
+
+    Delivery Notes never hit this — a DN is four items and finishes inside the
+    budget — which is exactly why the failure looked like "the model cannot read
+    free-form tables" rather than "the answer did not fit in the envelope".
+
+    ⚠️ THE CUT IS ONLY EVER MADE AT A CLOSING BRACKET, and that restriction is
+    the whole safety argument. A closing `}` or `]` is proof that the value
+    before it was written in full; a comma is not, and cutting at the last comma
+    would keep a row whose `material_text` had been read but whose `quantity`
+    had not — a row that looks complete and is missing the number. The
+    incomplete trailing element is DROPPED, never patched: a half-read row is a
+    half-read quantity, and inventing the rest of it is the one thing this
+    module refuses to do.
+
+    Returns None when nothing coherent survives — a reply that was garbage from
+    the first character must still fail, and fail loudly.
+    """
+    if not text or text[0] != "{":
+        return None
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    cut = -1                    # index AFTER the last completed nested value
+    # ⚠️ AND THE CONTAINERS THAT WERE OPEN AT THAT INSTANT, which is not the
+    # same as the containers open when the text ran out. The clipped row opens
+    # a `{` after the cut point; closing it would weld the abandoned fragment
+    # back on and produce `[{"a": 1}}]` — invalid, and the salvage would then
+    # fail for a reply it could have rescued.
+    cut_stack: list[str] = []
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack[-1] != ch:
+                return None                  # structurally broken, not merely cut
+            stack.pop()
+            if not stack:                    # the reply was complete after all
+                try:
+                    out = json.loads(text[:i + 1])
+                except json.JSONDecodeError:
+                    return None
+                return out if isinstance(out, dict) else None
+            cut = i + 1
+            cut_stack = list(stack)
+    if cut <= 0 or not cut_stack:
+        return None
+    repaired = text[:cut] + "".join(reversed(cut_stack))
     try:
-        return json.loads(candidate[first:last + 1])
+        out = json.loads(repaired)
     except json.JSONDecodeError:
         return None
+    return out if isinstance(out, dict) else None
 
 
 def _to_float(s: Any) -> float:
@@ -264,10 +426,25 @@ def _to_float_or_none(s: Any) -> Optional[float]:
 
 
 def clean_consumption_row(r: dict) -> dict:
+    """One handwritten log row, normalised for the review grid.
+
+    ⚠️ `quantity` STAYS None WHEN THE MODEL COULD NOT READ IT. The prompt above
+    tells the model in as many words: "A blank QTY cell is qty_text '' and
+    quantity null — never invent 0 or 1." This function used to invent it
+    anyway: `_to_float(None)` is 0.0, so every ambiguous and every empty box
+    arrived in the grid as a confident `0`. A store keeper scanning thirty rows
+    does not stop at a zero — it reads as a number somebody wrote. An empty box
+    is a question, and the grid already renders None as one (`InputNumber` shows
+    blank, and the submit filter needs `> 0`).
+
+    This is the vision lane only. `parse_consumption_paste` builds its own rows
+    and keeps the 0.0 default, which is right there: a pasted cell that is empty
+    was typed empty by a human who was looking at it.
+    """
     out = {"issued_to": str(r.get("issued_to") or "").strip(),
            "material_text": str(r.get("material_text") or "").strip(),
            "uom": str(r.get("uom") or "").strip(),
-           "quantity": _to_float(r.get("quantity")),
+           "quantity": _to_float_or_none(r.get("quantity")),
            "work_type": str(r.get("work_type") or "").strip()}
     # 2026-07-18 handwritten-form spec fields (additive — old consumers see
     # the same keys as before; ai/handwritten.py consumes the extras)
@@ -337,24 +514,60 @@ def parse_vision_reply(kind: str, raw: str) -> dict:
             raise ValueError("Vision model returned an unparseable response. "
                              "Try the Paste tab.")
         rows = [clean_consumption_row(r) for r in obj["rows"] if isinstance(r, dict)]
+        kept = [r for r in rows
+                if r["material_text"] or r["quantity"] or r["qty_text"]]
+        # ⚠️ NOTHING READ IS A FAILURE, NOT A RESULT. A parse that yields zero
+        # rows used to finish the job at status='done' with an empty grid, which
+        # is indistinguishable from a photo of a blank form — so the store
+        # keeper retried the same picture, or worse, submitted the emptiness.
+        # The lane has to say it could not read the page.
+        if not kept:
+            raise ValueError(
+                "The model read this photo but found no rows on it. Check the "
+                "whole table is in frame and in focus, then retake it — or use "
+                "the Paste tab.")
         return {"date_text": str(obj.get("date_text") or "").strip(),
-                "rows": [r for r in rows
-                         if r["material_text"] or r["quantity"] or r["qty_text"]]}
+                "rows": kept}
     if not obj or "items" not in obj:
         raise ValueError("Vision model returned an unparseable response. "
                          "Try the Paste tab.")
     if kind == "ocr_purchase_doc":
         items = [clean_purchase_row(r) for r in obj["items"] if isinstance(r, dict)]
         doc_type = str(obj.get("doc_type") or "").strip().upper()
+        # A row with neither a code nor a description is a table artefact,
+        # not a line item.
+        kept = [r for r in items if r["material_code"] or r["material_text"]]
+        if not kept:
+            raise ValueError(
+                "The model read this document but found no line items on it. "
+                "Check the item table is in frame, then re-upload — or enter "
+                "the lines manually.")
         return {"doc_type": doc_type if doc_type in ("PR", "PO") else "",
                 "header": clean_purchase_header(obj.get("header") or {}),
-                # A row with neither a code nor a description is a table
-                # artefact, not a line item.
-                "items": [r for r in items
-                          if r["material_code"] or r["material_text"]]}
+                "items": kept}
     items = [clean_item_row(r) for r in obj["items"] if isinstance(r, dict)]
-    return {"header": clean_dn_header(obj.get("header") or {}),
-            "items": [r for r in items if r["material_text"] or r["quantity"]]}
+    kept = [r for r in items if r["material_text"] or r["quantity"]]
+    header = clean_dn_header(obj.get("header") or {})
+    # ⚠️ THE DELIVERY NOTE FAILS ONLY WHEN BOTH HALVES ARE EMPTY, and that is a
+    # deliberate difference from the consumption lane above.
+    #
+    # A consumption sheet IS its rows: no rows means nothing was read. A DN's
+    # header is independently useful — parity C3 feeds it straight into the
+    # Receive form's DN No. / driver / vehicle fields, so a note whose item
+    # table was cropped out of frame still saves the store keeper four fields
+    # of typing. Refusing that read would delete a working feature in order to
+    # report a partial one, which is the wrong trade in the one direction the
+    # operator asked us not to break.
+    #
+    # Neither half readable is still a failure, for the same reason as above: a
+    # job finishing at status='done' with nothing in it is indistinguishable
+    # from a photo of a blank page.
+    if not kept and not any(header.values()):
+        raise ValueError(
+            "The model read this note but found neither a header nor any items "
+            "on it. Check the whole note is in frame and in focus, then retake "
+            "it — or use the Paste tab.")
+    return {"header": header, "items": kept}
 
 
 # --- paste lane (offline twin — identical output shapes) -------------------------

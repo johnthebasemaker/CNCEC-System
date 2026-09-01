@@ -78,8 +78,14 @@ async def run_job(job_id: int) -> None:
                     s, read, site_id=row.Site_ID, username=row.actor,
                     role=payload.get("role") or "supervisor",
                     image_bytes=image, job_id=job_id)
+            # The photograph is released here. It is NOT lost: `build_entry`
+            # has just stored it on `sme_execution_entry.OCR_Image`, which is
+            # where the row-crop viewer reads it from. Keeping the base64 copy
+            # too meant every uploaded form was held twice, one copy in a text
+            # column nothing would ever open again.
             await s.execute(update(ai_jobs_t).where(ai_jobs_t.c["id"] == job_id)
                             .values(status="done", finished_at=_now(),
+                                    payload_json=None,
                                     result_json=json.dumps(result,
                                                            ensure_ascii=False,
                                                            default=str)))
@@ -100,6 +106,7 @@ async def _fail(job_id: int, message: str) -> None:
     async with SessionLocal() as s:
         await s.execute(update(ai_jobs_t).where(ai_jobs_t.c["id"] == job_id)
                         .values(status="error", finished_at=_now(),
+                                payload_json=None,
                                 error=str(message)[:900]))
         await s.commit()
 

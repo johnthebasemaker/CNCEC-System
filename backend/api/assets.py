@@ -197,17 +197,71 @@ class UnitCreate(BaseModel):
     site_id: Optional[str] = None
 
 
+async def _raise_if_serial_taken(session: AsyncSession, sap: str,
+                                 serial: str) -> None:
+    """Raise the helpful 409 when `(sap, serial)` is already registered.
+
+    Extracted 2026-09-01 so the pre-insert Bloom confirmation and the
+    post-insert IntegrityError handler produce the IDENTICAL sentence. Two
+    copies of this message would have drifted the first time one was edited,
+    and the message is the whole value of the check — the uniqueness is GLOBAL
+    (alembic a3c17e9b25d4), so it has to name where the existing unit actually
+    is. "Already exists at your site" was the old wording and is a lie whenever
+    the unit is somewhere else.
+    """
+    where = (await session.execute(
+        select(unit_t.c["Site_ID"], unit_t.c["status"], unit_t.c["holder"])
+        .where(func.trim(unit_t.c["SAP_Code"]) == sap,
+               func.trim(unit_t.c["serial_no"]) == serial))).first()
+    if where is None:
+        return
+    raise HTTPException(
+        409, f"{sap} serial {serial!r} is already registered at "
+             f"{where[0]} ({where[1]}{', held by ' + where[2] if where[2] else ''}). "
+             "A serial number identifies ONE physical item — if it has moved "
+             "here, request a transfer from that site rather than registering "
+             "it again.")
+
+
 @router.post("", status_code=201, summary="Register one physical unit")
 async def create_asset(body: UnitCreate,
                        user: dict = Depends(require_level(1)),
                        session: AsyncSession = Depends(get_session)):
+    from .services import bloom
     site = _write_site(user, body.site_id)
     sap = body.SAP_Code.strip()
+    serial = body.serial_no.strip()
+
+    # ⚠️ THE BLOOM FILTER IS USED HERE FOR THE *ABSENCE* OF THE SAP CODE, which
+    # is the refusal, and NOT for the absence of the serial, which would be the
+    # permission. The distinction is the whole safety argument in
+    # `services/bloom.py`: "definitely not in the inventory master" is a fact
+    # this process can act on, because inventory does not grow behind its back
+    # in a way that could turn a refusal into a wrongful one — a code the filter
+    # has never seen was not registerable a moment ago either, and the operator
+    # retries after the refresh. "Definitely not an existing serial" is the
+    # opposite shape: acting on it would AUTHORISE an insert, and a filter this
+    # worker built before another worker registered the same unit would say
+    # exactly that. The serial's uniqueness therefore stays where it always was
+    # — the global index, caught below as IntegrityError.
+    bf_sap = bloom.get(bloom.SAP_CODES)
+    if bf_sap is not None and not bf_sap.probably_present(sap):
+        raise HTTPException(422, f"no inventory item with SAP code {sap!r}")
     known = (await session.execute(
         select(func.count()).select_from(inventory_t)
         .where(func.trim(inventory_t.c["SAP_Code"]) == sap))).scalar_one()
     if not known:
         raise HTTPException(422, f"no inventory item with SAP code {sap!r}")
+
+    # A "maybe already registered" is worth one cheap confirming query BEFORE
+    # the insert, purely so the operator gets the helpful message below (which
+    # names where the unit actually is) instead of a bare IntegrityError. When
+    # the filter says "definitely not", that query is skipped and the index
+    # still guards the write.
+    bf_ser = bloom.get(bloom.ASSET_SERIALS)
+    if bf_ser is not None and bf_ser.probably_present(bloom.asset_key(sap, serial)):
+        await _raise_if_serial_taken(session, sap, serial)
+
     vals = body.model_dump(exclude={"site_id", "SAP_Code"}, exclude_none=True)
     vals |= {"Site_ID": site, "SAP_Code": sap,
              "serial_no": body.serial_no.strip(), "created_by": user["username"],
@@ -217,21 +271,8 @@ async def create_asset(body: UnitCreate,
             insert(unit_t).values(**vals).returning(unit_t.c["id"]))).scalar_one()
     except IntegrityError:
         await session.rollback()
-        # The uniqueness is GLOBAL now (alembic a3c17e9b25d4), so name where
-        # the existing one actually is — "already exists at your site" was
-        # the old message and would now be a lie whenever it is elsewhere.
-        where = (await session.execute(
-            select(unit_t.c["Site_ID"], unit_t.c["status"], unit_t.c["holder"])
-            .where(func.trim(unit_t.c["SAP_Code"]) == sap,
-                   func.trim(unit_t.c["serial_no"]) == body.serial_no.strip()))).first()
-        if where is None:
-            raise HTTPException(409, f"{sap} serial {body.serial_no!r} already exists")
-        raise HTTPException(
-            409, f"{sap} serial {body.serial_no!r} is already registered at "
-                 f"{where[0]} ({where[1]}{', held by ' + where[2] if where[2] else ''}). "
-                 "A serial number identifies ONE physical item — if it has moved "
-                 "here, request a transfer from that site rather than registering "
-                 "it again.")
+        await _raise_if_serial_taken(session, sap, serial)
+        raise HTTPException(409, f"{sap} serial {serial!r} already exists")
     # The registration IS the first movement — otherwise the history starts
     # with a gap and "where has this been" cannot answer for the first leg.
     await session.execute(insert(move_t).values(
@@ -239,8 +280,9 @@ async def create_asset(body: UnitCreate,
         to_location_id=body.current_location_id, to_note=body.location_note,
         source="register", status=body.status or "in_stock", note="registered"))
     await write_audit(session, user["username"], "ASSET_REGISTER", "asset_units",
-                      f"{site}/{sap}/{body.serial_no} id={new_id}")
+                      f"{site}/{sap}/{serial} id={new_id}")
     await session.commit()
+    bloom.add(bloom.ASSET_SERIALS, bloom.asset_key(sap, serial))
     return {"created": True, "id": new_id}
 
 

@@ -184,6 +184,20 @@ async def lifespan(app: FastAPI):
                  if w["ok"] else w.get("error", "?")))
     except Exception as e:  # never block startup on the assistant
         print(f"[ai] manual index skipped: {type(e).__name__}: {e}")
+    # Uniqueness Bloom filters (2026-09-01). Built at boot so the first
+    # registration keystroke does not pay for the load, and refreshed on a
+    # timer because a filter is a SNAPSHOT of a set — see services/bloom.py for
+    # why a stale one may retire a read and may never authorise a write.
+    try:
+        from .services import bloom as _bloom
+        built = await _bloom.refresh_all()
+        print("[bloom] " + ", ".join(
+            f"{n}: {st['elements']}/{st['capacity']} in {st['bytes']}B"
+            for n, st in built.items() if st))
+        if os.environ.get("GI_SCHEDULER", "1") != "0":
+            _bloom.start_refresh_loop()
+    except Exception as e:  # never block startup on an accelerator
+        print(f"[bloom] skipped: {type(e).__name__}: {e}")
     # Second-wall assertion (audit A01-F3): the gi_ai_ro GRANT allowlist is
     # wiped by every mirror reload and re-applied by operator ritual. Say so at
     # boot rather than discovering it during an incident. Never fatal — a dev
@@ -203,6 +217,11 @@ async def lifespan(app: FastAPI):
         weekly_task.cancel()
     if briefing_task:
         briefing_task.cancel()
+    try:
+        from .services import bloom as _bloom
+        await _bloom.stop_refresh_loop()
+    except Exception:  # noqa: BLE001 — shutdown must not raise
+        pass
     await engine.dispose()
 
 

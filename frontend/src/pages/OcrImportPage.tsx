@@ -22,7 +22,11 @@ type Kind = 'ocr_consumption' | 'ocr_delivery_note'
 
 interface OcrRow extends ApiRow {
   material_text: string
-  quantity: number
+  // null when the model could not read the box. The vision lane stops
+  // inventing 0 for an unreadable quantity (backend `clean_consumption_row`)
+  // — a blank cell is a question the store keeper answers, a 0 is a number
+  // nobody re-reads.
+  quantity: number | null
   uom: string
   issued_to?: string
   work_type?: string
@@ -243,7 +247,8 @@ export default function OcrImportPage() {
       title: 'Qty', key: 'q', width: 110,
       render: (_: unknown, r, i) => (
         <InputNumber size="small" min={0} value={r.quantity}
-          onChange={(v) => patch(i, { quantity: v ?? 0 })} style={{ width: 90 }} />
+          placeholder="—" status={r.quantity == null ? 'warning' : undefined}
+          onChange={(v) => patch(i, { quantity: v })} style={{ width: 90 }} />
       ),
     },
     { title: 'UOM', dataIndex: 'uom', width: 70, render: (v) => v || '—' },
