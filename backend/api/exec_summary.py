@@ -492,3 +492,37 @@ async def executive_summary_pdf(date_from: str | None = Query(None),
     return StreamingResponse(
         io.BytesIO(blob), media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+# ─── Track 3 (slice 10b): valuation & burn ───────────────────────────────────
+# Same `_EXEC_READERS` guard as the executive summary above — hod + auditor,
+# with admin implicit in `require_roles`. Operator ruling Q3.3: admin, HOD and
+# auditor. A scoped HOD sees their own site (`_resolve_site` refuses a request
+# for somebody else's rather than silently rewriting it); admin and auditor read
+# across every site.
+
+@router.get("/valuation", summary="Site-wide valuation + 30-day burn (JSON)")
+async def valuation_json(site_id: str | None = Query(None),
+                         days: int = Query(30, ge=1, le=365),
+                         user: dict = Depends(_EXEC_READERS),
+                         session: AsyncSession = Depends(get_session)):
+    from .services.valuation import build_valuation
+    return await build_valuation(session, site=_resolve_site(user, site_id),
+                                 days=days)
+
+
+@router.get("/valuation/export.pdf",
+            summary="Site-wide valuation + 30-day burn (branded PDF)")
+async def valuation_pdf(site_id: str | None = Query(None),
+                        days: int = Query(30, ge=1, le=365),
+                        user: dict = Depends(_EXEC_READERS),
+                        session: AsyncSession = Depends(get_session)):
+    from .exec_pdf import render_valuation_pdf
+    from .services.valuation import build_valuation
+    site = _resolve_site(user, site_id)
+    d = await build_valuation(session, site=site, days=days)
+    blob = render_valuation_pdf(d, username=user["username"])
+    fname = f"valuation_burn_{(site or 'ALL')}_{_dt.date.today().isoformat()}.pdf"
+    return StreamingResponse(
+        io.BytesIO(blob), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})

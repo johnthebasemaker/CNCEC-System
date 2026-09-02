@@ -312,6 +312,40 @@ async def send_document(session: AsyncSession, *, to: str, blob: bytes, filename
                                   preview=(caption or filename), event_key=event_key, created_by=created_by)
 
 
+async def draft_text(session: AsyncSession, *, to: str, body: str,
+                     event_key: str, related_table: str | None = None,
+                     related_ref=None, created_by: str = "system",
+                     reason: str = "") -> dict:
+    """Queue a WhatsApp message as a DRAFT — recorded, not sent.
+
+    ⚠️ EXTERNAL RECIPIENTS DO NOT GET AUTOMATED MESSAGES (operator ruling,
+    slice 10b). Everything the system sends today goes to a colleague whose
+    number is in `users`; a chase message addressed to a SUPPLIER is a different
+    act. It leaves the company, it is read as the company's position, and an
+    automated one that names the wrong purchase order is a commercial mistake
+    nobody reviewed.
+
+    So the row is written with `status='draft'` and `_post_message` is never
+    called. It appears in the admin WhatsApp Console like every other outbox
+    row, and a human releases it with `POST /admin/whatsapp/{id}/approve`.
+    The audit trail is identical to a sent message; the difference is that a
+    person is on it.
+
+    `reason` is stored in the body preview so the reviewer can see WHY the
+    system proposed this without opening the payload.
+    """
+    to = (to or "").strip()
+    payload = _text_payload(to, body)
+    preview = f"[DRAFT{' — ' + reason if reason else ''}] {body}"
+    oid = (await session.execute(insert(outbox_t).values(
+        to_number=to or None, message_type="text",
+        body=preview[:1000], payload_json=json.dumps(payload),
+        status="draft", event_key=event_key, related_table=related_table,
+        related_ref=(str(related_ref) if related_ref is not None else None),
+        attempts=0, created_by=created_by).returning(outbox_t.c["id"]))).scalar_one()
+    return {"id": oid, "status": "draft"}
+
+
 async def retry(session: AsyncSession, *, outbox_id: int) -> dict:
     row = (await session.execute(select(
         outbox_t.c["status"], outbox_t.c["payload_json"], outbox_t.c["to_number"]

@@ -21,7 +21,8 @@ import {
   AimOutlined, AlertOutlined, AuditOutlined, BarChartOutlined, CameraOutlined, CarOutlined,
   DashboardOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, FallOutlined,
   FieldTimeOutlined, FileExcelOutlined, FileProtectOutlined, FileSearchOutlined, FireOutlined,
-  FormOutlined, FundProjectionScreenOutlined, InboxOutlined, MessageOutlined, ProfileOutlined,
+  FormOutlined, FundProjectionScreenOutlined, InboxOutlined, MessageOutlined,
+  PlayCircleOutlined, ProfileOutlined,
   SafetyCertificateOutlined, SafetyOutlined, SolutionOutlined, TagsOutlined, StockOutlined, TeamOutlined,
   ToolOutlined, ControlOutlined, UserAddOutlined,
 } from '@ant-design/icons'
@@ -397,6 +398,10 @@ export const NAV: NavGroup[] = [
     label: 'Account',
     children: [
       { key: '/security', label: 'Security', icon: <SafetyCertificateOutlined />, access: { minLevel: 0 } },
+      // Everybody has training, including the roles that are not mandated for
+      // any module — they see the list and their own (empty) standing rather
+      // than a page that 404s for half the company.
+      { key: '/training', label: 'Training', icon: <PlayCircleOutlined />, access: { minLevel: 0 } },
       { key: '/feedback', label: 'Feedback', icon: <MessageOutlined />, access: { minLevel: 0 } },
     ],
   },

@@ -303,8 +303,16 @@ async def digest_loop() -> None:
         await asyncio.sleep((nxt - now).total_seconds())
         try:
             async with SessionLocal() as s:
+                # One worker, not four — see services/dailyjob.py. Without the
+                # claim every recipient received four copies of the evening
+                # digest, which is the fastest way to teach people to ignore it.
+                from . import dailyjob
+                if not await dailyjob.claim(s, "evening_digest", nxt):
+                    _log.info("evening digest: another worker has it")
+                    continue
                 res = await send_evening_digests(s)
                 await s.commit()
+                await dailyjob.note_result(s, "evening_digest", str(res))
             _log.info("evening digest run: %s", res)
         except Exception:  # noqa: BLE001 — one bad run must not kill the loop
             _log.exception("evening digest run failed")

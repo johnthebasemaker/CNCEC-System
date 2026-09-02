@@ -493,7 +493,117 @@ async def probe_pr_stale(session: AsyncSession, site: Optional[str]) -> dict | N
 
 Probe = Callable[[AsyncSession, Optional[str]], Awaitable[Optional[dict]]]
 
+# ── Track 2 (slice 10b): uncertified material staged for TODAY'S DAY SHIFT ───
+#
+# ⚠️ A SHARPER QUESTION THAN `probe_missing_mtc`, AND BOTH ARE WANTED.
+# That probe asks "is there uncertified stock on hand?" — a standing condition,
+# true for weeks, and correctly reported every morning until somebody uploads
+# the document. This one asks "is uncertified material about to be needed by the
+# crew that starts in an hour?", which is a different and much more actionable
+# fact: it has a deadline, and the deadline is today.
+#
+# ⚠️ NULL Shift IS SKIPPED, NOT ASSUMED. Every entry filed before slice 10b has
+# a NULL shift and there is no honest backfill. Treating NULL as 'Day' would
+# make this probe scream about a year of history on its first morning; treating
+# it as 'Night' would be an equally invented answer. It reports what it knows.
+#
+# ⚠️ AND IT REUSES `visible_mtc`, like every other MTC path here. Re-implementing
+# "has a certificate" would produce an alert that disagrees with the refusal at
+# the counter, and an alert naming material that is actually fine is one people
+# learn to skip.
+_DAY_SHIFT_STATES = ("DRAFT_SUPERVISOR", "PENDING_SK", "PENDING_HOD")
+
+
+async def day_shift_uncertified(session: AsyncSession,
+                                site: Optional[str] = None) -> list[dict]:
+    """Rows for controlled material on today's day-shift entries with no MTC."""
+    from .services import quality
+    category = await quality.controlled_category(session)
+    clause, params = _site_clause(site, 'e."Site_ID"')
+    rows = (await session.execute(text(f"""
+        SELECT e."Site_ID"           AS site,
+               e."Entry_No"          AS entry_no,
+               e."Equipment_Tag_No"  AS tag,
+               m."SAP_Code"          AS sap,
+               i."Equipment_Description" AS name,
+               SUM(m."Actual_Qty")   AS qty
+          FROM sme_execution_entry e
+          JOIN sme_execution_entry_material m ON m."Entry_ID" = e.id
+          JOIN inventory i ON TRIM(i."SAP_Code") = TRIM(m."SAP_Code")
+         WHERE e."Work_Date" = :today
+           AND e."Shift" = 'Day'
+           AND e.status = ANY(:states)
+           AND i."Category" = :cat
+           AND COALESCE(m."Actual_Qty", 0) > 0
+           {clause}
+         GROUP BY 1, 2, 3, 4, 5
+    """), {"today": _dt.date.today().isoformat(), "cat": category,
+           "states": list(_DAY_SHIFT_STATES), **params})).all()
+
+    out: list[dict] = []
+    for r in rows:
+        if await quality.visible_mtc(session, sap_code=r.sap,
+                                     site_id=r.site) is not None:
+            continue
+        out.append({"site": r.site, "entry_no": r.entry_no, "tag": r.tag,
+                    "sap": r.sap, "name": r.name, "qty": float(r.qty or 0),
+                    "po": await _po_for(session, r.sap, r.site)})
+    return out
+
+
+async def _po_for(session: AsyncSession, sap: str, site: str) -> str | None:
+    """The most recent purchase order this material reached the site on.
+
+    ⚠️ BEST-EFFORT, AND None IS AN HONEST ANSWER. The chase message names the PO
+    so Logistics can go straight to the supplier who owes the certificate; when
+    the trail does not lead to one — material moved between sites, or received
+    before purchase orders were tracked — the message says the PO is unknown
+    rather than naming a plausible wrong one. A chase quoting the wrong order
+    number is worse than one quoting none.
+    """
+    try:
+        row = (await session.execute(text("""
+            SELECT d."PO_Number"
+              FROM dn_items di
+              JOIN delivery_notes d ON d."DN_Number" = di."DN_Number"
+             WHERE TRIM(di."Material_Code") IN (
+                       SELECT TRIM("Material_Code") FROM inventory
+                        WHERE TRIM("SAP_Code") = TRIM(:sap))
+               AND d."Site_ID" = :site
+               AND d."PO_Number" IS NOT NULL
+             ORDER BY d.id DESC LIMIT 1
+        """), {"sap": sap, "site": site})).first()
+        return row[0] if row else None
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
+async def probe_day_shift_mtc(session: AsyncSession,
+                              site: Optional[str]) -> dict | None:
+    """Briefing finding: today's day shift is about to be blocked."""
+    rows = await day_shift_uncertified(session, site)
+    if not rows:
+        return None
+    listed = [f"{r['sap']} ({r['name'] or '—'}) {r['qty']:g} on {r['entry_no']}"
+              f"{' · PO ' + r['po'] if r['po'] else ' · PO unknown'}"
+              for r in rows]
+    return {
+        "key": "day_shift_mtc", "severity": "critical",
+        "title": f"{len(rows)} uncertified material(s) staged for TODAY'S day shift",
+        "count": len(rows), "items": listed[:8],
+        "link_page": "/qc/inspections",
+        "detail": ("These lines are on day-shift entries dated today and have no "
+                   "Material Test Certificate on file, so the store keeper "
+                   "cannot issue them. Logistics can attach the certificate to "
+                   "the purchase order, the warehouse to the delivery note, or "
+                   "the store keeper can upload it directly."),
+    }
+
+
 PROBES: list[tuple[str, Probe]] = [
+    # First in the list because it sorts first anyway (critical) and because it
+    # is the only finding here with a deadline measured in hours.
+    ("day_shift_mtc",       probe_day_shift_mtc),
     ("missing_mtc",         probe_missing_mtc),
     ("qc_blocked_stock",    probe_qc_blocked_stock),
     ("negative_stock",      probe_negative_stock),
@@ -744,6 +854,124 @@ async def dispatch_missing_mtc(session: AsyncSession, *, force: bool = False) ->
     return {"dispatched": sent, "materials": len(rows), "places": len(places)}
 
 
+async def dispatch_day_shift_mtc(session: AsyncSession, *,
+                                 force: bool = False) -> dict:
+    """The chase, on three channels chosen by WHO is being asked.
+
+    ⚠️ THE CHANNEL IS DECIDED BY THE RECIPIENT, NOT BY URGENCY.
+
+      · in-app + WhatsApp  → colleagues (Logistics, the site SK/HOD, QC). These
+        numbers are in `users`; the message is internal and goes out
+        automatically like every other notification.
+      · EMAIL              → Logistics only (operator ruling, slice 10b). They
+        are the role that can actually obtain the document from a supplier, and
+        they live in a mailbox. Emailing everybody would make three copies of
+        one message and teach people to filter it.
+      · WhatsApp DRAFT     → anybody outside the company. Never sent
+        automatically; written to the outbox at `status='draft'` for a human to
+        release in the WhatsApp Console. A chase that leaves the company is read
+        as the company's position, and an automated one naming the wrong
+        purchase order is a commercial mistake nobody reviewed.
+    """
+    from .services import emailer
+    from .services import whatsapp as wa
+
+    rows = await day_shift_uncertified(session, None)
+    if not rows and not force:
+        return {"found": 0, "internal": 0, "emails": 0, "drafts": 0}
+
+    by_site: dict[str, list[dict]] = {}
+    for r in rows:
+        by_site.setdefault(r["site"], []).append(r)
+
+    internal = 0
+    for site, found in sorted(by_site.items()):
+        listed = ", ".join(
+            f"{f['sap']} {f['qty']:g} on {f['entry_no']}"
+            f"{' (PO ' + f['po'] + ')' if f['po'] else ' (PO unknown)'}"
+            for f in found[:6])
+        more = f" (+{len(found) - 6} more)" if len(found) > 6 else ""
+        body = (f"TODAY'S DAY SHIFT at {site}: {len(found)} Surface Shield "
+                f"line(s) have no Material Test Certificate and cannot be "
+                f"issued — {listed}{more}. The crew is on site; the paperwork "
+                f"is not.")
+        for role in ("logistics", "store_keeper", "hod", "qc"):
+            await dispatch(
+                session, event_key="mtc_day_shift", severity="critical",
+                recipient_role=role, recipient_site=site,
+                wa_template="critical_alert",
+                title=f"Day shift blocked — {len(found)} uncertified line(s) at {site}",
+                body=body, link_page="/qc/inspections",
+                related_table="sme_execution_entry",
+                related_ref=f"dayshift:{site}:{_dt.date.today().isoformat()}",
+                created_by="health-monitor")
+            internal += 1
+
+    # ⚠️ THE HEAD OF QUALITIES NEEDS AN UNSCOPED COPY, for the same reason
+    # `dispatch_missing_mtc` gives one: a notification is visible when
+    # `recipient_site IS NULL OR recipient_site = site`, and a qc_hod carries
+    # site_id '' by design — so every site-scoped row above is invisible to
+    # them. Adding the role to the loop would look right and change nothing.
+    if rows:
+        summary = ", ".join(f"{s} ({len(v)})" for s, v in sorted(by_site.items()))
+        await dispatch(
+            session, event_key="mtc_day_shift_oversight", severity="critical",
+            recipient_role="qc_hod", recipient_site=None,
+            wa_template="critical_alert",
+            title=f"Day shift blocked at {len(by_site)} site(s) — no MTC",
+            body=(f"Uncertified Surface Shield staged for today's day shift: "
+                  f"{summary}. Nothing can be issued against these lines."),
+            link_page="/qc-hod", related_table="sme_execution_entry",
+            related_ref=f"dayshift-oversight:{_dt.date.today().isoformat()}",
+            created_by="health-monitor")
+        internal += 1
+
+    # ── the email, to Logistics only ───────────────────────────────────────
+    emails = 0
+    if rows and emailer.enabled():
+        lines = [f"  · {r['site']} / {r['entry_no']} / {r['tag']}: "
+                 f"{r['sap']} {r['name'] or ''} qty {r['qty']:g}"
+                 f"{' — PO ' + r['po'] if r['po'] else ' — PO unknown'}"
+                 for r in rows]
+        res = await emailer.send_email(
+            session, to=emailer.logistics_to(),
+            subject=(f"[GI Hub] Day shift blocked — {len(rows)} uncertified "
+                     f"Surface Shield line(s)"),
+            body=("The following material is staged for TODAY'S day shift and "
+                  "has no Material Test Certificate on file. The store keeper "
+                  "cannot issue it.\n\n" + "\n".join(lines) +
+                  "\n\nAttach the certificate to the purchase order in the "
+                  "Logistics Portal, or ask the warehouse to attach it to the "
+                  "delivery note.\n"),
+            event_key="mtc_day_shift", related_table="sme_execution_entry",
+            related_ref=_dt.date.today().isoformat(),
+            created_by="health-monitor")
+        emails = 1 if res.get("status") == "sent" else 0
+
+    # ── the supplier chase, as a DRAFT ─────────────────────────────────────
+    drafts = 0
+    supplier_to = os.environ.get("GI_SUPPLIER_CHASE_TO", "").strip()
+    if rows and supplier_to:
+        with_po = [r for r in rows if r["po"]]
+        if with_po:
+            pos = sorted({r["po"] for r in with_po})
+            res = await wa.draft_text(
+                session, to=supplier_to,
+                body=("General Industries: we are missing Material Test "
+                      f"Certificates for purchase order(s) {', '.join(pos)}. "
+                      "The material is on site and cannot be used until the "
+                      "certificate is received. Please send it today."),
+                event_key="mtc_supplier_chase",
+                related_table="sme_execution_entry",
+                related_ref=_dt.date.today().isoformat(),
+                created_by="health-monitor",
+                reason="supplier chase — review before sending")
+            drafts = 1 if res.get("status") == "draft" else 0
+
+    return {"found": len(rows), "internal": internal, "emails": emails,
+            "drafts": drafts, "sites": len(by_site)}
+
+
 async def briefing_loop() -> None:
     """Daemon: fire the morning briefing once per day at GI_BRIEFING_HOUR.
 
@@ -755,6 +983,7 @@ async def briefing_loop() -> None:
     import asyncio
 
     from .db import SessionLocal
+    from .services import dailyjob
 
     hour = int(os.environ.get("GI_BRIEFING_HOUR", "7"))
     minute = int(os.environ.get("GI_BRIEFING_MINUTE", "0"))
@@ -767,7 +996,22 @@ async def briefing_loop() -> None:
         await asyncio.sleep((nxt - now).total_seconds())
         try:
             async with SessionLocal() as s:
+                # ⚠️ ONE WORKER RUNS THIS, NOT FOUR. Every worker wakes on the
+                # same clock tick; without the claim each dispatched its own
+                # copy and every recipient got the briefing four times. See
+                # services/dailyjob.py — the claim is one atomic statement
+                # because four workers waking together is exactly the window a
+                # check-then-write leaves open.
+                if not await dailyjob.claim(s, "morning_briefing", nxt):
+                    log.info("morning briefing: another worker has it")
+                    continue
                 res = await run_and_dispatch(s)
+                # Track 2: the day-shift chase rides the SAME 07:00 claim
+                # rather than a second 07:30 timer. Two alerts half an hour
+                # apart trains people to ignore both, and a separate loop would
+                # need its own claim to avoid the 4x it was written to prevent.
+                res["day_shift"] = await dispatch_day_shift_mtc(s)
+                await dailyjob.note_result(s, "morning_briefing", str(res))
             log.info("morning briefing run: %s", res)
         except Exception:  # noqa: BLE001 — one bad run must not kill the loop
             log.exception("morning briefing run failed")

@@ -258,8 +258,8 @@ async def open_entry(session: AsyncSession, *, username: str, role: str,
                      site_id: str, work_date: str, equipment_tag: str,
                      code: str, esc: str, variant: str = "",
                      materials: list[dict] | None = None,
-                     origin: str = "manual", form_uuid: str | None = None
-                     ) -> dict:
+                     origin: str = "manual", form_uuid: str | None = None,
+                     shift: str | None = None) -> dict:
     """Create an entry at DRAFT_SUPERVISOR.
 
     ⚠️ THE SUPERVISOR OPENS IT NOW, not the store keeper. The record starts
@@ -283,6 +283,10 @@ async def open_entry(session: AsyncSession, *, username: str, role: str,
         Execution_Sub_Activity_Code=esc, Variant_Key=(variant or "").strip(),
         status=DRAFT_SUPERVISOR, supervisor_username=username,
         Entry_Origin=origin, Form_UUID=form_uuid,
+        # NULL unless the filer said which shift. Never inferred from the clock:
+        # an entry is filed when somebody reaches a desk, not when the work
+        # happened. See models.SmeExecutionEntry.Shift.
+        Shift=(shift if shift in ("Day", "Night") else None),
         created_by=username).returning(entry_t.c["id"]))).scalar_one()
 
     for i, m in enumerate(materials or []):

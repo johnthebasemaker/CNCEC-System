@@ -82,6 +82,11 @@ class OpenIn(BaseModel):
     lining_system_code: str = ""
     execution_sub_activity_code: str
     variant_key: str = ""
+    # 'Day' | 'Night' | None. Optional on purpose: the Track 2 chase alert reads
+    # it, and a supervisor who does not set it is simply not covered by that
+    # alert rather than blocked from filing. `None` stays NULL — see
+    # models.SmeExecutionEntry.Shift for why NULL is never guessed at.
+    shift: Optional[str] = Field(default=None, pattern="^(Day|Night)$")
     materials: list[MaterialIn] = []
     site_id: Optional[str] = None
 
@@ -192,7 +197,7 @@ async def open_entry(body: OpenIn = Body(...),
         session, username=user["username"], role=user["role"], site_id=sid,
         work_date=body.work_date, equipment_tag=body.equipment_tag,
         code=body.lining_system_code, esc=body.execution_sub_activity_code,
-        variant=body.variant_key,
+        variant=body.variant_key, shift=body.shift,
         materials=[m.model_dump() for m in body.materials])
     await session.commit()
     return res

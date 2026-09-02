@@ -55,6 +55,7 @@ const QcHodPage = lazy(() => import('./pages/QcHodPage'))
 const OcrImportPage = lazy(() => import('./pages/OcrImportPage'))
 const WbsPage = lazy(() => import('./pages/WbsPage'))
 const FeedbackPage = lazy(() => import('./pages/FeedbackPage'))
+const TrainingPage = lazy(() => import('./pages/TrainingPage'))
 
 export default function App() {
   const { user } = useAuth()
@@ -113,6 +114,7 @@ export default function App() {
         <Route path="qc-hod" element={<QcHodPage />} />
         <Route path="feedback" element={<FeedbackPage />} />
         <Route path="security" element={<SecurityPage />} />
+        <Route path="training" element={<TrainingPage />} />
       </Route>
     </Routes>
   )

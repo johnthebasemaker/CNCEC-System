@@ -323,3 +323,176 @@ def render_exec_pdf(d: dict, *, site: str | None, username: str) -> bytes:
                     "available_qty", "status", "requested_by", "created"]))
 
     return bytes(pdf.output())
+
+
+# ─── Track 3 (slice 10b): the valuation & burn brief ─────────────────────────
+class _ValuationPDF(_ExecPDF):
+    """Same letterhead, different title — one branding implementation.
+
+    ⚠️ SUBCLASSED RATHER THAN COPIED. Two renderers with two copies of the GI
+    palette drift the first time somebody adjusts one, and a board pack whose
+    two halves are subtly different navies looks like two documents.
+    """
+
+    def header(self):
+        if self.page_no() == 1:
+            return
+        self.set_fill_color(*_NAVY)
+        self.rect(0, 0, self.w, 9, style="F")
+        self.set_y(2)
+        self.set_font("helvetica", "B", 8)
+        self.set_text_color(255, 255, 255)
+        self.cell(0, 5, _latin(f"VALUATION & BURN  -  {self.site_label}  -  "
+                               f"{self.period_label}"), align="L")
+        self.set_y(13)
+        self.set_text_color(0, 0, 0)
+
+    def footer(self):
+        # Overridden so a board pack does not carry another report's name in
+        # its footer — the inherited one says "Executive Summary".
+        self.set_y(-11)
+        self.set_draw_color(*_BORDER)
+        self.set_line_width(0.2)
+        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
+        self.set_font("helvetica", "", 7)
+        self.set_text_color(*_MUTED)
+        self.cell(0, 6, _latin("GI Hub - Valuation & 30-Day Burn  -  generated "
+                               f"by {self.username}"), align="L")
+        self.cell(0, 6, f"Page {self.page_no()} of {{nb}}", align="R")
+
+
+def _money(v, currency: str = "SAR") -> str:
+    return f"{currency} {float(v or 0):,.2f}"
+
+
+def render_valuation_pdf(d: dict, *, username: str) -> bytes:
+    """The board brief. A pure function of `services.valuation.build_valuation`.
+
+    ⚠️ THREE THINGS THIS RENDERER WILL NOT DO, each of which would make the
+    document read better and be false:
+
+      1. It never prints a single "total stock value" that silently includes
+         un-costed lines at zero. The un-costed count is a KPI box of its own
+         and a footnote under every table that has one.
+      2. It never adds the ERP figures to the SME seed. They are two tables
+         with a paragraph between them saying why (rule 1a).
+      3. It never prints a months-of-cover figure when the burn is zero. A site
+         that consumed nothing has no runway; inventing one out of a division
+         by zero is exactly the shape of error suite CO exists for.
+    """
+    cur = d.get("currency", "SAR")
+    stock, burn, sme = d["stock"], d["burn"], d.get("sme") or {}
+    site_label = d.get("site") or "All sites"
+    period = f"{burn['days']}-day window from {burn['since']}"
+
+    pdf = _ValuationPDF(site=site_label, period=period, username=username)
+    pdf.add_page()
+
+    # ── cover band ─────────────────────────────────────────────────────────
+    pdf.set_fill_color(*_NAVY)
+    pdf.rect(0, 0, pdf.w, 26, style="F")
+    pdf.set_xy(12, 6)
+    pdf.set_font("helvetica", "B", 15)
+    pdf.set_text_color(255, 255, 255)
+    pdf.cell(0, 8, _latin("Site-Wide Valuation and 30-Day Burn Value"))
+    pdf.set_xy(12, 15)
+    pdf.set_font("helvetica", "", 8.5)
+    pdf.cell(0, 5, _latin(f"{site_label}   |   {period}   |   "
+                          f"generated {d['generated_at']}"))
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(32)
+
+    # ── KPI row ────────────────────────────────────────────────────────────
+    y = pdf.get_y()
+    inner = pdf.w - 24
+    bw = (inner - 3 * 4) / 4
+    _kpi_box(pdf, 12, y, bw, 20, "Stock value (priced lines)",
+             _money(stock["total_value"], cur),
+             f"{stock['valued_items']} priced of "
+             f"{stock['valued_items'] + stock['unvalued_items']} lines")
+    # ⚠️ THE UN-COSTED BOX SITS BESIDE THE VALUE, NOT IN A FOOTNOTE ONLY. A
+    # reader who sees only the first box has been told a number without its
+    # denominator, and that is the failure this whole report guards against.
+    _kpi_box(pdf, 12 + bw + 4, y, bw, 20, "Not valued",
+             f"{stock['unvalued_items']} items",
+             f"{stock['unvalued_qty']:,.0f} units with no unit cost",
+             sub_color=_RED if stock["unvalued_items"] else _MUTED)
+    _kpi_box(pdf, 12 + 2 * (bw + 4), y, bw, 20,
+             f"{burn['days']}-day burn value", _money(burn["total_value"], cur),
+             f"{_money(burn['daily_value'], cur)} per day")
+    _kpi_box(pdf, 12 + 3 * (bw + 4), y, bw, 20, "Months of cover",
+             (f"{d['months_cover']:.1f}" if d.get("months_cover") is not None
+              else "n/a"),
+             ("at the current burn rate" if d.get("months_cover") is not None
+              else "no consumption in the window"))
+    pdf.set_y(y + 26)
+
+    # ── stock by site ──────────────────────────────────────────────────────
+    rows = [[s["site"], _fmt(s["valued_items"]), _money(s["value"], cur),
+             _fmt(s["unvalued_items"]), f"{s['unvalued_qty']:,.0f}"]
+            for s in stock["sites"]]
+    if rows:
+        rows.append(["TOTAL", _fmt(stock["valued_items"]),
+                     _money(stock["total_value"], cur),
+                     _fmt(stock["unvalued_items"]),
+                     f"{stock['unvalued_qty']:,.0f}"])
+    _table(pdf, "Stock valuation by site",
+           ["Site", "Priced lines", f"Value ({cur})", "Not valued",
+            "Not-valued qty"],
+           rows or [["(no stock on hand)", "", "", "", ""]],
+           sub=(f"Priced coverage {stock['coverage_pct']}% of lines. "
+                "Not-valued lines are EXCLUDED from the value column."))
+    _footnote(pdf, stock["unvalued_items"], cur)
+
+    # ── burn by site ───────────────────────────────────────────────────────
+    brows = [[s["site"], f"{s['qty']:,.1f}", _money(s["value"], cur),
+              _money(s["value"] / burn["days"], cur), _fmt(s["unvalued_items"])]
+             for s in burn["sites"]]
+    _table(pdf, f"Consumption value — rolling {burn['days']} days",
+           ["Site", "Qty consumed", f"Value ({cur})", f"Per day ({cur})",
+            "Not valued"],
+           brows or [["(nothing consumed in the window)", "", "", "", ""]],
+           sub=(f"From {burn['since']}. The per-day figure divides by the FULL "
+                f"{burn['days']}-day window, not by the days that had activity."))
+    _footnote(pdf, burn["unvalued_items"], cur)
+
+    # ── top consumers ──────────────────────────────────────────────────────
+    if burn["top_lines"]:
+        _table(pdf, "Highest-value consumption in the window",
+               ["Site", "SAP", "Material", "Qty", f"Unit ({cur})",
+                f"Value ({cur})"],
+               [[r["site"], r["sap"], r["name"] or "-", f"{r['qty']:,.1f}",
+                 f"{r['unit_cost']:,.2f}", f"{r['value']:,.2f}"]
+                for r in burn["top_lines"]],
+               sub="Priced lines only, highest value first.")
+
+    # ── the SME block, deliberately apart ──────────────────────────────────
+    if sme.get("available"):
+        _table(pdf, "Material Estimator seed (SME) — stated separately",
+               ["Scope", "Seed lines", "Seed on hand", "Seed on order"],
+               [["Project" if sme.get("scope") == "project" else "-",
+                 _fmt(sme.get("lines")), f"{sme.get('seed_on_hand', 0):,.0f}",
+                 f"{sme.get('seed_on_order', 0):,.0f}"]],
+               sub=("⚠️ NOT ADDED TO THE FIGURES ABOVE. The estimator seed is a "
+                    "frozen project-wide snapshot of what the estimate said "
+                    "would be needed; the tables above are the live ERP ledger "
+                    "of what is on the shelf today. They describe different "
+                    "things about the same site, and a sum of the two would "
+                    "double-count every material that appears in both."))
+    return bytes(pdf.output())
+
+
+def _footnote(pdf: FPDF, unvalued: int, cur: str) -> None:
+    """The sentence that keeps the number above honest."""
+    if not unvalued:
+        return
+    _ensure_room(pdf, 8)
+    pdf.set_font("helvetica", "I", 6.5)
+    pdf.set_text_color(*_MUTED)
+    pdf.multi_cell(0, 3.4, _latin(
+        f"Not Valued ({unvalued} items): these lines have no unit cost on the "
+        f"inventory master, so they are counted and excluded rather than valued "
+        f"at {cur} 0. The value shown therefore covers the priced portion only "
+        f"and is a FLOOR, not a total."))
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(1.5)

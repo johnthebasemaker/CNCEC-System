@@ -202,7 +202,15 @@ async def weekly_report_loop() -> None:
         await asyncio.sleep((nxt - now).total_seconds())
         try:
             async with SessionLocal() as s:
+                # One worker, not four — see services/dailyjob.py. This one
+                # renders and MAILS a PDF, so a quadruple run was four
+                # renders and four attachments to every executive on the list.
+                from .services import dailyjob
+                if not await dailyjob.claim(s, "weekly_exec_report", nxt):
+                    log.info("weekly exec report: another worker has it")
+                    continue
                 res = await generate_and_dispatch(s)
+                await dailyjob.note_result(s, "weekly_exec_report", str(res))
             log.info("weekly exec report run: %s", res)
         except Exception:  # noqa: BLE001 — one bad run must not kill the loop
             log.exception("weekly exec report run failed")

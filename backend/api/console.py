@@ -281,6 +281,63 @@ async def whatsapp_retry(outbox_id: int, user: dict = Depends(require_level(4)),
     return res
 
 
+@admin.post("/whatsapp/{outbox_id}/approve",
+            summary="Release a DRAFT WhatsApp message after human review")
+async def whatsapp_approve_draft(outbox_id: int,
+                                 user: dict = Depends(require_level(4)),
+                                 session: AsyncSession = Depends(get_session)):
+    """Send a message the system proposed but would not send by itself.
+
+    ⚠️ THIS IS THE HUMAN IN THE LOOP, and it is the whole reason drafts exist.
+    Everything the system sends automatically goes to a colleague whose number
+    is in `users`. A chase message addressed to a SUPPLIER leaves the company
+    and is read as the company's position, so `whatsapp.draft_text` records it
+    at `status='draft'` and never posts it. This endpoint is where a person
+    takes responsibility for it.
+
+    Refuses anything that is not a draft: `retry` already covers pending and
+    failed messages, and re-purposing this for them would blur "somebody read
+    this and agreed" into "somebody clicked the button on the row".
+    """
+    row = (await session.execute(select(outbox_t.c["status"], outbox_t.c["to_number"])
+           .where(outbox_t.c["id"] == outbox_id))).first()
+    if row is None:
+        raise HTTPException(404, f"outbox message {outbox_id} not found")
+    if row[0] != "draft":
+        raise HTTPException(
+            409, f"message {outbox_id} is {row[0]!r}, not a draft — use retry")
+    res = await wa.retry(session, outbox_id=outbox_id)
+    if res.get("error"):
+        raise HTTPException(409, res["error"])
+    await write_audit(session, user["username"], "WHATSAPP_DRAFT_APPROVED",
+                      "whatsapp_outbox",
+                      f"id={outbox_id} to={row[1]} → {res.get('status')}")
+    await session.commit()
+    return {"approved": True, **res}
+
+
+@admin.delete("/whatsapp/{outbox_id}/draft",
+              summary="Discard a DRAFT WhatsApp message without sending it")
+async def whatsapp_discard_draft(outbox_id: int,
+                                 user: dict = Depends(require_level(4)),
+                                 session: AsyncSession = Depends(get_session)):
+    """Reject a proposed message. The row is kept and marked, never deleted —
+    "we decided not to send this" is itself a record worth having."""
+    row = (await session.execute(select(outbox_t.c["status"])
+           .where(outbox_t.c["id"] == outbox_id))).first()
+    if row is None:
+        raise HTTPException(404, f"outbox message {outbox_id} not found")
+    if row[0] != "draft":
+        raise HTTPException(409, f"message {outbox_id} is {row[0]!r}, not a draft")
+    await session.execute(update(outbox_t).where(outbox_t.c["id"] == outbox_id)
+                          .values(status="discarded",
+                                  error=f"discarded by {user['username']}"))
+    await write_audit(session, user["username"], "WHATSAPP_DRAFT_DISCARDED",
+                      "whatsapp_outbox", f"id={outbox_id}")
+    await session.commit()
+    return {"discarded": True, "id": outbox_id}
+
+
 # --- Evening digest (Phase 6): staged queue viewer + manual run -----------------
 pending_summary_t = _MD.tables["pending_summary_notifications"]
 
