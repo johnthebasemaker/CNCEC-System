@@ -32,9 +32,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import AsyncIterator
 
+from . import answer_cache as _cache
 from . import client as aic
 from . import guard as _guard
 from . import manual_index as mx
+from . import route as _route
 from . import trace as _trace
 
 # Which top-level USER_MANUAL.md sections each role may see. Lower roles
@@ -506,6 +508,27 @@ async def answer_manual_question(question: str, role: str,
         yield _ROLE_REFUSAL.get(role, _ROLE_REFUSAL["store_keeper"])
         return
 
+    # ── the answer cache (slice 11e) ───────────────────────────────────────
+    # ⚠️ KEYED ON THE ROLE, and the reason is not performance. Two people can
+    # type a byte-identical question and be entitled to different answers,
+    # because rule 9 showed them different chapters. A cache keyed on the
+    # question alone would walk around that boundary from the side. See
+    # answer_cache.key_for — the one place the key is built.
+    #
+    # ⚠️ AND IT IS CONSULTED AFTER BOTH GUARDS. A cached answer must not be a
+    # way to skip a refusal, and a question that would be refused today must
+    # not be answered because it was allowed last week.
+    cached = await _cache.lookup(question, role)
+    if trace_id:
+        _trace.emit("ai.cache", trace_id=trace_id, lane="assistant", role=role,
+                    username=username, outcome="hit" if cached else "miss",
+                    attrs={"hit": bool(cached),
+                           "age_s": (cached or {}).get("age_s"),
+                           "hit_count": (cached or {}).get("hit_count")})
+    if cached:
+        yield cached["answer"]
+        return
+
     prompt = f"User question: {question}\n\nAnswer:"
     gen = _trace.Span("ai.generate", trace_id=trace_id, lane="assistant",
                       role=role, username=username) if trace_id else None
@@ -520,16 +543,27 @@ async def answer_manual_question(question: str, role: str,
     # can be split across a chunk boundary and escape unseen. The cost is one
     # buffer of latency, not one answer's.
     sg = _guard.StreamGuard(canaries=_guard.runtime_canaries(role))
+    # ⚠️ WHAT IS CACHED IS WHAT THE USER SAW — the GUARDED text, assembled from
+    # the same chunks that were yielded. Caching the raw model output would
+    # replay a redaction-worthy answer to the next person unredacted, which is
+    # the guard being undone by the cache one turn later.
+    served: list[str] = []
+    ok_complete = False
+    pol = _route.policy("assistant")
     try:
         async for chunk in aic.stream(aic.MODEL_CHAT, prompt, system=system,
-                                      temperature=0.2, num_predict=512):
+                                      temperature=0.2,
+                                      num_predict=pol.num_predict):
             chars += len(chunk)
             safe = sg.push(chunk)
             if safe:
+                served.append(safe)
                 yield safe
         tail = sg.close()
         if tail:
+            served.append(tail)
             yield tail
+        ok_complete = True
     except RuntimeError as e:
         if gen:
             gen.outcome("error").attrs(error_type=type(e).__name__)
@@ -538,6 +572,7 @@ async def answer_manual_question(question: str, role: str,
         # before it failed.
         tail = sg.close()
         if tail:
+            served.append(tail)
             yield tail
         yield f"\n\n[Hub Assistant error: {e}]"
     finally:
@@ -561,3 +596,9 @@ async def answer_manual_question(question: str, role: str,
                             else "redacted" if ov.redactions or ov.defused
                             else "clean"),
                         attrs=ov.as_attrs())
+        # ⚠️ ONLY A COMPLETE, CLEAN GENERATION IS REMEMBERED. A half-streamed
+        # answer that hit an error would be served whole to the next person; a
+        # redacted or canary-carrying one would make an incident permanent.
+        if ok_complete and pol.cacheable and sg.verdict.clean and served:
+            await _cache.store(question, role, "".join(served),
+                               model=aic.MODEL_CHAT)

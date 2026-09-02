@@ -3105,6 +3105,33 @@ number or a key ever appears in an answer. The manual contains none of these, so
 if you ever see one redacted, tell an admin — it means something reached the
 assistant that should not have.
 
+## 14z. Repeated questions, and the model gateway (Phase 11 · 11e)
+
+**TC-CAC-01** — ask the assistant a question you have not asked before, wait for
+the answer, then ask **exactly the same question again**. The second answer
+arrives instantly. In AI Traces the second turn shows an `ai.cache` span with
+**hit**, and no `ai.generate` span at all — the model was not called.
+
+**TC-CAC-02** — ⚠️ **the check that matters.** Ask that same question again as a
+**different role**. It must generate a fresh answer, not replay the first one.
+Two roles are shown different chapters of the manual, so they are entitled to
+different answers; serving one the other's reply would undo the whole point of
+the role fence. If a second role ever gets an instant answer to a question only
+the first role had asked, stop and report it.
+
+**TC-CAC-03** — edit `USER_MANUAL.md` (or ship a release that does) and ask a
+previously-cached question again. It generates afresh: every cached answer is
+tied to the exact manual it came from, so a documentation change retires them
+all without anybody clearing anything.
+
+**TC-CAC-04** — a question that is **refused** is never cached. Ask a refused
+question twice; both are refusals, and neither creates a cache entry. The cache
+is consulted after the guards, so it can never be a way around one.
+
+**TC-CAC-05** — stock questions are never cached. Ask the dashboard's
+"chat with your data" card the same question twice after a receipt is posted;
+the number must change. Only the manual assistant caches.
+
 ## 15. Do's and Don'ts
 
 ### Do
