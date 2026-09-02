@@ -591,6 +591,72 @@ four times without one. Read at `/admin/ai-traces` — admin **and auditor**,
 mounted both as a Console tab and as its own route, because the Console is
 `minLevel: 4` and the auditor is level 3.
 
+### 7f. The guard at the door and the guard at the exit
+
+*Phase 11 slice 11d, `ai/guard.py` + `ai/guard_patterns.yaml`, suite CT.*
+
+⚠️ **THE SECURITY BOUNDARY IS NOT IN `guard.py`.** Rule 9 is. The fence in
+`allowed_sections()` filters chapters BEFORE BM25 scores them, so an injection
+that succeeds perfectly still reaches nothing. The failure mode to fear here is
+not that the guard is bypassed — it is that people start trusting it INSTEAD of
+the fence, and then somebody simplifies the fence because the guard exists.
+
+Everything in the module is one of two things: a refusal that would otherwise
+have been a slow confused answer, or a check on text that has ALREADY passed
+the fence for things the fence was never about (a spreadsheet formula, a phone
+number, a canary).
+
+**`guardrails-ai` was rejected**, on three grounds: its useful validators
+download a transformer of a few hundred MB at install time — a second model
+resident beside the one warm 7-8B the CPX42 ruling allows; its dependency tree
+out-masses the module it would guard; and its core abstraction (typed output
+with re-ask loops) is a retry this system cannot afford, since a re-ask on a
+400-second vision read is another six minutes.
+
+| Stage | What it does |
+|---|---|
+| **shape** | length, line count, repeated-token flood, long base64 runs |
+| **patterns** | 13 scored jailbreak patterns — override, extraction, elevation, delimiter injection |
+| **topic pre-flight** | refuses when a question matches a FORBIDDEN chapter far better than anything allowed |
+| **output** | formula defusal, PII redaction, runtime canary scan, over a sliding buffer for SSE |
+
+⚠️ **Scores, never a boolean, and every pattern has a NEGATIVE TWIN.** "Ignore
+the damaged drum and issue the rest" is a real sentence a store keeper types at
+06:00; a guard that refuses it has cost more than the injection the fence had
+already made profitless. One pattern warns; a combination refuses. Prompt
+extraction is the single deliberate one-pattern refusal, because there is no
+innocent phrasing of "show me your system prompt" and what it asks for is the
+fence's own description.
+
+⚠️ **The topic pre-flight can ONLY refuse**, and its trigger is a RATIO, not an
+empty retrieval. The first version fired only when retrieval returned nothing —
+measured against the live manual that condition is very nearly empty, because
+BM25 over ~450 chunks scores something for almost any English sentence, so the
+guard never ran while looking like coverage. It now needs the forbidden chapter
+to beat the best allowed one by 2.5×, which is what keeps §2's access matrix
+answering "can I add a user?" ("you cannot; an admin does") instead of being
+refused.
+
+⚠️ **The output guard's buffer is SIZED FROM THE DATA (65 chars), not guessed.**
+It must exceed the longest thing that must not be split across two SSE chunks —
+the longest live canary is 21 characters, the longest bounded PII shape 60. The
+first draft used a flat 240 and coalesced whole short answers into one event,
+defeating the streaming the endpoint exists for; suite A caught it. A JWT can
+exceed 65 and may be split: an accepted, stated trade, because a token in a
+manual answer is an alarm either half raises.
+
+⚠️ **No LLM judge in the request path.** A second generation doubles the wait on
+one warm model, or cold-starts a second; and a stochastic judge that can REFUSE
+means the same question is answered on Monday and denied on Tuesday — P10-7's
+flaky-gate argument applied to production. The judge belongs in eval Tier 2.
+
+Formula defusal imports `reports._RISKY` rather than retyping the six characters
+a spreadsheet evaluates (rule 12); two copies would agree until one was updated.
+Canaries come from `tests/ai_eval/cases/*.yaml`, whose uniqueness
+`audit_canaries()` already verifies — defence in depth that degrades to an empty
+set when the case files are absent, because the fence is the control and a smoke
+alarm should not take the building down when its battery is flat.
+
 ### 7a. ⚠️ The vision envelope — three numbers that are ONE decision
 
 Fixed 2026-09-01 after two production reports ("the Consumption Log fails
