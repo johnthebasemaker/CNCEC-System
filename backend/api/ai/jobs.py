@@ -375,13 +375,24 @@ fail_orphans = sweep_orphans
 async def orphan_sweep_loop() -> None:
     """Periodic sweep. One per worker; the UPDATE is idempotent and guarded,
     so four workers racing it is harmless — whoever runs first reaps, the
-    others match nothing."""
+    others match nothing.
+
+    Also carries the `rate_buckets` housekeeping, because it is the only loop in
+    the process whose job is already "delete rows nothing will read again" and a
+    second timer for one DELETE would be ceremony.
+    """
     while True:
         try:
             await asyncio.sleep(ORPHAN_SWEEP_SECONDS)
             n = await sweep_orphans()
             if n:
                 logger.info("orphan sweep failed %s stranded job(s)", n)
+            try:
+                from ..ratelimit import sweep_rate_buckets
+                async with SessionLocal() as s:
+                    await sweep_rate_buckets(s)
+            except Exception as e:                          # noqa: BLE001
+                logger.debug("rate-bucket sweep skipped: %s", e)
         except asyncio.CancelledError:
             raise
         except Exception as e:                              # noqa: BLE001

@@ -197,6 +197,71 @@ def _decode(token: str, scope: str) -> dict:
     return p
 
 
+# ── Phase 10 Track 1: 2FA that is MANDATORY for privileged roles ────────────
+#
+# ⚠️ THE CAPABILITY WAS ALREADY SHIPPED; THIS IS THE ENFORCEMENT. `pyotp`
+# enrol/verify/disable, the login challenge, the step-up password check and the
+# SecurityPage UI have existed since Phase 2. What did not exist was any reason
+# for a privileged account to turn it on, so almost none had.
+#
+# Both settings live in `app_settings` rather than in code, matching
+# `mtc_required_category`: widening the net or moving the deadline is an admin
+# action, not a deploy.
+#
+#   mfa_required_roles   CSV. Operator ruling 2026-09-02:
+#                        admin, logistics, hod, qc_hod, auditor.
+#   mfa_enforced_from    ISO date. Before it, a mandated-but-unenrolled user
+#                        signs in normally and is TOLD; on and after it, they
+#                        are stopped at the door. ⚠️ ABSENT MEANS WARN-ONLY,
+#                        NEVER BLOCK — an unset date must not lock out a
+#                        company because somebody deleted a settings row.
+MFA_DEFAULT_ROLES = "admin,logistics,hod,qc_hod,auditor"
+MFA_GRACE_DAYS = 14
+ENROLL_TTL = _dt.timedelta(minutes=15)
+
+
+async def _mfa_required_roles(session: AsyncSession) -> set[str]:
+    v = (await session.execute(select(app_settings_t.c["value"])
+         .where(app_settings_t.c["key"] == "mfa_required_roles"))
+         ).scalar_one_or_none()
+    raw = MFA_DEFAULT_ROLES if v is None else v
+    return {r.strip().lower() for r in str(raw).split(",") if r.strip()}
+
+
+async def _mfa_enforced_from(session: AsyncSession) -> _dt.date | None:
+    """The date the hard block begins, or None for warn-only."""
+    v = (await session.execute(select(app_settings_t.c["value"])
+         .where(app_settings_t.c["key"] == "mfa_enforced_from"))
+         ).scalar_one_or_none()
+    if not v:
+        return None
+    try:
+        return _dt.date.fromisoformat(str(v).strip()[:10])
+    except ValueError:
+        return None      # a malformed date must not become an outage
+
+
+async def mfa_gate(session: AsyncSession, role: str, totp_enabled) -> dict | None:
+    """What to do about this account's second factor, or None for "nothing".
+
+    Returns `{"blocked": bool, "enforced_from": str|None}`. The caller mints an
+    enrolment token when blocked and attaches a warning otherwise.
+
+    ⚠️ FAILS TOWARDS ACCESS, deliberately. Every uncertain branch here — no
+    settings row, an unparseable date, a role not on the list — resolves to
+    "let them in". A second factor is a control on top of a password that was
+    already checked; a bug in the ROLLOUT of that control must not be able to
+    lock an entire company out of its own inventory system.
+    """
+    if totp_enabled:
+        return None
+    if (role or "").strip().lower() not in await _mfa_required_roles(session):
+        return None
+    on = await _mfa_enforced_from(session)
+    return {"blocked": bool(on and _dt.date.today() >= on),
+            "enforced_from": on.isoformat() if on else None}
+
+
 def _public(username: str, role: str, site_id: str, warehouse_id: str = "") -> dict:
     meta = ROLE_META.get(role, {"label": role, "level": 0})
     return {"username": username, "role": role, "site_id": site_id or "",
@@ -621,13 +686,39 @@ async def login(body: LoginIn, response: Response,
                           extra={"client": body.client_type})
         return {"mfa_required": True, "mfa_token": mfa}
 
+    # ── the THIRD outcome: mandated role, no authenticator ──────────────────
+    #
+    # ⚠️ THE ENROLMENT TOKEN IS SCOPE-LIMITED, AND THAT IS THE WHOLE CONTROL.
+    # `_decode` matches the scope exactly and `get_current_user` asks for
+    # "access", so this token opens `/auth/2fa/*` and nothing else. Minting a
+    # normal access token here — the obvious shortcut — would turn "you must
+    # set up 2FA" into a way to skip 2FA, which is worse than not mandating it
+    # at all: the account would be exempt AND believed protected.
+    gate = await mfa_gate(session, row.role, row.totp_enabled)
+    if gate and gate["blocked"]:
+        await _audit(session, row.username, "LOGIN_MFA_REQUIRED",
+                     f"role={row.role} enforced_from={gate['enforced_from']}")
+        return {"enrollment_required": True,
+                "enroll_token": _make_token(row.username, row.role, row.Site_ID,
+                                            ENROLL_TTL, scope="enroll",
+                                            warehouse_id=row.Warehouse_ID),
+                "enforced_from": gate["enforced_from"],
+                "message": ("Two-factor authentication is required for your "
+                            "role. Set up an authenticator app to continue.")}
+
     token = _make_token(row.username, row.role, row.Site_ID, ACCESS_TTL,
                         warehouse_id=row.Warehouse_ID)
     raw_refresh, _ = await _open_session(session, row.username, row.id, body.client_type)
     await _audit(session, row.username, "LOGIN", f"password client={body.client_type}")  # commits
     _set_refresh_cookie(response, raw_refresh, REFRESH_TTLS[body.client_type])
-    return {"access_token": token, "token_type": "bearer",
-            "user": _public(row.username, row.role, row.Site_ID, row.Warehouse_ID)}
+    out = {"access_token": token, "token_type": "bearer",
+           "user": _public(row.username, row.role, row.Site_ID, row.Warehouse_ID)}
+    # Inside the grace period the sign-in succeeds and carries the deadline, so
+    # the SPA can show a banner. A silent grace period is a grace period nobody
+    # uses, and then the deadline arrives as an outage.
+    if gate and not gate["blocked"]:
+        out["mfa_enrollment_due"] = gate["enforced_from"]
+    return out
 
 
 @router.post("/login/2fa", summary="Complete login with a TOTP code",
@@ -941,6 +1032,31 @@ def _totp_recent(username: str) -> deque[float]:
     return q
 
 
+async def _check_totp_attempts_shared(session, username: str) -> None:
+    """The cross-worker half of the second-factor attempt budget.
+
+    ⚠️ THE MOST IMPORTANT OF THE FOUR LIMITERS THAT WERE PER-PROCESS. Under
+    `uvicorn --workers 4` the in-memory budget of 5 became an effective 20, and
+    `_verify_totp` runs at `valid_window=1` — three 6-digit codes are acceptable
+    at any instant. A ceiling on brute-forcing the SECOND factor is not a place
+    to be four times looser than documented.
+
+    Keyed on the USERNAME, which is not header-controllable, so unlike the
+    per-IP limit it cannot be reset by rotating `CF-Connecting-IP`.
+    """
+    from .ratelimit import check_bucket_shared
+    await check_bucket_shared(
+        session, f"totp:{(username or '').strip().lower()}",
+        _TOTP_MAX_ATTEMPTS, _TOTP_WINDOW_SECONDS,
+        message="too many 2FA attempts — please wait a few minutes and try again")
+
+
+async def _clear_totp_attempts_shared(session, username: str) -> None:
+    """A correct code ends the throttle immediately, across every worker."""
+    from .ratelimit import clear_bucket_shared
+    await clear_bucket_shared(session, f"totp:{(username or '').strip().lower()}")
+
+
 def _check_totp_attempts(username: str) -> None:
     q = _totp_recent(username)
     if len(q) >= _TOTP_MAX_ATTEMPTS:
@@ -967,8 +1083,30 @@ def _qr_data_uri(uri: str) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+async def enroll_or_current_user(
+    cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> dict:
+    """Accepts a normal access token OR an enrolment-scoped one.
+
+    ⚠️ USED ONLY BY THE THREE `/2fa/*` ROUTES, and that limit is the control.
+    An `enroll`-scoped token exists so a mandated user who has been refused a
+    session can still reach the enrolment flow; it must reach NOTHING ELSE, or
+    "you must set up 2FA" becomes a way to skip it. Everything else in the app
+    keeps `get_current_user`, whose `_decode(..., "access")` rejects this token
+    outright.
+    """
+    if cred is None:
+        raise HTTPException(401, "not authenticated")
+    try:
+        p = _decode(cred.credentials, "access")
+    except HTTPException:
+        p = _decode(cred.credentials, "enroll")
+    return _public(p["sub"], p.get("role"), p.get("site_id"),
+                   p.get("warehouse_id", ""))
+
+
 @router.get("/2fa/status", summary="Is 2FA enabled for the current user?")
-async def twofa_status(user: dict = Depends(get_current_user),
+async def twofa_status(user: dict = Depends(enroll_or_current_user),
                        session: AsyncSession = Depends(get_session)):
     row = await _fetch_user(session, user["username"])
     return {"enabled": bool(row and row.totp_enabled)}
@@ -977,7 +1115,7 @@ async def twofa_status(user: dict = Depends(get_current_user),
 @router.post("/2fa/enroll", summary="Begin 2FA enrollment → secret + QR (not enabled yet)",
              dependencies=[rate_limit(5, 60)])
 async def twofa_enroll(body: TwoFaEnrollIn = Body(...),
-                       user: dict = Depends(get_current_user),
+                       user: dict = Depends(enroll_or_current_user),
                        session: AsyncSession = Depends(get_session)):
     import pyotp
     row = await _fetch_user(session, user["username"])
@@ -1004,21 +1142,27 @@ async def twofa_enroll(body: TwoFaEnrollIn = Body(...),
 
 @router.post("/2fa/verify", summary="Confirm a code to enable 2FA",
              dependencies=[rate_limit(5, 60)])
-async def twofa_verify(body: CodeIn, user: dict = Depends(get_current_user),
+async def twofa_verify(body: CodeIn, user: dict = Depends(enroll_or_current_user),
                        session: AsyncSession = Depends(get_session)):
     row = await _fetch_user(session, user["username"])
     if row is None or not row.totp_secret:
         raise HTTPException(409, "no enrollment in progress — call /2fa/enroll first")
     _check_totp_attempts(user["username"])
+    await _check_totp_attempts_shared(session, user["username"])
     if not _verify_totp(row.totp_secret, body.code):
         _burn_totp_attempt(user["username"])
         raise HTTPException(400, "invalid 2FA code")
     _clear_totp_attempts(user["username"])
+    await _clear_totp_attempts_shared(session, user["username"])
     await session.execute(update(users_t).where(users_t.c["username"] == user["username"])
                           .values(totp_enabled=1))
     await session.commit()
     await _audit(session, user["username"], "2FA_ENABLED", "verified + enabled")
-    return {"enabled": True}
+    # No session is opened here. A user who arrived on an enrolment token has
+    # been refused one, and minting it now would make enrolment itself the
+    # bypass; they sign in again, this time through the TOTP challenge, which
+    # also proves the authenticator they just bound actually works.
+    return {"enabled": True, "next": "sign in again with your 2FA code"}
 
 
 @router.post("/2fa/disable", summary="Disable 2FA (requires a valid current code)",
@@ -1033,11 +1177,13 @@ async def twofa_disable(body: CodeIn, user: dict = Depends(get_current_user),
     # an attacker rotating CF-Connecting-IP gets a fresh IP bucket per request.
     # The username is not header-controllable, so this ceiling actually holds.
     _check_totp_attempts(user["username"])
+    await _check_totp_attempts_shared(session, user["username"])
     if not _verify_totp(row.totp_secret, body.code):
         _burn_totp_attempt(user["username"])
         await _audit(session, user["username"], "2FA_DISABLE_FAILED", "invalid code")
         raise HTTPException(400, "invalid 2FA code")
     _clear_totp_attempts(user["username"])
+    await _clear_totp_attempts_shared(session, user["username"])
     await session.execute(update(users_t).where(users_t.c["username"] == user["username"])
                           .values(totp_secret=None, totp_enabled=0))
     await session.commit()
@@ -1104,10 +1250,20 @@ async def request_phone_otp(body: PhoneRequestIn, request: Request,
     # anything else so even misconfigured/failed sends burn quota. Relaxed in
     # hermetic test envs — see ratelimit.strict_limits_enabled().
     if strict_limits_enabled():
+        from .ratelimit import check_bucket_shared
         check_bucket(f"otp:ip:{client_ip(request)}", 3, 3600,
                      "too many verification codes requested from this address — try again later")
         check_bucket(f"otp:phone:{number}", 3, 3600,
                      "too many verification codes for this number — try again later")
+        # ⚠️ AND THE SAME TWO BUDGETS ACROSS WORKERS. Per-process, "3 codes per
+        # hour" was 12 on a four-worker box — and this is the toll-fraud guard,
+        # where every extra send is a real message somebody pays for.
+        await check_bucket_shared(
+            session, f"otp:ip:{client_ip(request)}", 3, 3600,
+            "too many verification codes requested from this address — try again later")
+        await check_bucket_shared(
+            session, f"otp:phone:{number}", 3, 3600,
+            "too many verification codes for this number — try again later")
     if not wa.enabled():
         # Fail BEFORE creating a code row — nothing to strand, clear guidance.
         raise HTTPException(503, "WhatsApp is not configured on the server — "

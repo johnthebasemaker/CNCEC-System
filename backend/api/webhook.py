@@ -40,7 +40,7 @@ import os
 import secrets
 
 import bcrypt
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import delete, select, text as sqltext
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -194,23 +194,67 @@ async def _handle_command(session: AsyncSession, user: dict, body: str) -> str:
 # from one IP ⇒ that IP is refused for 15 minutes BEFORE any body processing.
 # Relaxed in hermetic test envs (see ratelimit.strict_limits_enabled), so the
 # functional webhook suites keep working; the limits suite forces it on.
-_hmac_penalty = PenaltyBox(threshold=5, window_seconds=600, ban_seconds=900)
+_HMAC_STRIKES = 5
+_HMAC_WINDOW_SECONDS = 600
+_HMAC_BAN_SECONDS = 900
+_hmac_penalty = PenaltyBox(threshold=_HMAC_STRIKES,
+                           window_seconds=_HMAC_WINDOW_SECONDS,
+                           ban_seconds=_HMAC_BAN_SECONDS)
+
+
+# ⚠️ THE BAN HELD ON ONE WORKER OF FOUR (Phase 10, 2026-09-02). `PenaltyBox` is
+# in-process, so a banned prober kept hitting the endpoint until the proxy handed
+# them one of the other three uvicorn workers — a ban that stops a quarter of the
+# traffic is not a ban. These two put the strike count and the ban itself in
+# `rate_buckets`, alongside the in-process box rather than instead of it: the
+# memory check costs nothing and trips first, the row is what makes it true
+# everywhere.
+async def _hmac_banned(session, ip: str) -> int | None:
+    """Seconds remaining on an active ban, else None. ASKS, never bans.
+
+    ⚠️ THE READ AND THE WRITE ARE DIFFERENT VERBS, and conflating them was a
+    real bug: the first version asked `check_bucket_shared` — which INCREMENTS —
+    so the ban check opened the ban and the very first invalid signature
+    answered 429 instead of 403. Suite `limits` caught it.
+    """
+    local = _hmac_penalty.banned_for(ip)
+    if local is not None:
+        return local
+    from .ratelimit import read_bucket_shared
+    hit = await read_bucket_shared(session, f"hmacban:{ip}", _HMAC_BAN_SECONDS)
+    return hit[1] if hit else None
+
+
+async def _hmac_strike(session, ip: str) -> None:
+    """Record one invalid signature; open a shared ban at the threshold."""
+    from .ratelimit import (check_bucket_shared, clear_bucket_shared,
+                            open_bucket_shared)
+    if _hmac_penalty.strike(ip):
+        log.warning("webhook: IP %s banned for repeated invalid HMAC signatures", ip)
+    try:
+        await check_bucket_shared(session, f"hmacstrike:{ip}", _HMAC_STRIKES,
+                                  _HMAC_WINDOW_SECONDS)
+    except HTTPException:
+        # The strike budget is spent → open the ban and reset the tally, so the
+        # ban's expiry is what ends it rather than a stale strike row keeping it
+        # permanently one hit from re-opening.
+        await open_bucket_shared(session, f"hmacban:{ip}")
+        await clear_bucket_shared(session, f"hmacstrike:{ip}")
 
 
 @router.post("/webhook", summary="Inbound WhatsApp messages (Meta Cloud API)")
 async def receive_webhook(request: Request, session: AsyncSession = Depends(get_session)):
     ip = client_ip(request)
     if strict_limits_enabled():
-        remaining = _hmac_penalty.banned_for(ip)
-        if remaining is not None:
-            return PlainTextResponse("temporarily blocked",
-                                     status_code=429,
-                                     headers={"Retry-After": str(remaining)})
+        banned = await _hmac_banned(session, ip)
+        if banned is not None:
+            return PlainTextResponse("temporarily blocked", status_code=429,
+                                     headers={"Retry-After": str(banned)})
     raw = await request.body()
     if not _signature_ok(raw, request.headers.get("X-Hub-Signature-256", "")):
         log.warning("webhook POST rejected: X-Hub-Signature-256 mismatch")
-        if strict_limits_enabled() and _hmac_penalty.strike(ip):
-            log.warning("webhook: IP %s banned for repeated invalid HMAC signatures", ip)
+        if strict_limits_enabled():
+            await _hmac_strike(session, ip)
         return PlainTextResponse("invalid signature", status_code=403)
     try:
         payload = json.loads(raw or b"{}")

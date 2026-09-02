@@ -118,7 +118,15 @@ _EDITABLE_SETTINGS = {"maintenance_mode", "low_stock_days", "burn_alert_days",
                       "require_entry_documents", "mtc_required_category",
                       "expiry_warn_days", "ai_enabled", "ai_assistant_enabled",
                       "ai_doc_intel_enabled", "ai_ocr_enabled",
-                      "ai_nl_search_enabled", "ai_insights_enabled"}
+                      "ai_nl_search_enabled", "ai_insights_enabled",
+                      # Phase 10 Track 1 — mandatory 2FA. Both are settings
+                      # rather than constants so widening the net or moving the
+                      # deadline is an admin action, not a deploy, matching
+                      # `mtc_required_category`.
+                      #
+                      # ⚠️ `mfa_enforced_from` ABSENT MEANS WARN-ONLY. Deleting
+                      # the row relaxes the gate; it can never lock anybody out.
+                      "mfa_required_roles", "mfa_enforced_from"}
 
 
 class SettingIn(BaseModel):
