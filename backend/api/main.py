@@ -55,6 +55,7 @@ from .console import admin as console_admin_router  # noqa: E402
 from .sla import router as sla_router  # noqa: E402
 from .console import oversight as console_oversight_router  # noqa: E402
 from .console import public as console_public_router  # noqa: E402
+from .console import traces as console_traces_router  # noqa: E402
 from .console import xsite as xsite_router  # noqa: E402
 from .documents import router as documents_router  # noqa: E402
 from .report_center import router as report_center_router  # noqa: E402
@@ -175,6 +176,16 @@ async def lifespan(app: FastAPI):
             orphan_task = _aio_orph.create_task(_ai_jobs.orphan_sweep_loop())
     except Exception as e:  # never block startup on the sweep
         print(f"[ai] orphan sweep skipped: {type(e).__name__}: {e}")
+    # AI request tracing (slice 11c). One drain task per worker, writing a
+    # BOUNDED queue in batches. ⚠️ Started regardless of GI_SCHEDULER: it is
+    # not a scheduled job, it is the writer for spans the request path is
+    # already producing, and without it those spans accumulate to the queue cap
+    # and are dropped. Costs nothing when nobody asks the assistant anything.
+    try:
+        from .ai import trace as _ai_trace
+        _ai_trace.start()
+    except Exception as e:  # never block startup on observability
+        print(f"[ai] trace drain not started: {type(e).__name__}: {e}")
     # Pre-build the assistant's manual index (Phase 8 slice 8f). Measured on
     # the live 229 KB manual: 2 ms to chunk, 15 ms for the BM25 tables, 0.3 ms
     # per search afterwards.
@@ -405,6 +416,8 @@ app.include_router(documents_router)
 # (≥logistics), cross-site requests (≥hod), feedback (any authenticated user).
 app.include_router(console_admin_router)
 app.include_router(console_oversight_router)
+# AI request traces (slice 11c) — admin + auditor, read-only by rule 7.
+app.include_router(console_traces_router)
 # T2 — admin SLA tracker: >24h Overdue Actions + clear/notify nudges (admin-only).
 app.include_router(sla_router)
 app.include_router(xsite_router, dependencies=_auth)

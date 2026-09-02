@@ -5728,4 +5728,70 @@ we simply stopped ignoring the one place it was already recorded.
 - **Nothing you had already acknowledged, approved or posted.** No historical
   record was rewritten by any part of this release.
 
+# 25. Phase 11 — AI Traces
 
+**Who this chapter is for:** Administrators and Auditors. It describes one new
+read-only page and nothing else changes for anybody.
+
+## 25.1 What the page is
+
+**Where:** Admin → Console → **AI Traces**, or, for an Auditor, **AI Traces** in
+the sidebar. (The Console itself is administrators-only, which is why the same
+page has its own menu entry for the Auditor rather than living only inside it.)
+
+Every question anybody asks the Hub Assistant now leaves a record of **how the
+answer was produced** — not the answer, but the working:
+
+| Column | What it tells you |
+|---|---|
+| **Question** | what was typed |
+| **Retrieval** | which manual sections the question actually reached, and how strongly each one matched |
+| **Queued** | how long it waited for a free slot before the model started |
+| **Total** | the whole turn |
+| **Outcome** | answered, greeting, switched off, or failed |
+
+Expanding a row shows each stage separately.
+
+## 25.2 ⚠️ Why the Retrieval column is the whole point
+
+The assistant does not read the manual every time. It **searches** it, picks the
+handful of passages most likely to answer you, and shows the model only those.
+That search has always scored every candidate section — and always threw the
+scores away.
+
+Which meant that when the assistant said something wrong, there was no way to
+tell which of two completely different things had happened:
+
+- it was **shown the wrong pages**, and answered them faithfully; or
+- it was **shown the right pages** and answered badly anyway.
+
+They need opposite fixes, and for a long time nobody could tell them apart. One
+real case: the assistant told HODs they could not open the Manpower page. The
+model was not confused — the section that lists who can open what had been cut
+off before the relevant table, so it never reached the model at all. That took a
+phase to find. With this page it would have been visible in one row.
+
+## 25.3 The gold "fallback" tag, and why it matters
+
+If a question matches nothing in the sections your role may read, the assistant
+does not give up — it falls back to showing the model a shortened copy of every
+chapter you are allowed, and answers from that.
+
+That is **the condition under which an assistant makes things up**: a broad,
+truncated context and no passage that actually answers the question. The row is
+tagged **fallback** so you can see it happened. A run of them on similar
+questions means the manual is missing a section, not that the model has
+deteriorated.
+
+## 25.4 What is deliberately NOT on this page
+
+- **The answer.** Only its length is recorded — enough to spot a reply that was
+  cut off, nothing more.
+- **The text of the manual sections.** Only chapter numbers, headings and
+  scores. The assistant is careful about which chapters a role may see, and
+  showing the text on a different page would quietly work around that.
+
+You may also see a header saying **"N span(s) dropped"**. That means the part
+of the system that writes these records fell behind, so the list is incomplete.
+It never affects the assistant itself — records are dropped rather than allowed
+to slow anybody's question down.

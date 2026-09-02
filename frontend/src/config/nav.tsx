@@ -384,6 +384,13 @@ export const NAV: NavGroup[] = [
       { key: '/admin/inventory', label: 'Inventory', icon: <DatabaseOutlined />, access: { minLevel: 4 } },
       { key: '/admin/audit', label: 'Audit Log', icon: <FileSearchOutlined />, access: { minLevel: 4 } },
       { key: '/admin/console', label: 'Console', icon: <ControlOutlined />, access: w({ minLevel: 4 }) },
+      // ⚠️ NAMED ROLES, NOT A LEVEL (rule 14). The Console above is minLevel 4,
+      // so an Auditor — level 3, and the role whose whole job is reading what
+      // happened — could never open a tab inside it. This route mounts the same
+      // panel for both. It is read-only for the auditor by construction, not by
+      // remembering: rule 7's method-level middleware refuses every mutating
+      // verb from that role whatever a page offers.
+      { key: '/admin/ai-traces', label: 'AI Traces', icon: <FileSearchOutlined />, access: { anyRole: ['admin', AUD] } },
     ],
   },
   {

@@ -540,6 +540,57 @@ memory — deliberately not reproduced here).
    Issue flow). Changing a preserved rule: edit the owning spec file first,
    then the module, then the suite-AM pins.
 
+### 7e. Request tracing — the scores that were computed and thrown away
+
+*Phase 11 slice 11c (alembic `f8a3c05d1b27`), `ai/trace.py` + `ai_traces`.*
+
+⚠️ **`Index.score()` produced a BM25 score for every candidate chunk on every
+question, `search()` sorted by it, and all of them were discarded.** So a good
+answer and a bad answer left identical evidence — none — and "did retrieval
+fetch the wrong passage, or did the model ignore the right one?" had no answer.
+Those have completely different fixes. The 800-character head-truncation that
+kept §2's access matrix out of every non-admin prompt (§7, bullet 1) was a
+RETRIEVAL failure that presented as a model failure and lived a whole phase.
+
+Six spans, one row each, grouped by `trace_id`:
+
+| Span | Carries |
+|---|---|
+| `ai.request` | lane, role, the QUESTION, queue-wait, total ms, outcome |
+| `ai.guard.input` | pattern hits, score, decision *(slice 11d)* |
+| `ai.retrieve` | **allowed chapter set, candidate count, per-chunk `{chapter, heading, score, rank, chars, used}`, whether the fallback fired** |
+| `ai.cache` | key hash, hit/miss, similarity *(slice 11e)* |
+| `ai.generate` | model, num_ctx/num_predict, ms, **answer LENGTH** |
+| `ai.guard.output` | redactions, canary hits, defusals *(slice 11d)* |
+
+**Three rulings inside it:**
+
+* ⚠️ **Postgres, not a hosted tracer (P11-1).** A hosted span carries the
+  PROMPT, and ours contain manual chapters, the results of `/ai/insights`'
+  five live SQL probes, generated SQL, and OCR'd delivery notes with employee
+  names. Same argument as P10-1 chose Postgres over Redis.
+* ⚠️ **The question is stored; the answer and the chunk TEXT are not.** The
+  question is retained by operator ruling Q11 (what people actually ask is the
+  best eval material in the system and nothing was keeping it). Storing
+  passages would copy the manual into a table with a laxer read path than the
+  manual's own — undoing rule 9 by accident. Chapter numbers, headings and
+  scores answer every diagnostic question the text would.
+* ⚠️ **It must never cost the thing it measures.** Nothing in `trace.py` raises
+  and nothing blocks: spans go on a bounded per-worker queue drained in
+  batches, and a full queue DROPS and counts rather than waiting. A dropped
+  span is a missing diagnostic; a blocked request is a missing answer.
+  `stats().dropped` surfaces it, and the console shows it — the same reasoning
+  that stopped a skipped check counting as a pass.
+
+`search()` delegates to `search_scored()` so there is exactly one ranking
+implementation; two would let the telemetry and the prompt drift apart, and a
+trace that reports a ranking the prompt did not use is worse than no trace.
+Retention is a 30-day DELETE carried by the orphan-sweep loop **under the
+`daily_job_runs` claim** (P10-2), because a once-a-day job on four workers runs
+four times without one. Read at `/admin/ai-traces` — admin **and auditor**,
+mounted both as a Console tab and as its own route, because the Console is
+`minLevel: 4` and the auditor is level 3.
+
 ### 7a. ⚠️ The vision envelope — three numbers that are ONE decision
 
 Fixed 2026-09-01 after two production reports ("the Consumption Log fails

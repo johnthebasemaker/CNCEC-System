@@ -516,6 +516,25 @@ async def orphan_sweep_loop() -> None:
                     await sweep_rate_buckets(s)
             except Exception as e:                          # noqa: BLE001
                 logger.debug("rate-bucket sweep skipped: %s", e)
+            # ⚠️ TRACE RETENTION TAKES THE DAILY CLAIM; THE TWO SWEEPS ABOVE DO
+            # NOT NEED ONE. Those are idempotent DELETEs of rows nothing will
+            # read again, so four workers racing them is waste and nothing more.
+            # This one runs once a day rather than every five minutes, and a
+            # claim is how a once-a-day job stays once-a-day under
+            # `--workers 4` — the exact shape of the bug that had three daily
+            # loops sending four copies of every message (P10-2).
+            try:
+                from ..services import dailyjob as _dj
+                from . import trace as _tr
+                due = _now() - _dt.timedelta(days=1)
+                async with SessionLocal() as s:
+                    won = await _dj.claim(s, "ai_trace_retention", due)
+                if won:
+                    n = await _tr.sweep_retention()
+                    if n:
+                        logger.info("ai_traces retention removed %s span(s)", n)
+            except Exception as e:                          # noqa: BLE001
+                logger.debug("trace retention skipped: %s", e)
         except asyncio.CancelledError:
             raise
         except Exception as e:                              # noqa: BLE001

@@ -10,6 +10,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { Row as ApiRow } from '../api/client'
 import { useSystemOverview } from '../api/hooks'
+import { AiTracesPanel } from './AiTracesPage'
 import KpiCard from '../components/KpiCard'
 import KpiRow from '../components/KpiRow'
 import { brand, status } from '../theme/tokens'
@@ -537,6 +538,10 @@ export default function AdminConsolePage() {
           { key: 'settings', label: 'Settings', children: <SettingsTab /> },
           { key: 'sessions', label: 'Sessions', children: <SessionsTab /> },
           { key: 'oversight', label: 'Oversight', children: <OversightTab /> },
+          // Slice 11c. Shares its component with /admin/ai-traces, which is the
+          // route an AUDITOR can reach — this Console is minLevel 4, so a tab
+          // here alone would be invisible to the role the operator named.
+          { key: 'ai-traces', label: 'AI Traces', children: <AiTracesPanel /> },
           { key: 'feedback', label: 'Feedback', children: <FeedbackTab /> },
         ]}
       />

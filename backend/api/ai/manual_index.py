@@ -383,27 +383,73 @@ class Index:
         `allowed` is applied BEFORE scoring — that is the security boundary.
         A chunk from a chapter this role cannot see is never a candidate, so
         it cannot reach the prompt no matter what the question asks for.
+
+        Delegates to `search_scored` so there is exactly ONE ranking
+        implementation. Two copies of a retrieval rule is how a telemetry
+        number and the thing it claims to describe drift apart, and a trace
+        that reports a ranking the prompt did not use is worse than no trace.
+        """
+        return self.search_scored(query, allowed=allowed, k=k,
+                                  char_budget=char_budget)[0]
+
+    def search_scored(self, query: str, *, allowed: set[int],
+                      k: int = 6, char_budget: int = 7000
+                      ) -> tuple[list[Chunk], dict]:
+        """`(chunks, telemetry)` — the same result, plus what it cost to get.
+
+        ⚠️ THE SCORES WERE ALREADY BEING COMPUTED AND THROWN AWAY, and that is
+        the whole reason a bad answer has never been diagnosable. A wrong answer
+        and a right answer left identical evidence: none. The 800-character
+        head-truncation that kept §2's access matrix out of every non-admin
+        prompt — so the assistant inferred HODs could not open the Manpower page
+        — was a RETRIEVAL failure that looked like a model failure and survived
+        a whole phase, because nothing recorded what the model had been shown.
+
+        The telemetry carries chapter numbers, headings, scores, ranks and
+        character counts. ⚠️ It deliberately does NOT carry the chunk TEXT:
+        that would copy the manual into a trace table whose read path is laxer
+        than the manual's own, which is how rule 9 gets undone by accident.
         """
         q = _tokens(query)
+        tele: dict = {"query_tokens": len(q), "allowed_chapters": sorted(allowed),
+                      "candidates": 0, "hits": [], "char_budget": char_budget,
+                      "k": k}
         if not q:
-            return []
+            return [], tele
         scored = [(self.score(i, q), i) for i in range(len(self.chunks))
                   if self.chunks[i].chapter in allowed]
+        # ⚠️ THE CANDIDATE COUNT IS THE FENCE, MEASURED. It is how many chunks
+        # this role was allowed to be scored against at all — so a policy that
+        # silently widens or narrows shows up here as a number that moved,
+        # visible next to the answers it changed.
+        tele["candidates"] = len(scored)
         scored.sort(key=lambda x: (-x[0], x[1]))
         out: list[Chunk] = []
         used = 0
-        for s, i in scored:
+        for rank, (s, i) in enumerate(scored):
             if s <= 0 or len(out) >= k:
                 break
             c = self.chunks[i]
             if used + len(c.text) > char_budget and out:
+                # Recorded rather than silently skipped: "the right passage was
+                # found and then did not fit" is a completely different problem
+                # from "the right passage did not score", and they are
+                # indistinguishable without this.
+                tele["hits"].append({"chapter": c.chapter, "heading": c.heading,
+                                     "score": round(s, 3), "rank": rank,
+                                     "chars": len(c.text), "used": False})
                 continue
             out.append(c)
             used += len(c.text)
+            tele["hits"].append({"chapter": c.chapter, "heading": c.heading,
+                                 "score": round(s, 3), "rank": rank,
+                                 "chars": len(c.text), "used": True})
+        tele["context_chars"] = used
+        tele["top_score"] = round(scored[0][0], 3) if scored else 0.0
         # Present them in manual order: the model reads a coherent document
         # rather than a relevance-ranked jumble, and cross-references resolve.
         out.sort(key=lambda c: (c.chapter, self.chunks.index(c)))
-        return out
+        return out, tele
 
 
 def render_context(chunks: list[Chunk]) -> str:

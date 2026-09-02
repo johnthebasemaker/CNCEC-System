@@ -34,6 +34,7 @@ from typing import AsyncIterator
 
 from . import client as aic
 from . import manual_index as mx
+from . import trace as _trace
 
 # Which top-level USER_MANUAL.md sections each role may see. Lower roles
 # cannot see higher roles' sections. §18 (SME) + §19 (Man-Hours) are
@@ -70,13 +71,18 @@ _ROLE_ALLOWED: dict[str, set[int]] = {
     # Its chapters mirror exactly that: orientation, reporting, the data
     # model and the glossary. No role operational how-tos it could not
     # perform anyway, and not the hosting chapter.
-    "auditor":        {1, 2, 3, 8, 9, 10, 11, 12, 16, 20, 21, 22, 24},
+    # §25 (AI Traces) is admin+auditor ONLY, unlike §21/§24 which went to
+    # every role. Those are "what changed" chapters about features everyone
+    # uses; §25 describes ONE page that only these two roles can open, and a
+    # store keeper answered out of it would be told how to read a screen the
+    # nav refuses them.
+    "auditor":        {1, 2, 3, 8, 9, 10, 11, 12, 16, 20, 21, 22, 24, 25},
     # ⚠️ THE UPPER BOUND IS EXCLUSIVE AND HAS TO MOVE WITH THE MANUAL. Adding
     # a chapter without touching this line gives the ADMIN less than everybody
     # else — the one role that is supposed to see all of it. `tests/ai_eval`
     # pins the resulting set, so the omission fails a gate rather than being
     # discovered by an administrator who cannot find a chapter.
-    "admin":          set(range(1, 25)),
+    "admin":          set(range(1, 26)),
 }
 
 _SECTION_TITLES = {
@@ -104,6 +110,7 @@ _SECTION_TITLES = {
     22: "Quality, Safety, Employees & Procurement (QSEP)",
     23: "Quality Oversight (Head of Qualities) Manual",
     24: "Phase 10 — Security, Training and the Board Brief",
+    25: "Phase 11 — AI Traces",
 }
 
 
@@ -349,32 +356,70 @@ def retrieve_context(role: str, question: str) -> str:
     """The passages worth showing for THIS question, from the chapters this
     role may see. Returns '' when nothing scores — the caller then falls back
     to the role's whole (truncated) context rather than answering blind."""
+    return retrieve_context_scored(role, question)[0]
+
+
+def retrieve_context_scored(role: str, question: str) -> tuple[str, dict]:
+    """`(context, telemetry)` — retrieval, plus a record of how it went.
+
+    ⚠️ THE TELEMETRY IS THE POINT OF SLICE 11c. Until now the BM25 scores were
+    computed on every question and discarded, so "the assistant gave a bad
+    answer" could not be split into "it retrieved the wrong passage" and "it
+    ignored the right one". Those have completely different fixes, and one of
+    them (the 800-character truncation that hid §2's access matrix from every
+    non-admin role) went undiagnosed for a phase.
+
+    Returns telemetry even on the empty and error paths, because "nothing
+    scored" and "retrieval threw" are themselves the two most interesting
+    outcomes and were previously indistinguishable from each other.
+    """
+    allowed = allowed_sections(role)
     if not question:
-        return ""
+        return "", {"skipped": "no question", "allowed_chapters": sorted(allowed)}
     try:
-        hits = _index().search(question, allowed=allowed_sections(role))
-    except Exception:  # noqa: BLE001 — retrieval must never break the chat
-        return ""
-    return mx.render_context(hits)
+        hits, tele = _index().search_scored(question, allowed=allowed)
+    except Exception as e:  # noqa: BLE001 — retrieval must never break the chat
+        return "", {"error": type(e).__name__,
+                    "allowed_chapters": sorted(allowed)}
+    return mx.render_context(hits), tele
 
 
 def build_system_prompt(role: str, username: str = "",
                         question: str = "") -> str:
-    """System prompt for one turn.
+    """System prompt for one turn. See `build_system_prompt_scored`."""
+    return build_system_prompt_scored(role, username, question)[0]
+
+
+def build_system_prompt_scored(role: str, username: str = "",
+                               question: str = "") -> tuple[str, dict]:
+    """`(prompt, retrieval telemetry)`.
 
     With a question, CONTEXT is the retrieved passages — a few KB instead of
     the whole allowed manual, which is both much faster to evaluate and much
     more likely to contain the answer than a fixed head-truncation. Without
     one (or if nothing scores) it falls back to the role's full context, so
     the assistant degrades to its previous behaviour rather than to nothing.
+
+    ⚠️ THE FALLBACK IS RECORDED. It is the quiet path: the answer still arrives,
+    from a head-truncated dump of every allowed chapter rather than from the
+    passage that answers the question — which is precisely the condition under
+    which the model confabulates. Without `fallback: true` in the trace, a
+    systematic retrieval failure looks like a model that has got worse.
     """
-    context = retrieve_context(role, question) or _context_for_role(role)
-    return _SYSTEM_PROMPT_TMPL.format(
+    context, tele = retrieve_context_scored(role, question)
+    fallback = not context
+    if fallback:
+        context = _context_for_role(role)
+    tele["fallback"] = fallback
+    tele["context_chars"] = len(context)
+    prompt = _SYSTEM_PROMPT_TMPL.format(
         username=(username or "").strip() or "the user",
         role_label=_ROLE_LABEL.get(role, role.title() if role else "user"),
         refusal=_ROLE_REFUSAL.get(role, _ROLE_REFUSAL["store_keeper"]),
         context=context or "(manual not found on disk)",
     )
+    tele["prompt_chars"] = len(prompt)
+    return prompt, tele
 
 
 async def health() -> tuple[bool, str]:
@@ -392,9 +437,16 @@ async def health() -> tuple[bool, str]:
 
 
 async def answer_manual_question(question: str, role: str,
-                                 username: str = "") -> AsyncIterator[str]:
+                                 username: str = "",
+                                 trace_id: str = "") -> AsyncIterator[str]:
     """Stream the answer token-by-token. On failure, yield a single friendly
-    string rather than raising — the SSE endpoint never breaks mid-chat."""
+    string rather than raising — the SSE endpoint never breaks mid-chat.
+
+    `trace_id` groups this turn's spans (slice 11c). Optional and defaulted so
+    every existing caller — and every test that monkeypatches this — keeps
+    working untouched; tracing is something the request path may do, never
+    something it depends on.
+    """
     ok, msg = await health()
     if not ok:
         yield msg
@@ -405,13 +457,45 @@ async def answer_manual_question(question: str, role: str,
         return
     canned = greeting_reply(question)
     if canned is not None:
+        # The greeting fast path never reaches the model, and saying so is
+        # worth a span: an "assistant is slow" report is answered instantly by
+        # a trace showing which turns were and were not generations.
+        if trace_id:
+            _trace.emit("ai.generate", trace_id=trace_id, lane="assistant",
+                        role=role, username=username, duration_ms=0,
+                        outcome="greeting", attrs={"greeting": True})
         yield canned
         return
-    system = build_system_prompt(role, username, question)
+
+    if trace_id:
+        with _trace.Span("ai.retrieve", trace_id=trace_id, lane="assistant",
+                         role=role, username=username) as sp:
+            system, tele = build_system_prompt_scored(role, username, question)
+            sp.attrs(**tele).outcome("fallback" if tele.get("fallback") else "ok")
+    else:
+        system, _ = build_system_prompt_scored(role, username, question)
+
     prompt = f"User question: {question}\n\nAnswer:"
+    gen = _trace.Span("ai.generate", trace_id=trace_id, lane="assistant",
+                      role=role, username=username) if trace_id else None
+    if gen:
+        gen.__enter__()
+        gen.attrs(model=aic.MODEL_CHAT, num_predict=512, temperature=0.2,
+                  system_chars=len(system))
+    chars = 0
     try:
         async for chunk in aic.stream(aic.MODEL_CHAT, prompt, system=system,
                                       temperature=0.2, num_predict=512):
+            chars += len(chunk)
             yield chunk
     except RuntimeError as e:
+        if gen:
+            gen.outcome("error").attrs(error_type=type(e).__name__)
         yield f"\n\n[Hub Assistant error: {e}]"
+    finally:
+        if gen:
+            # ⚠️ THE LENGTH, NEVER THE ANSWER. How much was generated is a
+            # latency and truncation diagnostic; what was generated is content
+            # this table has no business holding (see trace.py's header).
+            gen.attrs(answer_chars=chars)
+            gen.__exit__(None, None, None)

@@ -27,9 +27,17 @@
 # the Training tab is universal; and §2's access matrix already tells every role
 # what every other role can open, so naming the Valuation report's audience in
 # §24.3 discloses nothing §2 does not.
+# ⚠️ SIGNED CHANGE, 2026-09-04 (slice 11c): §25 "Phase 11 — AI Traces" was added
+# to admin and auditor ONLY.
+#
+# Deliberately NOT every role, which breaks the §21/§24 precedent above and does
+# so on purpose. Those are "what changed" chapters about features the whole site
+# uses. §25 documents ONE read-only page that only these two roles can open —
+# answering a store keeper out of it would explain a screen the navigation
+# refuses them, which is worse than the refusal.
 expected_allowlists:
-  admin:          [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]
-  auditor:        [1,2,3,8,9,10,11,12,16,20,21,22,24]
+  admin:          [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]
+  auditor:        [1,2,3,8,9,10,11,12,16,20,21,22,24,25]
   hod:            [1,2,3,4,5,6,8,9,10,11,12,13,16,18,19,21,22,24]
   logistics:      [1,2,3,9,11,12,13,14,16,21,22,24]
   qc:             [1,2,3,4,11,12,15,21,22,24]
