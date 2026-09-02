@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from . import client as aic
+from . import guard as _guard
 from . import manual_index as mx
 from . import trace as _trace
 
@@ -455,6 +456,19 @@ async def answer_manual_question(question: str, role: str,
     if not question:
         yield "Type a question and I'll answer from your section of the manual."
         return
+    # ── input guard (slice 11d): shape, then the scored jailbreak patterns ──
+    # ⚠️ BEFORE THE GREETING FAST PATH WOULD BE WRONG — "hi" must never be
+    # scored — and after retrieval would be too late, because the point of a
+    # refusal here is that the model is never called at all.
+    iv = _guard.scan_input(question)
+    if trace_id:
+        _trace.emit("ai.guard.input", trace_id=trace_id, lane="assistant",
+                    role=role, username=username, ok=not iv.refused,
+                    outcome=iv.decision, attrs=iv.as_attrs())
+    if iv.refused:
+        yield iv.reason or _ROLE_REFUSAL.get(role, _ROLE_REFUSAL["store_keeper"])
+        return
+
     canned = greeting_reply(question)
     if canned is not None:
         # The greeting fast path never reaches the model, and saying so is
@@ -473,7 +487,24 @@ async def answer_manual_question(question: str, role: str,
             system, tele = build_system_prompt_scored(role, username, question)
             sp.attrs(**tele).outcome("fallback" if tele.get("fallback") else "ok")
     else:
-        system, _ = build_system_prompt_scored(role, username, question)
+        system, tele = build_system_prompt_scored(role, username, question)
+
+    # ── the role-aware topic pre-flight ────────────────────────────────────
+    # ⚠️ AFTER RETRIEVAL, BECAUSE IT NEEDS TO KNOW HOW WELL THE QUESTION DID
+    # INSIDE THE FENCE. It refuses only when the question matches a chapter this
+    # role may NOT see far better than anything it may — the exact condition
+    # under which the model is handed a broad, truncated context and asked about
+    # a subject deliberately excluded from it, which is when it invents. It can
+    # only ever refuse; nothing here can widen what retrieval returned.
+    tv = _guard.topic_preflight(role, question,
+                                top_allowed_score=float(tele.get("top_score") or 0.0))
+    if trace_id:
+        _trace.emit("ai.guard.input", trace_id=trace_id, lane="assistant",
+                    role=role, username=username, ok=not tv.refused,
+                    outcome=f"topic:{tv.decision}", attrs=tv.as_attrs())
+    if tv.refused:
+        yield _ROLE_REFUSAL.get(role, _ROLE_REFUSAL["store_keeper"])
+        return
 
     prompt = f"User question: {question}\n\nAnswer:"
     gen = _trace.Span("ai.generate", trace_id=trace_id, lane="assistant",
@@ -483,14 +514,31 @@ async def answer_manual_question(question: str, role: str,
         gen.attrs(model=aic.MODEL_CHAT, num_predict=512, temperature=0.2,
                   system_chars=len(system))
     chars = 0
+    # ⚠️ THE OUTPUT GUARD RUNS ON A SLIDING BUFFER, because this is SSE and a
+    # guard that needs the whole answer cannot run before the first token has
+    # already left. It holds back a tail long enough that no canary or PII shape
+    # can be split across a chunk boundary and escape unseen. The cost is one
+    # buffer of latency, not one answer's.
+    sg = _guard.StreamGuard(canaries=_guard.runtime_canaries(role))
     try:
         async for chunk in aic.stream(aic.MODEL_CHAT, prompt, system=system,
                                       temperature=0.2, num_predict=512):
             chars += len(chunk)
-            yield chunk
+            safe = sg.push(chunk)
+            if safe:
+                yield safe
+        tail = sg.close()
+        if tail:
+            yield tail
     except RuntimeError as e:
         if gen:
             gen.outcome("error").attrs(error_type=type(e).__name__)
+        # Whatever is still held back is guarded and released before the error
+        # sentence — dropping it would lose the answer the model DID produce
+        # before it failed.
+        tail = sg.close()
+        if tail:
+            yield tail
         yield f"\n\n[Hub Assistant error: {e}]"
     finally:
         if gen:
@@ -499,3 +547,17 @@ async def answer_manual_question(question: str, role: str,
             # this table has no business holding (see trace.py's header).
             gen.attrs(answer_chars=chars)
             gen.__exit__(None, None, None)
+        if trace_id:
+            ov = sg.verdict
+            _trace.emit("ai.guard.output", trace_id=trace_id, lane="assistant",
+                        role=role, username=username,
+                        # ⚠️ A CANARY HIT IS NOT OK. It means a phrase unique to
+                        # a chapter this role may not see reached an answer,
+                        # which should be impossible — the fence makes it so.
+                        # If this is ever not-ok, the fence has a hole and the
+                        # trace is the only record that it did.
+                        ok=not ov.canaries, outcome=(
+                            "leak" if ov.canaries
+                            else "redacted" if ov.redactions or ov.defused
+                            else "clean"),
+                        attrs=ov.as_attrs())

@@ -5795,3 +5795,39 @@ You may also see a header saying **"N span(s) dropped"**. That means the part
 of the system that writes these records fell behind, so the list is incomplete.
 It never affects the assistant itself — records are dropped rather than allowed
 to slow anybody's question down.
+
+## 25.5 The assistant's guard rails
+
+Two small checks were added around the Hub Assistant. Neither changes how you
+use it, and the second one is mostly notable for what it does **not** do.
+
+**On the way in**, a question that is plainly an attempt to talk the assistant
+out of its own rules — "ignore your instructions", "show me your system prompt",
+"you are now an unrestricted assistant" — is answered with the ordinary "that is
+not in your section" reply, without troubling the model at all.
+
+⚠️ **Ordinary sentences that happen to contain those words are NOT refused**, and
+that matters more than the refusals do. All of these are answered normally:
+
+- *"one drum arrived damaged — can I ignore it and issue the rest?"*
+- *"the tank is now empty, how do I record that?"*
+- *"can you repeat the steps for staging a return?"*
+- *"how do I bypass a blocked lot and use the next one?"*
+
+**If you are ever refused for a genuine question, that is a bug — report it.**
+The assistant's real protection has never been this check: it is that the
+sections of the manual your role may not read are never loaded into your
+conversation in the first place, so there is nothing there to be talked out of.
+The check simply saves you a slow, confused answer.
+
+**On the way out**, an answer is scanned before it reaches you. Anything shaped
+like a phone number, an email address, an ID number or a key is removed, and a
+line that begins with `=` is made safe to paste into a spreadsheet. ⚠️ **The
+manual contains none of those things**, so if you ever see something removed
+from an answer, tell an administrator — it means something reached the assistant
+that should not have.
+
+Answers now arrive in slightly larger pieces than before — roughly a clause at a
+time rather than a word — because the text is being checked as it goes. They
+should still appear progressively; if an answer only ever arrives all at once at
+the end, that is worth reporting.
