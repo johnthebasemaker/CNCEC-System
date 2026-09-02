@@ -6,6 +6,7 @@ import { useRegister, useRegisterSites, useRegisterWarehouses } from '../api/hoo
 import { passwordProblems } from '../lib/password'
 import { darkTheme } from '../theme/themes'
 import ServerConfigModal from '../components/ServerConfigModal'
+import MandatoryEnrollPanel from '../components/MandatoryEnrollPanel'
 import { apiBase, isApiOverridden } from '../api/client'
 
 function errMsg(e: unknown): string {
@@ -45,6 +46,7 @@ export default function LoginPage() {
   const { login, loginMfa } = useAuth()
   const [loading, setLoading] = useState(false)
   const [mfaToken, setMfaToken] = useState<string | null>(null)
+  const [enroll, setEnroll] = useState<{ token: string; from: string | null } | null>(null)
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const register = useRegister()
   const [regForm] = Form.useForm()
@@ -66,6 +68,15 @@ export default function LoginPage() {
       if (r.mfa) {
         setMfaToken(r.mfaToken!)
         message.info('Enter your 6-digit authenticator code')
+      } else if (r.enroll) {
+        // ⚠️ NOT A SESSION. `enrollToken` is scoped to /auth/2fa/* by the
+        // server; it is handed to the enrolment panel and never to
+        // setAuthToken. See AuthContext.LoginOutcome.
+        setEnroll({ token: r.enrollToken!, from: r.enforcedFrom ?? null })
+      } else if (r.mfaDue) {
+        message.warning(
+          `Two-factor authentication becomes mandatory for your role on ${r.mfaDue}. ` +
+          'Set it up in Security before then.', 8)
       }
     } catch (e) {
       message.error(errMsg(e))
@@ -209,6 +220,15 @@ export default function LoginPage() {
                 Back to sign in
               </Button>
             </Form>
+          ) : enroll ? (
+            <MandatoryEnrollPanel
+              token={enroll.token}
+              enforcedFrom={enroll.from}
+              onDone={() => {
+                setEnroll(null)
+                message.success('Two-factor authentication is on. Sign in again with your code.')
+              }}
+            />
           ) : !mfaToken ? (
             <Form key="login" layout="vertical" onFinish={onLogin}>
               <Form.Item name="username" rules={[{ required: true, message: 'Username' }]}>

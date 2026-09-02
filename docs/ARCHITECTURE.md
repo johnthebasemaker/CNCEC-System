@@ -610,6 +610,91 @@ untouched. Suite CP-20..CP-29.
 memory (`checked: "bloom"`), a name that looks taken is CONFIRMED against both
 `users` and `pending_users` before the endpoint will say so (`checked: "db"`).
 
+## 7c. Phase 10 slice 10a — mandatory 2FA, shared limiters, AI guardrail audit
+
+### The 2FA mandate (`auth.mfa_gate`)
+
+⚠️ **The capability was already shipped; slice 10a added the ENFORCEMENT.**
+`pyotp` enrol/verify/disable, the login challenge, the step-up password check
+(audit A03-F8) and `SecurityPage.tsx` have existed since Phase 2, and
+`users.totp_secret` / `totp_enabled` were already columns. What did not exist
+was any reason for a privileged account to turn it on.
+
+`POST /auth/login` now has a **third** outcome:
+
+| password | role mandated | enrolled | deadline | outcome |
+|---|---|---|---|---|
+| ok | – | yes | – | `mfa_required` + `mfa_token` (unchanged) |
+| ok | no | no | – | `access_token` (unchanged) |
+| ok | yes | no | future | `access_token` + `mfa_enrollment_due` (banner) |
+| ok | yes | no | **passed** | **`enrollment_required` + `enroll_token`** |
+
+⚠️ **The enrolment token is scope-limited, and that is the whole control.**
+`_decode` matches `scope` exactly and `get_current_user` asks for `"access"`, so
+an `enroll` token opens only the three `/auth/2fa/*` routes that use
+`enroll_or_current_user` — **not** `/2fa/disable`, which keeps the ordinary
+dependency. Minting a normal access token there (the obvious shortcut) would
+turn "you must set up 2FA" into the way to skip 2FA, and the account would be
+both exempt and believed protected. Suite CR-05 is that assertion.
+
+Both knobs are `app_settings` rows, matching `mtc_required_category`:
+`mfa_required_roles` (default `admin,logistics,hod,qc_hod,auditor`) and
+`mfa_enforced_from` (ISO date). ⚠️ **Every uncertain branch resolves towards
+ACCESS** — no row, an unparseable date, an empty role list all mean warn-only.
+A bug in the rollout of a control must not lock a company out of its own
+inventory system.
+
+### `rate_buckets` — the cross-worker half of four limiters
+
+`deploy/Dockerfile.api` runs `uvicorn --workers 4`, and four limiters kept state
+in process memory, so each enforced **4× its configured limit**:
+
+| limiter | documented | actual on 4 workers |
+|---|---|---|
+| `rate_limit(n, w)` per-IP dependency | n | 4n |
+| `check_bucket` OTP budgets (per IP, per phone) | 3/hr | 12/hr |
+| `PenaltyBox` webhook HMAC bans | banned | banned on 1 worker of 4 |
+| `_totp_failures` second-factor attempts | 5 | **20** |
+
+The last is the worst: it is the ceiling on brute-forcing the second factor
+against a `_verify_totp` that accepts three codes at any instant
+(`valid_window=1`).
+
+**Postgres, not Redis** — operator ruling re-confirmed 2026-09-02, generalising
+the `login_attempts` mechanism rather than introducing a second idea of a shared
+counter. Two layers, not a replacement: the in-memory check runs first and costs
+nothing; the row makes the ceiling true across workers. Gated by
+`strict_limits_enabled()` so hermetic runs write no rows.
+
+⚠️ **It fails OPEN** (ruling Q1.2) — a throttle that takes sign-in down when its
+own storage hiccups is worse than the attack it prevents. Deliberately the
+opposite of the access matrix, which fails **closed**.
+
+⚠️ **`read_bucket_shared` vs `check_bucket_shared` is not a style choice.** The
+counting function INCREMENTS, so using it to ask "is this IP banned?" creates
+the ban it was asking about — the first invalid webhook signature answered 429
+instead of 403 until suite `limits` caught it. A test and a tally are different
+verbs.
+
+### `tests/ai_eval/` — the adversarial RAG audit
+
+Two tiers; **only Tier 1 gates a merge** (suite CQ). Tier 1 audits the finished
+*system prompt* — deterministic, no model — and therefore covers the retrieval
+path AND the fallback path at once. Tier 2 audits the *answer*, needs a live
+model, and is stochastic; it is a scored artefact on a schedule, because a
+flaky gate is one people re-run rather than read.
+
+Three ways it fails: a **leak** (no threshold — one is too many), a **broken
+canary** (a canary that drifted into an allowed chapter would pass forever), and
+a **policy change**.
+
+⚠️ **The policy pin closes a blind spot the structural check cannot see.** Tier 1
+compares the prompt's chapters against `allowed_sections(role)` — the same
+allowlist that built it — so a policy *widening* is self-consistent and
+invisible. Proved by negative control: granting a Store Keeper chapters 7 and 17
+failed **zero** structural checks. `cases/policy.yaml` pins the allowlists as
+data; superset test, so gaining a chapter fails and losing one does not.
+
 ## 8. Testing — the gates
 
 > 🔄 **2026-08-13 — the service tests run against their OWN database.**

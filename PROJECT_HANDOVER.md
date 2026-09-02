@@ -1532,6 +1532,58 @@ of them is a regression, not a new normal.
 > * **`SAP_INTEGRATION_QUESTIONNAIRE.md`** (repo root) is the scoping document
 >   for the legacy SAP ERP feed — Employee / Equipment / Material, read-only,
 >   one-way. No application code exists for it yet, deliberately.
+
+> **Updated 2026-09-02 — PHASE 10 SLICE 10a** (Tracks 4 + 1). Plan and locked
+> rulings in `PROPOSED_PHASE10_PLAN.md`; architecture in ARCHITECTURE §7c.
+>
+> * ⚠️ **THE PHASE 10 BRIEF WOULD HAVE REBUILT SHIPPED CODE.** Audited before
+>   planning: 2FA was already complete (pyotp, enrol/verify/disable, the login
+>   challenge, the step-up password check, `SecurityPage.tsx`, and the
+>   `totp_secret`/`totp_enabled` columns); the MTC chase sweep already existed
+>   in `health_monitor`; the branded PDF engine already existed in `exec_pdf`.
+>   Operator agreed the re-scope: **extend three tracks, build two.** Twilio and
+>   reportlab were dropped — Meta WhatsApp Cloud API and fpdf2 are already live,
+>   and a second vendor/renderer buys nothing.
+> * **Q1 ruling — POSTGRES, NOT REDIS, re-confirmed.** `rate_buckets` (alembic
+>   `d5b8c3f92a41`) generalises the `login_attempts` mechanism to the four
+>   limiters that were still per-process. On `--workers 4` each enforced **4x**
+>   its documented limit; the second-factor attempt budget was 5 documented / 20
+>   actual, against a `_verify_totp` that accepts three codes at any instant.
+>   ⚠️ **FAILS OPEN** — the opposite of the access matrix, which fails closed,
+>   and the two are meant to differ.
+> * ⚠️ **`read_bucket_shared` IS NOT A STYLE VARIANT OF `check_bucket_shared`.**
+>   The counting one INCREMENTS, so asking it "is this IP banned?" creates the
+>   ban — the first invalid webhook signature answered 429 instead of 403 until
+>   suite `limits` caught it. A test and a tally are different verbs.
+> * **2FA is mandatory for `admin, logistics, hod, qc_hod, auditor`**, 14-day
+>   grace, admin-reset recovery. ⚠️ **The `enroll`-scoped token opens ONLY
+>   `/auth/2fa/*` and NOT `/2fa/disable`.** Minting an ordinary access token for
+>   a user who must enrol would make "you must set up 2FA" the way to skip it,
+>   and the account would be exempt AND believed protected. Suite CR-05.
+>   ⚠️ Every uncertain branch in `mfa_gate` resolves towards ACCESS — no
+>   settings row, a bad date, an empty role list all mean warn-only. A bug in
+>   the rollout of a control must not lock the company out.
+> * **`tests/ai_eval/` — Tier 1 is a hard gate (suite CQ), Tier 2 is a scored
+>   artefact.** Wiring the stochastic half into CI would make the build flaky,
+>   and a flaky gate is one people re-run rather than read.
+> * ⚠️ **THE POLICY PIN EXISTS BECAUSE THE STRUCTURAL CHECK IS SELF-REFERENTIAL.**
+>   Tier 1 compares a prompt's chapters against `allowed_sections(role)` — the
+>   same allowlist that built it — so a WIDENING is invisible to it. Negative
+>   control: granting a Store Keeper chapters 7 and 17 failed **zero**
+>   structural checks. `cases/policy.yaml` pins the allowlists as data.
+> * 📌 **OPEN FINDING, NOT A REGRESSION — Tier 2 security scored 43% against a
+>   95% target** (llama3.1:8b, 2026-09-02). Tier 1 was 24/24 with **zero
+>   leaks** on the same run, so nothing forbidden reached the model. The misses
+>   are the model preferring to ANSWER an out-of-scope question: partly from
+>   adjacent ALLOWED chapters (a Store Keeper's own §10/§11 define
+>   `force_closed`, so that one is a question about what the manual tells whom),
+>   and partly by CONFABULATION — asked "what is on the Service Health card?"
+>   it described one, having provably never been shown chapter 7. The second is
+>   a groundedness failure and the fix is prompt work. **Deliberately not
+>   bundled into the slice that built the measuring instrument**, and the
+>   threshold was deliberately NOT lowered to make it green.
+> * **Gates:** service tests **2126/0** (was 2102/0) · E2E 125/0 · legacy 599/0
+>   · parity 5/5 on a clean cut · alembic single head `d5b8c3f92a41`.
 >   * The receipt block was traded for a **chase-up to Logistics**
 >     (`quality.warn_mtc_missing`) — without that the ruling deletes a control
 >     rather than moving it.

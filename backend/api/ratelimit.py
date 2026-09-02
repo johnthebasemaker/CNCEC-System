@@ -82,10 +82,25 @@ def _client_ip(request: Request) -> str:
 
 def rate_limit(max_calls: int, window_seconds: int):
     """FastAPI dependency: at most `max_calls` per `window_seconds` per client
-    IP per endpoint path. Raises 429 (with Retry-After) when exceeded."""
+    IP per endpoint path. Raises 429 (with Retry-After) when exceeded.
+
+    TWO LAYERS since 2026-09-02. The in-memory bucket trips first and costs
+    nothing; the `rate_buckets` row is what makes the ceiling true across all
+    four uvicorn workers instead of 4x the configured limit. The shared half is
+    a no-op unless `strict_limits_enabled()` — see check_bucket_shared.
+    """
     async def _dep(request: Request):
         check_bucket(f"{_client_ip(request)}:{request.url.path}",
                      max_calls, window_seconds)
+        if strict_limits_enabled():
+            # Imported lazily: db.py imports config, and a module-level import
+            # here would put the whole database stack behind every import of
+            # this module — including the ones in scripts that never open a
+            # connection.
+            from .db import SessionLocal
+            async with SessionLocal() as s:
+                await check_bucket_shared(s, ip_bucket_key(request),
+                                          max_calls, window_seconds)
     return Depends(_dep)
 
 
@@ -324,3 +339,177 @@ async def clear_login_failures_shared(session, username: str) -> None:
         await session.commit()
     except Exception:
         await session.rollback()
+
+# ─── the SHARED bucket store (Phase 10 Track 4→1, 2026-09-02) ────────────────
+#
+# ⚠️ EVERYTHING ABOVE IS PER PROCESS, and `deploy/Dockerfile.api` runs
+# `uvicorn --workers 4`. So the real ceiling on each in-memory limiter was 4x
+# its configured limit:
+#
+#   rate_limit(n, w) per-IP dependency ....... 4 x n
+#   check_bucket() identity-keyed budgets .... 4 x n
+#   PenaltyBox webhook bans .................. the ban held on 1 worker of 4
+#   auth._totp_failures (2FA attempts) ....... 4 x 5 = 20 codes per window
+#
+# The last is the worst: it is the ceiling on brute-forcing the SECOND FACTOR,
+# and `_verify_totp` runs at valid_window=1, so three 6-digit codes are
+# acceptable at any instant.
+#
+# `login_attempts` solved exactly this for the per-account login budget and its
+# migration recorded WHY Postgres rather than Redis. This generalises that
+# mechanism rather than introducing a second idea of what a shared counter is.
+#
+# ⚠️ TWO LAYERS, NOT A REPLACEMENT. The in-memory check still runs first: it
+# costs nothing and trips inside a hot worker before any query happens. The row
+# is what makes the ceiling true across all four workers.
+#
+# ⚠️ FAILS OPEN (operator ruling Q1.2, 2026-09-02). Every function here
+# swallows storage errors and ALLOWS the request. A throttle that takes sign-in
+# down when its own storage hiccups is worse than the attack it prevents. Note
+# this is deliberately the opposite of the access matrix, which fails CLOSED —
+# an unknown route is refused, an unavailable throttle is not enforced. They are
+# different decisions about different things.
+#
+# ⚠️ AND IT IS GATED BY `strict_limits_enabled()`, like everything else here.
+# In hermetic runs (GI_DOTENV=0 — service_tests, Playwright, CI) the shared
+# layer is a no-op, so 2,100 committing tests do not each write a bucket row.
+# The suites that test THE LIMITS force it on with GI_FORCE_STRICT_LIMITS=1.
+
+_BUCKET_TOUCH = """
+    INSERT INTO rate_buckets (bucket_key, window_start, hits)
+    VALUES (:k, CURRENT_TIMESTAMP, 1)
+    ON CONFLICT (bucket_key) DO UPDATE SET
+        -- A stale window is RESTARTED, not decayed: the budget is "n hits
+        -- within w seconds", not a leaky bucket. Same semantics as
+        -- login_attempts, so the two cannot drift in behaviour.
+        window_start = CASE
+            WHEN rate_buckets.window_start < CURRENT_TIMESTAMP - (:w * INTERVAL '1 second')
+            THEN CURRENT_TIMESTAMP ELSE rate_buckets.window_start END,
+        hits = CASE
+            WHEN rate_buckets.window_start < CURRENT_TIMESTAMP - (:w * INTERVAL '1 second')
+            THEN 1 ELSE rate_buckets.hits + 1 END
+    RETURNING hits,
+        EXTRACT(EPOCH FROM (window_start + (:w * INTERVAL '1 second')
+                            - CURRENT_TIMESTAMP))::int AS retry_after
+"""
+
+
+async def check_bucket_shared(session, key: str, max_calls: int,
+                              window_seconds: int,
+                              message: str = "too many requests — please slow down"
+                              ) -> None:
+    """Cross-worker sliding window on an arbitrary key. Raises 429 when full.
+
+    ⚠️ COUNTS THE CURRENT REQUEST, then refuses if that put it over. The
+    in-memory `check_bucket` checks-then-records, which is the same ordering
+    seen from outside: `max_calls` succeed and the next one is refused.
+    """
+    if not strict_limits_enabled() or not key:
+        return
+    from sqlalchemy import text as _text
+    try:
+        row = (await session.execute(_text(_BUCKET_TOUCH),
+                                     {"k": key, "w": window_seconds})).first()
+        await session.commit()
+    except Exception:
+        try:
+            await session.rollback()
+        except Exception:                                   # noqa: BLE001
+            pass
+        return          # fail open — storage trouble must not deny the request
+    if row and row[0] > max_calls:
+        raise HTTPException(429, message,
+                            headers={"Retry-After": str(max(1, int(row[1] or 1)))})
+
+
+async def read_bucket_shared(session, key: str,
+                             window_seconds: int) -> tuple[int, int] | None:
+    """(hits, seconds_remaining) for an OPEN window, else None. Reads only.
+
+    ⚠️ THIS EXISTS BECAUSE `check_bucket_shared` INCREMENTS. Using the counting
+    function to ASK "is this IP banned?" creates the ban it was asking about —
+    caught by suite `limits` on 2026-09-02, where the first invalid webhook
+    signature answered 429 instead of 403 because the ban check had opened the
+    ban. A test and a tally are different operations and need different verbs.
+    """
+    if not key:
+        return None
+    from sqlalchemy import text as _text
+    try:
+        row = (await session.execute(_text(
+            "SELECT hits, EXTRACT(EPOCH FROM (window_start + "
+            "(:w * INTERVAL '1 second') - CURRENT_TIMESTAMP))::int "
+            "FROM rate_buckets WHERE bucket_key = :k "
+            "  AND window_start > CURRENT_TIMESTAMP - (:w * INTERVAL '1 second')"),
+            {"k": key, "w": window_seconds})).first()
+    except Exception:
+        return None          # fail open, like everything else here
+    return (int(row[0]), max(1, int(row[1] or 1))) if row else None
+
+
+async def open_bucket_shared(session, key: str) -> None:
+    """Start (or restart) a window on `key` without counting a hit.
+
+    Used for a BAN, where the row's existence is the state rather than a tally.
+    """
+    if not key:
+        return
+    from sqlalchemy import text as _text
+    try:
+        await session.execute(_text(
+            "INSERT INTO rate_buckets (bucket_key, window_start, hits) "
+            "VALUES (:k, CURRENT_TIMESTAMP, 1) "
+            "ON CONFLICT (bucket_key) DO UPDATE SET "
+            "  window_start = CURRENT_TIMESTAMP, hits = 1"), {"k": key})
+        await session.commit()
+    except Exception:
+        try:
+            await session.rollback()
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
+async def clear_bucket_shared(session, key: str) -> None:
+    """Drop a bucket. Used where success ends a throttle immediately — a
+    correct TOTP code, like a correct password, must not leave the legitimate
+    owner waiting out a window an attacker filled."""
+    if not key:
+        return
+    from sqlalchemy import text as _text
+    try:
+        await session.execute(
+            _text("DELETE FROM rate_buckets WHERE bucket_key = :k"), {"k": key})
+        await session.commit()
+    except Exception:
+        try:
+            await session.rollback()
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
+async def sweep_rate_buckets(session, older_than_seconds: int = 86400) -> int:
+    """Delete buckets whose window closed long ago.
+
+    Called from the scheduler loop. Without it the table grows by one row per
+    distinct IP//path pair ever seen and never shrinks — which is fine for a
+    month and not fine for a year.
+    """
+    from sqlalchemy import text as _text
+    try:
+        res = await session.execute(_text(
+            "DELETE FROM rate_buckets WHERE window_start < "
+            "CURRENT_TIMESTAMP - (:s * INTERVAL '1 second')"),
+            {"s": older_than_seconds})
+        await session.commit()
+        return res.rowcount or 0
+    except Exception:
+        try:
+            await session.rollback()
+        except Exception:                                   # noqa: BLE001
+            pass
+        return 0
+
+
+def ip_bucket_key(request: Request) -> str:
+    """The key `rate_limit` uses, exposed so tests can compute it."""
+    return f"ip:{_client_ip(request)}:{request.url.path}"

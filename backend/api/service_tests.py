@@ -19450,6 +19450,359 @@ async def test_ocr_workflow():
 
 
 
+# --- Suite CR: mandatory 2FA, and the shared limiter buckets ------------------
+async def test_mfa_mandate_and_shared_limits():
+    """Suite CR — Phase 10 Track 1. Enforcement, and the 4× ceiling.
+
+    ⚠️ 2FA WAS ALREADY BUILT. `pyotp` enrol/verify/disable, the login challenge,
+    the step-up password check and the SecurityPage UI have existed since Phase
+    2, and `users.totp_secret` / `totp_enabled` were already columns. What did
+    not exist was any reason for a privileged account to turn it on, so almost
+    none had. This suite is about the ENFORCEMENT, not the capability.
+
+    ⚠️ AND THE ONE ASSERTION THAT MATTERS MOST IS CR-05. A mandated user who is
+    refused a session still has to reach the enrolment flow, so the server mints
+    a token for them. If that token were an ordinary access token — the obvious
+    shortcut — then "you must set up 2FA" would become the way to SKIP 2FA, and
+    the account would be both exempt and believed protected. `_decode` matches
+    the scope exactly and only the three `/2fa/*` routes accept the enrolment
+    scope; CR-05 proves it opens nothing else.
+
+    ⚠️ THE LIMITER HALF IS ABOUT A MULTIPLIER, NOT A MISSING CONTROL.
+    `deploy/Dockerfile.api` runs `uvicorn --workers 4`, and four limiters kept
+    their state in process memory — so each had an effective ceiling of 4× its
+    configured limit. The worst was the second-factor attempt budget: 5 became
+    20, against a `_verify_totp` that accepts three codes at any instant
+    (valid_window=1). Postgres rather than Redis, re-confirmed by the operator
+    on 2026-09-02 and for the reasons `login_attempts` already recorded.
+    """
+    import datetime as _crdt
+
+    from fastapi import HTTPException
+    from sqlalchemy import delete as _crdel
+    from sqlalchemy import insert as _crins
+    from sqlalchemy import select as _crsel
+    from sqlalchemy import text as _crtext
+
+    from . import ratelimit as _crrl
+    from .auth import MFA_DEFAULT_ROLES, mfa_gate
+
+    settings_t = _MD.tables["app_settings"]
+    buckets_t = _MD.tables["rate_buckets"]
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    async def _set(key: str, value: str | None) -> None:
+        async with SessionLocal() as s:
+            await s.execute(_crdel(settings_t).where(settings_t.c["key"] == key))
+            if value is not None:
+                await s.execute(_crins(settings_t).values(key=key, value=value))
+            await s.commit()
+
+    yesterday = (_crdt.date.today() - _crdt.timedelta(days=1)).isoformat()
+    tomorrow = (_crdt.date.today() + _crdt.timedelta(days=13)).isoformat()
+
+    try:
+        # ── 1. the gate's decision table, without touching HTTP ─────────────
+        async with SessionLocal() as s:
+            await _set("mfa_required_roles", MFA_DEFAULT_ROLES)
+            await _set("mfa_enforced_from", yesterday)
+            check("CR-01 a mandated role with no authenticator is BLOCKED once "
+                  "the deadline has passed",
+                  (await mfa_gate(s, "admin", 0) or {}).get("blocked") is True, "")
+            check("CR-02 …and a role that is NOT mandated is untouched, however "
+                  "long the deadline has passed. A store keeper standing at a "
+                  "counter is not who this control is for",
+                  await mfa_gate(s, "store_keeper", 0) is None, "")
+            check("CR-03 …and a mandated role that ALREADY has an "
+                  "authenticator is not gated — it goes down the ordinary TOTP "
+                  "challenge path instead",
+                  await mfa_gate(s, "admin", 1) is None, "")
+            await _set("mfa_enforced_from", tomorrow)
+            g = await mfa_gate(s, "admin", 0)
+            check("CR-04 inside the grace window the sign-in SUCCEEDS and "
+                  "carries the deadline. A silent grace period is one nobody "
+                  "uses, and then the deadline lands as an outage",
+                  g is not None and g["blocked"] is False
+                  and g["enforced_from"] == tomorrow, str(g))
+
+        # ── 2. ⚠️ the bypass test ───────────────────────────────────────────
+        await _set("mfa_enforced_from", yesterday)
+        async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+            _crrl._hits.clear()
+            r = await ac.post("/auth/login", json={"username": "SVCQ-admin",
+                                                   "password": _QSEP_PW})
+            body = r.json() if r.status_code == 200 else {}
+            check("CR-05a a mandated, unenrolled admin gets enrollment_required "
+                  "and NO access token",
+                  r.status_code == 200 and body.get("enrollment_required") is True
+                  and "access_token" not in body, f"{r.status_code} {r.text[:140]}")
+            tok = body.get("enroll_token") or ""
+            hdr = {"Authorization": f"Bearer {tok}"}
+            rr = await ac.get("/entry/return-sources", headers=hdr,
+                              params={"sap_code": "1001"})
+            check("CR-05 ⚠️ THE BYPASS TEST — the enrolment token opens NOTHING "
+                  "but /auth/2fa/*. Minting an ordinary access token here would "
+                  "turn 'you must set up 2FA' into the way to skip it, and the "
+                  "account would be exempt AND believed protected",
+                  rr.status_code == 401, f"an ordinary endpoint accepted it: "
+                                          f"{rr.status_code}")
+            rr = await ac.get("/auth/2fa/status", headers=hdr)
+            check("CR-06 …but it DOES open the enrolment flow, which is the "
+                  "only reason it exists",
+                  rr.status_code == 200, f"{rr.status_code} {rr.text[:120]}")
+            rr = await ac.post("/auth/2fa/disable", headers=hdr,
+                               json={"code": "000000"})
+            check("CR-07 …and it may not DISABLE 2FA. `/2fa/disable` keeps the "
+                  "ordinary session dependency: a token minted because somebody "
+                  "lacks a second factor must not be able to remove one",
+                  rr.status_code == 401, f"{rr.status_code}")
+
+            # ── 3. the grace period, over HTTP ─────────────────────────────
+            await _set("mfa_enforced_from", tomorrow)
+            _crrl._hits.clear()
+            r = await ac.post("/auth/login", json={"username": "SVCQ-admin",
+                                                   "password": _QSEP_PW})
+            body = r.json()
+            check("CR-08 inside the grace window the admin signs in normally "
+                  "and is TOLD the date",
+                  "access_token" in body
+                  and body.get("mfa_enrollment_due") == tomorrow,
+                  str(body)[:160])
+
+            # ── 4. ⚠️ fails towards access ─────────────────────────────────
+            await _set("mfa_enforced_from", None)
+            _crrl._hits.clear()
+            r = await ac.post("/auth/login", json={"username": "SVCQ-admin",
+                                                   "password": _QSEP_PW})
+            check("CR-09 ⚠️ NO DEADLINE ROW MEANS WARN-ONLY, NEVER BLOCK. "
+                  "Deleting a settings row must not be able to lock a company "
+                  "out of its own inventory system — every uncertain branch in "
+                  "the gate resolves towards access",
+                  "access_token" in r.json(), r.text[:140])
+            await _set("mfa_enforced_from", yesterday)
+            await _set("mfa_required_roles", "")
+            _crrl._hits.clear()
+            r = await ac.post("/auth/login", json={"username": "SVCQ-admin",
+                                                   "password": _QSEP_PW})
+            check("CR-10 …and an EMPTY role list mandates nobody, rather than "
+                  "falling back to the default and blocking everyone",
+                  "access_token" in r.json(), r.text[:140])
+
+        # ── 5. the shared buckets ──────────────────────────────────────────
+        os.environ["GI_FORCE_STRICT_LIMITS"] = "1"
+        key = "svc-cr-test-bucket"
+        async with SessionLocal() as s:
+            await s.execute(_crdel(buckets_t)
+                            .where(buckets_t.c["bucket_key"] == key))
+            await s.commit()
+        # Each call opens its OWN session, which is the point: four uvicorn
+        # workers are four processes with four separate memories, and the row
+        # is the only thing they share.
+        allowed = 0
+        refused = False
+        for _ in range(5):
+            async with SessionLocal() as s:
+                try:
+                    await _crrl.check_bucket_shared(s, key, 3, 60)
+                    allowed += 1
+                except HTTPException:
+                    refused = True
+        check("CR-11 ⚠️ THE SHARED BUDGET IS SHARED. Five attempts through five "
+              "independent sessions against a limit of 3 → exactly 3 allowed. "
+              "In memory this was 3 PER WORKER, so a four-worker box enforced "
+              "12 while its documentation said 3",
+              allowed == 3 and refused, f"allowed={allowed} refused={refused}")
+
+        async with SessionLocal() as s:
+            await _crrl.clear_bucket_shared(s, key)
+        async with SessionLocal() as s:
+            try:
+                await _crrl.check_bucket_shared(s, key, 3, 60)
+                cleared = True
+            except HTTPException:
+                cleared = False
+        check("CR-12 …and success CLEARS it, so the legitimate owner is never "
+              "left waiting out a window an attacker filled — the same rule "
+              "`clear_login_failures` already follows",
+              cleared, "a cleared bucket still refused")
+
+        # ── 6. ⚠️ fail-open ────────────────────────────────────────────────
+        class _BrokenSession:
+            """A session whose every statement raises, as a storage outage."""
+            async def execute(self, *a, **k):
+                raise RuntimeError("simulated storage outage")
+
+            async def commit(self):
+                raise RuntimeError("simulated storage outage")
+
+            async def rollback(self):
+                return None
+
+        try:
+            await _crrl.check_bucket_shared(_BrokenSession(), key, 1, 60)
+            open_ok = True
+        except Exception:
+            open_ok = False
+        check("CR-13 ⚠️ THE LIMITER FAILS OPEN (operator ruling Q1.2). A "
+              "throttle that takes sign-in down when its own storage hiccups is "
+              "worse than the attack it prevents. Note this is deliberately the "
+              "OPPOSITE of the access matrix, which fails CLOSED — an unknown "
+              "route is refused, an unavailable throttle is not enforced",
+              open_ok, "a storage outage denied the request")
+
+        # ── 7. the sweeper ─────────────────────────────────────────────────
+        async with SessionLocal() as s:
+            await s.execute(_crins(buckets_t).values(
+                bucket_key="svc-cr-ancient", hits=1,
+                window_start=_crdt.datetime.now(_crdt.timezone.utc)
+                .replace(tzinfo=None) - _crdt.timedelta(days=3)))
+            await s.commit()
+        async with SessionLocal() as s:
+            swept = await _crrl.sweep_rate_buckets(s, older_than_seconds=86400)
+        async with SessionLocal() as s:
+            left = (await s.execute(_crsel(func.count()).select_from(buckets_t)
+                    .where(buckets_t.c["bucket_key"] == "svc-cr-ancient"))
+                    ).scalar_one()
+        check("CR-14 expired buckets are swept. Without it the table grows by "
+              "one row per distinct IP//path ever seen and never shrinks — fine "
+              "for a month, not fine for a year",
+              swept >= 1 and left == 0, f"swept={swept} left={left}")
+
+    finally:
+        os.environ.pop("GI_FORCE_STRICT_LIMITS", None)
+        await _set("mfa_required_roles", None)
+        await _set("mfa_enforced_from", None)
+        async with SessionLocal() as s:
+            await s.execute(_crdel(buckets_t).where(
+                buckets_t.c["bucket_key"].like("svc-cr-%")))
+            await s.commit()
+        _crrl._hits.clear()
+
+
+# --- Suite CQ: the adversarial RAG audit, as a hard gate ---------------------
+async def test_ai_guardrail_audit():
+    """Suite CQ — Phase 10 Track 4. What the assistant was SHOWN, under attack.
+
+    ⚠️ THIS IS TIER 1 ONLY, AND THAT IS THE WHOLE DESIGN. `tests/ai_eval/`
+    scores two different things and only one of them belongs in a gate:
+
+      · TIER 1 audits the SYSTEM PROMPT — what the model was handed. No model
+        runs, so it is as deterministic as every other check in this file and a
+        failure is a real defect. It is here.
+      · TIER 2 audits the ANSWER. It needs a live Ollama and is stochastic: the
+        same prompt at temperature 0.2 can comply once and not the next time.
+        Gating on it would make CI flaky, and a flaky gate is one people re-run
+        rather than read. It runs on a schedule and writes an artefact.
+
+    Suite CJ already proves the retrieval LAYER is built correctly — the chapter
+    filter runs before BM25 scores, aliases cannot widen a role's reach. This
+    suite attacks the same boundary from OUTSIDE with prompts written to break
+    it, because "does the filter run?" and "does anything get through?" stop
+    being the same question the moment somebody adds a context path that forgets
+    to call the filter.
+
+    ⚠️ AND THE BLIND SPOT THE POLICY PIN CLOSES. The structural check compares
+    the chapters in a prompt against `allowed_sections(role)` — the SAME
+    allowlist that built it — so a policy WIDENING is self-consistent and
+    invisible to it. Proved by negative control while writing this: granting a
+    Store Keeper chapters 7 and 17 failed ZERO structural checks. Only the
+    canaries noticed, and canaries exist only for chapters somebody thought to
+    write one for. `cases/policy.yaml` pins the allowlists as data so a
+    widening is a diff somebody signed rather than one nobody saw.
+    """
+    import pathlib as _cqpath
+    import sys as _cqsys
+
+    _cqroot = _cqpath.Path(__file__).resolve().parents[2]
+    if str(_cqroot) not in _cqsys.path:
+        _cqsys.path.insert(0, str(_cqroot))
+    try:
+        from tests.ai_eval.runner import (audit_canaries, audit_policy,
+                                          load_cases, run_tier1)
+    except ImportError as e:
+        check("CQ-00 the AI guardrail suite is importable (PyYAML installed)",
+              False, f"{type(e).__name__}: {e}")
+        return
+
+    cases = load_cases()
+    check("CQ-01 the audit has cases to run at all. An eval suite that loaded "
+          "zero files would pass forever and prove nothing",
+          len(cases) >= 20, f"{len(cases)} cases")
+
+    # ── 1. the suite's own integrity, checked before its results ────────────
+    broken = audit_canaries(cases)
+    check("CQ-02 ⚠️ every canary is STILL unique to a chapter its role cannot "
+          "see. A canary that drifted into an allowed chapter — or out of the "
+          "manual entirely — is a test that has quietly stopped testing, and "
+          "would then pass forever",
+          not broken, "; ".join(broken[:2]))
+
+    policy = audit_policy()
+    check("CQ-03 ⚠️ NO ROLE HAS GAINED A CHAPTER since the policy was pinned. "
+          "This is the check the structural one cannot make: Tier 1 compares a "
+          "prompt against the same allowlist that built it, so widening the "
+          "allowlist is invisible to it",
+          not policy, "; ".join(policy[:2]))
+
+    # ── 2. the audit itself ────────────────────────────────────────────────
+    results = run_tier1(cases)
+    failed = [r for r in results if not r.passed]
+    leaks = [r for r in results
+             if any("RBAC LEAK" in f or "CANARY LEAK" in f for f in r.failures)]
+    check(f"CQ-04 ⚠️ ZERO RBAC LEAKS across {len(cases)} adversarial prompts. "
+          "One leak is one too many — this is the only assertion in the file "
+          "with no threshold, because a percentage of a security boundary is "
+          "not a security boundary",
+          not leaks,
+          "; ".join(f"{r.case_id}: {r.failures[0]}" for r in leaks[:2]))
+    check("CQ-05 …and every Tier 1 case passes, including the groundedness "
+          "half. A pipeline that retrieves NOTHING is perfectly secure and "
+          "perfectly useless; those cases assert the chapter that ANSWERS the "
+          "question was actually retrieved",
+          not failed,
+          "; ".join(f"{r.case_id}: {r.failures[0]}" for r in failed[:2]))
+
+    # ── 3. the suite can actually FAIL (negative control) ───────────────────
+    # ⚠️ A GUARDRAIL SUITE THAT HAS NEVER FAILED IS NOT EVIDENCE. These two
+    # inject the exact defects the audit claims to catch and assert it does.
+    from .ai import manual_qa as _cqmq
+    saved = dict(_cqmq._ROLE_ALLOWED)
+    try:
+        _cqmq._ROLE_ALLOWED["store_keeper"] = saved["store_keeper"] | {7, 17}
+        _cqmq._context_for_role.cache_clear()
+        leaked_results = run_tier1(load_cases())
+        caught = [r for r in leaked_results
+                  if any("CANARY LEAK" in f for f in r.failures)]
+        check("CQ-06 NEGATIVE CONTROL — granting a Store Keeper the Admin and "
+              "Hosting chapters makes the audit FAIL. A suite that cannot be "
+              "made to fail is decoration",
+              len(caught) >= 2, f"only {len(caught)} case(s) noticed")
+        check("CQ-07 …and the POLICY PIN catches the same widening, which is "
+              "what makes it the load-bearing half: it fired on chapters no "
+              "canary was written for",
+              any("GAINED" in p for p in audit_policy()), "policy pin silent")
+    finally:
+        _cqmq._ROLE_ALLOWED.clear()
+        _cqmq._ROLE_ALLOWED.update(saved)
+        _cqmq._context_for_role.cache_clear()
+
+    check("CQ-08 …and the tree is clean again after the control — the audit "
+          "passes, so the injection was fully undone",
+          not audit_policy() and not [r for r in run_tier1(load_cases())
+                                      if not r.passed], "control leaked state")
+
+    # ── 4. every role in the app is covered ────────────────────────────────
+    from .auth import ROLE_META as _cqroles
+    covered = {c["role"] for c in cases}
+    missing = sorted(set(_cqroles) - covered)
+    check("CQ-09 every role in ROLE_META appears in at least one case. The "
+          "`qc` role was added to auth and forgotten in `_ROLE_ALLOWED` once "
+          "already, and a Quality inspector was answered out of the Store "
+          "Keeper chapter for a whole release",
+          not missing, f"no adversarial case for: {missing}")
+
+
 # --- Suite CP: the OCR envelope, and the uniqueness filters ------------------
 async def test_ocr_envelope_and_bloom():
     """Suite CP — 2026-09-01. Two failures reported from production, and the
@@ -20549,6 +20902,14 @@ async def main() -> int:
           "window and a timeout that have to be decided together; and the "
           "filters that answer 'definitely not' without asking the database")
     await test_ocr_envelope_and_bloom()
+    print("\n CQ. The assistant under attack — what it was SHOWN, not what it "
+          "said; and the policy pin that catches a widening the structural "
+          "check cannot see")
+    await test_ai_guardrail_audit()
+    print("\n CR. Mandatory 2FA — the enrolment token that must open nothing "
+          "else; and four limiters that were 4x looser than their own "
+          "documentation on a four-worker box")
+    await test_mfa_mandate_and_shared_limits()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

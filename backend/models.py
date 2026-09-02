@@ -1817,6 +1817,44 @@ class LoginAttempts(Base):
     failures = Column(Integer, nullable=False, server_default=text('0'))
 
 
+class RateBuckets(Base):
+    """The cross-worker half of every OTHER limiter (alembic d5b8c3f92a41).
+
+    `LoginAttempts` above made the per-ACCOUNT login throttle true across
+    workers. This generalises the same mechanism to the four that were still
+    per-process, and therefore had an effective ceiling of 4x their configured
+    limit under `uvicorn --workers 4`:
+
+      · the per-IP `rate_limit(n, w)` dependency on the public auth endpoints
+      · identity-keyed `check_bucket` budgets (one OTP allowance per PHONE
+        NUMBER, regardless of how many source IPs an attacker rotates through)
+      · `PenaltyBox` IP bans on the WhatsApp webhook
+      · the per-account TOTP attempt budget — the most serious of the four,
+        because it is the ceiling on brute-forcing the SECOND FACTOR and
+        `_verify_totp` accepts three codes at any instant (valid_window=1)
+
+    ⚠️ ONE TABLE, MANY LIMITERS. `bucket_key` carries its own namespace
+    ("ip:…:/auth/login", "totp:jsmith", "otp:+966…", "ban:…"). They share the
+    window algorithm exactly and differ only in what they count, so separate
+    tables would be four copies of one `ON CONFLICT DO UPDATE`.
+
+    ⚠️ POSTGRES, NOT REDIS — operator ruling re-confirmed 2026-09-02. And it
+    FAILS OPEN: every read and write swallows storage errors and allows the
+    request, because a throttle that takes sign-in down when its own storage
+    hiccups is worse than the attack it prevents. That is the opposite of the
+    access matrix, which fails CLOSED; the two are different decisions and are
+    meant to differ.
+    """
+    __tablename__ = "rate_buckets"
+    __table_args__ = (
+        Index("ix_rate_buckets_window", "window_start"),
+    )
+    bucket_key = Column(Text, primary_key=True)
+    window_start = Column(DateTime, nullable=False,
+                          server_default=text('CURRENT_TIMESTAMP'))
+    hits = Column(Integer, nullable=False, server_default=text('1'))
+
+
 class AssetUnits(Base):
     """One row per PHYSICAL THING (alembic e9f2a4c68b71).
 

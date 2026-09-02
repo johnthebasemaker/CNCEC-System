@@ -87,3 +87,11 @@ qrcode>=7.4
 # PyJWT (new-stack login JWT), asyncpg/greenlet (async PG driver), and alembic
 # (new-stack schema migrations) moved to backend/requirements.txt — pulled in
 # via the -r include above.
+
+# --- Phase 10 Track 4: the adversarial RAG audit (tests/ai_eval/) ------------
+# Case files are YAML rather than Python so a non-engineer can add an
+# adversarial prompt, and so `cases/policy.yaml` reads as a signed statement of
+# who may see which chapter rather than as code. Already an indirect dependency
+# of several installed packages; declared here because a test gate must not
+# rely on somebody else's transitive pin.
+PyYAML>=6.0
