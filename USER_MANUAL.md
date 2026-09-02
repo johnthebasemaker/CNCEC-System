@@ -187,8 +187,9 @@ reaches every workspace deliberately, for support.
 | 🛡️ Safety & People → PPE Usable Time | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | 👤 Safety & People → Employees | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ |
 | 🗂️ Records (Inventory, ledgers, POs, PRs) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ (read) | ✅ |
+| 💰 Valuation & 30-Day Burn (§24.3) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ |
 | 🛡️ Admin Portal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| 📄 Documents · 🔐 Security · 💬 Feedback | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 📄 Documents · 🔐 Security · 🎓 Training · 💬 Feedback | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 **Where each role lands after signing in:** Store Keeper → Entry Log → Issue
 Stock · Warehouse User → Warehouse Portal · Supervisor → Supervisor Portal ·
@@ -5437,4 +5438,225 @@ full manual alongside.
 If you are handing the system over to a new team, print the role booklets rather
 than this complete document. People read twenty relevant pages and skip two
 hundred.
+
+# 24. Phase 10 — Security, Training and the Board Brief
+
+Four things changed. One of them will stop you signing in the way you always
+have, so read 24.1 even if you read nothing else.
+
+## 24.1 🔐 Two-factor authentication is now required for some roles
+
+If your role is **Admin, Logistics, HOD, Head of Qualities or Auditor**, your
+account now needs an authenticator app as well as a password.
+
+**Nothing changes for Store Keepers, Supervisors, Warehouse Operators or
+Quality Control inspectors.** They may still turn 2FA on voluntarily from
+🔐 Security, and it is a good idea, but nobody will make them.
+
+### 24.1.1 The 14-day grace period
+
+You are not locked out on the day this ships. For fourteen days after the
+change goes live, a mandated account signs in exactly as before and sees a
+banner naming the date after which it will not. **On and after that date, a
+mandated account with no authenticator cannot get a session at all** — it is
+sent to the setup screen instead.
+
+Your administrator sets both the list of roles and the date, so if the deadline
+is unworkable for your site, ask them rather than working around it.
+
+### 24.1.2 Setting it up — three minutes
+
+You need a phone with an authenticator app: Google Authenticator, Microsoft
+Authenticator and 1Password all work.
+
+1. Go to **🔐 Security** (it is in the Account group at the bottom of the
+   sidebar) and choose **Set up 2FA**.
+2. **Re-enter your password.** This is deliberate: it means somebody who has
+   borrowed your open laptop cannot attach *their* phone to *your* account.
+3. Scan the square code with the app. If your phone cannot scan it, copy the
+   text code underneath instead.
+4. Type the six-digit number the app shows and confirm.
+
+From then on, signing in asks for your password and then that six-digit number.
+The number changes every thirty seconds; typing the previous one is fine for a
+few seconds after it rolls over.
+
+### 24.1.3 If you are past the deadline and not set up
+
+You will not see the normal screens. You will see the setup panel instead, and
+you can complete it right there — password, scan, six digits — and then sign in
+again. **You are not locked out; you are held at the door until the second lock
+is fitted.**
+
+### 24.1.4 If you lose your phone
+
+**Ask an Admin to reset your 2FA.** There are no printed backup codes on
+purpose: a backup code is a second password that lives on a piece of paper, and
+this company has an administrator who can be reached. The reset is recorded in
+the audit log with who did it and when.
+
+### 24.1.5 Five wrong codes
+
+Five wrong codes in fifteen minutes and the account pauses for a few minutes.
+It **throttles, it never locks** — nobody has to be called, and the pause
+clears on its own. Getting it right immediately ends the pause.
+
+## 24.2 🎓 Training — the new tab, and what it does to the OCR upload
+
+**🎓 Training** now sits in the Account group beside 🔐 Security. Everybody has
+it; what it contains depends on your role.
+
+### 24.2.1 Watching a tutorial
+
+Open **🎓 Training**. Each module shows a title, whether it is required for your
+role, and — once your administrator has published the videos — a player.
+
+**Pick your language.** Tutorials are recorded in **English, Tamil, Tanglish
+(Tamil spoken in Latin script) and Arabic**. Choose whichever you follow most
+easily; the system records which one you watched, and no language counts for
+less than another.
+
+Watch it. When you have seen **at least 90%**, the **"I have watched and
+understood this"** button becomes available. Pressing it records your name, the
+date and the version you watched.
+
+> **You cannot acknowledge a video you have not watched**, and the button stays
+> disabled until you have. A register full of tick-boxes pressed on arrival is
+> worse than an empty one, because somebody would eventually produce it as
+> proof of training that never happened.
+
+If a module says **"Not published yet"**, the videos have not been uploaded.
+There is nothing to watch and nothing to acknowledge; that is not your problem
+to solve.
+
+### 24.2.2 The soft gate on the consumption-form upload
+
+The first time you press **Photograph or upload** on the Execution page without
+having completed the OCR tutorial, a panel appears offering two choices.
+
+| Choice | What happens |
+|---|---|
+| **Watch now** | Takes you to 🎓 Training. Nothing is uploaded. |
+| **Watch later & continue** | **Your upload proceeds immediately.** The deferral is recorded. |
+
+> ⚠️ **Nothing is ever blocked.** You are standing in a plant holding a filled
+> form; a video must not stop you filing it. "Watch later & continue" carries
+> straight on with the upload you asked for — the click is not wasted and you
+> do not have to press it twice.
+>
+> What "Watch later" is not is invisible. It is counted, and your HOD sees the
+> count next to your name. The point is that somebody can have a conversation
+> with you, not that the system can refuse you.
+
+Printing a **blank** form is never gated at all — the tutorial is about filling
+one in, so it has no business standing between you and a sheet of paper.
+
+### 24.2.3 For HODs — the compliance tab
+
+An HOD or Admin opening 🎓 Training sees a second tab, **Team compliance**.
+
+It lists **everybody whose role requires the module**, not merely the people who
+have opened it — so somebody who has never touched it appears as "Not started"
+rather than being absent from the list. That absence is the thing worth seeing.
+
+Each person shows Not started / Started / Acknowledged, and how many times they
+have deferred.
+
+### 24.2.4 When a tutorial is re-recorded
+
+If the workflow changes and your administrator publishes a new version,
+**everybody must watch and acknowledge it again**. Your old acknowledgement is
+not deleted — "watched version 1 on that date" stays true and stays in the
+record — it simply no longer counts for the new version.
+
+## 24.3 💰 Site-Wide Valuation and 30-Day Burn
+
+**Who:** HOD (own site), Auditor and Admin (all sites).
+
+A one-page, board-ready PDF answering two questions: what the material on the
+shelves is worth, and how fast it is being consumed. Available as a download
+alongside the Executive Summary.
+
+It shows: stock value, the 30-day consumption value and its per-day rate, months
+of cover at that rate, a breakdown per site, and the highest-value lines
+consumed in the window.
+
+> ⚠️ **This is not the 🔥 Burn Rate Forecast.** The HOD Portal has carried a
+> Burn Rate Forecast chart for a long time and it answers a different question:
+> *how many days of stock is left before we run out*, in units, per material.
+> This report answers *what is the stock worth and what is it costing us*, in
+> SAR, across the site. If you want to know when to reorder, use the Burn Rate
+> Forecast. If you are writing a board paper, use this.
+
+### 24.3.1 ⚠️ "Not Valued (N items)" — read this before quoting the number
+
+**A material with no unit cost on the inventory master is NOT counted as worth
+zero. It is counted separately and named.**
+
+This matters more than it sounds. If un-costed drums were multiplied by a cost
+of zero and added in, a site holding four hundred of them would report exactly
+the same value as a site holding none — a number that is arithmetically correct
+and completely false, and one a board would act on.
+
+So the report shows:
+
+- the value of the **priced** lines,
+- **"Not Valued (N items)"** beside it, with how many units that covers,
+- the **coverage percentage** — how much of the list carries a price at all,
+- and a footnote saying the total is a **floor, not a total**.
+
+**If the coverage figure is low, the valuation is not wrong — it is
+incomplete, and it says so.** The fix is unit costs on the inventory master,
+which is Admin work, not a change to the report.
+
+### 24.3.2 Why the estimator's numbers sit in their own table
+
+The Material Estimator's figures appear at the bottom under **"stated
+separately"**, and they are **never added** to the value above them.
+
+They measure different things. The tables above are the live ledger of what is
+physically on the shelf today; the estimator seed is a frozen snapshot of what
+the estimate said the project would need. Adding them together would count the
+same material twice and produce a bigger number that means nothing.
+
+### 24.3.3 "Months of cover" and when it is blank
+
+Months of cover is the stock value divided by the daily burn. When nothing was
+consumed in the window it shows **n/a**, not zero and not infinity — a site that
+has consumed nothing has no meaningful runway, and printing one would be
+inventing a figure out of a division by zero.
+
+The per-day rate divides by the **full 30 days**, not by the days on which
+something was actually consumed. A site that worked eight days out of thirty
+would otherwise look four times busier than it is.
+
+## 24.4 🌓 Day and Night shift on execution entries
+
+When you open an execution entry there is now an optional **Shift** choice —
+**Day** or **Night**.
+
+It is optional, and leaving it blank does not block anything. Setting it does
+one useful thing: at 07:00 each morning the system checks which materials are
+staged for **today's day shift** and have no Material Test Certificate, and
+warns Logistics, the store keeper, the HOD, the QC and the Head of Qualities
+before the crew reaches the counter.
+
+Entries filed before this existed have no shift recorded and are simply not
+covered by that check. Nothing guesses which shift they were.
+
+> **Why not work it out from the clock?** Because an entry is filed when
+> somebody reaches a desk, not when the work happened. A night crew filing at
+> 06:40 would be counted as day shift on the strength of a timestamp nobody
+> looked at.
+
+## 24.5 What did not change
+
+- **Nothing about the MTC rule.** Material without a certificate can still be
+  received and still be sent to site; it still cannot be issued or consumed
+  there. See §22.1.
+- **Nothing about how consumption is filed.** The paper-first workflow of §4.10
+  is exactly as it was; the training gate sits beside it and never in it.
+- **Nothing you had already acknowledged, approved or posted.** No historical
+  record was rewritten by any part of this release.
+
 

@@ -2759,6 +2759,194 @@ been invisible to it, and chapter 21 is in every role's allowed set.
 
 ---
 
+## 14t. Mandatory 2FA (Phase 10 · slice 10a)
+
+**Where:** sign-in, and 🔐 Security.
+**Settings:** `mfa_required_roles` (default `admin,logistics,hod,qc_hod,auditor`)
+and `mfa_enforced_from` (ISO date) in Admin → Settings.
+
+### 14t.1 The three login outcomes
+
+**TC-MFA-01** — a NON-mandated role (store keeper, supervisor, warehouse, QC)
+with no authenticator signs in exactly as before. Nothing changed for them.
+
+**TC-MFA-02** — a mandated role with 2FA already on gets the ordinary TOTP
+challenge (`mfa_required` + a code box). Unchanged.
+
+**TC-MFA-03** — a mandated role, no authenticator, **deadline in the future**:
+sign-in SUCCEEDS and the response carries `mfa_enrollment_due`. A banner names
+the date. This is the grace period; it must not block.
+
+**TC-MFA-04** — a mandated role, no authenticator, **deadline passed**: no
+session. The enrolment panel appears instead.
+
+### 14t.2 ⚠️ The bypass test — do this one properly
+
+**TC-MFA-05** — take the `enroll_token` from TC-MFA-04 and call an ORDINARY
+endpoint with it (e.g. `GET /entry/return-sources`). It must be **401**.
+
+> This is the assertion that matters most in the whole slice. If the enrolment
+> token were an ordinary access token, "you must set up 2FA" would become the
+> way to skip 2FA — and the account would be both exempt and believed
+> protected. Suite CR-05 pins it; check it by hand at least once.
+
+**TC-MFA-06** — the same token DOES open `/auth/2fa/status`, `/auth/2fa/enroll`
+and `/auth/2fa/verify`, and does **not** open `/auth/2fa/disable`. A token
+minted because somebody lacks a second factor must not be able to remove one.
+
+**TC-MFA-07** — enrolling still asks for the password again, even inside this
+flow. A borrowed open laptop must not be able to attach a new phone.
+
+### 14t.3 ⚠️ It fails towards ACCESS
+
+**TC-MFA-08** — delete the `mfa_enforced_from` settings row. Every mandated
+account must sign in normally (warn-only). A deleted row must never be able to
+lock the company out of its own inventory system.
+
+**TC-MFA-09** — set `mfa_required_roles` to an empty string. Nobody is
+mandated. It must NOT fall back to the default and block everyone.
+
+**TC-MFA-10** — set `mfa_enforced_from` to nonsense (`"tomorrow"`). Warn-only
+again; a malformed date is not an outage.
+
+### 14t.4 Recovery and throttling
+
+**TC-MFA-11** — an Admin can reset another user's 2FA, and the reset is in the
+audit log. There are no printed backup codes, by decision.
+
+**TC-MFA-12** — five wrong codes inside fifteen minutes pauses the account for
+a few minutes and then clears on its own. It **throttles, never locks** — no
+administrator is in the recovery path.
+
+## 14u. The Training hub and the soft gate (Phase 10 · slice 10b)
+
+**Where:** 🎓 Training (Account group), and Execution → Upload a filled form.
+
+### 14u.1 ⚠️ The gate never blocks work
+
+**TC-TRN-01** — as an untrained supervisor, press **Photograph or upload**. The
+interstitial appears. Press **"Watch later & continue"**: the file dialog opens
+and the upload proceeds. **The click is not wasted and you must not have to
+press it twice.**
+
+**TC-TRN-02** — `GET /training/gate/ocr_upload` returns `allowed: true`
+*always*. Only `show_interstitial` varies. A soft gate that returned false
+would be a hard gate with extra steps.
+
+**TC-TRN-03** — ⚠️ **printing a BLANK form is not gated at all.** With the
+interstitial pending, "Print a consumption form" must still work. The gate
+wraps the upload ACTION, not the page — an earlier build wrapped the card and
+blocked an unrelated control.
+
+**TC-TRN-04** — the deferral is recorded. Check `/training/compliance` (as HOD)
+shows the count beside that person's name. The control is visibility, not
+refusal.
+
+### 14u.2 Watching and acknowledging
+
+**TC-TRN-05** — a module with no published asset says **"Not published yet"**
+and the acknowledge button is unavailable. `POST /training/acknowledge` returns
+409.
+
+**TC-TRN-06** — acknowledging before watching is refused with a message naming
+the 90% bar.
+
+**TC-TRN-07** — progress is **monotonic**. Post `watched_seconds: 280`, then
+`10`. It must still read 280 — a late beacon, or a second tab restarting the
+video, must not erase what somebody watched.
+
+**TC-TRN-08** — after ≥ 90%, acknowledging succeeds, writes an audit row, and
+clears the interstitial.
+
+**TC-TRN-09** — language options are `en`, `ta`, `ta-Latn` (Tanglish) and `ar`.
+An unknown code is refused with 422 rather than creating a track nothing plays.
+
+### 14u.3 ⚠️ The version bump re-certifies everybody
+
+**TC-TRN-10** — acknowledge a module, then `POST /training/modules/{key}/bump`.
+The interstitial must come back for the same user.
+
+**TC-TRN-11** — the OLD compliance row is still in the table. "Watched v1 on
+that date" stays true and stays auditable; it simply stops matching.
+
+### 14u.4 The HOD dashboard
+
+**TC-TRN-12** — ⚠️ it lists **everybody whose role requires the module**, not
+only the people who have opened it. Somebody who has never touched it must
+appear as "Not started". Their absence would be the finding you most need.
+
+**TC-TRN-13** — a supervisor gets 403 on `/training/compliance`.
+
+## 14v. Valuation and 30-Day Burn (Phase 10 · slice 10b)
+
+**Where:** HOD Portal → the valuation download; `GET /hod/valuation` and
+`/hod/valuation/export.pdf`.
+
+**TC-VAL-01** — reachable by HOD, Auditor and Admin. A store keeper or
+supervisor gets 403.
+
+### 14v.1 ⚠️ Un-costed items are never valued at zero
+
+**TC-VAL-02** — on the current data **every** `Unit_Cost` is 0. The report must
+show `SAR 0.00` for the priced portion AND **"Not Valued (51 items)"** beside
+it, with the coverage percentage. It must NOT report a total that silently
+includes them at zero.
+
+> Test this by reading the PDF, not the JSON. The PDF is what reaches a board,
+> and the footnote calling the figure a **floor, not a total** must be on the
+> page.
+
+**TC-VAL-03** — give one SAP a real unit cost and re-run. That line moves into
+the valued column and the un-costed count drops by one.
+
+### 14v.2 The arithmetic that must not be "tidied"
+
+**TC-VAL-04** — the per-day burn divides by the **full 30 days**, not by the
+days that had activity. A site that worked eight days in thirty must not look
+four times busier than it is.
+
+**TC-VAL-05** — with no consumption in the window, months-of-cover reads
+**n/a** — not 0, not ∞. A site that consumed nothing has no runway.
+
+**TC-VAL-06** — the SME block is in its own table under "stated separately" and
+is **never added** to the ERP figures (rule 1a). Check the warning sentence is
+on the page.
+
+**TC-VAL-07** — ⚠️ this is **not** the 🔥 Burn Rate Forecast. Both exist, both
+say "burn", and they answer different questions. Confirm the manual's
+disambiguation note (§24.3) is present and that asking the assistant "what is
+the burn rate forecast" still reaches chapter 6.
+
+## 14w. Day/Night shift and the day-shift MTC chase (Phase 10 · slice 10b)
+
+**Where:** Execution → open an entry; and the 07:00 morning briefing.
+
+**TC-SHF-01** — the Shift field offers Day and Night and is **optional**.
+Leaving it blank files the entry normally.
+
+**TC-SHF-02** — the API rejects anything other than `Day`/`Night` (422). A
+free-text shift would defeat the probe's own filter.
+
+**TC-SHF-03** — ⚠️ entries with a NULL shift are **skipped** by the day-shift
+check, not treated as Day. Confirm a pre-Phase-10 entry raises no alert.
+
+**TC-SHF-04** — seed an uncertified Surface Shield on a Day entry dated today,
+then run `POST /admin/health/run`. Logistics, the site SK, the HOD and the QC
+get an in-app + WhatsApp alert; the Head of Qualities gets a separate **unscoped**
+one (a `qc_hod` carries `site_id = ''`, so every site-scoped row is invisible
+to them).
+
+**TC-SHF-05** — Logistics ALSO gets an email; nobody else does.
+
+**TC-SHF-06** — with `GI_SUPPLIER_CHASE_TO` set, a supplier message is written
+to the outbox at **`status='draft'`** and is **not sent**. Release it from the
+admin WhatsApp Console (`POST /admin/whatsapp/{id}/approve`); discarding marks
+it `discarded` rather than deleting the row.
+
+**TC-SHF-07** — ⚠️ **run the briefing twice and confirm ONE set of messages.**
+The daily loops previously fired in all four uvicorn workers. `dailyjob.claim`
+is what stops it; a regression here is silent and quadruples every alert.
+
 ## 15. Do's and Don'ts
 
 ### Do
@@ -2906,12 +3094,13 @@ regression, not a new normal.**
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1502 / 0** | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Backend service tests | **2188 / 0** (suites A…CS) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
-| Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
+| Playwright E2E | **125 / 125** | `cd tests/e2e && npm test` |
+| **AI guardrail — Tier 1** | **24 / 24, 0 leaks** | `.venv/bin/python -m tests.ai_eval.runner` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
-| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
+| Navigation route coverage | **50 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | Frontend build | clean | `npm run build --prefix frontend` |
 | Manual PDFs | **0 overlapping text pairs** | `.venv/bin/python build_manual_pdf.py --role all` |
 

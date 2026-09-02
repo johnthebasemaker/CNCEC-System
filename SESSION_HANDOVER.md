@@ -1,7 +1,31 @@
 # SESSION HANDOVER — read this first, then `PROJECT_HANDOVER.md`
 
-> **Updated 2026-08-13** by the workflow-polish and test-isolation pass
-> (branch `feat/workflow-polish-and-test-isolation`).
+> **Updated 2026-09-03** by the Phase 10 documentation sweep
+> (branch `chore/phase10-docs`). ⚠️ **Phases 9 and 10 have both shipped since
+> the 2026-08-13 body of this file was written** — everything below the next
+> block is still accurate about the things it describes, but it does not know
+> about the paper-first OCR workflow, mandatory 2FA, the training hub or the
+> board brief. For those, read `docs/PROJECT_STATUS.md` §0b/§0c first.
+>
+> **Where Phase 9 and 10 are written up:**
+>
+> | Topic | Read |
+> |---|---|
+> | What shipped, per phase, with the bugs each one surfaced | `docs/PROJECT_STATUS.md` §0b, §0c |
+> | The ten Phase 10 rulings that must not be "improved" | `PROJECT_HANDOVER.md` → *Phase 10 rulings, LOCKED* |
+> | The vision envelope, the orphan heartbeat, Bloom filters, `rate_buckets`, `dailyjob` | `docs/ARCHITECTURE.md` §7a–§7d |
+> | What a USER sees | `USER_MANUAL.md` §21.12–§21.13 (Phase 9) and §24 (Phase 10) |
+> | The AI guardrail audit | `tests/ai_eval/README.md` |
+>
+> **Three production bugs were found by building on the code rather than by
+> looking for them, and all three shared a cause — `uvicorn --workers 4`:**
+> the OCR orphan sweep reaped other workers' live jobs; three daily loops
+> dispatched four copies of every message; and four rate limiters were 4×
+> looser than their own documentation. If you add anything that runs on a
+> timer or holds state in memory, assume four of it.
+>
+> *(Original note, 2026-08-13 — the workflow-polish and test-isolation pass,
+> branch `feat/workflow-polish-and-test-isolation`.)*
 > The project is **feature-complete, stable and security-audited**.
 > Every live gate is green. **Nothing is mid-flight — there is no half-finished
 > work to pick up.**
@@ -488,14 +512,15 @@ A change that lowers any of these is a regression, not a new normal.
 
 | Gate | Baseline | Command |
 |---|---|---|
-| Backend service tests | **1502 / 0** (suites A…BX, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **90 / 90** | `cd tests/e2e && npm test` |
+| Backend service tests | **2188 / 0** (suites A…CS, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **125 / 125** | `cd tests/e2e && npm test` |
+| **AI guardrail — Tier 1** | **24 / 24, 0 leaks** (also inside suite CQ) | `.venv/bin/python -m tests.ai_eval.runner` |
 | SME UI math | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
-| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
+| Navigation route coverage | **50 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | Frontend | `tsc -b` + build + `oxlint` clean | `npm run build --prefix frontend` |
-| Alembic | single head **`c7a93e5d2b18`** | `cd backend && alembic heads` |
+| Alembic | single head **`e7f2a4c916b8`** | `cd backend && alembic heads` |
 | **Manual PDFs** | **0 overlapping text pairs** × 8 booklets | `.venv/bin/python build_manual_pdf.py --role all` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 

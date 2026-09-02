@@ -1,4 +1,4 @@
-# PROJECT STATUS — resume here (updated 2026-08-24 · Phase 8 COMPLETE · deployment PAUSED)
+# PROJECT STATUS — resume here (updated 2026-09-03 · Phase 10 COMPLETE · deployment PAUSED)
 
 > 🔄 **2026-08-13 — the backend suite runs against its OWN database.**
 > `gihub_svctest`, rebuilt from `gi_database.db` before the engine is created,
@@ -25,6 +25,65 @@ run log — the project's full history lives THERE, not here).
 Legacy/SME rules: [`handoff.md`](../handoff.md) (SME Canon).
 
 ---
+
+## 0c. Phase 10 — COMPLETE (2026-09-02 → 2026-09-03)
+
+**Enterprise Security, Automated Analytics & Ecosystem Integration.** Three
+branches, all merged. Baselines now **service tests 2,188 / 0** (suites A…CS) ·
+**E2E 125** · legacy 599 · nav 50 · **AI guardrail Tier 1 24/24, 0 leaks** ·
+alembic head **`e7f2a4c916b8`**.
+
+> ⚠️ **The phase as briefed would have rebuilt shipped code.** The planning pass
+> (`PROPOSED_PHASE10_PLAN.md`) found 2FA already complete, the MTC chase sweep
+> already in `health_monitor`, and the branded PDF engine already in
+> `exec_pdf`. Operator agreed the re-scope: **extend three tracks, build two.**
+> Twilio and reportlab were dropped — Meta WhatsApp Cloud API and fpdf2 are
+> already live.
+
+| Slice | Branch | What shipped |
+|---|---|---|
+| pre | `fix/ocr-orphan-crash` | 🐛 the orphan sweep was reaping OTHER workers' live OCR jobs on a respawn; now heartbeat-based (`ai_jobs.worker_id` + `heartbeat_at`). `num_ctx` became a measurement (`ocr.estimate_image_tokens`) rather than a constant |
+| 10a | `feat/phase10-security-and-evals` | `tests/ai_eval/` — Tier 1 hard gate (suite CQ) + policy pin; mandatory 2FA for admin/logistics/hod/qc_hod/auditor with a 14-day grace and a scope-limited `enroll` token; `rate_buckets` giving the four per-process limiters a cross-worker half |
+| 10b | `feat/phase10-ecosystem` | 🐛 `services/dailyjob.py` — the atomic claim **three daily loops never had**; day-shift MTC chase (email to Logistics, WhatsApp DRAFT externally); the Valuation & 30-Day Burn board brief; the Training hub and its SOFT gate |
+| docs | `chore/phase10-docs` | this sweep — USER_MANUAL §24, ARCHITECTURE §7b–§7d, the CJ doc-drift needles, and the retrieval aliases that make §24 findable |
+
+**Three production bugs were found by building on top of the code, not by
+looking for them:**
+
+1. **The orphan sweep killed live jobs.** `UPDATE ai_jobs SET status='error'
+   WHERE status IN ('queued','running')` with no owner filter — correct for one
+   process, wrong for `--workers 4`. A single worker respawn failed the
+   in-flight OCR reads of the other three.
+2. **The daily loops fired four times a day.** Only `report_center` claimed its
+   work. The 07:00 briefing, the 16:00 digest and the Friday exec PDF each
+   dispatched in every worker, so every recipient got four copies — invisible in
+   dev (one worker) and in the tests (`GI_SCHEDULER=0`).
+3. **Four rate limiters were 4× looser than documented**, worst of all the
+   second-factor attempt budget (5 documented, 20 actual).
+
+📌 **Open, not a regression:** the AI assistant's Tier 2 generation score is
+**64%** against a 95% target (was 43% before the anti-confabulation prompt
+rule). Tier 1 is 24/24 with zero leaks on the same run, so nothing forbidden
+reaches the model — the gap is an 8B model preferring to answer rather than
+refuse. The lever is a larger chat model, not more prompt text. The threshold
+was deliberately not lowered.
+
+## 0b. Phase 9 — complete (2026-08-25 → 2026-09-01)
+
+**Paper-first OCR, QSEP gates, analytics.** Baselines at close: service tests
+2,064 / 0 · E2E 119 · legacy 599 · alembic head `a2c9f5e81b43`.
+
+| Slice | What shipped |
+|---|---|
+| 9a–9b | WBS numbers + canonical work types; the manpower planner's night-shift arithmetic (nights buy calendar time, not a smaller payroll) |
+| 9c–9d | the printed consumption form (QR + corner fiducials) and the **paper-first workflow** — supervisor → SK → HOD, with four colour layers (OCR grey → supervisor amber → SK red → HOD purple) and approval as the ONLY writer of lining consumption |
+| 9e–9f | Efficiency by Day (the running figure, and its two divisions by zero); "Labor" → "Manpower" on screen only — the JSON keys did not move |
+| post | `feat/optimization-and-fixes` — the OCR envelope (per-lane token budgets, a 900 s vision timeout, truncation salvage), Bloom filters, and the QSEP documentation correction |
+
+⚠️ **The QSEP audit found the code already correct and the DOCS wrong.**
+Material without an MTC can be received and sent to site; it cannot be issued or
+consumed there. `docs/ARCHITECTURE.md` had carried the pre-2026-08-12 sentence
+"MTC hard-block for Surface Shields receipts" for three phases.
 
 ## 0a. Phase 8 — complete (2026-08-20 → 2026-08-24)
 
@@ -88,18 +147,20 @@ kit: `docs/DEPLOY.md` + `deploy/`), plus one Cloudflare dashboard action for
 the native apps (§3.6). Locked rules + baselines:
 [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md).
 
-## 1. Gates (all green locally — 2026-08-13)
+## 1. Gates (all green locally — 2026-09-03)
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1502/0** (suites A…BX, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **90/90** (~37 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **2188/0** (suites A…CS, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **125/125** (~55 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| **AI guardrail — Tier 1** | **24/24, 0 leaks** (also runs inside suite CQ) | `.venv/bin/python -m tests.ai_eval.runner` |
+| AI guardrail — Tier 2 | 📌 **scored, NOT a gate** — security 64% vs a 95% target, false-refusal 0%. Stochastic; needs a live model | `… --tier2 --json scorecard.json` |
 | Legacy regression | **599/0** | `.venv/bin/python legacy/bug_check.py` |
 | Frontend | build + `tsc -b` + `oxlint` ✅ | `npm run build --prefix frontend` |
 | SME engine parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | SME UI math | **33/0** | `npm run test:ui-math --prefix frontend` |
-| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
-| Alembic | single head **`c7a93e5d2b18`** (QC rejection returns) | see ARCHITECTURE §8 |
+| Navigation route coverage | **50 routes, all claimed** | `npm run test:nav --prefix frontend` |
+| Alembic | single head **`e7f2a4c916b8`** (slice 10b: Shift + daily_job_runs + training) | see ARCHITECTURE §8 |
 | Derived-view parity | **5/5** ⚠️ fresh cutover / CI only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Release pipeline | desktop ✅ (dmg/exe/msi on v0.1.0–v1.0.1) · Android fixed (JDK 21) — next tag should attach the `.apk` | `git tag vX.Y.Z && git push origin vX.Y.Z` |
 
