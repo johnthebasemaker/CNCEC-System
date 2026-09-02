@@ -94,3 +94,18 @@ backups/
 # pattern is deliberately narrow rather than a blanket *.pdf.
 /PO#*.pdf
 /PR No *.pdf
+
+# ⚠️ OCR CALIBRATION FIXTURES — THE EXPECTATIONS ARE TRACKED, THE PAGES ARE NOT.
+#
+# `fixtures/ocr/` holds real signed company paperwork used to measure the vision
+# lanes: a delivery note naming a driver and a customer project, a consumables
+# register carrying thirty employees' names, a signed consumption form. They are
+# read locally and never committed.
+#
+# `fixtures/ocr_ground_truth.yaml` IS committed, and that is the point of the
+# split: the numbers a model is scored against have to be reviewable in a diff,
+# or a regression becomes an edit to the expectation. The pattern is narrow so
+# that adding a tracked file under fixtures/ later does not require a rule change.
+/fixtures/ocr/
+# The operator's drop folder for the same documents (PROPOSED_PHASE11_PLAN §7).
+/Trail Files/

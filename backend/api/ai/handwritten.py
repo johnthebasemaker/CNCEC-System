@@ -32,13 +32,52 @@ _DATE_FORMATS = [  # priority order; century_assumption for 2-digit years
 _DIGIT_FIXES = str.maketrans({"l": "1", "I": "1", "O": "0", "o": "0"})
 _YEAR_WINDOW = (-2, +1)  # relative to today, inclusive
 
+# ⚠️ THE SHIFT IS WRITTEN IN THE DATE BOX, AND IT USED TO BREAK THE DATE.
+#
+# The operator's real sheet (2026-09-02 trial) has `25|08|26 (Night)` in the
+# top-right corner, and the model reads it exactly: `"25/08/26 (Night)"`. Every
+# pattern in `_DATE_FORMATS` is anchored `^…$`, so that string matched none of
+# them and the whole page came back CRIT_DATE_UNPARSEABLE — a critical flag on
+# a date a human can read at a glance, caused by the crew being conscientious
+# enough to say which shift they were.
+#
+# ⚠️ AND CAPTURING IT DOES NOT WEAKEN RULING P10-9 — IT IS THE CASE P10-9 SAYS
+# DOES NOT EXIST FOR OLD ROWS. P10-9 forbids INFERRING `Shift` from a
+# timestamp, because an entry is filed when somebody reaches a desk and a night
+# crew filing at 06:40 would be recorded as day shift on a clock nobody looked
+# at. This is not a clock. It is the word the crew wrote on the paper, which is
+# the honest source P10-9 wants and has never had. Nothing here ever guesses:
+# no marker means no shift, and no shift means NULL.
+_SHIFT_RX = re.compile(r"[\(\[\s\-–—/]*\b(night|day)\b[\)\]\s\.]*$", re.I)
+
+
+def parse_shift(text: Any) -> Optional[str]:
+    """'Day' | 'Night' | None — from a marker WRITTEN on the paper, never inferred.
+
+    Returns None for anything that is not an unambiguous word, because a shift
+    is posted against a crew's hours and a wrong one moves work to people who
+    were asleep. See `_SHIFT_RX`'s comment for why this is not P10-9's
+    inference.
+    """
+    m = _SHIFT_RX.search(str(text or "").strip())
+    return m.group(1).capitalize() if m else None
+
+
+def strip_shift(text: Any) -> str:
+    """The date box with any trailing shift marker removed."""
+    return _SHIFT_RX.sub("", str(text or "").strip()).strip()
+
 
 def parse_form_date(text: Any, today: Optional[date] = None
                     ) -> tuple[Optional[str], Optional[str]]:
     """(date_iso, flag). DD/MM only — never swapped to MM/DD; a missing or
-    invalid date is CRIT_DATE_UNPARSEABLE, never guessed."""
+    invalid date is CRIT_DATE_UNPARSEABLE, never guessed.
+
+    A trailing shift marker is stripped first — see `_SHIFT_RX`. Read the shift
+    itself with `parse_shift()`; this function is only about the date.
+    """
     today = today or date.today()
-    s = str(text or "").strip().translate(_DIGIT_FIXES)
+    s = strip_shift(str(text or "").strip()).translate(_DIGIT_FIXES)
     for rx, century in _DATE_FORMATS:
         m = rx.match(s)
         if not m:
@@ -96,25 +135,105 @@ def apply_corrections(name: str) -> tuple[str, list[str]]:
 
 # ── 03 · row parsing: ditto marks + quantity rules ───────────────────────────
 _DITTO = {'"', "〃", ",,", "''", "`"}
+
+# ⚠️ THE SENTINEL, AND WHY THE GLYPHS ALONE WERE NOT ENOUGH (spec R2a, 2026-09-02).
+#
+# `ocr.CONSUMPTION_PROMPT` used to say "transcribe the GLYPH itself, never copy
+# the value down", and `qwen2.5vl:7b` does not do that. A ditto is not text to a
+# vision model — it is a mark meaning "same as above" — so the model normalises
+# it away and returns the EMPTY STRING. Measured on the operator's own 30-row
+# sheet (2026-09-02): 19 of 30 `Tank No.` cells, 14 of 30 `Name` cells and 8 of
+# 30 `Product Name` cells came back "".
+#
+# `""` is not in `_DITTO`, so this function fired on none of them and every one
+# of those cells stayed blank. The page had been read correctly and the details
+# were thrown away here — which is exactly what "the consumption paper details
+# are not coming through" meant.
+#
+# The prompt now asks for `<DITTO>`, a bracketed token a model will not tidy
+# away and handwriting cannot produce by accident.
+_DITTO_SENTINEL = "<ditto>"
 _DITTO_FIELDS = ("product_name_raw", "received_by", "tank_no", "work_type")
+
+# A row is REAL when somebody wrote on it (spec R2b).
+#
+# ⚠️ `sno` IS DELIBERATELY NOT IN THIS LIST, and leaving it in was a bug caught
+# by the first test of this function. The S.No. column is PRE-PRINTED on all 30
+# rows whether or not anyone filled them in — the spec says so itself ("S.No. is
+# always a printed number") — so counting it as evidence of a real row makes
+# every blank row on the sheet look populated, and the inference then walks the
+# last operator's name and material all the way down the empty tail of the page.
+# The guard would have been decorative.
+_ROW_QTY_FIELDS = ("qty_raw", "qty")
 _ADDITIVE_RX = re.compile(r"^\d+(\+\d+)+$")
 _LEADING_INT_RX = re.compile(r"^(\d+)")
 
 
+def _is_ditto(value: Any) -> bool:
+    """A marked ditto: one of the five glyphs, or the `<DITTO>` sentinel."""
+    s = str(value or "").strip()
+    return s in _DITTO or s.lower() == _DITTO_SENTINEL
+
+
+def _row_is_populated(row: dict) -> bool:
+    """Did somebody actually write on this row?
+
+    Either a quantity, or a ditto-able cell carrying real content — content
+    meaning neither blank nor itself a ditto, because a row of nothing but
+    ditto marks is evidence about the row above, not about this one.
+    """
+    if any(str(row.get(f) or "").strip() not in ("", "0")
+           for f in _ROW_QTY_FIELDS):
+        return True
+    return any(str(row.get(f) or "").strip() and not _is_ditto(row.get(f))
+               for f in _DITTO_FIELDS)
+
+
 def resolve_ditto(rows: list[dict]) -> None:
-    """In-place: ditto glyphs copy the RESOLVED value from the row above.
-    A ditto on the first row has no source → null + info flag."""
+    """In-place: ditto cells copy the RESOLVED value from the row above.
+
+    Three cases, and the third is new (spec R2b, 2026-09-02):
+
+      * a GLYPH or the `<DITTO>` sentinel → resolved, `ditto_fields` records it;
+      * an EMPTY cell on a POPULATED row → resolved, and additionally flagged
+        `INFO_DITTO_INFERRED`;
+      * an empty cell with no source above → null + `INFO_DITTO_WITH_NO_SOURCE`.
+
+    ⚠️ THE TWO RESOLVED CASES ARE FLAGGED DIFFERENTLY ON PURPOSE. `ditto_fields`
+    means the operator wrote a mark; `INFO_DITTO_INFERRED` means the cell came
+    back empty and we concluded one. A reviewer has to be able to tell what the
+    paper says from what we decided about it — collapsing them would make an
+    inference indistinguishable from evidence, which is the same mistake as
+    counting a skipped test as a pass.
+
+    ⚠️ AND THE INFERENCE ONLY EVER FILLS A GAP IN A ROW THAT EXISTS. A blank
+    cell on an otherwise empty row is an empty row; inheriting into it would
+    invent an issue to a person who was never there, against a material nobody
+    took. `_row_is_populated` is that guard and it is not optional.
+    """
     prev: dict = {}
     for row in rows:
+        real = _row_is_populated(row)
         for f in _DITTO_FIELDS:
-            v = str(row.get(f) or "").strip()
-            if v in _DITTO:
-                if f in prev and prev[f]:
-                    row[f] = prev[f]
-                    row.setdefault("ditto_fields", []).append(f)
-                else:
-                    row[f] = None
-                    row.setdefault("flags", []).append("INFO_DITTO_WITH_NO_SOURCE")
+            raw = row.get(f)
+            marked = _is_ditto(raw)
+            blank = str(raw or "").strip() == ""
+            if not marked and not (blank and real):
+                continue
+            if f in prev and prev[f]:
+                row[f] = prev[f]
+                row.setdefault("ditto_fields", []).append(f)
+                if not marked:
+                    flags = row.setdefault("flags", [])
+                    if "INFO_DITTO_INFERRED" not in flags:
+                        flags.append("INFO_DITTO_INFERRED")
+            elif marked:
+                # An explicit mark with nothing above it is a real anomaly on the
+                # paper and is reported. A blank with nothing above it is just a
+                # blank — saying "a ditto had no source" about a cell nobody
+                # marked would be inventing a defect to report.
+                row[f] = None
+                row.setdefault("flags", []).append("INFO_DITTO_WITH_NO_SOURCE")
         prev = {f: row.get(f) for f in _DITTO_FIELDS}
 
 
@@ -350,6 +469,11 @@ def process_batch(forms: list[dict], inventory: list[dict],
         d_flag = None
         if not d_iso:
             d_iso, d_flag = parse_form_date(form.get("date_text"), today)
+        # The shift the crew WROTE on the paper, if they wrote one (ruling Q13,
+        # 2026-09-02). Read from `date_text` even when `date_iso` was supplied,
+        # because the caller may have parsed the date itself and dropped the
+        # marker. None when nothing is written — never inferred (P10-9).
+        d_shift = parse_shift(form.get("date_text"))
         rows = [dict(r) for r in (form.get("rows") or [])]
         resolve_ditto(rows)
         for i, r in enumerate(rows, start=1):
@@ -364,6 +488,7 @@ def process_batch(forms: list[dict], inventory: list[dict],
                    "source_form_id": fid,
                    "source_row_no": int(r.get("source_row_no") or i),
                    "date_iso": d_iso,
+                   "shift": d_shift,
                    "received_by": r.get("received_by") or None,
                    "tank_no": r.get("tank_no") or None,
                    "work_type": r.get("work_type") or None,
@@ -416,6 +541,9 @@ def process_batch(forms: list[dict], inventory: list[dict],
             "blocked": sum(1 for r in out_rows if r["blocked"]),
             "substituted": sum(1 for r in out_rows if r.get("substituted_from")),
             "struck_through_excluded": struck,
+            # Surfaced on the batch as well as the row so the review screen can
+            # say "this sheet is a NIGHT sheet" once, rather than per line.
+            "shifts": sorted({r["shift"] for r in out_rows if r.get("shift")}),
             "batch_flags": batch_flags,
         },
     }

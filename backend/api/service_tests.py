@@ -6300,6 +6300,78 @@ async def test_ai_phase2_upgrades():
           d1 == "2026-07-13" and d2 == "2026-06-07" and d3 == "2026-07-18"
           and f4 == "CRIT_DATE_UNPARSEABLE" and f5 == "CRIT_DATE_UNPARSEABLE",
           f"{d1} {d2} {d3} {f4} {f5}")
+    # ── Phase 11 · spec R2a/R2b + the shift marker (2026-09-02) ─────────────
+    # ⚠️ EVERY ONE OF THESE IS A REAL SHAPE FROM THE OPERATOR'S OWN SHEET, not
+    # an invented case. `qwen2.5vl:7b` returns "" for a ditto cell rather than
+    # the glyph the old prompt asked for, so the resolver fired on nothing and
+    # 19 of 30 tank numbers, 14 of 30 names and 8 of 30 product names were
+    # silently dropped between a correct read and the review grid.
+    _dsh = hw.parse_form_date("25/08/26 (Night)", _today)
+    check("am: a shift marker in the date box no longer breaks the DATE. The "
+          "real sheet reads '25/08/26 (Night)' and every _DATE_FORMATS pattern "
+          "is anchored ^…$, so the whole page came back CRIT_DATE_UNPARSEABLE "
+          "because the crew said which shift they were",
+          _dsh == ("2026-08-25", None), str(_dsh))
+    check("am: …and the shift itself is READ, not inferred (Q13). P10-9 forbids "
+          "deriving Shift from a filing timestamp; this is the word written on "
+          "the paper, which is the honest source P10-9 says old rows lack",
+          hw.parse_shift("25/08/26 (Night)") == "Night"
+          and hw.parse_shift("13/07/26 (Day)") == "Day"
+          and hw.parse_shift("25/08/26") is None
+          and hw.parse_shift("25/08/26 Monday") is None,
+          f"{hw.parse_shift('25/08/26 (Night)')} "
+          f"{hw.parse_shift('25/08/26')} {hw.parse_shift('25/08/26 Monday')}")
+
+    _rows = [
+        {"sno": "1", "received_by": "Sunil", "tank_no": "J091",
+         "product_name_raw": "Green coated gloves", "qty_raw": "1", "work_type": "R/L"},
+        # the shape the model actually returns for a ditto: an empty string
+        {"sno": "2", "received_by": "", "tank_no": "",
+         "product_name_raw": "Dust Mask", "qty_raw": "1", "work_type": ""},
+        # the sentinel the prompt now asks for
+        {"sno": "3", "received_by": "<DITTO>", "tank_no": "〃",
+         "product_name_raw": "<ditto>", "qty_raw": "1", "work_type": '"'},
+        # ⚠️ AN UNWRITTEN ROW. Its S.No. is PRE-PRINTED, so a populated-row test
+        # that counted `sno` would inherit into it and issue Sunil's gloves to
+        # nobody, on every unused row of every sheet.
+        {"sno": "4", "received_by": "", "tank_no": "",
+         "product_name_raw": "", "qty_raw": "", "work_type": ""},
+    ]
+    hw.resolve_ditto(_rows)
+    check("am: spec R2a — the <DITTO> sentinel resolves exactly like a glyph, "
+          "and is NOT flagged as inferred (a marked ditto is evidence)",
+          _rows[2]["received_by"] == "Sunil"
+          and _rows[2]["product_name_raw"] == "Dust Mask"
+          and "INFO_DITTO_INFERRED" not in _rows[2].get("flags", []),
+          str(_rows[2]))
+    check("am: spec R2b — an EMPTY cell on a POPULATED row is an inferred ditto, "
+          "resolved and flagged INFO_DITTO_INFERRED so a reviewer can tell what "
+          "the paper says from what we concluded",
+          _rows[1]["received_by"] == "Sunil" and _rows[1]["tank_no"] == "J091"
+          and "INFO_DITTO_INFERRED" in _rows[1].get("flags", []),
+          str(_rows[1]))
+    check("am: ⚠️ …and an UNWRITTEN row stays empty. Inheriting into one would "
+          "invent an issue to a person who was never there, against a material "
+          "nobody took — the guard is the whole safety of R2b",
+          _rows[3]["received_by"] in ("", None)
+          and _rows[3]["product_name_raw"] in ("", None)
+          and _rows[3]["tank_no"] in ("", None),
+          str(_rows[3]))
+    _nosrc = [{"sno": "1", "received_by": '"', "tank_no": "",
+               "product_name_raw": "Gloves", "qty_raw": "1", "work_type": ""}]
+    hw.resolve_ditto(_nosrc)
+    check("am: a MARKED ditto with nothing above it is still reported; a BLANK "
+          "one is not — saying 'a ditto had no source' about a cell nobody "
+          "marked would be inventing a defect to report",
+          _nosrc[0]["received_by"] is None
+          and "INFO_DITTO_WITH_NO_SOURCE" in _nosrc[0]["flags"]
+          and "INFO_DITTO_INFERRED" not in _nosrc[0]["flags"],
+          str(_nosrc[0]))
+    check("am: INFO_DITTO_INFERRED is an INFO flag (it informs, never blocks)",
+          hw.flag_severity("INFO_DITTO_INFERRED") == "info"
+          and hw.flag_marker("INFO_DITTO_INFERRED") == "[?]",
+          hw.flag_severity("INFO_DITTO_INFERRED"))
+
     c1, n1 = hw.apply_corrections("Yloues blasting large")
     c2, _ = hw.apply_corrections("Mask")
     c3, _ = hw.apply_corrections("Face Mask")  # regex is ^Mask$ — no touch
@@ -20491,6 +20563,120 @@ async def test_ocr_envelope_and_bloom():
         r = await ac.get("/auth/username-available", params={"u": "   "})
         check("CP-29 a blank name is refused rather than reported available",
               r.status_code == 422, f"{r.status_code}")
+
+    # ── 7b. Phase 11 — the cloud seam, and the two switches it needs ────────
+    #
+    # ⚠️ THE POINT OF THESE CHECKS IS THAT COMPANY PAPERWORK CANNOT LEAVE THE
+    # NETWORK BY ACCIDENT. Two independent switches must BOTH be on: a key, and
+    # an explicit fallback grant. The operator has neither today (Q5, 2026-09-02
+    # — "build the seam, but I have no key; it must fail gracefully"), so the
+    # default configuration is the one asserted first.
+    from .ai import client as _cpc
+    _saved = (_cpc.VISION_API_KEY, _cpc.VISION_CLOUD_FALLBACK, _cpc.generate)
+    _cloud_calls: list = []
+
+    async def _fake_cloud(prompt, *, system, image_b64, num_predict, timeout_s,
+                          after=""):
+        _cloud_calls.append(after or "primary")
+        return ("cloud", _cpc.VISION_CLOUD_MODEL)
+
+    async def _dead(*a, **k):
+        raise _cpc.VisionUnavailable("Ollama unreachable")
+
+    async def _slow(*a, **k):
+        raise _cpc.VisionTimeout("did not finish within 900s")
+
+    _saved_cloud = _cpc._cloud_vision
+    _cpc._cloud_vision = _fake_cloud
+    try:
+        async def _attempt(local, key, fb):
+            _cloud_calls.clear()
+            _cpc.generate, _cpc.VISION_API_KEY = local, key
+            _cpc.VISION_CLOUD_FALLBACK = fb
+            try:
+                _, mid = await _cpc.vision_json("p", system="s", image_b64="x")
+                return mid, len(_cloud_calls)
+            except RuntimeError as e:
+                return type(e).__name__, len(_cloud_calls)
+
+        _r1 = await _attempt(_dead, "", False)
+        _r2 = await _attempt(_dead, "", True)
+        check("CP-40 ⚠️ WITH NO API KEY THE PAGE NEVER LEAVES, whatever the "
+              "fallback flag says. The operator has no key today, so this is "
+              "the live configuration: a dead local engine reports itself and "
+              "nothing is uploaded anywhere",
+              _r1 == ("VisionUnavailable", 0) and _r2 == ("VisionUnavailable", 0),
+              f"{_r1} {_r2}")
+        _r3 = await _attempt(_dead, "sk-test", False)
+        check("CP-41 …and a key ALONE does not grant it either. PROVIDER and "
+              "FALLBACK are two separate agreements about company data, so an "
+              "operator can hold a key for the vision lane without silently "
+              "consenting to every outage becoming an upload",
+              _r3 == ("VisionUnavailable", 0), f"{_r3}")
+        _r4 = await _attempt(_dead, "sk-test", True)
+        check("CP-42 both switches on + the local engine DEAD → the cloud "
+              "answers, and the model id records which engine actually read the "
+              "page (`provider_of`, not the configuration — after a fallback "
+              "those two disagree)",
+              _r4 == (_cpc.VISION_CLOUD_MODEL, 1)
+              and _cpc.provider_of(_cpc.VISION_CLOUD_MODEL) == "anthropic"
+              and _cpc.provider_of(_cpc.MODEL_VISION) == "ollama", f"{_r4}")
+        _r5 = await _attempt(_slow, "sk-test", True)
+        check("CP-43 ⚠️ …BUT A TIMEOUT NEVER FALLS BACK. A read timeout means "
+              "the local model was healthy and STILL GENERATING — a five-row "
+              "form measured at 399 s here. Uploading a page because our own "
+              "stopwatch ran out would make a data-egress decision out of "
+              "impatience, and would do it most often for exactly the dense "
+              "pages an operator would least want to send",
+              _r5 == ("VisionTimeout", 0), f"{_r5}")
+    finally:
+        _cpc.VISION_API_KEY, _cpc.VISION_CLOUD_FALLBACK, _cpc.generate = _saved
+        _cpc._cloud_vision = _saved_cloud
+
+    # ── 7c. Phase 11 — a long job has to be able to say how long ────────────
+    import datetime as _dtmod
+
+    from .ai import jobs as _cpj
+    _now = _cpj._now()
+
+    def _row(**kw):
+        base = {"kind": "ocr_consumption_form", "status": "running",
+                "created_at": _now - _dtmod.timedelta(seconds=400),
+                "started_at": _now - _dtmod.timedelta(seconds=400),
+                "heartbeat_at": _now - _dtmod.timedelta(seconds=10),
+                "payload_json": '{"image_b64":"x"}'}
+        return {**base, **kw}
+
+    _live = _cpj.progress(_row())
+    check("CP-44 ⚠️ THE CARD PROMISED A MINUTE FOR A JOB MEASURED AT 399 s, and "
+          "that mismatch is the whole of the reported 'it only loads and never "
+          "gets the results'. Each lane now reports its own measured median and "
+          "its real elapsed time, from the SERVER's clock — a phone with a wrong "
+          "one must not be able to render 'started 3 hours ago'",
+          _live["expected_s"] == 400 and _live["elapsed_s"] >= 399
+          and _cpj.expected_seconds("ocr_delivery_note") == 95
+          and _cpj.expected_seconds("ocr_consumption") == 215,
+          f"{_live['expected_s']} {_live['elapsed_s']}")
+    check("CP-45 a job that is merely SLOW is not interrupted, however long it "
+          "runs. Only a stopped heartbeat says the owner is gone, and this is "
+          "the same predicate the orphan sweep uses so the banner and the sweep "
+          "can never disagree about what a dead job is",
+          _live["stale"] is False, str(_live))
+    _dead_job = _cpj.progress(_row(
+        heartbeat_at=_now - _dtmod.timedelta(seconds=_cpj.ORPHAN_STALE_SECONDS + 30)))
+    check("CP-46 …and one whose heartbeat stopped IS interrupted, with the "
+          "photograph still held so it can be re-run without a walk back to "
+          "the plant",
+          _dead_job["stale"] is True and _dead_job["can_requeue"] is True,
+          str(_dead_job))
+    check("CP-47 a QUEUED row is never stale — it has no owner yet, so there is "
+          "nothing to have stopped beating; and a row whose image the sweep "
+          "already cleared cannot be re-queued, which is why the button says "
+          "'upload it again' instead",
+          _cpj.progress(_row(status="queued", started_at=None,
+                             heartbeat_at=None))["stale"] is False
+          and _cpj.progress(_row(payload_json=None))["can_requeue"] is False,
+          "queued/no-payload")
 
     # ── 8. the MTC rule, as the DOCUMENTS state it ──────────────────────────
     # ⚠️ THIS IS A DOC-DRIFT CHECK, and the drift it exists for was real. The

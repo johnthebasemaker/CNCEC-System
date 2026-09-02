@@ -40,9 +40,16 @@ const ROUTES: Record<Role, Check[]> = {
     // names roles instead of a level, and the SK lands on Stock.
     { path: '/stock', marker: 'Stock (derived)' },
     { path: '/entry/count' },
+    // ⚠️ ADDED 2026-09-02. The two OCR pages were NOT in this sweep, and the
+    // Phase 11 work edited both — so a broken import or a hook crash in either
+    // upload card would have shipped past a 125/125 green run. A render sweep
+    // that omits the pages people are actively changing is the coverage most
+    // worth having and the easiest to forget.
+    { path: '/entry/ocr', marker: /OCR Import/i },
   ],
   supervisor: [
     { path: '/supervisor', marker: 'Material Requests' },
+    { path: '/execution', marker: /execution/i },
   ],
   logistics: [
     { path: '/logistics' },
