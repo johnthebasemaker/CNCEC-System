@@ -17308,7 +17308,31 @@ async def test_docs_and_assistant():
             # "helpfully" filled in with a guess.
             ("19.6 📈 Efficiency by Day", "the efficiency chart (9e)"),
             ("The line is the RUNNING figure", "what the chart's line means (9e)"),
-            ("no reason recorded", "the never-guess-a-reason rule (9e)")):
+            ("no reason recorded", "the never-guess-a-reason rule (9e)"),
+            # ── Phase 10. The four things a person is most likely to be
+            # stopped by, plus the three a developer is most likely to
+            # "simplify" away because each looks like an inconsistency.
+            ("24.1 🔐 Two-factor authentication is now required",
+             "mandatory 2FA (10a)"),
+            ("14-day grace period", "the 2FA grace window (10a)"),
+            ("you are held at the door until the second lock",
+             "what a past-deadline sign-in actually does (10a)"),
+            ("Ask an Admin to reset your 2FA", "the no-backup-codes ruling (10a)"),
+            ("24.2 🎓 Training", "the training hub (10b)"),
+            ("Watch later & continue", "the soft gate's escape hatch (10b)"),
+            ("Nothing is ever blocked", "the soft-gate ruling Q5.1 (10b)"),
+            ("everybody must watch and acknowledge it again",
+             "why a version bump re-certifies (10b)"),
+            ("24.3 💰 Site-Wide Valuation", "the board brief (10b)"),
+            ("Not Valued (N items)", "the un-costed rule Q3.2 (10b)"),
+            ("floor, not a total", "what the valuation figure actually is (10b)"),
+            ("This is not the 🔥 Burn Rate Forecast",
+             "the burn/valuation name collision (10b)"),
+            ("they are **never added** to the value above them",
+             "why SME and ERP figures stay apart (rule 1a)"),
+            ("24.4 🌓 Day and Night shift", "the Shift field (10b)"),
+            ("not when the work happened",
+             "why the shift is not inferred from the clock (10b)")):
         check(f"CJ-23 the manual documents {why}", needle in md, needle)
 
     # ── ⚠️ Phase 9f: the rename stopped at the display layer ────────────────
@@ -17386,8 +17410,27 @@ async def test_docs_and_assistant():
 
 
     # And the assistant can actually find them.
+    # ⚠️ WRITING IT DOWN AND BEING ABLE TO FIND IT ARE SEPARATELY TRUE, and
+    # §24 proved it again: with the chapter written and no aliases, "do I need
+    # two factor authentication" retrieved chapters 9 and 19, and "what happens
+    # if I click watch later" retrieved 1, 4 and 22. The new chapter lost to
+    # older ones that use the same common words more often.
+    #
+    # ⚠️ THE LAST TWO ROWS RUN THE OTHER WAY, and they are the important half.
+    # "Burn Rate Forecast" is a pre-existing HOD chart documented across
+    # chapters 5, 6 and 8; §24.3's "30-Day Burn Value" is a different report
+    # that shares the word. An alias for "burn" would have dragged every
+    # legitimate forecast question into the valuation chapter — a worse failure
+    # than the one it fixed — so there is none, and these two rows are what
+    # stops somebody adding one.
     for q, chapter in (("what stops a duplicate purchase requisition", 16),
-                       ("what is the session report for MP&H", 19)):
+                       ("what is the session report for MP&H", 19),
+                       ("how do I set up 2FA", 24),
+                       ("how do I watch the training video", 24),
+                       ("what happens if I click watch later", 24),
+                       ("what is the site wide valuation report", 24),
+                       ("what is the burn rate forecast", 6),
+                       ("how many days of stock do I have left", 6)):
         hits = _mq._index().search(q, allowed=_mq.allowed_sections("hod"))
         check(f"CJ-24 …and '{q}' retrieves chapter {chapter}, so writing it "
               f"down and being able to find it are separately true",

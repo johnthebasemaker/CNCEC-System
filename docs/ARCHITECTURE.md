@@ -7,9 +7,12 @@
 > program); **updated 2026-07-30 (SME allocation overhaul: two-tier
 > Available-vs-Ordered + reverse SQM + COMPONENT IDENTITY; global table
 > tools)**; **updated 2026-08-13 (workflow polish + test isolation)** at gates
-> `service_tests 1502/0 (suites A…BX, own throwaway DB) · Playwright 90/90 ·
-> parity:sme 1,313 · ui-math 33/0 · bug_check 599/0 · nav 46 routes ·
-> build+tsc ✅ · alembic single head c7a93e5d2b18`.
+> **updated 2026-09-03 (Phase 9 paper-first OCR + Phase 10 security, analytics
+> and training — see §7a–§7d)** at gates
+> `service_tests 2188/0 (suites A…CS, own throwaway DB) · Playwright 125/125 ·
+> AI guardrail Tier 1 24/24 (0 leaks) · parity:sme 1,313 · ui-math 33/0 ·
+> bug_check 599/0 · nav 50 routes · build+tsc ✅ ·
+> alembic single head e7f2a4c916b8`.
 > **The Hetzner deployment is PAUSED by decision** — next phase is Feature
 > Fine-Tuning and UI Polish. Locked rules + baselines in one page:
 > [`PROJECT_HANDOVER.md`](../PROJECT_HANDOVER.md).
@@ -103,13 +106,22 @@ inventory+ledger 429/429, SME reseed run by the operator (recipes 41, codes
 
 ## 2. Backend map (`backend/api/`)
 
-FastAPI app in `main.py` (lifespan starts 3 daemons — report scheduler,
-16:00 evening digest, **Friday 17:00 weekly exec PDF** — all disabled by
-`GI_SCHEDULER=0`). `models.py` (repo `backend/models.py`) is the single schema
-contract; alembic migrations in `backend/alembic/versions` (single head
-**`a4e9b1c73f28`** = `sme_component_pooling`; before it `f1a7c9e83b52` =
-refresh_sessions_rtr, `c7d4e8f19a25` = feedback_triage, `b3f2a9c47d18` =
-SME SAP codes). Modules:
+FastAPI app in `main.py`. The lifespan starts **five** daemons — report
+scheduler, 16:00 evening digest, Friday 17:00 weekly exec PDF, 07:00 morning
+briefing, and the AI-job orphan sweep — all disabled by `GI_SCHEDULER=0`, plus
+the Bloom-filter refresh (§7b). It also runs three one-shot boot steps: the
+orphan sweep, the manual-index warm and the read-only-wall probe.
+
+⚠️ **THREE OF THOSE FIVE ARE DAILY, AND EACH RUNS IN EVERY WORKER.**
+Production is `uvicorn --workers 4`, so a daily loop without a claim dispatches
+four copies of everything it sends. `services/dailyjob.py` is that claim and all
+three daily loops now take it — see §7d for the bug it closed.
+
+`models.py` (repo `backend/models.py`) is the single schema contract; alembic
+migrations in `backend/alembic/versions` (single head **`e7f2a4c916b8`** =
+slice 10b: execution `Shift` + `daily_job_runs` + the training registry; before
+it `d5b8c3f92a41` = `rate_buckets`, `c4a7e2b81f36` = ai_jobs worker heartbeat,
+`b8d3f1a72c94` = ai_jobs indexes + payload purge). Modules:
 
 | Module | Owns |
 |---|---|
@@ -118,7 +130,7 @@ SME SAP codes). Modules:
 | `bulk_import.py` | **Bulk Excel Import** (`POST /import/{kind}`; kinds `inventory`/`ledger` admin-only, `sme-*` {hod,admin}): dry-run→commit, upsert-only, header-name-driven, category canonicalisation, 3-tier ledger reconcile (exact-match / qty-correction / insert), Material_Code uniqueness resolution — the same plan/apply code `tools/excel_sync.py` drives |
 | `entry_docs.py` | **Entry document system (parity A1/A4)**: `entry_attachments` upload/list/download/delete, `require_entry_documents` gate, WBS config endpoints. Doc types `consumption`/`receipt`/`return`/`safety_approval`/**`delivery_note`** (2026-08-13, the scan a warehouse must attach before a DN may ship) — the last two are per-item and per-shipment respectively, so neither goes through the per-BATCH `assert_entry_docs` gate |
 | `hod.py` | pending queues, per-row approve/reject(+reason)/edit (`{"fields":{...}}`), `bulk-approve` (≤200), submitter bell dispatch (receipts have NO submitter column by design — returns/issues/adjustments do), return-approval → logistics email |
-| `exec_summary.py` + `exec_pdf.py` | Executive Summary JSON/xlsx/**server-rendered fpdf2 PDF** (content-measured tables; nothing clips) |
+| `exec_summary.py` + `exec_pdf.py` | Executive Summary JSON/xlsx/**server-rendered fpdf2 PDF** (content-measured tables; nothing clips). **Slice 10b:** `/hod/valuation` + `/hod/valuation/export.pdf` — the board brief, rendered by `_ValuationPDF` (subclasses `_ExecPDF`, so there is ONE branding implementation). hod · auditor · admin via `_EXEC_READERS`. See §7d |
 | `weekly_report.py` | Friday 17:00 auto exec-PDF → `generated_reports` + sha256-tokenized 72-h link `/reports/weekly-exec/{token}` → WhatsApp+bell to every admin/HOD; `POST /admin/reports/weekly-exec/run`; needs `PUBLIC_BASE_URL` in deploy/.env |
 | `lining_analytics.py` | `GET /analytics/lining-coverage` — read-only SME engine with **live-ledger availability pool**; RL/BL family coverage + 90-day-burn depletion dates (hod/logistics; scoped site-pinned, default CNCEC) |
 | `logistics.py` / `warehouse.py` / `receiving.py` | PR→PO→assignment→DN two-stage approval state machine (`draft→pending_logistics→…→received`), RL/BL family separation, reschedules, force-close + 24 h undo, vendor returns |
@@ -129,14 +141,15 @@ SME SAP codes). Modules:
 | `notifications.py` + `services/notifications.py` | in-app bell (`app_notifications`) + unified `dispatch()` (bell ALWAYS + best-effort WhatsApp; `X-Delivery-Preference: evening` stages into `pending_summary_notifications` for the 16:00 digest; critical always immediate) |
 | `services/whatsapp.py` | Meta Cloud API v2 outbox (`whatsapp_outbox`), approved templates `gi_action_required/gi_status_update/gi_critical_alert/gi_otp_code/gi_evening_summary` (lang **`en`**), friendly #131030 sandbox handling |
 | `webhook.py` | inbound Meta webhook (`/whatsapp/webhook` + `/api/v1/…`): verify-token handshake, **X-Hub-Signature-256 HMAC**, STOCK/RESET PASSWORD commands, session-text replies |
-| `ratelimit.py` | see §6 |
+| `ratelimit.py` | see §6. **Slice 10a:** the four per-process limiters gained a cross-worker half in `rate_buckets` — Postgres, not Redis (§7c). ⚠️ `read_bucket_shared` ≠ `check_bucket_shared`: the counting one INCREMENTS, so asking it "is this IP banned?" creates the ban |
 | `console.py` | admin settings (whitelist incl. `maintenance_mode`, `require_entry_documents`, `mtc_required_category`), pg_dump backup, sessions revoke, outbox retries, lot lifecycle. **Bug Tracking Engine (2026-07-18)**: `bug_reports` + `title/severity/rollback_notes/safety_constraints/triage_notes`; admin triage drawer; **`GET /admin/feedback/{id}/prompt`** renders a self-contained coding-agent implementation prompt (report + triage + rollback plan + the project's non-negotiable gates) and `GET /admin/feedback-export.md` a batch digest — the portal never mutates code itself |
 | `documents.py` | SOP/manual downloads, QR label sheets, employee badges, **`GET /documents/material-stickers`** (2026-07-24, {hod,admin}): 2×6 full-bleed A4 rack stickers replicating the operator's CNCEC sheet — Material Name (auto-shrink 17→11pt), QR from `SAP_Code`, SAP/MAT lines, category; `sap_codes` repeats = copies, category filter, site-scoped |
 | `stock.py` | stock views + **`GET /stock/material-card?sap=&days=`** (2026-07-24; **Material Intelligence 2026-08-01**): the 📷 scan payload. `sap` resolves a SAP code, a **Material_Code**, OR a raw label payload (`"1163\|Cable Tie Wire ( Nylon)"` — the operator's stickers are `SAP\|Description`, and passing the whole string was the reported 404); `site_scope` pinning (''→403) is applied AFTER resolution. Returns stock + a gap-free 7–365-day receipt/consumption series with a **backwards-walked closing-balance line**, burn rate + **days of cover**, open **lots** (FEFO order, balance derived like SQL_LOT_BALANCE), last 12 **movements**, and a per-site split for unscoped roles only |
 | `qc.py` | the `qc` role, dual scoping (`qc_scope`), accounts + admin-decided transfers, the `qc_inspections` ledger and the one decide endpoint. **2026-08-13:** the list/fetch are decorated with the material NAME (from `inventory."Equipment_Description"`) and the certificate's number/filename, and `GET /qc/inspections/{id}/certificate` streams the MTC **through the inspection**, inheriting its scoping rather than re-deriving it. A rejection mints `return_no` = `QCR-YYYYMMDD-<id>` |
-| `health_monitor.py` | the 07:00 Morning Briefing: nine probes, each individually guarded, silent on a clean run but always audited, body forced to ONE line (Meta rejects a newline in a template parameter). **2026-08-13:** `probe_missing_mtc` + `dispatch_missing_mtc` — uncertified Surface Shields, grouped by PLACE and routed by location (warehouse → logistics/warehouse_user/qc; site → store_keeper/hod/qc/logistics) because the briefing's own admin+HOD audience cannot fix it |
+| `health_monitor.py` | the 07:00 Morning Briefing: **ten** probes, each individually guarded, silent on a clean run but always audited, body forced to ONE line (Meta rejects a newline in a template parameter). **2026-08-13:** `probe_missing_mtc` + `dispatch_missing_mtc` — uncertified Surface Shields, grouped by PLACE and routed by location (warehouse → logistics/warehouse_user/qc; site → store_keeper/hod/qc/logistics) because the briefing's own admin+HOD audience cannot fix it. **Slice 10b:** `probe_day_shift_mtc` + `dispatch_day_shift_mtc` — uncertified material staged for TODAY'S day shift, which unlike the standing sweep has a deadline measured in hours. Channels chosen by WHO is asked: in-app+WhatsApp to colleagues, EMAIL to Logistics only, and a WhatsApp **DRAFT** for anyone outside the company. Rides the same 07:00 `dailyjob` claim |
 | `testdb.py` | **the throwaway database the service tests run against (2026-08-13, rule 15).** Provisions `gihub_svctest` from `gi_database.db` via the production cutover script and rewrites `DATABASE_URL` before `db.py` is imported; refuses to run if source and target are the same name. `_apply_fixtures` carries the state a cutover-built database lacks (the AI read-only role, the `employees` site backfill, the nine PPE SAPs, the entry-doc switch) |
-| `service_tests.py` | the 1502-check gate (suites A…BX), see §8 |
+| `service_tests.py` | the **2,188-check** gate (suites A…CS), see §8 |
+| `training.py` | **Track 5 (slice 10b):** the training hub and the SOFT gate. `/training/modules`, `/training/gate/{feature}` (⚠️ `allowed` is unconditionally true — it reports, it never refuses), `/training/progress` (monotonic), `/training/acknowledge` (refused below 90% watched), `/training/defer` (the "Watch later" record), `/training/compliance` (HOD; driven from `users`, not from the compliance table), and the admin asset/version endpoints. See §7d |
 
 ## 3. Database facts that bite
 
@@ -366,6 +379,15 @@ unreachable → throttled console hint + `gi-api-unreachable` toast
 `logApiFailure()` prints message/code/status/headers on network-err/403/5xx
 incl. a Cloudflare-Access-block note. TanStack Query hooks in `api/hooks.ts`.
 
+**Phase 10 additions (§7c, §7d):**
+
+| File | Owns |
+|---|---|
+| `pages/TrainingPage.tsx` | 🎓 Training — my modules (per-language player, 90% bar, acknowledge) and, for level ≥ 2, the **Team compliance** tab |
+| `components/TrainingGate.tsx` | the SOFT gate. ⚠️ **It gates the ACTION, not the page** — a render prop supplying `guard(run)`. The first version rendered on mount and blocked the whole ExecutionPage including "Print a consumption form", so somebody wanting a BLANK sheet was stopped by a video about filling one in. Playwright caught it as a modal intercepting an unrelated click |
+| `components/MandatoryEnrollPanel.tsx` | the 2FA enrolment shown INSTEAD of a session to a mandated, unenrolled account. ⚠️ It drives `/auth/2fa/*` with an `enroll`-scoped token that is deliberately never passed to `setAuthToken` — storing it as a session would make "you must set up 2FA" the way to skip it |
+| `auth/AuthContext.tsx` | `LoginOutcome` now has **three** shapes, not two: straight through · `mfa` challenge · `enroll` required. Plus `mfaDue`, the grace-period deadline that drives the warning banner |
+
 **PWA/offline:** vite-plugin-pwa autoUpdate SW (build-only; dev unaffected),
 NetworkFirst cache for read APIs; **strict OTA** — `main.tsx` polls
 `reg.update()` every 15 min AND on tab refocus, so deployments reach every
@@ -450,7 +472,13 @@ service_tests must NEVER be removed). Secret-scan every push range for the Meta 
 WhatsApp phone-number ID before pushing (the exact grep lives in the project
 memory — deliberately not reproduced here).
 
-## 7. AI routing layers
+## 7. AI routing layers — and the cross-cutting patterns filed beside them
+
+> §7a–§7d grew into this section rather than being designed into it, and
+> two of them (§7b Bloom filters, §7c's rate limiting) are not AI at all.
+> They are kept here because every reference in `PROJECT_HANDOVER.md` names
+> them by these numbers; renumbering would silently break those pointers,
+> which is a worse cost than a slightly wide section title.
 
 1. **Hub Assistant** (`/ai/assistant`, SSE) + insights/EOD — same-box Ollama,
    one warm model. Retrieval is `ai/manual_index.py` (BM25 over
@@ -610,7 +638,7 @@ untouched. Suite CP-20..CP-29.
 memory (`checked: "bloom"`), a name that looks taken is CONFIRMED against both
 `users` and `pending_users` before the endpoint will say so (`checked: "db"`).
 
-## 7c. Phase 10 slice 10a — mandatory 2FA, shared limiters, AI guardrail audit
+### 7c. Phase 10 slice 10a — mandatory 2FA, shared limiters, AI guardrail audit
 
 ### The 2FA mandate (`auth.mfa_gate`)
 
@@ -695,7 +723,7 @@ invisible. Proved by negative control: granting a Store Keeper chapters 7 and 17
 failed **zero** structural checks. `cases/policy.yaml` pins the allowlists as
 data; superset test, so gaining a chapter fails and losing one does not.
 
-## 7d. Phase 10 slice 10b — daily claim, valuation, training gate
+### 7d. Phase 10 slice 10b — daily claim, valuation, training gate
 
 ### ⚠️ The daily loops were firing four times a day
 
@@ -813,7 +841,7 @@ invisible. The absence is the finding.
 > answer. See `PROJECT_HANDOVER.md` rule 15.
 
 ```bash
-# 1. service tests (1868 checks, suites A…CJ) — CI mirror, own throwaway DB
+# 1. service tests (2,188 checks, suites A…CS) — CI mirror, own throwaway DB
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
 JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 .venv/bin/python -u -m backend.api.service_tests
@@ -829,9 +857,19 @@ JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 npm run build --prefix frontend && cd frontend && npx tsc --noEmit
 
 # 4. headless E2E (Playwright — builds/destroys its own gihub_e2e_pw stack)
-cd tests/e2e && npm test        # 107 tests, ~37 s
+cd tests/e2e && npm test        # 125 tests, ~55 s
 
-# 5. alembic single head
+# 5. AI guardrail audit — Tier 1 ONLY is a gate (also runs inside suite CQ).
+#    ⚠️ Tier 2 needs a live model and is STOCHASTIC; it is a scored artefact on
+#    a schedule, never a merge gate, because a flaky gate is one people re-run
+#    rather than read. See tests/ai_eval/README.md and §7c.
+.venv/bin/python -m tests.ai_eval.runner                 # Tier 1, deterministic
+.venv/bin/python -m tests.ai_eval.runner --tier2 --json scorecard.json
+
+# 6. nav manifest — every routable page must declare who may open it
+npm run test:nav --prefix frontend
+
+# 7. alembic single head
 .venv/bin/python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; c=Config('backend/alembic.ini'); c.set_main_option('script_location','backend/alembic'); print(ScriptDirectory.from_config(c).get_heads())"
 ```
 Test-compat switches: service_tests sets `require_entry_documents='0'` first

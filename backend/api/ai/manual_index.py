@@ -94,6 +94,38 @@ _ALIASES: dict[str, str] = {
     "uom": "unit of measure",
     "fefo": "first expiry first out",
     # the words a question uses that the manual writes differently
+    # ── Phase 10 vocabulary (slice 10b docs) ────────────────────────────────
+    # ⚠️ MEASURED, NOT GUESSED. With §24 written and no aliases, "do I need two
+    # factor authentication" retrieved chapters 9 and 19, and "what happens if
+    # I click watch later" retrieved 1, 4 and 22 — the new chapter lost to
+    # older ones that merely use the same common words more often. Writing a
+    # chapter and being able to FIND it are separately true (CJ-24), and this
+    # is the half that makes the second one so.
+    "2fa": "two factor authentication authenticator",
+    "mfa": "two factor authentication authenticator",
+    "otp": "two factor authentication code",
+    "authenticator": "two factor authentication app",
+    "totp": "two factor authentication authenticator",
+    "training": "tutorial onboarding video",
+    "tutorial": "training video onboarding",
+    "onboarding": "training tutorial video",
+    "video": "training tutorial",
+    "tanglish": "language tamil training video",
+    "valuation": "stock value board brief not valued",
+    # ⚠️ "burn" IS DELIBERATELY NOT ALIASED, and that is a finding rather than
+    # an omission. The HOD Portal has carried a "🔥 Burn Rate Forecast (30-Day)"
+    # chart since long before Phase 10, documented across chapters 5, 6 and 8 —
+    # and §24.3's report is a DIFFERENT thing that happens to share the word.
+    # An alias pointing "burn" at the valuation chapter would drag every
+    # legitimate Burn Rate question away from the page that answers it, which
+    # is a worse failure than the one it would fix. §24.3 disambiguates in
+    # prose instead, and questions that name the report reach it via
+    # "valuation".
+    "uncosted": "not valued unit cost valuation",
+    "unvalued": "not valued unit cost valuation",
+    "watch later": "training defer soft gate",
+    "defer": "watch later training",
+    "interstitial": "training gate watch later",
     "permission": "access matrix",
     "permissions": "access matrix page",
     "portal": "page access",

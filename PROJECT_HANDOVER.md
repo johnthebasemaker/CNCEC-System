@@ -68,6 +68,25 @@ later in this file:**
   and covers 36 SAPs. **FEFO and over-issue remain allow-and-log** — never
   implement this by promoting the existing FEFO warning to an error.
 
+### Phase 10 rulings, LOCKED (2026-09-02/03)
+
+Each of these was decided by the operator and each has a plausible-looking
+"improvement" that would undo it. They are numbered P10-x and referenced by
+that name in the code.
+
+| # | Ruling | Why it is not an oversight |
+|---|---|---|
+| **P10-1** | **POSTGRES, NOT REDIS** for every shared limiter (`rate_buckets`, `login_attempts`). | Re-confirmed rather than assumed. The counters tick a few times a minute; Postgres is already deployed, backed up, in the runbook and holding the users table it protects. Redis is a new daemon and a new 3 a.m. failure mode. Revisit only if the app runs on more than one box. |
+| **P10-2** | **The rate limiters FAIL OPEN; the daily-job claim FAILS CLOSED.** | Deliberately opposite, and both are correct. A throttle whose storage hiccups must not deny sign-in. A daily job that cannot claim must not run, because a missed briefing is silence somebody notices and a double one is four messages everybody ignores. The **access matrix** fails closed too (`nav_routes_check`), which is a third thing again — do not "make them consistent". |
+| **P10-3** | **The OCR training gate is SOFT and gates the ACTION, not the page.** | Phase 9 made the photo the primary way consumption is filed. A hard gate stops a supervisor filing a form at 06:00 because of a video — the same shape as FEFO (allow-and-log) and the MTC gate (moved out of receipt). "Watch later & continue" runs the upload. If it is ever made hard, the refusal must move **server-side** into `POST /execution/ocr/upload`; a UI-only gate is not a control. |
+| **P10-4** | **Un-costed inventory is NEVER valued at zero.** | Every `Unit_Cost` on the live data is 0. Summing them produces `SAR 0.00` for a site holding 731 units — arithmetically correct and a lie a board would act on. They are counted as **"Not Valued (N items)"** and the total is labelled a **floor**. |
+| **P10-5** | **The board brief is PDF only (fpdf2).** | `python-pptx` is a second renderer with a second branding implementation that will drift from the first; `reportlab` is in `requirements.txt` but touched only by one legacy smoke test. `_ValuationPDF` subclasses `_ExecPDF` so there is exactly one GI navy. |
+| **P10-6** | **`module_version` is part of the training-compliance unique key.** | Keyed on `(user, module)` alone, re-recording a tutorial would leave everybody certified against a video they have never seen — worse than no record, because it would be produced as evidence. Old rows are kept and simply stop matching. |
+| **P10-7** | **Tier 1 AI evals gate a merge; Tier 2 never does.** | Tier 1 audits the system prompt and is deterministic. Tier 2 audits the model's answer and is stochastic — wiring it into CI produces a flaky gate, and a flaky gate is one people re-run rather than read. Its threshold is deliberately left above the measured score rather than tuned down to pass. |
+| **P10-8** | **External WhatsApp is a DRAFT; internal email goes to Logistics only.** | A chase that leaves the company is read as the company's position, and an automated one naming the wrong PO is a commercial mistake nobody reviewed. Everything internal still sends automatically. |
+| **P10-9** | **`sme_execution_entry.Shift` is never inferred from the clock**, and NULL is skipped rather than assumed. | An entry is filed when somebody reaches a desk, not when the work happened; a night crew filing at 06:40 would be counted as day shift on a timestamp nobody looked at. Every pre-10b row is NULL and there is no honest backfill. |
+| **P10-10** | **`read_bucket_shared` is not a style variant of `check_bucket_shared`.** | The counting one INCREMENTS, so asking it "is this IP banned?" creates the ban it was asking about — the first invalid webhook signature answered 429 instead of 403 until suite `limits` caught it. A test and a tally are different verbs. |
+
 ### 1. SME allocation is keyed on `(Material_Code, SAP_Code)` — never pool by code alone
 
 *Locked 2026-07-30. Overturns the 2026-07-18 Material_Code pooling rule.*
@@ -1682,15 +1701,17 @@ of them is a regression, not a new normal.
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **1502 / 0** (suites A…BX, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **90 / 90** (~37 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| Backend service tests | **2188 / 0** (suites A…CS, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **125 / 125** (~55 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| **AI guardrail — Tier 1** | **24 / 24, 0 leaks** — deterministic; also runs inside suite CQ | `.venv/bin/python -m tests.ai_eval.runner` |
+| AI guardrail — Tier 2 | 📌 **scored, NEVER a gate** (ruling P10-7). security **64%** vs a 95% target · false-refusal 0%. Stochastic, needs a live model | `… --tier2 --json scorecard.json` |
 | SME TS↔PY parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | **SME UI math** (session.ts + insights.ts) | **33 / 0** | `npm run test:ui-math --prefix frontend` |
 | Legacy regression | **599 / 0** | `.venv/bin/python legacy/bug_check.py` |
-| Navigation route coverage | **46 routes, all claimed** | `npm run test:nav --prefix frontend` |
+| Navigation route coverage | **50 routes, all claimed** | `npm run test:nav --prefix frontend` |
 | ~~Derived-view parity~~ | ❌ **RETIRED as a gate 2026-08-05** — see below | `tools/parity_check.py` |
 | Frontend | `tsc -b` + `npm run build` + `oxlint` ✅ | `npm run build --prefix frontend` |
-| Alembic | single head **`c7a93e5d2b18`** (QC rejection returns + receipt `posted_at`) | see ARCHITECTURE §8 |
+| Alembic | single head **`e7f2a4c916b8`** (slice 10b: execution `Shift` + `daily_job_runs` + the training registry) | see ARCHITECTURE §8 |
 | **Manual PDFs** | **0 overlapping text pairs**, all 8 booklets | `.venv/bin/python build_manual_pdf.py --role all` |
 | `gi_database.db` | sha256 `00652932…ba038` **unchanged** | `shasum -a 256 gi_database.db` |
 

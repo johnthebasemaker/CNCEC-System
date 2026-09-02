@@ -101,6 +101,33 @@ Two more production-only settings that are easy to miss:
 Everything in `deploy/.env` reaches the container via the api service's
 `env_file:` — if you add a new variable, it is passed automatically.
 
+### 1a. Phase 9 / Phase 10 settings
+
+None of these is required — every one has a working default — but three of them
+change behaviour a person will notice.
+
+| Variable | Default | Why you might set it |
+|---|---|---|
+| `GI_AI_VISION_TIMEOUT_S` | `900` | How long a vision OCR read may take. Sized from measurement, not guesswork: a full-page form takes 269–444 s and a 30-row consumption log 361 s on the reference box. **Lowering this below ~600 reintroduces the ReadTimeout Phase 9 fixed.** |
+| `GI_AI_VISION_NUM_CTX` / `_MAX` | `8192` / `16384` | The model's context window. ⚠️ **Never raise a per-lane `num_predict` without this** — Ollama runs the model at 4,096 by default and an over-budget request ABORTS the runner (`ggml_abort`), taking every queued job with it. See ARCHITECTURE §7a. |
+| `GI_AI_ORPHAN_STALE_S` | `180` | How long a job may go without a heartbeat before the sweep reaps it (§7a-ii). It is five missed beats, **not** the job timeout — sizing it off job duration means waiting 15 minutes to reap a corpse. |
+| `GI_SUPPLIER_CHASE_TO` | *(unset)* | E.164 number for the day-shift MTC supplier chase. ⚠️ Unset means **no supplier draft is created at all**; set, it writes a WhatsApp **DRAFT** that a human must release in the admin Console. It never sends automatically. |
+| `GI_BRIEFING_HOUR` / `_MINUTE` | `7` / `0` | When the morning briefing (and the day-shift MTC chase that rides it) runs. |
+| `GI_REDIS_URL` | — | **Does not exist, deliberately.** Ruling P10-1: the shared limiters are Postgres-backed (`rate_buckets`). Do not add Redis without revisiting that ruling. |
+
+⚠️ **Two settings are rows in `app_settings`, not environment variables**, and
+both were made that way so widening or delaying them is an admin action rather
+than a deploy: `mfa_required_roles` (default `admin,logistics,hod,qc_hod,auditor`)
+and `mfa_enforced_from` (an ISO date; **absent means warn-only, never block**).
+Set the date to **14 days after go-live** to give people the grace period the
+manual promises them (§24.1.1).
+
+⚠️ **`uvicorn --workers 4` is load-bearing in a way that bites.** Three
+production bugs in Phase 10 came from state that was per-process: the OCR
+orphan sweep, the daily schedulers and four rate limiters. If you add anything
+that runs on a timer or keeps a counter in memory, **assume four of it** and
+give it a claim (`services/dailyjob.py`) or a shared row (`rate_buckets`).
+
 ## 2. TLS — nothing to do
 Cloudflare terminates TLS at the edge, so there is no certificate to issue,
 install or renew on the box. `init-letsencrypt.sh` is kept only for the
