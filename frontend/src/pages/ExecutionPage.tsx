@@ -46,8 +46,11 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
+import OcrJobProgress from '../components/OcrJobProgress'
+import type { OcrJobStatus } from '../components/OcrJobProgress'
 import TrainingGate from '../components/TrainingGate'
 import { downloadConsumptionForm, useFormSystems } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
@@ -1017,6 +1020,13 @@ function OcrUploadCard({ onDraft }: { onDraft: (id: number) => void }) {
   const qc = useQueryClient()
   const [jobId, setJobId] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  // ⚠️ THE FILE IS KEPT SO "UPLOAD IT AGAIN" IS ONE CLICK, NOT A WALK BACK TO
+  // THE PLANT. When a worker dies the orphan sweep clears the stored image, so
+  // the server cannot re-queue the row — but the browser still has the exact
+  // bytes it sent, and a supervisor who has already photographed the sheet
+  // should never be asked to photograph it twice.
+  const [lastFile, setLastFile] = useState<File | null>(null)
 
   const job = useQuery({
     queryKey: ['/execution/ocr/jobs', jobId],
@@ -1041,6 +1051,7 @@ function OcrUploadCard({ onDraft }: { onDraft: (id: number) => void }) {
 
   const upload = async (file: File) => {
     setBusy(true)
+    setLastFile(file)
     try {
       const fd = new FormData()
       fd.append('file', file)
@@ -1052,6 +1063,30 @@ function OcrUploadCard({ onDraft }: { onDraft: (id: number) => void }) {
       setBusy(false)
     }
     return false
+  }
+
+  /**
+   * Re-run an interrupted read. Prefer the server's re-queue — it still holds
+   * the prepared image, so nothing is re-uploaded over site mobile data — and
+   * fall back to re-sending the file the browser kept when it does not.
+   */
+  const retry = async () => {
+    setRetrying(true)
+    try {
+      if (job.data?.can_requeue && jobId != null) {
+        await api.post(`/execution/ocr/jobs/${jobId}/requeue`)
+        await job.refetch()
+      } else if (lastFile) {
+        setJobId(null)
+        await upload(lastFile)
+      } else {
+        message.info('Photograph the form again — the original is no longer held.')
+      }
+    } catch (e) {
+      message.error(errMsg(e))
+    } finally {
+      setRetrying(false)
+    }
   }
 
   const running = jobId != null && job.data?.status !== 'error'
@@ -1079,18 +1114,38 @@ function OcrUploadCard({ onDraft }: { onDraft: (id: number) => void }) {
             </Upload>
           )}
         </TrainingGate>
-        {running && (
-          <Typography.Text type="secondary" style={{ lineHeight: '32px' }}>
-            This usually takes under a minute. You can leave the page — it
-            carries on.
-          </Typography.Text>
-        )}
       </Space>
+
+      {running && (
+        <OcrJobProgress job={job.data as OcrJobStatus | undefined}
+          what="a printed consumption form" onRetry={retry} retrying={retrying} />
+      )}
 
       {job.data?.status === 'error' && (
         <Alert type="error" showIcon style={{ marginTop: 10 }}
           message="That form could not be read"
-          description={String(job.data.error ?? '')}
+          description={
+            <>
+              {String(job.data.error ?? '')}
+              {/* ⚠️ A REFUSAL SHOULD NAME THE NEXT STEP, NOT JUST THE PROBLEM.
+                  "No QR code was found" is the correct answer for this lane —
+                  the QR is what makes positional row-mapping safe — but it is a
+                  dead end for somebody holding a handwritten sheet or a
+                  supplier's delivery note, neither of which has ever had one.
+                  Those belong to a different lane, and the person is two clicks
+                  from it rather than stuck. */}
+              {/no QR code/i.test(String(job.data.error ?? '')) && (
+                <Typography.Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
+                  If this is a <strong>handwritten consumption sheet</strong> or a{' '}
+                  <strong>supplier delivery note</strong>, it has no QR code and
+                  never will — read it in{' '}
+                  <Link to="/entry/ocr">Entry → OCR Import</Link> instead. Only
+                  forms printed from <em>Print a consumption form</em> can be
+                  filed here.
+                </Typography.Paragraph>
+              )}
+            </>
+          }
           action={<Button size="small" onClick={() => setJobId(null)}>Dismiss</Button>} />
       )}
       {problems && problems.length > 0 && (
@@ -1106,6 +1161,9 @@ function OcrUploadCard({ onDraft }: { onDraft: (id: number) => void }) {
         Photograph the <strong>whole page including the QR code</strong> — it is
         what tells us which form this is, and a photo without it cannot be
         matched to anything. JPG, PNG, HEIC or PDF.
+        {' '}A <strong>handwritten consumption sheet or a supplier delivery
+        note</strong> has no QR and belongs in{' '}
+        <Link to="/entry/ocr">Entry → OCR Import</Link> instead.
         {' '}Where the handwriting is not certain the number is left
         <strong> blank rather than guessed</strong>, and those rows are marked
         for you to fill in.

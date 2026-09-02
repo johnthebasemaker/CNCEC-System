@@ -1009,7 +1009,26 @@ Upload the photo under **Upload a filled form**. JPG, PNG, HEIC or PDF.
 app which form this is — a photo without it cannot be matched to anything and
 will be refused.
 
-Reading takes up to a minute. You can leave the page; it carries on.
+⚠️ **Only forms printed from "Print a consumption form" belong here.** A
+handwritten consumables sheet or a supplier's delivery note has no QR code and
+never will. Those are read in **Entry → OCR Import** instead — and if you upload
+one here by mistake, the refusal will say so and link you to the right page.
+
+**Reading a page takes minutes, not seconds, and the card now tells you how
+many.** You will see a live counter and the usual time for that kind of page:
+roughly **6½ minutes for a printed consumption form**, 3½ for a 30-row
+handwritten sheet, 1½ for a delivery note. A dense or badly-lit page takes
+longer and the card says so rather than pretending to be nearly finished.
+
+You can leave the page; the read carries on and the result will be waiting.
+
+> ⚠️ **If it says "This read was interrupted", it means the server process doing
+> the reading stopped** — not that your page was bad. Waiting longer will not
+> help; press **Read it again**. This is the honest version of a problem that
+> used to look like the page simply never finishing: before 2026-09-02 the card
+> claimed "usually takes under a minute" and then showed a spinner with no
+> elapsed time, so a perfectly good six-minute read and a dead worker looked
+> identical, and people quite reasonably gave up on both.
 
 ### 4.10.2 Step 2 — check every figure
 
@@ -4894,6 +4913,39 @@ page in frame, keep the lighting even, and hold the camera square to the paper.
 The **Paste tab** works with the AI switched off entirely and is always
 available. Typing the entry in by hand is never wrong.
 
+### 21.13.5 ✅ Ditto marks now come through (2026-09-02)
+
+**Where:** Entry → OCR Import (`/entry/ocr`), the Consumption log lane.
+
+If you have been retyping the Name, Tank No. and Product Name columns after
+every photo read, that was a real fault and it is fixed.
+
+Most people write a ditto mark — `"` or `〃` — instead of repeating themselves
+down a column, and on a typical sheet that is most of the page. The reader was
+seeing those marks perfectly well and quietly returning **nothing** for them,
+because to a reader "same as above" is not a word to transcribe. The step that
+was supposed to copy the value down was looking for the mark, found an empty
+cell instead, and left it empty. On the sheet this was diagnosed against, that
+was **19 of 30 tank numbers, 14 of 30 names and 8 of 30 product names**.
+
+**Now:** a dittoed cell is filled in from the row above, whether the reader
+returns the mark or returns nothing.
+
+Two things worth knowing about how it behaves:
+
+- **A cell that was filled in for you is marked `[?]`.** If the reader gave us
+  nothing and we worked the value out from the row above, the row carries an
+  information marker saying so. A cell where you actually wrote a ditto mark is
+  not marked, because that one is what the paper says rather than what we
+  concluded. It never blocks anything — it just lets you see the difference.
+- **Rows you never wrote on stay empty.** The `S.No.` column is printed on all
+  thirty rows whether or not anybody used them, so if you filled in ten rows,
+  rows 11 to 30 come back blank. They are not filled in with the last person's
+  name.
+
+Nothing about how you use the page changed: photograph it, press **Validate
+against the spec**, review, stage.
+
 # 22. Quality, Safety, Employees & Procurement (QSEP)
 
 Everything in this chapter went live in August 2026. It adds four things that
@@ -5648,6 +5700,23 @@ covered by that check. Nothing guesses which shift they were.
 > somebody reaches a desk, not when the work happened. A night crew filing at
 > 06:40 would be counted as day shift on the strength of a timestamp nobody
 > looked at.
+
+**Since 2026-09-02, the shift can also come off the paper.** Crews already write
+it beside the date — `25/08/26 (Night)` — and the system now reads it, on both
+the printed consumption form and the handwritten consumables sheet. If it is
+written, the shift is filled in for you. If it is not written, the shift stays
+blank, exactly as before.
+
+This is not the same thing as working it out from the clock, and it is worth
+being clear about the difference: **the clock is our guess, and the word beside
+the date is the crew's own statement.** Nothing infers a shift from anything;
+we simply stopped ignoring the one place it was already recorded.
+
+> ⚠️ **This also fixed a bug you may have hit.** Writing `(Night)` in the date
+> box used to make the whole page unreadable — the date parser expected nothing
+> after the digits, so a sheet came back with "the date could not be read" and a
+> critical flag. Being conscientious enough to record the shift was breaking the
+> page. It no longer does.
 
 ## 24.5 What did not change
 

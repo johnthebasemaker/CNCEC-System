@@ -2550,7 +2550,28 @@ It returns immediately and reads in the background — you can leave the page.
 comes from a camera nobody carries into a tank.
 
 **TC-OCR-24** — a photo **without the QR in frame** is refused. The QR is what
-identifies the sheet; nothing else can.
+identifies the sheet; nothing else can. ⚠️ **The refusal now names the next
+step** (Phase 11): a handwritten consumption sheet and a supplier delivery note
+have no QR and never will, so the message points at **Entry → OCR Import**
+rather than leaving somebody holding a page with nowhere to put it. Confirm the
+link appears, and that it does *not* appear for other kinds of failure.
+
+**TC-OCR-24a** — ⚠️ **the wait tells the truth** (Phase 11). Upload a form and
+watch the card. It must show a **live elapsed counter** and the expectation for
+that lane, not a bare spinner. Measured on the dev Mac: a printed five-row form
+takes about **6½ minutes**, a 30-row handwritten sheet about 3½, a delivery note
+about 1½. The card used to say "usually takes under a minute" for all three —
+which is why correct six-minute reads were reported as "it only loads and never
+gets the results". Past the expected time the bar stops at 99 % and the wording
+changes to "still reading"; it must never claim 100 % and keep spinning.
+
+**TC-OCR-24b** — ⚠️ **an interrupted read says so, and offers a retry**
+(Phase 11). Upload a form and restart the API mid-read (or kill the worker).
+Within ~3 minutes the card must change to **"This read was interrupted"** with a
+retry button — *not* spin forever. The state comes from the job's heartbeat, the
+same signal the orphan sweep uses, so a job that is merely **slow** must **never**
+show this however long it runs. Press retry: it re-queues server-side when the
+photograph is still held, and re-uploads from the browser when it is not.
 
 **TC-OCR-25** — ⚠️ **the same sheet cannot be filed twice.** Upload the same
 photo again → refused, naming the entry it already became. Two supervisors
@@ -2582,6 +2603,46 @@ material.
 **TC-OCR-31** — a quantity far off the benchmark shows a **"check" tag**. It
 never blocks: an unusual day happens, and refusing one would teach people to
 write the expected number.
+
+### 14q.7 The store keeper's lane — handwritten sheets and delivery notes
+
+Different paper, different page: **Entry → OCR Import** (`/entry/ocr`), not
+Execution Entries. Neither document has a QR and neither ever will.
+
+**TC-OCR-32** — ⚠️ **ditto marks survive the round trip** (Phase 11, spec R2a/R2b).
+Photograph a consumption sheet that uses `"` or `〃` down the Name, Tank No. and
+Product Name columns, then press **Validate against the spec**. Every populated
+row must come back with a name, a tank and a product — inherited from the row
+above where the writer dittoed. Before this fix the vision model returned an
+empty string for a ditto cell instead of the glyph, the resolver matched
+nothing, and **19 of 30 tank numbers, 14 of 30 names and 8 of 30 product names
+were silently dropped** on the operator's own sheet. That is what "the
+consumption paper details are not coming through" meant.
+
+**TC-OCR-33** — ⚠️ **an inherited cell says it was inherited.** A cell filled
+because the model returned nothing carries an `[?]` `INFO_DITTO_INFERRED`
+marker; one filled from a mark the writer actually made does not. A reviewer has
+to be able to tell what the paper says from what the system concluded.
+
+**TC-OCR-34** — ⚠️ **the unused tail of the sheet stays empty.** The `S.No.`
+column is pre-printed on all 30 rows whether or not anyone wrote on them. Upload
+a sheet with only the first ten rows filled: rows 11–30 must come back blank. If
+they ever inherit, the last operator's name and material walk down the page and
+the system invents issues to people who were never there.
+
+**TC-OCR-35** — ⚠️ **a shift written on the paper is read; one that is not
+written is not invented** (Phase 11, ruling Q13). A date box reading
+`25/08/26 (Night)` must produce the date **and** the Night shift. It used to
+produce neither — every `_DATE_FORMATS` pattern is anchored, so the whole page
+came back `CRIT_DATE_UNPARSEABLE` because the crew were conscientious enough to
+say which shift they were. A box with no marker leaves the shift **NULL**;
+nothing anywhere derives it from the time of filing (ruling P10-9).
+
+**TC-OCR-36** — a **delivery note** reads its header (Ref No, date, customer,
+driver, vehicle, preparer, destination) and its line items, and **skips the
+blank body rows** without inventing items for them. The SAP CODE NO column is
+blank on real GI notes, so every line arrives for matching on its description —
+confirm none is auto-accepted onto a SAP code without you choosing it.
 
 ### 14q.7 If the local model struggles
 

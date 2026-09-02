@@ -1,0 +1,193 @@
+# fixtures/ocr_ground_truth.yaml — what these pages ACTUALLY say.
+#
+# ⚠️ THE EXPECTED VALUES ARE VERSIONED; THE IMAGES ARE NOT. The files under
+# `fixtures/ocr/` are real signed company documents carrying employee names, a
+# driver's name and a customer's project — they stay out of git (see
+# `.gitignore`). This file is the half that must be reviewable in a diff,
+# because it is the half that says whether a model got better or worse.
+#
+# ⚠️ AND `verified` IS NOT DECORATION. A ground truth somebody guessed is worse
+# than no ground truth at all: it turns a model regression into a test failure
+# nobody trusts, and a model improvement into a test failure somebody "fixes" by
+# editing the expectation. Only fields confirmed against the image by a human
+# are `verified: true`. Everything else is `verified: false` and MUST NOT be
+# scored until the operator confirms it — see `pending_operator_review` at the
+# foot of this file.
+#
+# Provenance: uploaded by the operator 2026-08-27/28 as `Trail Files/`, timed and
+# transcribed through the live pipeline on 2026-09-02 (PROPOSED_PHASE11_PLAN §7.7).
+
+meta:
+  spec_version: 1
+  created: '2026-09-02'
+  # Where the images live locally. Restore with:
+  #   cp "Trail Files/"* fixtures/ocr/
+  image_dir: fixtures/ocr
+  model_at_capture: qwen2.5vl:7b
+  # The dev Mac, for reading the timings below. The Hetzner CPX42 is CPU-only
+  # and will differ — re-measure there before quoting these to anyone.
+  host_at_capture: 'Apple Silicon, 11.8 GiB VRAM, 28/29 layers on GPU'
+
+documents:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: execution_entry_form
+    file: Execution entry.pdf
+    sha256: d1b56a7667e46bd90215ab093e1f857a76f3c790bf645c4de7e78791349cc17e
+    lane: ocr_consumption_form          # POST /execution/ocr/upload
+    endpoint: /execution/ocr/upload
+    description: >-
+      A genuine GI Phase-9c printed consumption form, filled digitally (typed
+      into the PDF, not handwritten) and signed. This is the ONLY one of the
+      three that carries a QR code, which is why it is the only one the
+      Execution Entries lane will accept.
+    measured:
+      elapsed_s: 399
+      image_tokens: 4399
+      num_ctx: 8192
+      num_predict: 2600
+      outcome: every field correct
+    expect:
+      verified: true                    # read off the rendered page by a human
+      qr_payload: 'GIF1|CNCEC|LSC1||32934F7226D44CBF'
+      site_id: CNCEC
+      lining_system_code: LSC1
+      esc: ''                           # the form carries no sub-activity
+      form_uuid: 32934F7226D44CBF
+      work_date_text: '27/08/26'
+      work_date_iso: '2026-08-27'
+      equipment_text: TNK-071
+      area_text: '10'
+      area_sqm: 10.0
+      filled_by: Johnson
+      # No shift marker on this page — so `Shift` must stay NULL. A fixture
+      # that expected 'Day' here would be asking the system to guess, which is
+      # exactly what ruling P10-9 forbids.
+      shift: null
+      rows:
+        - {row: 1, material: PR 304,          sap: '1047', qty_text: '5',  quantity: 5,  lot_text: '123'}
+        - {row: 2, material: E40,             sap: '1046', qty_text: '5',  quantity: 5,  lot_text: '123'}
+        - {row: 3, material: BC 3004,         sap: '1045', qty_text: '5',  quantity: 5,  lot_text: '345'}
+        - {row: 4, material: Toluene,         sap: '1418', qty_text: '2',  quantity: 2,  lot_text: '0'}
+        - {row: 5, material: Chemoline 4 ECN, sap: '1044', qty_text: '11', quantity: 11, lot_text: '567'}
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: delivery_note
+    file: Delivery Note.jpeg
+    sha256: 5f40dc220c2dfec97766aa31d6d77c37e9724e4427ec02960c2c856d9999554d
+    lane: ocr_delivery_note             # POST /ai/jobs?kind=ocr_delivery_note
+    endpoint: /entry/ocr
+    description: >-
+      A GI pre-printed delivery note, machine-filled, with a handwritten
+      signature. No QR code — it belongs to the OCR Import lane, not to
+      Execution Entries. Twelve blank body rows below the four real ones, which
+      the model must not invent items for.
+    measured:
+      elapsed_s: 92
+      image_tokens: 2198
+      num_ctx: 8192
+      num_predict: 1536
+      outcome: header and all four items exact; blank rows correctly skipped
+    expect:
+      verified: true
+      header:
+        DN_No: '13529'
+        Date: '2026-08-25'
+        Mob_From: MPC CNCEC PROJECT
+        Driver_Name: ASGHAR
+        Vehicle_No: '1188'
+        Prepared_by: ESAM
+        Mob_To: RAS AL KHAIR
+      item_count: 4
+      items:
+        - {material_text: Rubber Sheet Roll 4E CN 4mm, uom: ROLL, quantity: 12}
+        - {material_text: BC 3004,                     uom: Cans, quantity: 37}
+        - {material_text: Hardener E40,                uom: BOX,  quantity: 28}
+        - {material_text: Carbon Filler,               uom: Bags, quantity: 7}
+      # ⚠️ THE SAP CODE NO COLUMN IS BLANK ON THE PAPER. Every line therefore
+      # reaches `fuzzy.resolve_rows` with a description only. Rule 1 says the
+      # component key is (Material_Code, SAP_Code), so a description-only match
+      # can land on the wrong drum of a multi-part system — see Q8. Nothing here
+      # asserts an auto-resolved SAP, deliberately.
+      sap_codes_present: false
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: consumption_paper
+    file: Consumption paper.jpeg
+    sha256: 4c8c4615d7aeedd2057c19d777b66aa60a24d18f3796b0cc0c0fa95dbf59cd84
+    lane: ocr_consumption               # POST /ai/jobs?kind=ocr_consumption
+    endpoint: /entry/ocr
+    description: >-
+      The handwritten PPE / consumables issue register — "MPC3P1-CNCEC PROJECT ·
+      Daily - Consumption · Safety & Production Consumables". Thirty ruled rows,
+      columns S.No | Name | Tank No.# | Product Name | UOM | QTY | Remarks, in
+      biro, with heavy use of ditto marks down the Name, Tank No. and Product
+      Name columns. No QR code.
+    measured:
+      elapsed_s: 212
+      image_tokens: 2265
+      num_ctx: 8192
+      num_predict: 3072
+      outcome: >-
+        Parsed cleanly and was NOT truncated (7,023 raw chars inside a 3,072-token
+        budget). Quantities and the date read correctly. Ditto cells came back as
+        the empty string rather than a glyph — the defect fixed by spec R2a/R2b.
+    expect:
+      # ⚠️ HEADER ONLY IS VERIFIED. The 30 handwritten rows have NOT been
+      # transcribed by a human, and this file will not pretend otherwise.
+      verified: false
+      header:
+        verified: true
+        date_text: '25/08/26 (Night)'
+        date_iso: '2026-08-25'
+        # The word the crew wrote. Reading it is not the inference P10-9
+        # forbids — it is the honest source P10-9 says older rows do not have.
+        shift: Night
+        row_count: 30
+      # What the SHAPE of a correct read must be, which is scoreable today
+      # without a per-cell transcription. These are the properties the 11b fix
+      # is actually about.
+      structure:
+        verified: true
+        # Every printed row is returned, in order, including ones left blank.
+        rows_returned_min: 25
+        # Ditto-able columns that must be POPULATED after resolution — before
+        # the fix these came back blank on the counts below.
+        ditto_columns: [received_by, tank_no, product_name_raw, work_type]
+        blank_before_fix:
+          tank_no: 19
+          received_by: 14
+          product_name_raw: 8
+        # After R2a/R2b every populated row must carry a name, a tank and a
+        # product — inherited or written — and every inherited one must say so.
+        after_fix:
+          populated_rows_with_blank_ditto_column: 0
+          inferred_cells_flagged: INFO_DITTO_INFERRED
+        # ⚠️ AND THE EMPTY TAIL MUST STAY EMPTY. The S.No. column is pre-printed
+        # on all 30 rows; if the inference ever counted that as evidence of a
+        # real row it would walk the last operator's name and material down the
+        # unused rows and invent issues to people who were not there.
+        unwritten_rows_must_stay_blank: true
+
+# ⚠️ WHAT A HUMAN STILL HAS TO CONFIRM BEFORE IT CAN BE SCORED.
+#
+# Listed explicitly rather than left implicit, because the failure mode here is
+# a fixture that quietly becomes authoritative without anybody having checked
+# it. Until these are done, `consumption_paper.expect.verified` stays false and
+# a runner must skip the per-cell comparison (and SAY that it skipped it — a
+# skip is not a pass; see legacy/bug_check.py's SkipCheck).
+pending_operator_review:
+  - document: consumption_paper
+    needs: >-
+      A per-row transcription of the 30 handwritten rows — Name, Tank No.,
+      Product Name, UOM, QTY and Remarks as written on the paper, with the
+      ditto cells marked as dittos rather than resolved. The handwriting is
+      legible but several names are ambiguous (row 1 reads as "Sunil" or
+      "Sunit"; the UOM column reads variously as "Pair"/"Pavr"/"Pcs"), and a
+      transcription this file guessed would become the standard the model is
+      measured against.
+  - document: delivery_note
+    needs: >-
+      A ruling on Q8 — whether a DN line may auto-resolve to a SAP code by
+      description similarity, or must always be confirmed by a human. Until
+      that is answered no SAP expectations are recorded here.

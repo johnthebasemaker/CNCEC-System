@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import insert
 
 from .ai import form_jobs
+from .ai import jobs as aijobs
 from .ai import ocr
 from .ai import ocr_form as OF
 from .auth import (get_current_user, require_roles, resolve_site_param,
@@ -546,10 +547,31 @@ async def ocr_job(job_id: int, user: dict = Depends(get_current_user),
         raise HTTPException(404, "no such job")
     if not site_row_visible(site_scope(user), row["Site_ID"]):
         raise HTTPException(403, "that job belongs to another site")
-    out = {"job_id": job_id, "status": row["status"], "error": row["error"]}
+    out = {"job_id": job_id, "status": row["status"], "error": row["error"],
+           # ⚠️ THE TIMING FACTS TRAVEL WITH THE STATUS, because a status alone
+           # cannot tell a supervisor the difference between "six minutes in and
+           # working" and "the process died four minutes ago". The card promised
+           # a minute for a read measured at 399 s, so the honest ones spun
+           # until somebody gave up. See ai/jobs.EXPECTED_SECONDS.
+           **aijobs.progress(row)}
     if row["result_json"]:
         out["result"] = json.loads(row["result_json"])
     return out
+
+
+@router.post("/ocr/jobs/{job_id}/requeue",
+             summary="Re-run a form read whose worker went away")
+async def ocr_job_requeue(job_id: int,
+                          user: dict = Depends(require_roles(
+                              "supervisor", "hod", "store_keeper")),
+                          session: AsyncSession = Depends(get_session)):
+    row = (await session.execute(select(ai_jobs_t)
+           .where(ai_jobs_t.c["id"] == job_id))).mappings().first()
+    if row is None:
+        raise HTTPException(404, "no such job")
+    if not site_row_visible(site_scope(user), row["Site_ID"]):
+        raise HTTPException(403, "that job belongs to another site")
+    return await aijobs.requeue(session, row, form_jobs.spawn)
 
 
 @router.get("/entries/{entry_id}/qsep",

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   Alert, App, Button, Card, DatePicker, Descriptions, Input, InputNumber, Popconfirm, Radio,
-  Select, Space, Spin, Tag, Typography, Upload,
+  Select, Space, Tag, Typography, Upload,
 } from 'antd'
 import { Table } from '../lib/smartTable'
 import { CameraOutlined, DeleteOutlined, DownloadOutlined, InboxOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
@@ -12,6 +12,8 @@ import { api } from '../api/client'
 import type { Row as ApiRow } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { useList, useSites } from '../api/hooks'
+import OcrJobProgress from '../components/OcrJobProgress'
+import type { OcrJobStatus } from '../components/OcrJobProgress'
 
 function errMsg(e: unknown): string {
   const x = e as { response?: { data?: { detail?: string } }; message?: string }
@@ -78,6 +80,11 @@ export default function OcrImportPage() {
   const [date, setDate] = useState<Dayjs>(dayjs())
   const [site, setSite] = useState<string | undefined>(user?.site_id || undefined)
   const [staging, setStaging] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  // Kept so an interrupted read can be re-sent in one click — the orphan
+  // sweep clears the server's copy of the image, and a store keeper should
+  // not have to fetch the paper back to the desk to try again.
+  const [lastFile, setLastFile] = useState<File | null>(null)
 
   const isAdmin = user?.role === 'admin'
   const isConsumption = kind === 'ocr_consumption'
@@ -275,6 +282,33 @@ export default function OcrImportPage() {
   const polling = jobId != null && (job.data == null
     || job.data.status === 'queued' || job.data.status === 'running')
 
+  /**
+   * Re-run an interrupted read. The server re-queues in place while it still
+   * holds the prepared image; otherwise the browser re-sends the file it kept,
+   * so a store keeper never has to fetch the paper back to the desk.
+   */
+  const retry = async () => {
+    setRetrying(true)
+    try {
+      if (job.data?.can_requeue && jobId != null) {
+        await api.post(`/ai/jobs/${jobId}/requeue`)
+        await job.refetch()
+      } else if (lastFile) {
+        const fd = new FormData()
+        fd.append('file', lastFile)
+        setJobId(null)
+        const r = await api.post('/ai/jobs', fd, { params: { kind } })
+        setJobId(r.data.job_id)
+      } else {
+        message.info('Photograph the page again — the original is no longer held.')
+      }
+    } catch (e) {
+      message.error(errMsg(e))
+    } finally {
+      setRetrying(false)
+    }
+  }
+
   return (
     <div>
       <Typography.Title level={3} style={{ marginTop: 0 }}>📷 OCR Import</Typography.Title>
@@ -300,19 +334,16 @@ export default function OcrImportPage() {
               title="Local AI is offline — use the Paste lane meanwhile." />
           )}
           {polling ? (
-            <div style={{ textAlign: 'center', padding: 24 }}>
-              <Spin />
-              <Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>
-                Reading the photo… ({job.data?.status ?? 'queued'}) — first scan can
-                take a minute while the vision model warms up.
-              </Typography.Paragraph>
-            </div>
+            <OcrJobProgress job={job.data as OcrJobStatus | undefined}
+              what={isConsumption ? 'a handwritten consumption sheet' : 'a delivery note'}
+              onRetry={retry} retrying={retrying} />
           ) : (
             <Upload.Dragger accept="image/*" maxCount={1} showUploadList={false}
               disabled={Boolean(aiHealth && !aiHealth.ok)}
               customRequest={async ({ file, onSuccess, onError }) => {
                 const fd = new FormData()
                 fd.append('file', file as Blob)
+                setLastFile(file as File)
                 try {
                   const r = await api.post('/ai/jobs', fd, { params: { kind } })
                   setJobId(r.data.job_id)

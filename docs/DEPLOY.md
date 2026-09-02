@@ -113,6 +113,10 @@ change behaviour a person will notice.
 | `GI_AI_ORPHAN_STALE_S` | `180` | How long a job may go without a heartbeat before the sweep reaps it (§7a-ii). It is five missed beats, **not** the job timeout — sizing it off job duration means waiting 15 minutes to reap a corpse. |
 | `GI_SUPPLIER_CHASE_TO` | *(unset)* | E.164 number for the day-shift MTC supplier chase. ⚠️ Unset means **no supplier draft is created at all**; set, it writes a WhatsApp **DRAFT** that a human must release in the admin Console. It never sends automatically. |
 | `GI_BRIEFING_HOUR` / `_MINUTE` | `7` / `0` | When the morning briefing (and the day-shift MTC chase that rides it) runs. |
+| `GI_AI_VISION_API_KEY` | *(unset)* | A cloud vision key. ⚠️ **Unset means no page can ever leave the network**, whatever else is configured — every path degrades to Ollama rather than failing, so an operator without a key gets exactly the local behaviour they had before (Q5, 2026-09-02). |
+| `GI_AI_VISION_PROVIDER` | `ollama` | `anthropic` sends **every** page to the cloud. This and the next row are deliberately **two switches, not one**: they are two different agreements about company data. |
+| `GI_AI_VISION_CLOUD_FALLBACK` | `0` | `1` keeps reads local and sends a page out **only when the local engine is dead** — never when it is merely slow. A read timeout means the model was healthy and still generating (a five-row form measured at 399 s), and uploading a page because our own stopwatch ran out would make a data-egress decision out of impatience. Every fallback is logged with the reason. |
+| `GI_AI_EXPECTED_<KIND>_S` | measured | What the upload card tells a user to expect for one lane, e.g. `GI_AI_EXPECTED_OCR_CONSUMPTION_S`. Defaults are timings from real pages on the dev Mac (95 / 215 / 400 s); the CPX42 is CPU-only and **should be re-measured before these are quoted to anyone**. |
 | `GI_REDIS_URL` | — | **Does not exist, deliberately.** Ruling P10-1: the shared limiters are Postgres-backed (`rate_buckets`). Do not add Redis without revisiting that ruling. |
 
 ⚠️ **Two settings are rows in `app_settings`, not environment variables**, and

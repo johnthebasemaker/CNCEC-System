@@ -242,8 +242,13 @@ Output STRICT JSON with this shape and no extra commentary:
 
 Rules:
 - Output JSON only. No markdown fences, no prose.
-- Ditto marks (\", 〃, ,,) mean "same as above" — transcribe the GLYPH
-  itself, never copy the value down.
+- A cell that says "same as the row above" — written as a ditto mark (", 〃,
+  ,,), as a wavy line, or simply left to be understood from the row above —
+  MUST be output as the exact token <DITTO>. Do not copy the value down
+  yourself, and do not output an empty string for it. Later code resolves
+  <DITTO> against the row above; an empty string is indistinguishable from a
+  cell the writer left genuinely blank.
+- A cell that is genuinely blank — nothing written, nothing implied — is "".
 - Additive quantities like "2+3" go in qty_text verbatim; leave quantity null.
 - A blank QTY cell is qty_text "" and quantity null — never invent 0 or 1.
 - Use empty strings for unreadable text fields; never guess a person's name.

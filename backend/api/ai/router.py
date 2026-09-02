@@ -390,10 +390,36 @@ async def get_ocr_job(job_id: int,
         raise HTTPException(403, "not your job")
     out = {"id": row["id"], "kind": row["kind"], "status": row["status"],
            "error": row["error"], "created_at": row["created_at"],
-           "finished_at": row["finished_at"]}
+           "finished_at": row["finished_at"],
+           **ai_jobs.progress(row)}
     if row["status"] == "done" and row["result_json"]:
         out["result"] = json.loads(row["result_json"])
     return out
+
+
+@router.post("/jobs/{job_id}/requeue",
+             summary="Re-run a job whose worker went away")
+async def requeue_ocr_job(job_id: int,
+                          user: dict = Depends(require_roles("store_keeper")),
+                          session: AsyncSession = Depends(get_session)):
+    """Put a stalled job back on the queue, using the image already stored.
+
+    ⚠️ ONLY WHEN THE OWNER IS ACTUALLY GONE. Re-queueing a job that is merely
+    slow starts a SECOND six-minute vision read of the same page on a box that
+    holds one warm model — the first read then finishes into a row a second
+    worker has re-claimed, and the person waiting gets neither result any
+    sooner. `progress().stale` is the same predicate the orphan sweep uses, so
+    the button appears exactly when the server has already concluded nobody is
+    working on it.
+    """
+    t = _MD.tables["ai_jobs"]
+    row = (await session.execute(select(t).where(t.c["id"] == job_id))
+           ).mappings().first()
+    if row is None:
+        raise HTTPException(404, f"job {job_id} not found")
+    if user["role"] != "admin" and row["actor"] != user["username"]:
+        raise HTTPException(403, "not your job")
+    return await ai_jobs.requeue(session, row, ai_jobs.spawn)
 
 
 class FromAttachmentIn(BaseModel):

@@ -46,6 +46,7 @@ Every flag is a record `{code, severity, row_no?, message, context}`. `row_no` i
 | `INFO_TANK_NO_ILLEGIBLE` | 03 | The `Tank No.` field couldn't be read |
 | `INFO_MATCH_UNCERTAIN` | 05 | Fuzzy match has `needs_review = true` (top candidates surfaced) |
 | `INFO_DITTO_WITH_NO_SOURCE` | 03 | A ditto mark appeared but no previous row had a value in that column |
+| `INFO_DITTO_INFERRED` | 03 | **(2026-09-02, spec R2b)** A cell came back EMPTY on a populated row and was filled from the row above. Distinct from `ditto_flags` on purpose: that says the operator wrote a ditto mark, this says the model returned nothing and we concluded one. A reviewer must be able to tell what the paper says from what we inferred. |
 
 ### Warning flags (⚠️)
 
@@ -166,7 +167,8 @@ Not part of the spec — but this is how the operator has come to expect the fla
 
 ```python
 INFO_FLAGS = {"NAME_ILLEGIBLE", "REMARKS_ILLEGIBLE", "TANK_NO_ILLEGIBLE",
-              "MATCH_UNCERTAIN", "DITTO_WITH_NO_SOURCE"}
+              "MATCH_UNCERTAIN", "DITTO_WITH_NO_SOURCE",
+              "DITTO_INFERRED"}
 WARN_FLAGS = {"QTY_DEFAULTED", "ADDITIVE_QTY", "SUBSTITUTED",
               "LOW_STOCK_CROSSED", "MULTI_SUBSTITUTIONS_IN_BATCH", "QTY_APPROXIMATE"}
 CRIT_FLAGS = {"ZERO_STOCK_NO_SUBSTITUTE", "WOULD_GO_NEGATIVE",
@@ -231,6 +233,7 @@ flag_codes:
     - INFO_TANK_NO_ILLEGIBLE
     - INFO_MATCH_UNCERTAIN
     - INFO_DITTO_WITH_NO_SOURCE
+    - INFO_DITTO_INFERRED
   warning:
     - WARN_QTY_DEFAULTED
     - WARN_ADDITIVE_QTY

@@ -386,6 +386,9 @@ async def read_form(image_bytes: bytes) -> dict:
         "filled_by": str(parsed.get("filled_by") or "").strip(),
         "rows": rows,
         "model": model_id,
-        "provider": aic.vision_provider(),
+        # Which engine ACTUALLY answered, derived from the model id it
+        # returned rather than from the configuration — after a cloud fallback
+        # those two disagree, and the fact is what belongs beside a quantity.
+        "provider": aic.provider_of(model_id),
         "raw": raw,
     }

@@ -73,6 +73,24 @@ An empty row (just the printed `S.No.`) is discarded. Do not emit 30 rows padded
 
 ### R2 — Ditto marks
 
+> **⚠️ AMENDED 2026-09-02 (Phase 11, slice 11b) — R2a and R2b are new.**
+> The rule below was written for an OCR engine that transcribes a page
+> character by character. `qwen2.5vl:7b`, which is what actually reads these
+> forms, does not: asked for the glyph in a ditto cell it returns the **empty
+> string**, because "same as above" is not text and the model normalises it
+> away. Measured on the operator's own sheet (30 rows, 2026-09-02) it returned
+> `""` for **19 of 30** `Tank No.` cells, **14 of 30** `Name` cells and **8 of
+> 30** `Product Name` cells.
+>
+> The resolver matched only the five glyphs, so it fired on none of them and
+> those cells stayed blank. That is the whole of the reported fault
+> *"consumption paper details not getting"*: the details were read correctly
+> and then discarded between a prompt rule the model does not obey and a
+> resolver that only recognises the form the model does not produce.
+>
+> The fix is at both ends — ask for a token the model **can** emit (R2a), and
+> stop depending on the model's cooperation for the common case (R2b).
+
 Any of these characters, alone in a cell, means "same as the row directly above":
 
 - `"` (straight double quote)
@@ -82,6 +100,42 @@ Any of these characters, alone in a cell, means "same as the row directly above"
 - A backtick `` ` `` alone
 
 When any of these five glyphs is the entire content of a cell, replace the cell's value with the value from the same column of the previous **non-blank** row, and set the corresponding `ditto_flags.<column>` to true.
+
+#### R2a — the `<DITTO>` sentinel (2026-09-02)
+
+The vision prompt now instructs the model to emit the literal token `<DITTO>`
+for a ditto cell instead of transcribing the glyph. A cell whose entire content
+is `<DITTO>` (case-insensitively, with or without surrounding whitespace) is
+resolved **exactly like one of the five glyphs**, and sets the same
+`ditto_flags.<column>`.
+
+A sentinel is asked for rather than a glyph because a glyph is *punctuation the
+model is entitled to normalise* and a bracketed token is not: it survives the
+model's own tidying, it cannot be confused with a legitimate value, and it
+cannot be produced by accident from handwriting.
+
+#### R2b — an empty cell on a POPULATED row is an inferred ditto (2026-09-02)
+
+When a cell in a ditto-able column is empty **and the row it sits on carries a
+quantity or any other populated field**, treat it as a ditto — resolve it from
+the previous non-blank row exactly as R2 does — and additionally set the flag
+`INFO_DITTO_INFERRED` on the row.
+
+**⚠️ The "on a populated row" qualifier is the entire safety of this rule.** A
+blank cell on an otherwise **empty** row is an empty row (already discarded by
+R1), and inheriting into one would invent an issue to a person who was never
+there and a material that was never taken. The inference only ever fills a gap
+in a row that certainly exists.
+
+**⚠️ An inferred ditto is flagged differently from a marked one on purpose.**
+`ditto_flags.<column>` says "the operator wrote a ditto mark". `INFO_DITTO_INFERRED`
+says "the cell came back blank and we filled it from the row above". A reviewer
+must be able to tell those apart, because the first is what the paper says and
+the second is what we concluded. Both are visible in the review grid;
+`INFO_DITTO_INFERRED` is an INFO-level flag (it does not block).
+
+**Precedence:** an explicit `<DITTO>` or glyph is always R2/R2a, never R2b —
+the marked case is evidence and takes priority over the inferred one.
 
 **Ditto marks do NOT propagate:** if row 5 has `"` in the `Product Name` column and row 4 also had `"` in the same column, both resolve to the value from the last non-ditto row. This is important for long runs of `"` (10+ rows in a column is common on real forms).
 

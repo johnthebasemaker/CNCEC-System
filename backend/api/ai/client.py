@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from typing import AsyncIterator, Optional
 
 import httpx
+
+logger = logging.getLogger("gi.ai.client")
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
@@ -82,17 +85,69 @@ VISION_CLOUD_MODEL = os.environ.get("GI_AI_VISION_CLOUD_MODEL",
 VISION_CLOUD_URL = os.environ.get("GI_AI_VISION_CLOUD_URL",
                                   "https://api.anthropic.com/v1/messages")
 
+# ── ⚠️ FALLBACK IS A SECOND, SEPARATE DECISION FROM PROVIDER (Phase 11, Q5) ──
+#
+# `GI_AI_VISION_PROVIDER=anthropic` says "read every page in the cloud".
+# `GI_AI_VISION_CLOUD_FALLBACK=1` says "read locally, and only if the local
+# engine is DOWN send the page out". They are deliberately two switches and not
+# one, because they are two different agreements about company data and an
+# operator must be able to grant one without the other — and be able to see, in
+# an env file, which one they granted.
+#
+# **DEFAULT OFF.** Vision is the only lane allowed to do this at all: the pages
+# are consumption sheets and delivery notes. `/ai/query`, `/ai/nl-search`,
+# `/ai/insights` and `/ai/eod-summary` carry live stock rows and generated SQL
+# over the ERP and have NO cloud path, by ruling (Q5, 2026-09-02).
+VISION_CLOUD_FALLBACK = os.environ.get("GI_AI_VISION_CLOUD_FALLBACK",
+                                       "0").strip().lower() in ("1", "true", "yes")
+
+
+class VisionTimeout(RuntimeError):
+    """The model was reachable and still generating when the budget ran out."""
+
+
+class VisionUnavailable(RuntimeError):
+    """The engine could not be reached, or died mid-generation."""
+
+
+def cloud_vision_ready() -> bool:
+    """True when a cloud vision call could actually be made right now.
+
+    ⚠️ THE KEY IS THE GATE, AND ITS ABSENCE IS SILENT ON PURPOSE. An operator
+    who has not obtained a key must get the local behaviour they had before,
+    not a stack trace and not a page sitting in a queue — so every path here
+    degrades to Ollama rather than failing. `/ai/health` is where a
+    misconfiguration is meant to become visible; somebody's photograph is not.
+    """
+    return bool(VISION_API_KEY) and bool(VISION_CLOUD_URL)
+
+
+def cloud_fallback_ready() -> bool:
+    """True when a LOCAL failure is permitted to leave the network."""
+    return VISION_CLOUD_FALLBACK and cloud_vision_ready()
+
 
 def vision_provider() -> str:
-    """Which engine vision calls will actually reach.
+    """Which engine vision calls will reach FIRST.
 
     Reports `ollama` when a cloud provider is named but unconfigured, rather
     than failing at the first upload: a missing key is an operator mistake that
     should surface in /ai/health, not in somebody's photograph.
     """
-    if VISION_PROVIDER == "anthropic" and VISION_API_KEY:
+    if VISION_PROVIDER == "anthropic" and cloud_vision_ready():
         return "anthropic"
     return "ollama"
+
+
+def provider_of(model_id: str) -> str:
+    """Which engine actually answered, from the model id it returned.
+
+    ⚠️ ASKED OF THE ANSWER, NOT OF THE CONFIGURATION. `vision_provider()`
+    describes intent; after a fallback the intent and the fact differ, and the
+    one worth recording beside a quantity is the fact. "Which engine read this"
+    is the first question asked when a number is disputed.
+    """
+    return "anthropic" if model_id == VISION_CLOUD_MODEL else "ollama"
 
 
 async def vision_json(prompt: str, *, system: str, image_b64: str,
@@ -106,37 +161,71 @@ async def vision_json(prompt: str, *, system: str, image_b64: str,
     disputed, and it is unanswerable later if nobody recorded it.
     """
     if vision_provider() == "anthropic":
-        body = {
-            "model": VISION_CLOUD_MODEL,
-            "max_tokens": num_predict,
-            "system": system,
-            "messages": [{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64",
-                                             "media_type": "image/jpeg",
-                                             "data": image_b64}},
-                {"type": "text", "text": prompt}]}],
-        }
-        try:
-            async with httpx.AsyncClient(timeout=timeout_s) as c:
-                r = await c.post(VISION_CLOUD_URL, json=body, headers={
-                    "x-api-key": VISION_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"})
-                r.raise_for_status()
-                parts = r.json().get("content", [])
-                text = "".join(p.get("text", "") for p in parts
-                               if p.get("type") == "text")
-                return text, VISION_CLOUD_MODEL
-        except Exception as e:
-            raise RuntimeError(
-                f"Cloud vision failed: {type(e).__name__}: {e}") from e
+        return await _cloud_vision(prompt, system=system, image_b64=image_b64,
+                                   num_predict=num_predict, timeout_s=timeout_s)
 
-    async with GEN_SEMAPHORE:
-        text = await generate(MODEL_VISION, prompt, system=system,
-                              temperature=0.0, num_predict=num_predict,
-                              images=[image_b64], timeout_s=timeout_s,
-                              num_ctx=vision_num_ctx(num_predict, image_tokens))
-    return text, MODEL_VISION
+    try:
+        async with GEN_SEMAPHORE:
+            text = await generate(
+                MODEL_VISION, prompt, system=system, temperature=0.0,
+                num_predict=num_predict, images=[image_b64],
+                timeout_s=timeout_s,
+                num_ctx=vision_num_ctx(num_predict, image_tokens))
+        return text, MODEL_VISION
+    except VisionTimeout:
+        # ⚠️ A TIMEOUT NEVER FALLS BACK, AND THIS IS THE IMPORTANT HALF OF THE
+        # RULE. A read timeout means the local model was reachable, healthy and
+        # STILL GENERATING — the page is slow, not the server broken (a five-row
+        # form measured at 399 s here). Sending that page to a third party
+        # because our own stopwatch ran out would make a data-egress decision on
+        # the basis of impatience, and it would do it most often for exactly the
+        # dense, information-rich pages the operator would least want to send.
+        # The named "raise the budget" error goes back unchanged.
+        raise
+    except VisionUnavailable as e:
+        if not cloud_fallback_ready():
+            raise
+        logger.warning(
+            "local vision unavailable (%s) — falling back to %s. The page is "
+            "leaving the network because GI_AI_VISION_CLOUD_FALLBACK is on.",
+            e, VISION_CLOUD_MODEL)
+        return await _cloud_vision(prompt, system=system, image_b64=image_b64,
+                                   num_predict=num_predict, timeout_s=timeout_s,
+                                   after=str(e))
+
+
+async def _cloud_vision(prompt: str, *, system: str, image_b64: str,
+                        num_predict: int, timeout_s: float,
+                        after: str = "") -> tuple[str, str]:
+    """One cloud vision completion. Never called unless a key is configured."""
+    body = {
+        "model": VISION_CLOUD_MODEL,
+        "max_tokens": num_predict,
+        "system": system,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": "image/jpeg",
+                                         "data": image_b64}},
+            {"type": "text", "text": prompt}]}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as c:
+            r = await c.post(VISION_CLOUD_URL, json=body, headers={
+                "x-api-key": VISION_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"})
+            r.raise_for_status()
+            parts = r.json().get("content", [])
+            text = "".join(p.get("text", "") for p in parts
+                           if p.get("type") == "text")
+            return text, VISION_CLOUD_MODEL
+    except Exception as e:
+        # When this was a fallback, BOTH failures are reported. Saying only
+        # "cloud vision failed" would send an operator to check a cloud account
+        # for a problem that started with their own Ollama being down.
+        tail = f" (after the local engine failed: {after})" if after else ""
+        raise RuntimeError(
+            f"Cloud vision failed: {type(e).__name__}: {e}{tail}") from e
 
 
 async def health() -> bool:
@@ -256,13 +345,20 @@ async def generate(model: str, prompt: str, *, system: Optional[str] = None,
         # An operator then checks a service that is running fine. The model was
         # reachable, answering, and simply not finished — which is a budget
         # problem with a named fix, and this sentence is what names it.
-        raise RuntimeError(
+        #
+        # Since Phase 11 the distinction is TYPED as well as worded, because a
+        # caller now acts on it: `vision_json` may send a page to a cloud
+        # provider when the local engine is DEAD, and must never do so merely
+        # because it was SLOW. A string nobody parses is documentation; a type
+        # is a control.
+        raise VisionTimeout(
             f"the model did not finish within {timeout_s:g}s (it was still "
             f"generating — this is a time budget, not an outage; raise "
             f"GI_AI_VISION_TIMEOUT_S if this page is genuinely this long)"
         ) from e
     except Exception as e:  # normalized like legacy — caller shows a friendly msg
-        raise RuntimeError(f"Ollama generate failed: {type(e).__name__}: {e}") from e
+        raise VisionUnavailable(
+            f"Ollama generate failed: {type(e).__name__}: {e}") from e
 
 
 async def stream(model: str, prompt: str, *, system: Optional[str] = None,

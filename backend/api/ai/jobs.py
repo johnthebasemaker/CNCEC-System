@@ -73,6 +73,129 @@ HEARTBEAT_SECONDS = float(os.environ.get("GI_AI_HEARTBEAT_S", "30"))
 ORPHAN_STALE_SECONDS = float(os.environ.get("GI_AI_ORPHAN_STALE_S", "180"))
 ORPHAN_SWEEP_SECONDS = float(os.environ.get("GI_AI_ORPHAN_SWEEP_S", "300"))
 
+# ⚠️ HOW LONG EACH LANE ACTUALLY TAKES, MEASURED, BECAUSE THE UI WAS LYING.
+#
+# The upload card said "This usually takes under a minute" for every lane. On
+# 2026-09-02 the operator's own three documents were timed end-to-end through
+# these exact prompts and budgets on the dev Mac (qwen2.5vl:7b, 28 of 29 layers
+# on GPU, output layer on CPU):
+#
+#   delivery note, 4 typed items, 1,536 predict ................  92 s
+#   consumption sheet, 30 handwritten rows, 3,072 predict ...... 212 s
+#   printed GI consumption form, 5 rows, 2,600 predict ......... 399 s
+#
+# All three read CORRECTLY. The bug reported as "it only loads and never gets
+# the results" was a 6½-minute job behind a 60-second promise and an unlabelled
+# spinner — the person watching it gave up, which is the rational response to a
+# progress indicator that has stopped meaning anything.
+#
+# These are medians to SHOW somebody, not deadlines to enforce; nothing branches
+# on them. They are deliberately generous, because a job that finishes early
+# reads as fast and one that overruns its own estimate reads as broken.
+#
+# ⚠️ THEY ARE HARDWARE-SPECIFIC. The Hetzner CPX42 is CPU-only and will differ;
+# `GI_AI_EXPECTED_<KIND>_S` overrides one lane without a deploy.
+EXPECTED_SECONDS: dict[str, int] = {
+    "ocr_delivery_note": 95,
+    "ocr_consumption": 215,
+    "ocr_purchase_doc": 240,
+    "ocr_consumption_form": 400,          # the Phase 9c printed form (form_jobs)
+    "tool_identify": 30,
+}
+DEFAULT_EXPECTED_SECONDS = 180
+
+
+def expected_seconds(kind: str) -> int:
+    env = os.environ.get(f"GI_AI_EXPECTED_{(kind or '').upper()}_S")
+    if env:
+        try:
+            return max(1, int(float(env)))
+        except ValueError:
+            pass
+    return EXPECTED_SECONDS.get(kind, DEFAULT_EXPECTED_SECONDS)
+
+
+def progress(row) -> dict:
+    """The timing facts a poller needs in order to tell the truth.
+
+    ⚠️ `stale` IS COMPUTED HERE, NOT IN THE BROWSER, so the "Interrupted"
+    banner and the orphan sweep can never disagree about what a dead job is.
+    Two thresholds drifting apart would show a supervisor a Retry button for a
+    job that is about to succeed, or leave them watching a spinner for a row
+    the server has already given up on.
+
+    A `queued` row is never stale: it has no owner yet, so there is nothing to
+    have stopped beating. It ages against `created_at` only so that the sweep
+    can eventually reap a row whose process died between the commit and
+    `spawn()`.
+    """
+    now = _now()
+    started = row["started_at"] or row["created_at"]
+    beat = row["heartbeat_at"] or row["started_at"] or row["created_at"]
+    running = row["status"] in ("queued", "running")
+    since_beat = (now - beat).total_seconds() if beat else 0.0
+    return {
+        "started_at": started,
+        "heartbeat_at": row["heartbeat_at"],
+        # Elapsed is server-computed for the same reason: a phone with a wrong
+        # clock must not be able to render "started 3 hours ago".
+        "elapsed_s": int((now - started).total_seconds()) if started else 0,
+        "expected_s": expected_seconds(row["kind"]),
+        "stale": bool(running and row["status"] == "running"
+                      and since_beat > ORPHAN_STALE_SECONDS),
+        "stale_after_s": int(ORPHAN_STALE_SECONDS),
+        # The worker clears `payload_json` when it finishes OR fails, and the
+        # orphan sweep clears it too — so a retry that re-queues the row in
+        # place is only possible while the image is still held. When it is not,
+        # the honest answer is "send the photo again", and the UI says so.
+        "can_requeue": bool(running and row["payload_json"]),
+    }
+
+
+async def requeue(session, row, spawner) -> dict:
+    """Hand a stalled job back to a live worker. Shared by both OCR lanes.
+
+    ⚠️ THE CLAIM IS THE SAME ATOMIC UPDATE AS EVERYWHERE ELSE, guarded on the
+    row still being `running` with the same stale heartbeat we just read. Under
+    `--workers 4` the honest race is: the original owner was not dead, only
+    quiet, and it finishes between our read and our write. The guard means it
+    keeps its result and we return "it came back on its own" instead of
+    discarding a six-minute read and starting another.
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import update as _update
+
+    prog = progress(row)
+    if row["status"] not in ("queued", "running"):
+        raise HTTPException(
+            409, f"that job already finished with status '{row['status']}' — "
+                 f"there is nothing to re-run.")
+    if not prog["stale"]:
+        raise HTTPException(
+            409, "that job is still being worked on. Re-running it would start "
+                 "a second read of the same page on a server that reads one at "
+                 "a time, which makes the wait longer, not shorter.")
+    if not prog["can_requeue"]:
+        raise HTTPException(
+            409, "the photograph is no longer held for this job, so it cannot "
+                 "be re-run from here. Upload it again.")
+
+    res = await session.execute(_update(ai_jobs_t).where(
+        ai_jobs_t.c["id"] == row["id"],
+        ai_jobs_t.c["status"] == "running",
+        ai_jobs_t.c["heartbeat_at"] == row["heartbeat_at"],
+    ).values(status="queued", started_at=None, finished_at=None,
+             worker_id=None, heartbeat_at=None, error=None))
+    await session.commit()
+    if res.rowcount == 0:
+        return {"job_id": row["id"], "status": "unchanged",
+                "message": "that job moved on while you were asking — poll it "
+                           "again rather than starting a second read."}
+    spawner(row["id"])
+    return {"job_id": row["id"], "status": "queued",
+            "message": "Re-reading the page."}
+
+
 JOB_KINDS = ("ocr_consumption", "ocr_delivery_note", "tool_identify",
              # QSEP slice 6 — a SCANNED PR/PO. Needed because a real
              # purchase order in this project (PO#4710003121) is a scan with

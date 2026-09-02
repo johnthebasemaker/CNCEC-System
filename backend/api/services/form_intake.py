@@ -34,6 +34,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..ai import handwritten as _hw
 from ..ai import ocr_form as OF
 from . import consumption_form as CF
 from . import execution as X
@@ -62,10 +63,13 @@ def parse_work_date(text: str, *, today: Optional[_dt.date] = None
 
     Same DD/MM rule as `ai/handwritten.parse_form_date`, deliberately: two
     date parsers in one system that disagree about 03/04 is a bug waiting for
-    the fourth of March.
+    the fourth of March. It now shares that function's shift-stripping too —
+    a crew that writes `27/08/26 (Night)` in the box must not have its whole
+    page refused for saying which shift it was. Read the shift itself with
+    `ai/handwritten.parse_shift`.
     """
     today = today or _dt.date.today()
-    s = str(text or "").strip().translate(_DIGIT_FIX)
+    s = _hw.strip_shift(str(text or "").strip()).translate(_DIGIT_FIX)
     for rx, century in _DATE_RX:
         m = rx.match(s)
         if not m:
@@ -175,6 +179,12 @@ async def build_entry(session: AsyncSession, read: dict, *, site_id: str,
 
     work_date, date_problem = parse_work_date(read.get("work_date_text") or "")
     equipment = (read.get("equipment_text") or "").strip()
+    # ⚠️ THE SHIFT COMES FROM THE PAPER OR IT DOES NOT COME AT ALL (Q13,
+    # 2026-09-02). Crews write `(Night)` beside the date; that is a statement by
+    # the people who did the work, and ruling P10-9 objects to INFERRING a shift
+    # from a filing timestamp, not to reading one somebody wrote down. No
+    # marker → None → the column stays NULL, exactly as P10-9 requires.
+    shift = _hw.parse_shift(read.get("work_date_text"))
 
     opened = await X.open_entry(
         session, username=username, role=role, site_id=site_id,
@@ -186,6 +196,7 @@ async def build_entry(session: AsyncSession, read: dict, *, site_id: str,
         # case 5): a wrong tag posts area to the wrong vessel. Whatever the
         # model read is offered as text and the supervisor picks from a list.
         equipment_tag=equipment or "(unread — pick the equipment)",
+        shift=shift,
         code=reg["Lining_System_Code"],
         esc=reg["Execution_Sub_Activity_Code"] or _first_esc(recipe),
         materials=lines, origin="ocr", form_uuid=reg["Form_UUID"])
@@ -230,7 +241,7 @@ async def build_entry(session: AsyncSession, read: dict, *, site_id: str,
 
     return {"entry_id": opened["id"], "Entry_No": opened["Entry_No"],
             "status": opened["status"], "Form_UUID": reg["Form_UUID"],
-            "lines": len(lines), "problems": problems,
+            "lines": len(lines), "problems": problems, "shift": shift,
             "model": read.get("model"), "provider": read.get("provider"),
             "work_date": work_date, "equipment_text": equipment,
             "area_sqm": read.get("area_sqm")}
