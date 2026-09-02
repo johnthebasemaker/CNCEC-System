@@ -52,8 +52,8 @@ from fastapi import HTTPException
 
 from ..services import consumption_form as CF
 from . import client as aic
-from .ocr import (ImagePrepError, extract_json_object,
-                  prep_image_for_vision)
+from .ocr import (ImagePrepError, estimate_image_tokens,
+                  extract_json_object, prep_image_for_vision)
 
 # How many pixels wide the rectified page is rendered at. 8 px/mm gives a
 # ~1680x2380 page, which is enough for a legible crop of an 8 mm-tall box
@@ -338,9 +338,13 @@ async def read_form(image_bytes: bytes) -> dict:
 
     b64 = base64.b64encode(prepped).decode()
     try:
-        raw, model_id = await aic.vision_json(FORM_USER, system=FORM_SYSTEM,
-                                              image_b64=b64,
-                                              num_predict=FORM_NUM_PREDICT)
+        raw, model_id = await aic.vision_json(
+            FORM_USER, system=FORM_SYSTEM, image_b64=b64,
+            num_predict=FORM_NUM_PREDICT,
+            # This lane renders the page at 1800 px — the largest image the
+            # system sends, and therefore the one whose context window is most
+            # worth measuring rather than assuming.
+            image_tokens=estimate_image_tokens(prepped))
     except RuntimeError as e:
         # ⚠️ "NOT REACHABLE" WAS THE WRONG DIAGNOSIS FOR THE COMMON FAILURE.
         # Every long read used to die on a 240 s read timeout and be reported

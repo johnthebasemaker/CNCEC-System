@@ -1775,20 +1775,67 @@ async def test_ai_layer():
                               json={"text": "   "})
             check("empty paste → 422", r.status_code == 422, f"got {r.status_code}")
 
-            # Orphan sweep: a queued row from a 'dead process' gets failed.
+            # ── the orphan sweep, and the bug it used to BE ─────────────
+            #
+            # ⚠️ THE SWEEP USED TO FAIL EVERY UNFINISHED ROW. Under
+            # `uvicorn --workers 4` that meant one worker's respawn killed the
+            # in-flight OCR reads of the three workers still running them — a
+            # supervisor five minutes into a six-minute form read told "server
+            # restarted while this job was in flight" by a server that had not
+            # restarted. The two rows below are the dead job and the LIVE one,
+            # and the second assertion is the whole fix.
+            import datetime as _orph_dt
             async with SessionLocal() as s:
                 from sqlalchemy import insert as _ins
+                stale = (_orph_dt.datetime.now(_orph_dt.timezone.utc)
+                         .replace(tzinfo=None)
+                         - _orph_dt.timedelta(
+                             seconds=ai_jobs_mod.ORPHAN_STALE_SECONDS + 60))
+                fresh = (_orph_dt.datetime.now(_orph_dt.timezone.utc)
+                         .replace(tzinfo=None))
                 orphan_id = (await s.execute(_ins(ai_jobs_t).values(
                     kind="ocr_consumption", status="running", actor="worker",
+                    worker_id="dead-worker-1", started_at=stale,
+                    heartbeat_at=stale,
+                    payload_json="{}").returning(ai_jobs_t.c["id"]))).scalar_one()
+                live_id = (await s.execute(_ins(ai_jobs_t).values(
+                    kind="ocr_consumption", status="running", actor="worker",
+                    worker_id="other-live-worker-2", started_at=stale,
+                    # Beating NOW — a different process, still working.
+                    heartbeat_at=fresh,
                     payload_json="{}").returning(ai_jobs_t.c["id"]))).scalar_one()
                 await s.commit()
-            n = await ai_jobs_mod.fail_orphans()
-            check("startup orphan sweep fails stranded jobs with a clear message",
-                  n >= 1, f"swept {n}")
+            n = await ai_jobs_mod.sweep_orphans()
+            check("orphan sweep fails a job whose worker stopped beating, with "
+                  "a clear message", n >= 1, f"swept {n}")
             r = await ac.get(f"/ai/jobs/{orphan_id}", headers=H(worker_t))
             check("orphaned job reads back as error → 'resubmit the photo'",
                   r.json()["status"] == "error"
                   and "resubmit" in (r.json().get("error") or ""), r.text[:160])
+            r = await ac.get(f"/ai/jobs/{live_id}", headers=H(worker_t))
+            check("⚠️ THE REGRESSION GUARD — a job owned by ANOTHER worker that "
+                  "is still heartbeating survives the sweep. This is the bug: "
+                  "the old predicate failed every unfinished row, so one "
+                  "worker's respawn reaped three other workers' live reads",
+                  r.json()["status"] == "running",
+                  f"a live job on another worker was killed: {r.text[:160]}")
+            check("…and a long-running job is judged by its BEAT, not its age. "
+                  "The live row above was started long ago and is still "
+                  "running — a vision read legitimately takes up to 900 s",
+                  ai_jobs_mod.ORPHAN_STALE_SECONDS < aic.VISION_TIMEOUT_S,
+                  f"stale={ai_jobs_mod.ORPHAN_STALE_SECONDS} "
+                  f"timeout={aic.VISION_TIMEOUT_S}")
+            check("both lanes stamp the SAME claim columns — a lane that "
+                  "claimed without a heartbeat would be reaped mid-read, which "
+                  "is the original bug wearing the fix's clothes",
+                  set((await ai_jobs_mod.claim_values())) ==
+                  {"status", "started_at", "worker_id", "heartbeat_at"},
+                  str(sorted(await ai_jobs_mod.claim_values())))
+            async with SessionLocal() as s:
+                from sqlalchemy import delete as _del
+                await s.execute(_del(ai_jobs_t).where(
+                    ai_jobs_t.c["id"] == live_id))
+                await s.commit()
 
             # Flag off → both lanes 503; restored in the finally below.
             r = await ac.put("/admin/settings", headers=H(admin_t),
@@ -19228,8 +19275,13 @@ async def test_ocr_workflow():
               rect_ok, "rectification failed on a mild perspective")
 
         # ⚠️ ONE HALLUCINATED ROW AND ONE UNREADABLE DIGIT, on purpose.
+        # ⚠️ `**kw` DELIBERATELY. A monkeypatched seam with a pinned signature
+        # turns every future keyword on the real function into a crash INSIDE
+        # the suite rather than a failed assertion — which is how adding
+        # `image_tokens` to `vision_json` aborted suite CN mid-run instead of
+        # reporting anything. The seam should follow the contract, not freeze it.
         async def _fake(prompt, *, system, image_b64, num_predict=1400,
-                        timeout_s=0):
+                        timeout_s=0, **kw):
             return _json.dumps({
                 "work_date_text": _dt.date.today().strftime("%d/%m/%y"),
                 "equipment_text": "SVCN-T1", "area_text": "40", "area_sqm": 40,

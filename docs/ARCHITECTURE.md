@@ -522,7 +522,7 @@ the model read both correctly and was cut off by the limits around it.
 | Knob | Where | Value | Why that number |
 |---|---|---|---|
 | output budget | `ai/jobs.py: NUM_PREDICT`, `ai/ocr_form.py: FORM_NUM_PREDICT` | per lane (3072 / 1536 / 2560 / 384 / 2600) | a DN is 4 items × 3 fields (~350 tok); a consumption log is 30 rows × 9 fields (~2,400 tok). One number for both clipped the sheet at row 14 and never clipped the note |
-| context window | `ai/client.py: VISION_NUM_CTX` | 8192, image calls only | **Ollama runs this model at `n_ctx=4096` whatever the 128k model card says.** An 1800 px page is 3,120 prompt tokens of that |
+| context window | `ai/client.py: vision_num_ctx()` | computed per call; floor 8192, ceiling 16384 | **Ollama runs this model at `n_ctx=4096` whatever the 128k model card says.** An 1800 px page is 3,120 prompt tokens of that. Since 2026-09-02 the window is sized from `ocr.estimate_image_tokens()` — calibrated to err HIGH, because under-counting aborts the runner while over-counting only costs KV cache |
 | HTTP timeout | `ai/client.py: VISION_TIMEOUT_S` | 900 s | measured: the form lane takes 269–444 s and the consumption lane 361 s. The old shared 240 s ceiling could not physically be met |
 
 ⚠️ **Raising the output budget without raising `num_ctx` is WORSE than leaving
@@ -550,6 +550,47 @@ Three more rules the lanes now share:
   row-crop rectifier. `/execution/ocr/upload` normalises at the door, so a 20 MB
   HEIC no longer arrives base64'd at ~27 MB in `ai_jobs.payload_json` — and the
   workers now NULL that column on both terminal transitions.
+
+### 7a-ii. ⚠️ The orphan sweep, and why it is heartbeat-based
+
+Fixed 2026-09-02 (alembic `c4a7e2b81f36`). `ai/jobs.py:fail_orphans()` used to
+run at startup and execute, with no filter for who owned the row:
+
+```sql
+UPDATE ai_jobs SET status='error' WHERE status IN ('queued','running')
+```
+
+Correct for one process — the worker is an in-process `asyncio.create_task`, so
+its jobs die with it. **Wrong for `uvicorn --workers 4`, which is what
+`deploy/Dockerfile.api` runs.** When one worker crashed and uvicorn respawned
+it, the new process's lifespan failed the in-flight OCR jobs of the three
+workers still running them. Invisible at deploy (all four boot before any job
+exists); it only bit on a respawn.
+
+`sweep_orphans()` now reaps on **liveness, not existence**:
+
+| Column | Meaning |
+|---|---|
+| `ai_jobs.worker_id` | which process claimed the row (`pid-uuid8`) — answers "which worker was this on" after the fact |
+| `ai_jobs.heartbeat_at` | touched every 30 s (`GI_AI_HEARTBEAT_S`) for as long as the owner is working |
+
+The predicate is `COALESCE(heartbeat_at, started_at, created_at) < now −
+ORPHAN_STALE_SECONDS` (180 s, five missed beats), covering all three ages a row
+can have: beating, claimed-but-not-yet-beaten, and never-claimed (a `queued`
+row whose process died between the commit and `spawn`).
+
+Three rules a later edit must not break:
+
+- **The beat starts BEFORE `GEN_SEMAPHORE`.** A third concurrent job waits
+  minutes on the 2-permit semaphore with status already `running`; a beat
+  started after the wait would let the sweep reap a job that is patiently queued.
+- **The stale window is NOT the job timeout.** A vision read legitimately runs
+  up to `VISION_TIMEOUT_S` (900 s). Sizing the sweep off job *duration* would
+  mean waiting 15 minutes to reap a corpse; sizing it off the *beat* is
+  independent of how long the job takes.
+- **The sweep also runs on a timer** (`orphan_sweep_loop`, 300 s). A worker that
+  dies while its siblings stay up leaves an orphan no startup ever sees —
+  uvicorn respawns it in seconds, long before the row goes stale.
 
 ### 7b. Uniqueness Bloom filters (`services/bloom.py`)
 
