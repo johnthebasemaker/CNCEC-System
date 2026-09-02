@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
+import io
 import json
 import shutil
 import datetime
@@ -41,10 +42,146 @@ TMP_DB      = TMP_ROOT / "bug_check.db"
 TMP_UPLOADS = TMP_ROOT / "uploads"
 TMP_UPLOADS.mkdir(parents=True, exist_ok=True)
 
-# Stop mailer.py from actually launching Mail.app / xdg-open / Outlook
+# ---------------------------------------------------------------------------
+# ⚠️ OPTIONAL NATIVE DEPENDENCIES ARE PROBED HERE, BEFORE THE Popen GUARD.
+#
+# `pyzbar` resolves `libzbar` at IMPORT time through `ctypes.util.find_library`,
+# and on Linux that function's first act is
+# `with subprocess.Popen(['/sbin/ldconfig','-p']) as p:`. Probing it up here —
+# while `subprocess.Popen` is still the real one — means the loader gets a real
+# process no matter what the guard below does later. See the Popen guard's
+# comment for the 30-run CI failure this ordering fixes.
+#
+# The result is a plain dict of booleans, so a check's guard is `if not
+# _OPTIONAL_DEPS["pyzbar"]: raise SkipCheck(...)` rather than a try/except
+# around an import whose exception TYPE varies by platform. That variance was
+# the bug: macOS raised ImportError (silently skipped, counted as a pass) and
+# Linux raised TypeError (hard failure), and the assertion ran on neither.
+# ---------------------------------------------------------------------------
+_OPTIONAL_DEPS: dict[str, bool] = {}
+_OPTIONAL_DEP_REASONS: dict[str, str] = {}
+
+
+def _probe_optional_dep(name: str, importer) -> None:
+    try:
+        importer()
+        _OPTIONAL_DEPS[name] = True
+        _OPTIONAL_DEP_REASONS[name] = ""
+    except BaseException as e:            # noqa: BLE001 — any failure = absent
+        _OPTIONAL_DEPS[name] = False
+        _OPTIONAL_DEP_REASONS[name] = f"{type(e).__name__}: {e}" or type(e).__name__
+
+
+def _import_pyzbar() -> None:
+    from pyzbar.pyzbar import decode as _decode  # noqa: F401
+
+
+_probe_optional_dep("pyzbar", _import_pyzbar)
+
+
+# ---------------------------------------------------------------------------
+# Stop mailer.py from actually launching Mail.app / xdg-open / Outlook.
+#
+# ⚠️ THIS USED TO BE `subprocess.Popen = lambda *a, **kw: None`, AND THAT LINE
+# COST 30 CONSECUTIVE CI RUNS.
+#
+# A process-wide `Popen` that returns `None` is not a stub — it is a landmine
+# for every library that shells out, because `with None:` raises `TypeError:
+# 'NoneType' object does not support the context manager protocol`, which is a
+# type nobody's `except` clause anticipates. `ctypes.util.find_library` walks
+# straight into it on Linux (`_findSoname_ldconfig` catches `OSError` only), so
+# `import pyzbar` died there and the QR round-trip check failed on every runner
+# while passing on macOS — where `find_library` probes dyld and never shells
+# out at all. Every "simulated CI condition" was simulated on the Mac, so the
+# one difference that mattered could not be reproduced.
+#
+# The guard is now written against what it actually cares about: LAUNCHING A
+# GUI. Anything whose argv[0] is a launcher is refused and recorded; everything
+# else — ldconfig, ld, gcc, objdump, bash -n — reaches the real Popen. Narrow
+# by BEHAVIOUR, not by blast radius.
+# ---------------------------------------------------------------------------
 _orig_popen = subprocess.Popen
-subprocess.Popen = lambda *a, **kw: None  # type: ignore[assignment]
-platform.system = lambda: "Linux"          # avoid Windows COM path
+
+# argv[0] basenames that open a window, a browser or a mail client.
+_GUI_LAUNCHERS = frozenset({
+    "open", "xdg-open", "gio", "gnome-open", "kde-open", "kde-open5",
+    "osascript", "start", "explorer", "explorer.exe", "cmd", "cmd.exe",
+    "rundll32", "rundll32.exe", "wslview",
+})
+
+# Every launch this harness refused, for any check that wants to assert on it.
+BLOCKED_LAUNCHES: list[list[str]] = []
+
+
+class _BlockedPopen:
+    """Stands in for a GUI launch the harness refused.
+
+    Honours enough of the `Popen` contract that a caller which merely fires and
+    forgets — which is all `mailer` does — cannot tell, and a caller that does
+    look gets an empty, already-finished process rather than an exception. The
+    context-manager methods are the whole point: their absence is what broke
+    `ctypes`.
+    """
+
+    def __init__(self, argv) -> None:
+        self.args = argv
+        self.returncode = 0
+        self.pid = -1
+        self.stdout = io.BytesIO(b"")
+        self.stderr = io.BytesIO(b"")
+        self.stdin = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def communicate(self, *a, **kw):
+        return (b"", b"")
+
+    def wait(self, *a, **kw) -> int:
+        return 0
+
+    def poll(self) -> int:
+        return 0
+
+    def kill(self) -> None:
+        pass
+
+    terminate = kill
+
+
+def _argv_head(args, kwargs) -> str:
+    """argv[0]'s basename, lowercased — '' when it cannot be determined."""
+    argv = args[0] if args else kwargs.get("args")
+    if isinstance(argv, (str, bytes, os.PathLike)):
+        head = os.fsdecode(argv).split()[0] if str(argv).strip() else ""
+    elif isinstance(argv, (list, tuple)) and argv:
+        head = os.fsdecode(argv[0])
+    else:
+        return ""
+    return os.path.basename(head).lower()
+
+
+def _guarded_popen(*args, **kwargs):
+    if _argv_head(args, kwargs) in _GUI_LAUNCHERS:
+        argv = args[0] if args else kwargs.get("args")
+        BLOCKED_LAUNCHES.append(
+            [os.fsdecode(x) for x in argv] if isinstance(argv, (list, tuple))
+            else [str(argv)])
+        return _BlockedPopen(argv)
+    return _orig_popen(*args, **kwargs)
+
+
+subprocess.Popen = _guarded_popen  # type: ignore[assignment]
+
+# `mailer` takes a Windows COM branch on platform.system() == "Windows"; this
+# forces the POSIX path. Saved so the `finally` at the foot of this file can put
+# it back — a module-scope patch that outlives its run is inherited by anything
+# that later imports this module (a REPL, a profiler, another harness).
+_orig_platform_system = platform.system
+platform.system = lambda: "Linux"
 
 # This is the SQLite regression suite — force SQLite even if the environment
 # (e.g. CI) exports DATABASE_URL for the Postgres steps. Individual PG-seam
@@ -74,12 +211,30 @@ RESULTS: list[dict] = []
 VERBOSE = "--verbose" in sys.argv or "-v" in sys.argv
 
 
+class SkipCheck(Exception):
+    """Raised by a check that cannot run HERE — a missing native library, a
+    platform that lacks the thing under test.
+
+    ⚠️ A SKIP IS NOT A PASS, AND CONFLATING THEM IS HOW A GATE STARTS LYING.
+    `check_qr_decode_roundtrip` guarded itself with a bare `except ImportError:
+    return`, so on macOS (Homebrew's libzbar is not on dyld's search path) it
+    reported PASS while its assertions had never executed — the report said
+    `QR Badges 2/2` for a round-trip nobody had ever measured. Raise this
+    instead: the run stays green, the count is honest, and the reason is
+    printed and written to the report where somebody can act on it.
+    """
+
+
 def run_check(area: str, name: str, fn, hint: str = "") -> None:
     """Execute one check function, capturing the result + any exception."""
     started = datetime.datetime.now()
     try:
         fn()
         status, error, tb = "PASS", "", ""
+    except SkipCheck as e:
+        status = "SKIP"
+        error  = str(e) or "skipped"
+        tb     = ""
     except AssertionError as e:
         status = "FAIL"
         error  = str(e) or "AssertionError"
@@ -95,13 +250,18 @@ def run_check(area: str, name: str, fn, hint: str = "") -> None:
         "elapsed_ms": int(elapsed * 1000),
     })
     if VERBOSE:
-        glyph = "✅" if status == "PASS" else "❌"
+        glyph = {"PASS": "✅", "SKIP": "⏭️"}.get(status, "❌")
         print(f"  {glyph} {area} · {name}" + (f"  →  {error}" if error else ""))
 
 
 def _format_tb(exc: BaseException) -> str:
+    # ⚠️ DEEP ENOUGH TO NAME THE CULPRIT. At limit=3 the CI artifact for the
+    # 2026-09-02 failure stopped at `pyzbar.py, line 7`, one frame ABOVE the
+    # `with subprocess.Popen(...)` in `ctypes/util.py` that actually raised —
+    # so the report named the importer rather than the cause, and the real
+    # cause went unidentified for 30 runs.
     return "".join(traceback.format_exception(
-        type(exc), exc, exc.__traceback__, limit=3,
+        type(exc), exc, exc.__traceback__, limit=8,
     ))
 
 
@@ -2667,8 +2827,8 @@ def check_process_po_pdf_smoke() -> None:
     try:
         from reportlab.pdfgen import canvas
         from reportlab.lib.pagesizes import letter
-    except ImportError:
-        return  # skip silently — reportlab not in requirements
+    except Exception as e:                      # noqa: BLE001 — see SkipCheck
+        raise SkipCheck(f"reportlab is not importable ({type(e).__name__}: {e})")
 
     import io as _io
     buf = _io.BytesIO()
@@ -3469,8 +3629,9 @@ def check_postgres_engine_seam() -> None:
     # The engine builds and runs a trivial query against the same SQLite DB.
     try:
         from sqlalchemy import text
-    except ImportError:
-        return  # optional dep absent — seam still imports; nothing to exercise
+    except Exception as e:                      # noqa: BLE001 — see SkipCheck
+        raise SkipCheck(f"SQLAlchemy is not importable ({type(e).__name__}: "
+                        f"{e}) — the engine seam could not be exercised")
     eng = database.get_engine()
     with eng.connect() as conn:
         assert conn.execute(text("SELECT 1")).scalar() == 1
@@ -3533,8 +3694,9 @@ def check_2fa_flow() -> None:
 
         try:
             import pyotp
-        except ImportError:
-            return  # optional dep absent — helpers still import
+        except Exception as e:                  # noqa: BLE001 — see SkipCheck
+            raise SkipCheck(f"pyotp is not importable ({type(e).__name__}: "
+                            f"{e}) — the TOTP lifecycle was not exercised")
 
         secret = auth.generate_2fa_secret()
         assert secret
@@ -4006,6 +4168,7 @@ def write_report() -> Path:
     total   = len(RESULTS)
     passed  = sum(1 for r in RESULTS if r["status"] == "PASS")
     failed  = sum(1 for r in RESULTS if r["status"] == "FAIL")
+    skipped = sum(1 for r in RESULTS if r["status"] == "SKIP")
     by_area: dict[str, list[dict]] = {}
     for r in RESULTS:
         by_area.setdefault(r["area"], []).append(r)
@@ -4018,6 +4181,7 @@ def write_report() -> Path:
     lines.append(f"**Total checks:** {total}  ")
     lines.append(f"**Passing:** {passed}  ")
     lines.append(f"**Failing:** {failed}  ")
+    lines.append(f"**Skipped:** {skipped}  ")
     lines.append("")
     lines.append(
         "_The harness writes a fresh SQLite file under your system temp dir, "
@@ -4046,15 +4210,33 @@ def write_report() -> Path:
                 lines.append("```")
             lines.append("")
 
+    # ⚠️ SKIPS GET THEIR OWN SECTION, ABOVE THE PASS LIST. A skipped check is
+    # coverage somebody believes they have and does not; burying it inside the
+    # per-area tallies is how `QR Badges 2/2` described a round-trip that had
+    # never executed on any machine.
+    skips = [r for r in RESULTS if r["status"] == "SKIP"]
+    lines.append(f"## ⏭️ Skipped ({len(skips)})")
+    lines.append("")
+    if not skips:
+        lines.append("_None — every check ran._")
+    else:
+        lines.append("_These did NOT run and are NOT counted as passing._")
+        lines.append("")
+        for r in skips:
+            lines.append(f"- **{r['area']} · {r['name']}** — {r['error']}")
+    lines.append("")
+
     lines.append("## ✅ Passing by area")
     lines.append("")
     for area in sorted(by_area):
         rows = by_area[area]
         p = sum(1 for r in rows if r["status"] == "PASS")
         f = sum(1 for r in rows if r["status"] == "FAIL")
-        lines.append(f"### {area} — {p}/{p+f}")
+        s = sum(1 for r in rows if r["status"] == "SKIP")
+        lines.append(f"### {area} — {p}/{p+f}"
+                     + (f" (+{s} skipped)" if s else ""))
         for r in rows:
-            glyph = "✅" if r["status"] == "PASS" else "❌"
+            glyph = {"PASS": "✅", "SKIP": "⏭️"}.get(r["status"], "❌")
             lines.append(f"- {glyph} {r['name']}"
                          + (f" ({r['elapsed_ms']} ms)" if VERBOSE else ""))
         lines.append("")
@@ -4740,10 +4922,12 @@ def check_employee_badges_pdf_smoke() -> None:
     pattern at the top of reports.py)."""
     try:
         from reports import generate_employee_qr_badges_pdf, _HAS_QRCODE
-    except ImportError:
-        return
+    except Exception as e:                      # noqa: BLE001 — see SkipCheck
+        raise SkipCheck(f"reports.generate_employee_qr_badges_pdf is not "
+                        f"importable ({type(e).__name__}: {e})")
     if not _HAS_QRCODE:
-        return
+        raise SkipCheck("the `qrcode` package is not installed, so no badge "
+                        "PDF can be rendered on this host")
 
     emps = [
         {"ID_Number": "EMP-PDF-1", "Name": "Ahmed — Test",   "Department": "Logistics"},
@@ -4765,18 +4949,27 @@ def check_employee_badges_pdf_smoke() -> None:
 def check_qr_decode_roundtrip() -> None:
     """encode → decode preserves the ID_Number exactly.
 
-    Requires libzbar via pyzbar. If the import fails (libzbar missing on
-    this host), the check no-ops — the encode side is already covered by
-    `check_qr_encode_produces_png`. Once libzbar is installed, the check
-    will assert for real on the next run.
+    Requires libzbar via pyzbar, probed ONCE at module import before the Popen
+    guard is installed (see `_probe_optional_dep`). When it is absent this
+    raises `SkipCheck`, which is reported as a SKIP with its reason — it is
+    NOT counted as a pass.
+
+    ⚠️ THIS USED TO `except ImportError: return`, AND THAT WAS TWO BUGS.
+    On macOS Homebrew's libzbar is not on dyld's search path, so the import
+    raised `ImportError`, the check returned, and the report claimed a passing
+    round-trip that had never run. On Linux the harness's own `Popen` stub
+    broke `ctypes.util.find_library` and the import raised `TypeError` — a type
+    the guard did not catch — so the same absent library was a hard CI failure
+    instead. One guard, two platforms, two wrong answers, and the assertion
+    executed on neither.
     """
-    try:
-        from pyzbar.pyzbar import decode as _zbar_probe  # noqa: F401
-    except ImportError:
-        # Encode-only environments (e.g. Streamlit Cloud) — skip silently.
-        # The companion check_qr_encode_produces_png() still guards the
-        # encode path so this section isn't completely uncovered.
-        return
+    if not _OPTIONAL_DEPS.get("pyzbar"):
+        raise SkipCheck(
+            f"libzbar is not loadable on this host "
+            f"({_OPTIONAL_DEP_REASONS.get('pyzbar', 'unknown')}). "
+            f"macOS: `brew install zbar` and export "
+            f"DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib. "
+            f"Debian/Ubuntu: `apt-get install libzbar0`.")
 
     from ai.cv.qr import encode_id_to_png, decode_png_to_id
 
@@ -7904,8 +8097,10 @@ def check_8a_download_script_present() -> None:
 def _8b_assert_bash_script(path: str) -> None:
     """Common check: file exists, is executable, parses as valid bash.
 
-    Uses _orig_popen directly because the harness monkey-patches
-    subprocess.Popen to a no-op for mailer-safety (see line 45)."""
+    Kept on `_orig_popen` deliberately. Since 2026-09-02 the harness's Popen
+    guard passes non-GUI commands straight through, so plain `subprocess.Popen`
+    would work here too — but pinning this one to the real thing means the
+    guard can never become the reason a syntax check silently reports clean."""
     import pathlib, stat
     p = pathlib.Path(REPO_ROOT / path)
     assert p.exists(), f"missing: {path}"
@@ -10800,8 +10995,15 @@ def main() -> int:
     out = write_report()
     print()
     fail_n = sum(1 for r in RESULTS if r["status"] == "FAIL")
-    pass_n = len(RESULTS) - fail_n
-    print(f"▶ {pass_n} passed, {fail_n} failed")
+    skip_n = sum(1 for r in RESULTS if r["status"] == "SKIP")
+    pass_n = len(RESULTS) - fail_n - skip_n
+    print(f"▶ {pass_n} passed, {fail_n} failed, {skip_n} skipped")
+    for r in RESULTS:
+        if r["status"] == "SKIP":
+            print(f"  ⏭️  SKIPPED · {r['area']} · {r['name']} — {r['error']}")
+    if BLOCKED_LAUNCHES:
+        print(f"▶ {len(BLOCKED_LAUNCHES)} GUI launch(es) refused by the harness "
+              f"guard (e.g. {BLOCKED_LAUNCHES[0][:2]})")
     print(f"▶ Report: {out.relative_to(REPO_ROOT)}")
     return 0 if fail_n == 0 else 1
 
@@ -10810,8 +11012,10 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        # Restore the real Popen so the rest of the process can use it
+        # Restore both module-scope patches so nothing that imports this file
+        # inherits them (see where each is installed, near the top).
         subprocess.Popen = _orig_popen  # type: ignore[assignment]
+        platform.system = _orig_platform_system  # type: ignore[assignment]
         # Clean up the throwaway directory
         try:
             shutil.rmtree(TMP_ROOT, ignore_errors=True)
