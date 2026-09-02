@@ -34,7 +34,7 @@ from ..services import form_intake
 from ..services.ledger import _MD
 from . import client as aic
 from . import ocr_form as OF
-from .jobs import _now
+from .jobs import _beat, _now, claim_values, stop_beat
 
 logger = logging.getLogger("gi.ai.form_jobs")
 
@@ -48,7 +48,7 @@ async def run_job(job_id: int) -> None:
         claimed = await s.execute(update(ai_jobs_t).where(
             ai_jobs_t.c["id"] == job_id,
             ai_jobs_t.c["status"] == "queued",
-        ).values(status="running", started_at=_now()))
+        ).values(**await claim_values()))
         if claimed.rowcount == 0:          # raced by another worker — theirs
             await s.rollback()
             return
@@ -58,6 +58,11 @@ async def run_job(job_id: int) -> None:
             .where(ai_jobs_t.c["id"] == job_id))).first()
         await s.commit()
 
+    # ⚠️ THE SAME BEAT AS `jobs.run_job`, and it must stay the same. This lane
+    # is the SLOWEST thing in the system — a full-page form read measured at
+    # 444 s — so it is the one the orphan sweep would reap first if it stopped
+    # signalling that it is alive.
+    beat = asyncio.create_task(_beat(job_id))
     try:
         payload = json.loads(row.payload_json or "{}")
         image = base64.b64decode(payload.get("image_b64", ""))
@@ -100,6 +105,8 @@ async def run_job(job_id: int) -> None:
     except Exception as e:                          # noqa: BLE001 — see above
         logger.warning("form job %s failed: %s", job_id, e)
         await _fail(job_id, f"{type(e).__name__}: {e}")
+    finally:
+        await stop_beat(beat)
 
 
 async def _fail(job_id: int, message: str) -> None:

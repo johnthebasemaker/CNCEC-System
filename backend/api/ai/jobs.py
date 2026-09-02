@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import datetime as _dt
 import json
 import logging
+import os
+import uuid
 
 from sqlalchemy import select, update
 
@@ -38,6 +41,37 @@ logger = logging.getLogger("gi.ai.jobs")
 
 ai_jobs_t = _MD.tables["ai_jobs"]
 inventory_t = _MD.tables["inventory"]
+
+# ── ⚠️ WHO OWNS A JOB, AND HOW A SWEEP KNOWS (2026-09-02) ────────────────────
+#
+# THE BUG. `fail_orphans` used to fail EVERY queued/running row at startup, on
+# the reasoning that a job in flight died with the process that was running it.
+# That holds for one process and breaks for `uvicorn --workers 4`, which is what
+# production runs: when a single worker crashed and uvicorn respawned it, the
+# new process's lifespan swept away the in-flight jobs of the three workers that
+# were still running them. A supervisor five minutes into a six-minute form read
+# was told "server restarted while this job was in flight" by a server that had
+# not restarted. Invisible at deploy (all four workers boot before any job
+# exists); it only bites on a respawn.
+#
+# WHY OWNERSHIP ALONE DOES NOT FIX IT. `WORKER_ID` says who claimed a row. It
+# cannot say whether that process is still alive — the other workers are
+# separate OS processes with no shared memory and nothing to ask. Liveness has
+# to be written somewhere every worker can read, and the row is that place.
+#
+# So the owner beats every HEARTBEAT_SECONDS while it works, and the sweep
+# reaps only rows that have not been touched for ORPHAN_STALE_SECONDS. A slow
+# job keeps beating and is left alone; a dead owner's job stops and is reaped.
+#
+# ⚠️ THE STALE WINDOW IS NOT THE JOB TIMEOUT, and must not be "fixed" to match
+# it. A vision read can legitimately run 900 s (client.VISION_TIMEOUT_S) and
+# spend much of that queued on the 2-permit generation semaphore. Sizing the
+# sweep off the job's DURATION would mean waiting 15 minutes to reap a corpse;
+# sizing it off the BEAT means five missed beats, whatever the job's length.
+WORKER_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+HEARTBEAT_SECONDS = float(os.environ.get("GI_AI_HEARTBEAT_S", "30"))
+ORPHAN_STALE_SECONDS = float(os.environ.get("GI_AI_ORPHAN_STALE_S", "180"))
+ORPHAN_SWEEP_SECONDS = float(os.environ.get("GI_AI_ORPHAN_SWEEP_S", "300"))
 
 JOB_KINDS = ("ocr_consumption", "ocr_delivery_note", "tool_identify",
              # QSEP slice 6 — a SCANNED PR/PO. Needed because a real
@@ -152,7 +186,7 @@ async def run_job(job_id: int) -> None:
         claimed = await s.execute(update(ai_jobs_t).where(
             ai_jobs_t.c["id"] == job_id,
             ai_jobs_t.c["status"] == "queued",
-        ).values(status="running", started_at=_now()))
+        ).values(**await claim_values()))
         if claimed.rowcount == 0:  # raced by another worker — theirs now
             await s.rollback()
             return
@@ -161,11 +195,22 @@ async def run_job(job_id: int) -> None:
         await s.commit()
 
     kind = row.kind
+    # ⚠️ THE BEAT STARTS BEFORE THE SEMAPHORE, not after it. A third concurrent
+    # job waits on `GEN_SEMAPHORE` (2 permits) for as long as the two ahead of
+    # it take — minutes — with status already 'running'. Starting the heartbeat
+    # after the wait would let the sweep reap a job that is patiently queued,
+    # which is the same class of mistake as the bug this replaced.
+    beat = asyncio.create_task(_beat(job_id))
     try:
         err = await _vision_preflight()
         if err:
             raise RuntimeError(err)
         image_b64 = json.loads(row.payload_json or "{}").get("image_b64", "")
+        # Measure the image ONCE and size the context window from it. Decoding
+        # a <=1.4 MB base64 payload costs about a millisecond; getting num_ctx
+        # wrong costs the Ollama runner (see client.vision_num_ctx).
+        img_tokens = ocr.estimate_image_tokens(
+            base64.b64decode(image_b64)) if image_b64 else None
 
         if kind == "tool_identify":
             # Smart Scan tier-2 (AI-4): catalogue-constrained when the
@@ -180,7 +225,9 @@ async def run_job(job_id: int) -> None:
                     system=ocr.tool_prompt(catalogue), images=[image_b64],
                     temperature=0.1,
                     num_predict=NUM_PREDICT["tool_identify"],
-                    timeout_s=aic.VISION_TIMEOUT_S)
+                    timeout_s=aic.VISION_TIMEOUT_S,
+                    num_ctx=aic.vision_num_ctx(
+                        NUM_PREDICT["tool_identify"], img_tokens))
             result = ocr.parse_tool_reply(raw, catalogue)
         else:
             async with aic.GEN_SEMAPHORE:
@@ -195,7 +242,9 @@ async def run_job(job_id: int) -> None:
                     system=ocr.SYSTEM_PROMPTS[kind], images=[image_b64],
                     temperature=0.1,
                     num_predict=NUM_PREDICT.get(kind, DEFAULT_NUM_PREDICT),
-                    timeout_s=aic.VISION_TIMEOUT_S)
+                    timeout_s=aic.VISION_TIMEOUT_S,
+                    num_ctx=aic.vision_num_ctx(
+                        NUM_PREDICT.get(kind, DEFAULT_NUM_PREDICT), img_tokens))
             parsed = ocr.parse_vision_reply(kind, raw)
 
         async with SessionLocal() as s:
@@ -214,6 +263,8 @@ async def run_job(job_id: int) -> None:
                                     payload_json=None,
                                     error=str(e)[:500]))
             await s.commit()
+    finally:
+        await stop_beat(beat)
 
 
 def spawn(job_id: int) -> None:
@@ -226,17 +277,115 @@ def spawn(job_id: int) -> None:
 _RUNNING: set[asyncio.Task] = set()
 
 
-async def fail_orphans() -> int:
-    """Startup sweep: jobs still queued/running belonged to a dead process —
-    their asyncio task no longer exists. Fail them with a clear message."""
+async def claim_values() -> dict:
+    """The columns every worker stamps when it wins the queued→running race.
+
+    Shared by `jobs.run_job` and `form_jobs.run_job` so the two cannot drift:
+    a lane that claimed a row without stamping a heartbeat would be reaped by
+    the sweep 180 s later, mid-read, which is the original bug wearing the
+    fix's clothes.
+    """
+    now = _now()
+    return {"status": "running", "started_at": now,
+            "worker_id": WORKER_ID, "heartbeat_at": now}
+
+
+async def _beat(job_id: int) -> None:
+    """Touch `heartbeat_at` while this process is still working on `job_id`.
+
+    ⚠️ NEVER RAISES, and never lets a database hiccup end the job it is
+    describing. A missed beat costs nothing until five of them accumulate; a
+    heartbeat task that propagated an exception would cancel the read it exists
+    to protect, which is strictly worse than the condition it reports.
+
+    The `status = 'running'` guard means a beat that lands after the job has
+    finished updates nothing, so a late beat cannot resurrect a terminal row.
+    """
+    while True:
+        try:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            async with SessionLocal() as s:
+                await s.execute(update(ai_jobs_t).where(
+                    ai_jobs_t.c["id"] == job_id,
+                    ai_jobs_t.c["status"] == "running",
+                ).values(heartbeat_at=_now()))
+                await s.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                              # noqa: BLE001
+            logger.debug("heartbeat for job %s missed: %s", job_id, e)
+
+
+async def stop_beat(task: asyncio.Task | None) -> None:
+    """Cancel a heartbeat and wait for it to actually stop.
+
+    Awaited in a `finally`, so it runs on every exit path including the ones
+    that raise. A beat left running would keep a finished job looking alive to
+    the sweep — harmless, since the beat's own `status = 'running'` guard makes
+    it a no-op on a terminal row, but it would also leak a task per job for the
+    life of the process.
+    """
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
+async def sweep_orphans() -> int:
+    """Fail jobs whose owner is gone. NOT jobs that are merely slow.
+
+    ⚠️ THIS REPLACED A SWEEP THAT FAILED EVERY UNFINISHED ROW. See the module
+    header for why that was wrong under `--workers 4`. The predicate is now
+    "nobody has touched this for ORPHAN_STALE_SECONDS", which is true of a
+    dead owner and false of a live one, however long its job runs.
+
+    `COALESCE(heartbeat_at, started_at, created_at)` covers all three ages a
+    row can have: beating (running normally), claimed but not yet beaten (the
+    first 30 s), and never claimed at all (a `queued` row whose process died
+    between the commit and `spawn`, which nothing else would ever reap).
+
+    Runs at startup AND on a timer, because a worker that dies while its
+    siblings stay up leaves an orphan no startup ever sees — uvicorn respawns
+    the dead worker, but the respawn happens in seconds, long before the row
+    goes stale. Without the timer the fix would trade one silent failure for
+    another.
+    """
+    from sqlalchemy import func as _func
+    cutoff = _now() - _dt.timedelta(seconds=ORPHAN_STALE_SECONDS)
     async with SessionLocal() as s:
         res = await s.execute(update(ai_jobs_t).where(
-            ai_jobs_t.c["status"].in_(["queued", "running"])
-        ).values(status="error", finished_at=_now(),
-                 error="server restarted while this job was in flight — "
-                       "please resubmit the photo"))
+            ai_jobs_t.c["status"].in_(["queued", "running"]),
+            _func.coalesce(ai_jobs_t.c["heartbeat_at"],
+                           ai_jobs_t.c["started_at"],
+                           ai_jobs_t.c["created_at"]) < cutoff,
+        ).values(status="error", finished_at=_now(), payload_json=None,
+                 error="this job stopped responding (the process running it "
+                       "went away) — please resubmit the photo"))
         await s.commit()
         return res.rowcount
+
+
+# Back-compat alias. `fail_orphans` was the startup-sweep name for two phases
+# and reads as "fail them all", which is precisely the behaviour that was
+# wrong; the new name says what the function now decides.
+fail_orphans = sweep_orphans
+
+
+async def orphan_sweep_loop() -> None:
+    """Periodic sweep. One per worker; the UPDATE is idempotent and guarded,
+    so four workers racing it is harmless — whoever runs first reaps, the
+    others match nothing."""
+    while True:
+        try:
+            await asyncio.sleep(ORPHAN_SWEEP_SECONDS)
+            n = await sweep_orphans()
+            if n:
+                logger.info("orphan sweep failed %s stranded job(s)", n)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("orphan sweep loop: %s", e)
 
 
 def to_b64(prepped_jpeg: bytes) -> str:

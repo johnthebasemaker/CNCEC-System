@@ -81,6 +81,47 @@ SOURCE_MAX_DIM = int(os.environ.get("GI_AI_SOURCE_MAX_DIM", "2600"))
 SOURCE_MAX_BYTES = int(os.environ.get("GI_AI_SOURCE_MAX_BYTES", str(4_000_000)))
 
 
+# ⚠️ HOW MANY CONTEXT TOKENS AN IMAGE COSTS, measured rather than assumed.
+#
+# qwen2.5-VL tiles an image into 14 px patches and merges 2x2 of them, so one
+# token covers roughly a 28x28 px square. That raw arithmetic UNDER-counts what
+# Ollama actually reports, because the runner pads and adds control tokens.
+# Measured on the operator's own files, 2026-09-01:
+#
+#   1273 x 1800  →  raw 2,990  ·  reported 3,120   (x1.04)
+#    990 x 1400  →  raw 1,800  ·  reported 2,247   (x1.25)
+#    792 x 1120  →  raw 1,160  ·  reported 1,617   (x1.39)
+#
+# The ratio is not constant, so the factor is set above the worst observed one.
+# ⚠️ THIS ESTIMATE MUST ERR HIGH, ALWAYS. Under-counting sizes `num_ctx` too
+# small, and too small does not degrade — it ABORTS the Ollama runner
+# (`ggml_abort`, SIGABRT), taking every other queued job with it. Over-counting
+# costs some KV cache and nothing else.
+_TOKENS_PER_PATCH_PX = 28
+_TOKEN_SAFETY = 1.45
+_TOKEN_FLOOR = 64        # control tokens the tiling arithmetic does not see
+
+
+def estimate_image_tokens(jpeg_bytes: bytes) -> int:
+    """Upper bound on the context tokens this image will occupy.
+
+    Reads only the JPEG header — PIL is lazy about pixel data, so `.size` costs
+    nothing on a 1.4 MB file. Returns a conservative floor when the header
+    cannot be read, because a failed measurement must not produce a small
+    number: `0` here would size the context as if there were no image at all.
+    """
+    import math
+    from PIL import Image
+    try:
+        with Image.open(BytesIO(jpeg_bytes)) as im:
+            w, h = im.size
+    except Exception:                                       # noqa: BLE001
+        return 4500      # ~the cost of a full-page 1800 px scan
+    patches = (math.ceil(w / _TOKENS_PER_PATCH_PX)
+               * math.ceil(h / _TOKENS_PER_PATCH_PX))
+    return int(patches * _TOKEN_SAFETY) + _TOKEN_FLOOR
+
+
 def prep_source_image(raw_bytes: bytes) -> bytes:
     """Normalise an uploaded photograph ONCE, at the door.
 

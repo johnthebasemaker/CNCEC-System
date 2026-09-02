@@ -722,6 +722,10 @@ class AiJob(Base):
     __table_args__ = (
         Index("ix_ai_jobs_kind_status_created", "kind", "status", "created_at"),
         Index("ix_ai_jobs_status", "status"),
+        # The orphan sweep's own predicate. It reads
+        # `COALESCE(heartbeat_at, started_at, created_at) < cutoff` over
+        # unfinished rows, which is the only query that touches heartbeat_at.
+        Index("ix_ai_jobs_heartbeat", "status", "heartbeat_at"),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     kind = Column(Text, nullable=False)          # ocr_consumption | ocr_delivery_note
@@ -734,6 +738,23 @@ class AiJob(Base):
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
     started_at = Column(DateTime)
     finished_at = Column(DateTime)
+    # ⚠️ WHO OWNS THIS JOB, AND IS IT STILL ALIVE (2026-09-02).
+    #
+    # The startup sweep used to fail EVERY queued/running row on the theory
+    # that a job in flight belonged to the process that just died. That is true
+    # of a single-process server and false of `uvicorn --workers 4`: when one
+    # worker crashed and was respawned, its lifespan swept away the in-flight
+    # OCR jobs of the three workers that were still running them — a supervisor
+    # five minutes into a six-minute form read was told "server restarted while
+    # this job was in flight" by a server that had not restarted.
+    #
+    # `worker_id` records which process claimed the row; `heartbeat_at` is
+    # touched every 30 s for as long as that process is still working on it. A
+    # sweep can then distinguish a job whose owner is gone (no beat for minutes)
+    # from one that is simply slow, which is the distinction the old predicate
+    # did not have available to it.
+    worker_id = Column(Text)
+    heartbeat_at = Column(DateTime)
 
 
 class WhatsappOutbox(Base):

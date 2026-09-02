@@ -157,13 +157,21 @@ async def lifespan(app: FastAPI):
         # anomalies nothing else can notice, because each one is the ABSENCE
         # of an event rather than an event. Same GI_SCHEDULER=0 escape hatch.
         briefing_task = asyncio.create_task(briefing_loop())
-    # AI-job orphan sweep: queued/running rows from a dead process can never
-    # finish (their asyncio task died with it) — fail them with a clear message.
+    # AI-job orphan sweep. ⚠️ THIS USED TO FAIL EVERY UNFINISHED ROW, which
+    # under `--workers 4` meant one worker's respawn killed the other three
+    # workers' in-flight OCR reads. It now reaps only jobs whose owner has
+    # stopped heartbeating (ai/jobs.py). The sweep also runs on a TIMER,
+    # because a worker that dies while its siblings stay up leaves an orphan
+    # that the respawn's startup sweep is too early to see.
+    orphan_task = None
     try:
         from .ai import jobs as _ai_jobs
-        n = await _ai_jobs.fail_orphans()
+        n = await _ai_jobs.sweep_orphans()
         if n:
-            print(f"[ai] failed {n} orphaned OCR job(s) from a previous run")
+            print(f"[ai] failed {n} stranded OCR job(s) whose worker had gone")
+        if os.environ.get("GI_SCHEDULER", "1") != "0":
+            import asyncio as _aio_orph
+            orphan_task = _aio_orph.create_task(_ai_jobs.orphan_sweep_loop())
     except Exception as e:  # never block startup on the sweep
         print(f"[ai] orphan sweep skipped: {type(e).__name__}: {e}")
     # Pre-build the assistant's manual index (Phase 8 slice 8f). Measured on
@@ -217,6 +225,8 @@ async def lifespan(app: FastAPI):
         weekly_task.cancel()
     if briefing_task:
         briefing_task.cancel()
+    if orphan_task:
+        orphan_task.cancel()
     try:
         from .services import bloom as _bloom
         await _bloom.stop_refresh_loop()

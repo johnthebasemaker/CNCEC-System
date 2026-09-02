@@ -97,7 +97,8 @@ def vision_provider() -> str:
 
 async def vision_json(prompt: str, *, system: str, image_b64: str,
                       num_predict: int = 1400,
-                      timeout_s: float = VISION_TIMEOUT_S) -> tuple[str, str]:
+                      timeout_s: float = VISION_TIMEOUT_S,
+                      image_tokens: Optional[int] = None) -> tuple[str, str]:
     """One vision completion. Returns `(raw_text, model_id)`.
 
     The model id comes back with the text because it is stored on the entry:
@@ -133,7 +134,8 @@ async def vision_json(prompt: str, *, system: str, image_b64: str,
     async with GEN_SEMAPHORE:
         text = await generate(MODEL_VISION, prompt, system=system,
                               temperature=0.0, num_predict=num_predict,
-                              images=[image_b64], timeout_s=timeout_s)
+                              images=[image_b64], timeout_s=timeout_s,
+                              num_ctx=vision_num_ctx(num_predict, image_tokens))
     return text, MODEL_VISION
 
 
@@ -183,16 +185,44 @@ async def list_models() -> list[str]:
 # must be changed together.
 VISION_NUM_CTX = int(os.environ.get("GI_AI_VISION_NUM_CTX", "8192"))
 
+# ⚠️ AND A CEILING, because the fix for "too small" must not become "so large
+# it swaps". The KV cache grows linearly with `num_ctx` — ~450 MiB at 4,096 on
+# the measurement box — so an unbounded computed context would trade a crash on
+# a big image for a machine that pages itself to death on one. 16,384 is about
+# 1.8 GiB of cache, which sits comfortably beside a 6 GiB model on the CPX42
+# and on a developer laptop.
+VISION_NUM_CTX_MAX = int(os.environ.get("GI_AI_VISION_NUM_CTX_MAX", "16384"))
+
+# What the system prompt plus the JSON scaffolding costs, over and above the
+# image and the reply. The consumption prompt is the longest at ~450 tokens.
+VISION_PROMPT_HEADROOM = 640
+
+
+def vision_num_ctx(num_predict: int, image_tokens: Optional[int] = None) -> int:
+    """The context window one vision call actually needs.
+
+    ⚠️ THE THREE NUMBERS ARE ONE DECISION (ARCHITECTURE §7a), and this function
+    is where they meet. `num_ctx` must hold the image, the prompt AND the reply;
+    when it does not, Ollama does not truncate politely — it aborts the runner
+    (`ggml_abort`, SIGABRT) and answers with an empty body and no error field,
+    killing every other job queued behind it.
+
+    `image_tokens` comes from `ocr.estimate_image_tokens`, which is calibrated
+    to err high. When a caller cannot supply it, the floor still covers every
+    image `prep_image_for_vision` is capable of producing, because that function
+    caps the long edge — an uncapped image is the only way to defeat this, and
+    nothing in this codebase sends one.
+    """
+    need = int(image_tokens or 0) + VISION_PROMPT_HEADROOM + int(num_predict)
+    return max(VISION_NUM_CTX, min(need, VISION_NUM_CTX_MAX))
+
 
 def _payload(model: str, prompt: str, *, system: Optional[str], temperature: float,
-             num_predict: int, images: Optional[list[str]] = None) -> dict:
+             num_predict: int, images: Optional[list[str]] = None,
+             num_ctx: Optional[int] = None) -> dict:
     options: dict = {"temperature": temperature, "num_predict": num_predict}
     if images:
-        # Sized for the worst case measured above: a 1800 px page (~3,120
-        # tokens) plus the largest per-lane budget, with headroom. The KV cache
-        # cost is linear — 512 MiB at 4,096 on the measurement box, so ~1 GiB
-        # here, which the one-warm-model ruling leaves room for.
-        options["num_ctx"] = max(VISION_NUM_CTX, num_predict * 2)
+        options["num_ctx"] = int(num_ctx) if num_ctx else vision_num_ctx(num_predict)
     body: dict = {
         "model": model, "prompt": prompt, "keep_alive": KEEP_ALIVE,
         "options": options,
@@ -207,10 +237,11 @@ def _payload(model: str, prompt: str, *, system: Optional[str], temperature: flo
 async def generate(model: str, prompt: str, *, system: Optional[str] = None,
                    temperature: float = 0.2, num_predict: int = 512,
                    images: Optional[list[str]] = None,
-                   timeout_s: float = GEN_TIMEOUT_S) -> str:
+                   timeout_s: float = GEN_TIMEOUT_S,
+                   num_ctx: Optional[int] = None) -> str:
     """One blocking completion. Raises RuntimeError on transport failure."""
     body = _payload(model, prompt, system=system, temperature=temperature,
-                    num_predict=num_predict, images=images)
+                    num_predict=num_predict, images=images, num_ctx=num_ctx)
     body["stream"] = False
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as c:
