@@ -1,16 +1,21 @@
 # Bug Check Report
 
-**Run at:** `2026-09-02T15:43:15`  
-**Throwaway DB:** `/var/folders/wc/nfgzq5_n3j126zwndxprnd_00000gn/T/gi_bugcheck_e6vlffn0/bug_check.db`  
+**Run at:** `2026-09-02T20:21:47`  
+**Throwaway DB:** `/var/folders/wc/nfgzq5_n3j126zwndxprnd_00000gn/T/gi_bugcheck_tql3gjq2/bug_check.db`  
 **Total checks:** 599  
 **Passing:** 599  
 **Failing:** 0  
+**Skipped:** 0  
 
 _The harness writes a fresh SQLite file under your system temp dir, seeds it, exercises every flow, then deletes the temp dir. `gi_database.db` is never touched._
 
 ## ❌ Failures (0)
 
 _None — every check passed._
+
+## ⏭️ Skipped (0)
+
+_None — every check ran._
 
 ## ✅ Passing by area
 

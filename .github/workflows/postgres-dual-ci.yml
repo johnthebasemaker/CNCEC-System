@@ -69,23 +69,61 @@ jobs:
           pip install -r requirements.txt
           pip install psycopg2-binary
 
+      # Harness hygiene, BEFORE the 34-second suite. Catches the class of defect
+      # that hid the real bug_check failure for 30 runs: process-wide stdlib
+      # monkeypatches, single-exception optional-dependency guards, and mocks
+      # installed without a restore. Fails in ~1 s with a named line number.
+      - name: Harness hygiene preflight (bin/ci_preflight.sh)
+        run: bash bin/ci_preflight.sh
+
       # Phase B layout: the legacy app lives in legacy/ (bug_check is
       # self-rooted — it resolves every path from its own directory).
-      # This step has failed on EVERY recorded runner execution while passing
-      # locally (macOS) — on failure we re-emit the ❌ lines and log tail as
-      # ::error:: annotations (job logs need a signed-in session; annotations
-      # and the uploaded artifact don't). GitHub shows ≤10 annotations/step.
+      #
+      # ⚠️ THE ANNOTATION SHIM READS THE REPORT, NOT THE LOG. It used to
+      # `grep -E "❌" bugcheck_ci.log`, and the harness only prints that glyph
+      # in --verbose mode — so the grep matched nothing from the harness and
+      # everything from the APPLICATION log, where `whatsapp_worker` legitimately
+      # prints "❌ Send failed … giving up" on its normal terminal-failure path.
+      # For 30 consecutive runs the run page therefore blamed a passing WhatsApp
+      # retry test for a failing QR check. `BUG_REPORT.md` already carries the
+      # exact failure list under `### `; parse that instead. The `tail -n 4`
+      # annotations are gone for the same reason — they only ever quoted the
+      # summary lines. (Job logs need a signed-in session; annotations and the
+      # uploaded artifact don't. GitHub shows ≤10 annotations/step.)
       - name: SQLite regression suite (legacy/bug_check.py)
         shell: bash
         run: |
           set -o pipefail
           if ! python legacy/bug_check.py 2>&1 | tee bugcheck_ci.log; then
-            grep -E "❌" bugcheck_ci.log | head -6 \
-              | while IFS= read -r line; do echo "::error title=bug_check::${line}"; done
-            tail -n 4 bugcheck_ci.log \
-              | while IFS= read -r line; do echo "::error title=bug_check (log tail)::${line}"; done
+            python - <<'PY'
+          import pathlib, re, sys
+          rep = pathlib.Path("legacy/BUG_REPORT.md")
+          if not rep.exists():
+              print("::error title=bug_check::the suite died before writing "
+                    "BUG_REPORT.md — see the uploaded bugcheck_ci.log")
+              sys.exit(0)
+          body = rep.read_text(encoding="utf-8")
+          # Everything between "## ❌ Failures" and the next "## " heading.
+          m = re.search(r"^## ❌ Failures.*?$(.*?)^## ", body, re.S | re.M)
+          block = m.group(1) if m else ""
+          named = 0
+          for head, err in re.findall(r"^### (.+?)$\s*^- \*\*Error:\*\* `(.+?)`",
+                                      block, re.M):
+              print(f"::error title=bug_check::{head} — {err}")
+              named += 1
+              if named >= 8:
+                  break
+          if not named:
+              print("::error title=bug_check::the suite exited non-zero but "
+                    "BUG_REPORT.md lists no failures — see the artifact")
+          PY
             exit 1
           fi
+          # A SKIP is not a failure, but it IS missing coverage — surface it as a
+          # warning so an absent native library cannot quietly become permanent.
+          grep -E "^  ⏭️" bugcheck_ci.log \
+            | while IFS= read -r line; do echo "::warning title=bug_check (skipped)::${line}"; done \
+            || true
 
       - name: Upload bug_check output (on failure)
         if: failure()

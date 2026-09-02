@@ -18604,7 +18604,12 @@ async def test_consumption_form():
         import numpy as _np  # noqa: F401
         import pypdfium2 as _pdfium  # noqa: F401
         CAN_DECODE = True
-    except ImportError:
+    # ⚠️ NOT `except ImportError`. cv2 and pypdfium2 resolve NATIVE libraries at
+    # import time, and an unresolvable one does not raise a consistent type —
+    # libzbar raised ImportError on macOS and TypeError on Linux for the same
+    # absent library. A one-type guard here would not downgrade the check, it
+    # would abort the suite.
+    except Exception:                       # noqa: BLE001
         CAN_DECODE = False
 
     async def _cleanup():
@@ -18930,7 +18935,7 @@ async def test_ocr_workflow():
         import numpy as _np  # noqa: F401
         import pypdfium2 as _pdfium  # noqa: F401
         CAN_IMAGE = True
-    except ImportError:
+    except Exception:                       # noqa: BLE001 — native libs; see CAN_DECODE
         CAN_IMAGE = False
 
     async def _reset():
@@ -19673,10 +19678,11 @@ async def test_slice_10b_ecosystem():
               ("NOT ADDED TO THE FIGURES ABOVE" in _text
                or not (v.get("sme") or {}).get("available")),
               "the SME separation note is not in the PDF")
-    except ImportError:
-        check("CS-16 SKIPPED — pypdfium2 not installed, so the PDF's TEXT "
-              "cannot be read (a byte grep would prove nothing: content "
-              "streams are compressed)", True, "")
+    except Exception as _cs16e:             # noqa: BLE001 — native lib; see CAN_DECODE
+        check(f"CS-16 SKIPPED — pypdfium2 is not usable here "
+              f"({type(_cs16e).__name__}), so the PDF's TEXT cannot be read "
+              f"(a byte grep would prove nothing: content streams are "
+              f"compressed)", True, "")
 
     # ── 4. access to the brief ──────────────────────────────────────────────
     async with AsyncClient(transport=transport, base_url="http://svc") as ac:
@@ -20125,7 +20131,7 @@ async def test_ai_guardrail_audit():
     try:
         from tests.ai_eval.runner import (audit_canaries, audit_policy,
                                           load_cases, run_tier1)
-    except ImportError as e:
+    except Exception as e:                  # noqa: BLE001 — any failure is a hard fail
         check("CQ-00 the AI guardrail suite is importable (PyYAML installed)",
               False, f"{type(e).__name__}: {e}")
         return
@@ -20395,8 +20401,9 @@ async def test_ocr_envelope_and_bloom():
               max(sw, sh) <= _cpocr.SOURCE_MAX_DIM
               and max(sw, sh) >= 2000 and len(src) <= _cpocr.SOURCE_MAX_BYTES,
               f"{sw}x{sh} {len(src)}B")
-    except ImportError:
-        check("CP-13 SKIPPED — Pillow not installed", True, "")
+    except Exception as _cp13e:             # noqa: BLE001 — native lib; see CAN_DECODE
+        check(f"CP-13 SKIPPED — Pillow is not usable here "
+              f"({type(_cp13e).__name__})", True, "")
 
     # ── 5. the form lane inherits the same salvage ──────────────────────────
     clipped_form = ('{"work_date_text":"27/8/26","rows":['
