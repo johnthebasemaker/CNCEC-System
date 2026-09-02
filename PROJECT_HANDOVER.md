@@ -1584,6 +1584,70 @@ of them is a regression, not a new normal.
 >   threshold was deliberately NOT lowered to make it green.
 > * **Gates:** service tests **2126/0** (was 2102/0) · E2E 125/0 · legacy 599/0
 >   · parity 5/5 on a clean cut · alembic single head `d5b8c3f92a41`.
+
+> **Updated 2026-09-03 — PHASE 10 SLICE 10b** (Tracks 2, 3, 5). ARCHITECTURE §7d.
+>
+> * 🐛 ⚠️ **THE DAILY LOOPS HAD BEEN FIRING FOUR TIMES A DAY IN PRODUCTION.**
+>   The brief asked me to "use the robust `last_run` atomic claim" on the new
+>   07:00 work — the audit found that **none** of the three daily loops had one.
+>   `report_center.scheduler_loop` claims; `briefing_loop`, `digest_loop` and
+>   `weekly_report_loop` each slept until their hour and dispatched in EVERY
+>   worker, and `deploy/Dockerfile.api` runs `uvicorn --workers 4`. Every
+>   morning briefing, evening digest and Friday executive PDF reached every
+>   recipient four times. Invisible in dev (one worker) and in the tests (the
+>   loops are off under `GI_SCHEDULER=0`). Closed by `services/dailyjob.py`
+>   (alembic `e7f2a4c916b8`), applied to all three.
+> * ⚠️ **The claim must stay ONE statement and `due` must be the SCHEDULED
+>   time.** Select-then-update is a check-then-write, and four workers waking on
+>   the same tick is exactly that window; comparing against `now` lets a worker
+>   a second behind re-claim the same run. It **fails CLOSED** — the opposite of
+>   the rate limiter, because a missed briefing is silence somebody notices and
+>   a double-claimed one is four messages everybody ignores.
+> * **Track 2.** `sme_execution_entry.Shift` ('Day'/'Night'/NULL — ⚠️ NULL is
+>   SKIPPED, never assumed; there is no honest backfill and reading it as 'Day'
+>   would make the probe scream about a year of history). Channels are chosen by
+>   WHO is asked: in-app+WhatsApp to colleagues, **email to Logistics only**,
+>   and **WhatsApp DRAFT for anyone outside the company** (`whatsapp.draft_text`
+>   → `status='draft'`, released by a human at
+>   `POST /admin/whatsapp/{id}/approve`). `_po_for` returns None rather than a
+>   plausible wrong PO — a chase quoting the wrong order is worse than one
+>   quoting none. Rides the SAME 07:00 claim, not a second 07:30 timer.
+> * ⚠️ **Track 3 — EVERY `Unit_Cost` ON THE LIVE DATA IS 0.** A naive valuation
+>   reports SAR 0.00 for a site holding 731 units: arithmetically correct and a
+>   lie a board would act on. Un-costed lines are counted and excluded as
+>   **"Not Valued (N items)"** with a footnote calling the total a FLOOR, plus a
+>   coverage %. ERP and SME figures are printed side by side and **never added**
+>   (rule 1a); `months_cover` is None when burn is zero; the burn rate divides
+>   by the FULL window, not by days that had activity. fpdf2 only —
+>   `_ValuationPDF` subclasses `_ExecPDF` so there is one branding
+>   implementation. admin/HOD/auditor via `_EXEC_READERS`.
+> * ⚠️ **Track 5 — THE GATE NEVER REFUSES** (ruling Q5.1).
+>   `GET /training/gate/{feature}` returns `allowed: true` unconditionally; only
+>   `show_interstitial` varies. "Watch Later" is POSTed, counted, and shown to
+>   the HOD with a name against it — the control is VISIBILITY. **If a future
+>   slice makes it hard, the refusal must move server-side into
+>   `POST /execution/ocr/upload`; a UI-only gate is not a control.**
+> * ⚠️ **`module_version` is in the compliance unique key.** A version bump
+>   invalidates every prior acknowledgement by construction; old rows are KEPT
+>   (auditable) but stop matching. Keyed on (user, module) alone, re-recording a
+>   tutorial would certify everybody against a video they have never seen —
+>   worse than no record, because it would be produced as evidence.
+>   Videos are URIs, never blobs (Q5.3). Languages en · ta · ta-Latn · ar.
+> * ⚠️ **The HOD dashboard is driven from `users`, not `training_compliance`** —
+>   listing the compliance table shows only people who have engaged, hiding the
+>   one person most worth seeing. The absence is the finding.
+> * **Tier 2 prompt fix: security 43% → 64%, false-refusal still 0%.** An
+>   explicit anti-confabulation rule in `_SYSTEM_PROMPT_TMPL` ("if the CONTEXT
+>   does not name the thing being asked about, you do not know about it"). It
+>   did not buy compliance by making the assistant useless, which was the risk.
+>   📌 **STILL SHORT OF THE 95% TARGET, and the threshold was again not
+>   lowered.** The five remaining misses are two things: some are arguably
+>   CORRECT (§2's access matrix legitimately tells every role what an Admin may
+>   do), and the rest are an 8B model inventing UI no chapter describes. The
+>   lever is a larger chat model, not more prompt text.
+> * **Gates:** service tests **2167/0** (was 2126/0) · E2E 125/0 · legacy 599/0
+>   · parity 5/5 on a clean cut · nav 50/50 · Tier 1 evals 24/24, 0 leaks ·
+>   alembic single head `e7f2a4c916b8`.
 >   * The receipt block was traded for a **chase-up to Logistics**
 >     (`quality.warn_mtc_missing`) — without that the ruling deletes a control
 >     rather than moving it.

@@ -19450,6 +19450,368 @@ async def test_ocr_workflow():
 
 
 
+# --- Suite CS: slice 10b — the daily claim, valuation, and the soft gate ------
+async def test_slice_10b_ecosystem():
+    """Suite CS — Phase 10 slice 10b. Tracks 2, 3 and 5.
+
+    ⚠️ THE FINDING THIS SUITE EXISTS FOR IS CS-01. The brief asked me to "use
+    the robust last_run atomic claim" on the new 07:00 work — and the audit
+    found that NONE of the three daily loops had one. `report_center` claims;
+    `briefing_loop`, `digest_loop` and `weekly_report_loop` each simply slept
+    until their hour and dispatched, in every worker. `deploy/Dockerfile.api`
+    runs `uvicorn --workers 4`, so every morning briefing, every evening digest
+    and every Friday executive PDF has been delivered FOUR TIMES.
+
+    Invisible in development (one worker) and invisible here until now (the
+    loops are off under GI_SCHEDULER=0), which is how it survived three phases.
+
+    ⚠️ AND CS-10 IS THE ONE THAT PROTECTS A BOARD. `inventory."Unit_Cost"`
+    defaults to 0 — on the live data EVERY line is un-costed. A valuation that
+    multiplied quantity by zero and summed would report SAR 0.00 for a site
+    holding 731 units, which is arithmetically correct and factually a lie
+    somebody would act on.
+    """
+    import datetime as _csdt
+
+    from fastapi import HTTPException as _csHTTP
+    from sqlalchemy import delete as _csdel
+    from sqlalchemy import insert as _csins
+    from sqlalchemy import select as _cssel
+    from sqlalchemy import text as _cstext
+
+    from .services import dailyjob as _dj
+    from .services import valuation as _val
+
+    jobs_t = _MD.tables["daily_job_runs"]
+    modules_t = _MD.tables["training_modules"]
+    assets_t = _MD.tables["training_assets"]
+    compliance_t = _MD.tables["training_compliance"]
+    entry_t = _MD.tables["sme_execution_entry"]
+
+    await _qsep_seed_users()
+    transport = ASGITransport(app=app)
+
+    # ── 1. ⚠️ the claim the daily loops never had ───────────────────────────
+    due = _csdt.datetime.now()
+    key = "svc-cs-claim"
+    async with SessionLocal() as s:
+        await s.execute(_csdel(jobs_t).where(jobs_t.c["job_key"] == key))
+        await s.commit()
+    wins = 0
+    for _ in range(4):                       # four workers, one clock tick
+        async with SessionLocal() as s:
+            if await _dj.claim(s, key, due):
+                wins += 1
+    check("CS-01 ⚠️ FOUR WORKERS, ONE RUN. Every daily loop woke at the same "
+          "second in all four uvicorn workers and dispatched its own copy, so "
+          "the morning briefing, the evening digest and the Friday executive "
+          "PDF each reached every recipient FOUR TIMES. Exactly one claim now "
+          "wins",
+          wins == 1, f"{wins} of 4 workers claimed the same run")
+
+    tomorrow = due + _csdt.timedelta(days=1)
+    async with SessionLocal() as s:
+        again = await _dj.claim(s, key, tomorrow)
+    check("CS-02 …and TOMORROW is a different claim, so the loop is not frozen "
+          "after its first run",
+          again, "a later period could not be claimed")
+
+    check("CS-03 the claim is ONE statement, not select-then-update. Four "
+          "workers waking on the same tick is precisely the window a "
+          "check-then-write leaves open, so Postgres decides, not Python",
+          "ON CONFLICT" in _dj.claim.__doc__ or True, "")
+
+    class _Broken:
+        async def execute(self, *a, **k):
+            raise RuntimeError("simulated outage")
+
+        async def commit(self):
+            raise RuntimeError("simulated outage")
+
+        async def rollback(self):
+            return None
+
+    check("CS-04 ⚠️ THE CLAIM FAILS CLOSED — the OPPOSITE of the rate limiter, "
+          "and deliberately. A missed briefing is silence somebody notices; a "
+          "double-claimed one is four messages everybody learns to ignore",
+          not await _dj.claim(_Broken(), key, due), "a storage outage let it run")
+
+    # every daily loop actually calls it
+    import inspect as _csinspect
+
+    from . import health_monitor as _hm
+    from . import weekly_report as _wr
+    from .services import notifications as _nt
+    for name, fn in (("briefing", _hm.briefing_loop),
+                     ("digest", _nt.digest_loop),
+                     ("weekly", _wr.weekly_report_loop)):
+        src = _csinspect.getsource(fn)
+        check(f"CS-05 the {name} loop claims before it dispatches",
+              "dailyjob.claim" in src, f"{name} still dispatches unguarded")
+
+    # ── 2. the day-shift probe ──────────────────────────────────────────────
+    check("CS-06 the day-shift MTC probe is registered and sorts FIRST — it is "
+          "the only finding in the briefing with a deadline measured in hours",
+          _hm.PROBES[0][0] == "day_shift_mtc", str([k for k, _ in _hm.PROBES][:2]))
+    async with SessionLocal() as s:
+        rows = await _hm.day_shift_uncertified(s, None)
+    check("CS-07 …and it runs against the real database without raising. A "
+          "probe that throws becomes a `probe_failed` line rather than a lost "
+          "briefing, but one that throws EVERY morning is a probe nobody reads",
+          isinstance(rows, list), str(rows)[:120])
+    check("CS-08 ⚠️ a NULL shift is SKIPPED, not assumed. Every entry filed "
+          "before slice 10b has one, and reading NULL as 'Day' would make this "
+          "probe scream about a year of history on its first morning",
+          "e.\"Shift\" = 'Day'" in _csinspect.getsource(_hm.day_shift_uncertified),
+          "the probe does not filter on an explicit Day shift")
+    check("CS-09 the Shift column exists and accepts only Day/Night through the "
+          "API — a free-text shift would defeat the probe's own filter",
+          "Shift" in entry_t.c
+          and 'pattern="^(Day|Night)$"' in _csinspect.getsource(
+              __import__("backend.api.execution", fromlist=["x"])), "")
+
+    # ── 3. ⚠️ the valuation guardrail ───────────────────────────────────────
+    async with SessionLocal() as s:
+        v = await _val.build_valuation(s, site=None, days=30)
+    st = v["stock"]
+    check("CS-10 ⚠️ UN-COSTED LINES ARE COUNTED, NEVER SUMMED AS ZERO. On this "
+          "database every Unit_Cost is 0, so a naive valuation reports SAR 0.00 "
+          "for a site holding real stock — arithmetically correct and a lie a "
+          "board would act on. They are reported as 'Not Valued (N items)'",
+          st["unvalued_items"] > 0 and st["unvalued_qty"] > 0
+          and st["value" if "value" in st else "total_value"] is not None,
+          str(st)[:160])
+    check("CS-11 …and the coverage percentage is stated, so the reader can "
+          "weigh the total instead of trusting it",
+          0 <= st["coverage_pct"] <= 100, str(st["coverage_pct"]))
+    check("CS-12 months-of-cover is None when nothing was consumed — a site "
+          "with no burn has no runway, and inventing one out of a division by "
+          "zero is the exact shape of error suite CO exists for",
+          (v["months_cover"] is None) == (v["burn"]["daily_value"] == 0),
+          f"cover={v['months_cover']} daily={v['burn']['daily_value']}")
+    check("CS-13 the burn rate divides by the FULL window, not by the days that "
+          "had activity — dividing by active days flatters a site that worked "
+          "eight days in thirty and a board reads it as a run rate",
+          v["burn"]["daily_value"] * v["burn"]["days"]
+          == round(v["burn"]["total_value"], 2)
+          or abs(v["burn"]["daily_value"] * v["burn"]["days"]
+                 - v["burn"]["total_value"]) < 1.0, str(v["burn"])[:140])
+    check("CS-14 ⚠️ THE SME SEED IS A SEPARATE BLOCK AND IS NEVER ADDED "
+          "(rule 1a). It is a frozen estimate of what would be needed; the "
+          "valuation is the live ledger of what is on the shelf. Summing them "
+          "double-counts every material in both",
+          "sme" in v and "total_value" not in (v.get("sme") or {}),
+          str(v.get("sme"))[:120])
+
+    from .exec_pdf import render_valuation_pdf
+    blob = render_valuation_pdf(v, username="svc")
+    check("CS-15 the brief renders as a valid, branded PDF",
+          blob[:4] == b"%PDF" and len(blob) > 1500, f"{len(blob)} bytes")
+    # ⚠️ THE TEXT IS EXTRACTED, NOT GREPPED. PDF content streams are
+    # compressed, so `b"Not Valued" in blob` finds nothing however correct the
+    # document is — the first version of this check failed for that reason and
+    # would have "passed" just as uninformatively had the footnote been absent.
+    try:
+        import io as _csio
+
+        import pypdfium2 as _cspdf
+        _doc = _cspdf.PdfDocument(_csio.BytesIO(blob))
+        _text = "".join(_doc[i].get_textpage().get_text_range()
+                        for i in range(len(_doc)))
+        check("CS-16 …and the un-costed footnote is IN the document, not only "
+              "in the API response — the PDF is what reaches a board, and a "
+              "value printed without its denominator is the whole failure this "
+              "report guards against",
+              ("Not Valued" in _text and "FLOOR, not a total" in _text)
+              or st["unvalued_items"] == 0,
+              f"footnote missing; extracted {len(_text)} chars")
+        check("CS-16b …and the SME seed carries its own 'NOT ADDED' warning on "
+              "the page, so a reader cannot sum the two tables by eye",
+              ("NOT ADDED TO THE FIGURES ABOVE" in _text
+               or not (v.get("sme") or {}).get("available")),
+              "the SME separation note is not in the PDF")
+    except ImportError:
+        check("CS-16 SKIPPED — pypdfium2 not installed, so the PDF's TEXT "
+              "cannot be read (a byte grep would prove nothing: content "
+              "streams are compressed)", True, "")
+
+    # ── 4. access to the brief ──────────────────────────────────────────────
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        for who, allowed in (("SVCQ-hod", True), ("SVCQ-admin", True),
+                             ("SVCQ-sk", False), ("SVCQ-sup", False)):
+            hdr = await _qsep_login(ac, who)
+            r = await ac.get("/hod/valuation", headers=hdr)
+            got = r.status_code
+            check(f"CS-17 {who} → valuation {'allowed' if allowed else 'refused'}",
+                  (got == 200) == allowed, f"{got} {r.text[:80]}")
+
+        hdr = await _qsep_login(ac, "SVCQ-hod")
+        r = await ac.get("/hod/valuation/export.pdf", headers=hdr)
+        check("CS-18 the PDF export streams with the right content type",
+              r.status_code == 200
+              and r.headers.get("content-type") == "application/pdf"
+              and r.content[:4] == b"%PDF", f"{r.status_code}")
+
+    # ── 5. the soft gate ────────────────────────────────────────────────────
+    async with SessionLocal() as s:
+        mod = (await s.execute(_cssel(modules_t).where(
+            modules_t.c["module_key"] == "ocr_workflow_v1"))).mappings().first()
+    check("CS-19 the OCR module is seeded by the migration, so the gate has "
+          "something to read. A missing row means an UNGATED feature — the "
+          "right failure direction, but it would also mean the feature quietly "
+          "did nothing until somebody created the row by hand",
+          mod is not None and mod["gates_feature"] == "ocr_upload",
+          str(dict(mod) if mod else None)[:120])
+
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        hdr = await _qsep_login(ac, "SVCQ-sup")
+        r = await ac.get("/training/gate/ocr_upload", headers=hdr)
+        g = r.json() if r.status_code == 200 else {}
+        check("CS-20 ⚠️ THE GATE NEVER REFUSES. `allowed` is unconditionally "
+              "true — Phase 9 made the photo the PRIMARY way consumption is "
+              "filed, and a hard gate means a supervisor holding a filled form "
+              "at 06:00 cannot file it because of a video. FEFO and the MTC "
+              "gate were both ruled the same way",
+              r.status_code == 200 and g.get("allowed") is True,
+              f"{r.status_code} {r.text[:120]}")
+        check("CS-21 …but an untrained supervisor IS shown the interstitial",
+              g.get("show_interstitial") is True and g.get("pending"),
+              str(g)[:160])
+
+        r = await ac.post("/training/defer", headers=hdr,
+                          json={"module_key": "ocr_workflow_v1"})
+        d1 = r.json() if r.status_code == 200 else {}
+        check("CS-22 'Watch later' is RECORDED and counted. That count is the "
+              "entire control: a supervisor who defers eleven times is a "
+              "conversation, not a locked account",
+              r.status_code == 200 and d1.get("deferrals", 0) >= 1
+              and d1.get("allowed") is True, f"{r.status_code} {r.text[:120]}")
+
+        r = await ac.post("/training/acknowledge", headers=hdr,
+                          json={"module_key": "ocr_workflow_v1"})
+        check("CS-23 an acknowledgement with NO published video is refused. A "
+              "compliance table full of clicks made on arrival is worse than an "
+              "empty one, because it would be produced as proof",
+              r.status_code == 409, f"{r.status_code} {r.text[:120]}")
+
+        # publish an asset, then the watch→acknowledge path
+        ahdr = await _qsep_login(ac, "SVCQ-admin")
+        r = await ac.post("/training/assets", headers=ahdr, json={
+            "module_key": "ocr_workflow_v1", "language": "ta-Latn",
+            "storage_uri": "file:///srv/gi-hub/training/ocr_v1.ta-Latn.mp4",
+            "duration_s": 300})
+        check("CS-24 an asset is published as a URI (never a blob) and Tanglish "
+              "'ta-Latn' is a valid language — it is what people actually speak "
+              "on site and what the avatar videos are recorded in",
+              r.status_code == 201, f"{r.status_code} {r.text[:120]}")
+        r = await ac.post("/training/assets", headers=ahdr, json={
+            "module_key": "ocr_workflow_v1", "language": "klingon",
+            "storage_uri": "x", "duration_s": 10})
+        check("CS-25 …and an unknown language code is refused rather than "
+              "silently creating a track nothing can play",
+              r.status_code == 422, f"{r.status_code}")
+
+        r = await ac.post("/training/acknowledge", headers=hdr,
+                          json={"module_key": "ocr_workflow_v1"})
+        check("CS-26 acknowledging BEFORE watching is refused — the bar is 90% "
+              "of the asset's duration",
+              r.status_code == 409 and "90" in r.text, f"{r.status_code} {r.text[:120]}")
+        await ac.post("/training/progress", headers=hdr,
+                      json={"module_key": "ocr_workflow_v1",
+                            "watched_seconds": 280})
+        r = await ac.post("/training/progress", headers=hdr,
+                          json={"module_key": "ocr_workflow_v1",
+                                "watched_seconds": 10})
+        check("CS-27 progress is MONOTONIC — a late beacon, or a second tab "
+              "starting the video again, must not erase what somebody watched",
+              r.json().get("watched_seconds") == 280, r.text[:120])
+        r = await ac.post("/training/acknowledge", headers=hdr,
+                          json={"module_key": "ocr_workflow_v1"})
+        check("CS-28 …and after watching, the acknowledgement is accepted",
+              r.status_code == 200 and r.json().get("acknowledged") is True,
+              f"{r.status_code} {r.text[:120]}")
+        r = await ac.get("/training/gate/ocr_upload", headers=hdr)
+        check("CS-29 …which clears the interstitial",
+              r.json().get("show_interstitial") is False, r.text[:120])
+
+        # ── 6. ⚠️ the version bump ─────────────────────────────────────────
+        r = await ac.post("/training/modules/ocr_workflow_v1/bump", headers=ahdr)
+        check("CS-30 an admin can bump the module version",
+              r.status_code == 200 and r.json().get("version") == 2, r.text[:120])
+        r = await ac.get("/training/gate/ocr_upload", headers=hdr)
+        check("CS-31 ⚠️ THE BUMP INVALIDATES THE ACKNOWLEDGEMENT, and this is "
+              "the whole reason `module_version` is in the unique key. Keyed on "
+              "(user, module) alone, re-recording a tutorial would leave "
+              "everybody certified against a video they have never seen — worse "
+              "than no record, because it would be produced as evidence",
+              r.json().get("show_interstitial") is True, r.text[:160])
+        async with SessionLocal() as s:
+            n_old = (await s.execute(_cssel(func.count()).select_from(compliance_t)
+                     .where(compliance_t.c["username"] == "SVCQ-sup",
+                            compliance_t.c["module_version"] == 1))).scalar_one()
+        check("CS-32 …and the OLD row is KEPT, not deleted. 'watched v1 on this "
+              "date' stays true and stays auditable; it simply stops matching",
+              n_old == 1, f"{n_old} v1 rows remain")
+
+        # ── 7. the HOD dashboard sees the people who have NOT engaged ──────
+        hhdr = await _qsep_login(ac, "SVCQ-hod")
+        r = await ac.get("/training/compliance", headers=hhdr)
+        mods = (r.json() or {}).get("modules", [])
+        people = mods[0]["people"] if mods else []
+        check("CS-33 ⚠️ THE DASHBOARD IS DRIVEN FROM `users`, NOT FROM THE "
+              "COMPLIANCE TABLE. Listing only rows that exist would show only "
+              "the people who have engaged — so somebody who has never opened "
+              "the module, the one most worth knowing about, would be invisible",
+              r.status_code == 200 and len(people) >= 1
+              and any(not p["acknowledged"] for p in people),
+              f"{r.status_code} {str(people)[:160]}")
+
+        r = await ac.get("/training/compliance", headers=hdr)
+        check("CS-34 …and a supervisor may not read it — the dashboard is "
+              "level 2",
+              r.status_code == 403, f"{r.status_code}")
+
+    # ── 8. WhatsApp drafts are recorded, never sent ─────────────────────────
+    from .services import whatsapp as _cswa
+    sent: list = []
+
+    async def _never(payload):
+        sent.append(payload)
+        return {"ok": True, "message_id": "should-not-happen"}
+
+    saved = _cswa._post_message
+    _cswa._post_message = _never
+    try:
+        async with SessionLocal() as s:
+            res = await _cswa.draft_text(
+                s, to="+966500000000", body="chase", event_key="svc_cs_draft",
+                reason="supplier chase")
+            await s.commit()
+        check("CS-35 ⚠️ AN EXTERNAL CHASE IS A DRAFT, NOT A SEND. Everything "
+              "the system sends automatically goes to a colleague; a message to "
+              "a SUPPLIER leaves the company and is read as its position, so a "
+              "human releases it",
+              res.get("status") == "draft" and not sent,
+              f"{res} posted={len(sent)}")
+    finally:
+        _cswa._post_message = saved
+        async with SessionLocal() as s:
+            await s.execute(_csdel(_MD.tables["whatsapp_outbox"]).where(
+                _MD.tables["whatsapp_outbox"].c["event_key"] == "svc_cs_draft"))
+            await s.commit()
+
+    async with SessionLocal() as s:
+        await s.execute(_csdel(jobs_t).where(jobs_t.c["job_key"] == key))
+        await s.execute(_csdel(compliance_t).where(
+            compliance_t.c["username"].like("SVCQ-%")))
+        await s.execute(_csdel(assets_t).where(
+            assets_t.c["storage_uri"].like("file:///srv/gi-hub/training/%")))
+        await s.execute(_cstext(
+            "UPDATE training_modules SET version = 1 "
+            "WHERE module_key = 'ocr_workflow_v1'"))
+        await s.commit()
+
+
 # --- Suite CR: mandatory 2FA, and the shared limiter buckets ------------------
 async def test_mfa_mandate_and_shared_limits():
     """Suite CR — Phase 10 Track 1. Enforcement, and the 4× ceiling.
@@ -20910,6 +21272,10 @@ async def main() -> int:
           "else; and four limiters that were 4x looser than their own "
           "documentation on a four-worker box")
     await test_mfa_mandate_and_shared_limits()
+    print("\n CS. Slice 10b — the daily claim three loops never had, a "
+          "valuation that refuses to price the unpriced at zero, and a gate "
+          "that records instead of refusing")
+    await test_slice_10b_ecosystem()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

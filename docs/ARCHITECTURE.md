@@ -695,6 +695,111 @@ invisible. Proved by negative control: granting a Store Keeper chapters 7 and 17
 failed **zero** structural checks. `cases/policy.yaml` pins the allowlists as
 data; superset test, so gaining a chapter fails and losing one does not.
 
+## 7d. Phase 10 slice 10b — daily claim, valuation, training gate
+
+### ⚠️ The daily loops were firing four times a day
+
+`report_center.scheduler_loop` claims its work with an atomic `last_run`
+UPDATE. The three DAILY loops did **not**: the 07:00 morning briefing, the
+16:00 evening digest and the Friday 17:00 executive report each slept until
+their hour and dispatched, **in every worker**. `deploy/Dockerfile.api` runs
+`uvicorn --workers 4`, so every one of those messages reached every recipient
+four times. Invisible in development (one worker) and invisible in the tests
+(the loops are off under `GI_SCHEDULER=0`), which is how it survived three
+phases.
+
+`services/dailyjob.py` is the claim they were missing — one row per job key,
+one atomic `INSERT … ON CONFLICT DO UPDATE … WHERE last_run < :due RETURNING`.
+
+- **It must stay ONE statement.** Select-then-compare-then-update is a
+  check-then-write, and four workers waking on the same clock tick is exactly
+  the case that window is open for.
+- **`due` is the SCHEDULED time, not `now`** — comparing against `now` lets a
+  worker that started a second later re-claim the same run.
+- ⚠️ **It fails CLOSED**, the opposite of the rate limiter. A missed briefing is
+  silence somebody notices; a double-claimed one is four messages everybody
+  learns to ignore.
+
+### Track 2 — the day-shift chase
+
+`health_monitor.probe_day_shift_mtc` asks a sharper question than
+`probe_missing_mtc`: not "is there uncertified stock?" (a standing condition,
+true for weeks) but "is uncertified material staged for the crew starting in an
+hour?" — which has a deadline, and the deadline is today.
+
+`sme_execution_entry.Shift` (`'Day'`/`'Night'`/NULL) makes that answerable.
+⚠️ **NULL is skipped, not assumed.** Every pre-slice-10b entry has one and there
+is no honest backfill; reading NULL as `'Day'` would make the probe scream about
+a year of history on its first morning.
+
+Channels are chosen by **who** is being asked, not by urgency:
+
+| Recipient | Channel | Why |
+|---|---|---|
+| Logistics, site SK/HOD/QC | in-app + WhatsApp | colleagues; numbers are in `users` |
+| Logistics **only** | **email** (`emailer.py`) | the role that can obtain the document, and they live in a mailbox. Emailing everybody makes three copies of one message |
+| anybody outside the company | **WhatsApp DRAFT** | `whatsapp.draft_text` writes `status='draft'` and never posts. Released by a human via `POST /admin/whatsapp/{id}/approve` |
+
+⚠️ A chase that leaves the company is read as the company's position; an
+automated one naming the wrong purchase order is a commercial mistake nobody
+reviewed. `_po_for` returns `None` rather than a plausible wrong PO, and the
+message then says "PO unknown".
+
+The chase rides the **same 07:00 claim** rather than a second 07:30 timer — two
+alerts half an hour apart trains people to ignore both.
+
+### Track 3 — valuation & 30-day burn (`services/valuation.py`)
+
+⚠️ **Un-costed lines are counted, never summed as zero.** `inventory.Unit_Cost`
+defaults to 0; on the live database **every** line is un-costed, so a naive
+valuation reports `SAR 0.00` for a site holding 731 units — arithmetically
+correct and a lie a board would act on. They are reported as
+**"Not Valued (N items)"** with a footnote saying the value is a **floor**, and
+a coverage percentage sits beside the total.
+
+⚠️ **ERP and SME numbers are printed side by side and never added** (rule 1a).
+`inventory`/`consumption` are the live ledger; `sme_inventory_seed` is a frozen
+project-wide estimate. Summing them double-counts every material in both.
+
+⚠️ **`months_cover` is `None` when the burn is zero**, and the burn rate divides
+by the **full** window rather than by the days that had activity — dividing by
+active days flatters a site that worked eight days in thirty, and a board reads
+it as a run rate.
+
+`fpdf2` only (`_ValuationPDF` subclasses `_ExecPDF`, so there is one branding
+implementation). Reachable by admin, HOD and auditor via `_EXEC_READERS`.
+
+### Track 5 — the training hub and the SOFT gate
+
+⚠️ **The gate never refuses**, and that is operator ruling Q5.1. Phase 9 made
+photographing a form the primary way consumption is filed; a hard gate means a
+supervisor holding a filled sheet at 06:00 cannot file it because of a video.
+FEFO (allow-and-log) and the MTC gate (moved out of receipt) were ruled the same
+way. `GET /training/gate/{feature}` returns `allowed: true` unconditionally;
+only `show_interstitial` varies. **If a future slice makes it hard, the refusal
+must move server-side into `POST /execution/ocr/upload` — a UI-only gate is not
+a control.**
+
+"Watch Later" POSTs to `/training/defer`, which increments a counter the HOD
+dashboard shows with a name against it. The control is visibility.
+
+⚠️ **`module_version` is in the compliance unique key.** Bumping
+`training_modules.version` invalidates every prior acknowledgement by
+construction — old rows are kept (auditable) but stop matching. Keyed on
+`(user, module)` alone, re-recording a tutorial would leave everybody certified
+against a video they have never seen: worse than no record, because it would be
+produced as evidence.
+
+⚠️ **Videos are URIs, not blobs** (Q5.3). A 200–600 MB tutorial set in a
+`LargeBinary` lands in every nightly `pg_dump`, cannot serve HTTP Range requests
+(so the viewer cannot seek), and competes for OLTP buffers. Languages: `en`,
+`ta`, `ta-Latn` (Tanglish), `ar`.
+
+⚠️ **The HOD dashboard is driven from `users`, not from `training_compliance`.**
+Listing the compliance table shows only people who have engaged — so somebody
+who has never opened the module, the one most worth knowing about, would be
+invisible. The absence is the finding.
+
 ## 8. Testing — the gates
 
 > 🔄 **2026-08-13 — the service tests run against their OWN database.**

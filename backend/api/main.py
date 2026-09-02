@@ -47,6 +47,7 @@ from .hod import router as hod_router  # noqa: E402
 from .logistics import router as logistics_router  # noqa: E402
 from .manhours import router as manhours_router  # noqa: E402
 from .execution import router as execution_router
+from .training import router as training_router
 from .ai.router import router as ai_router  # noqa: E402
 from .notifications import router as notifications_router  # noqa: E402
 from .readonly import read_only_guard  # noqa: E402
@@ -414,6 +415,11 @@ app.include_router(manhours_router)
 # Phase 5 — the SK → supervisor → HOD consumption workflow. Its own gates are
 # per-route (each step names the role that performs it), so no blanket dep here.
 app.include_router(execution_router)
+
+# Track 5 — the training hub and the SOFT gate on the OCR upload. Per-route
+# guards: reads are any authenticated user (everybody has training), the HOD
+# dashboard is level 2, publishing an asset is admin.
+app.include_router(training_router, dependencies=_auth)
 
 # Intelligence layer — /ai/health + the Hub Assistant SSE stream (self-guarded,
 # any authenticated user; role-gated context inside manual_qa).

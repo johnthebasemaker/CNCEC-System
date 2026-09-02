@@ -48,6 +48,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 
 import { api } from '../api/client'
+import TrainingGate from '../components/TrainingGate'
 import { downloadConsumptionForm, useFormSystems } from '../api/hooks'
 import { useAuth } from '../auth/AuthContext'
 
@@ -1060,13 +1061,24 @@ function OcrUploadCard({ onDraft }: { onDraft: (id: number) => void }) {
     <Card size="small" style={{ marginBottom: 12 }}
       title={<Space><CameraOutlined />Upload a filled form</Space>}>
       <Space wrap align="start">
-        <Upload beforeUpload={upload} showUploadList={false}
-          accept=".jpg,.jpeg,.png,.heic,.heif,.pdf">
-          <Button type="primary" icon={<UploadOutlined />}
-            loading={busy || running} disabled={busy || running}>
-            {running ? 'Reading the form…' : 'Photograph or upload'}
-          </Button>
-        </Upload>
+        {/* ⚠️ THE GATE WRAPS THE UPLOAD, NOT THE PAGE. Wrapping the card
+            blocked the "Print a consumption form" control beside it, so
+            somebody wanting a BLANK sheet was stopped by a video about
+            filling one in — caught by the Playwright suite as a modal
+            intercepting an unrelated click. See components/TrainingGate.tsx. */}
+        <TrainingGate feature="ocr_upload">
+          {(guard) => (
+            <Upload
+              beforeUpload={(file) => { guard(() => { void upload(file) }); return false }}
+              showUploadList={false}
+              accept=".jpg,.jpeg,.png,.heic,.heif,.pdf">
+              <Button type="primary" icon={<UploadOutlined />}
+                loading={busy || running} disabled={busy || running}>
+                {running ? 'Reading the form…' : 'Photograph or upload'}
+              </Button>
+            </Upload>
+          )}
+        </TrainingGate>
         {running && (
           <Typography.Text type="secondary" style={{ lineHeight: '32px' }}>
             This usually takes under a minute. You can leave the page — it

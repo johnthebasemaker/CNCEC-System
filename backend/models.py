@@ -1325,6 +1325,19 @@ class SmeExecutionEntry(Base):
     # ⚠️ APPROVAL NOW MOVES STOCK (ruling Q1-b) — see post_stock().
     Stock_Posted_At = Column(DateTime)
     WBS_Number = Column(Text)
+    # ⚠️ 'Day' | 'Night' | NULL, and NULL is not a defect (slice 10b).
+    #
+    # Track 2's chase alert asks about material staged for DAY-SHIFT work, and
+    # nothing recorded which shift an entry belonged to. Inferring it from the
+    # clock was rejected: an entry is filed when somebody reaches a desk, not
+    # when the work happened, so a night crew filing at 06:40 would be counted
+    # as day shift on a timestamp nobody looked at.
+    #
+    # Every pre-existing row is NULL and there is no honest backfill — 'Day'
+    # would be a guess printed into the record. The probe reads NULL as "not
+    # known to be day shift" and skips it, so the feature starts empty and
+    # fills as people use it, exactly as `WBS_Number` above did in Phase 9a.
+    Shift = Column(Text)
 
     created_by = Column(Text)
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
@@ -1333,6 +1346,10 @@ class SmeExecutionEntry(Base):
         UniqueConstraint("Site_ID", "Entry_No"),
         Index("ix_sme_exec_entry_status", "Site_ID", "status"),
         Index("ix_execution_entry_form", "Form_UUID"),
+        # The day-shift MTC probe's predicate. Without it, that probe is a
+        # sequential scan of every execution entry ever filed — every morning,
+        # in every worker.
+        Index("ix_exec_entry_shift", "Site_ID", "Work_Date", "Shift"),
     )
 
 
@@ -1815,6 +1832,116 @@ class LoginAttempts(Base):
     window_start = Column(DateTime, nullable=False,
                           server_default=text('CURRENT_TIMESTAMP'))
     failures = Column(Integer, nullable=False, server_default=text('0'))
+
+
+class DailyJobRun(Base):
+    """One row per daily scheduled job — the claim the daily loops never had.
+
+    ⚠️ THE DAILY LOOPS HAVE BEEN FIRING FOUR TIMES A DAY IN PRODUCTION.
+    `report_center.scheduler_loop` claims its work with an atomic `last_run`
+    UPDATE and says why in its docstring. The three DAILY loops — the 07:00
+    morning briefing, the 16:00 evening digest and the Friday 17:00 executive
+    report — do not: each sleeps until its hour and dispatches, in every worker.
+    `deploy/Dockerfile.api` runs `uvicorn --workers 4`, so every one of those
+    messages reached every recipient four times.
+
+    Invisible in development (one worker) and invisible in the tests (the loops
+    are off under GI_SCHEDULER=0), which is how it survived three phases.
+
+    `last_worker` and `last_result` are here because "did it run, where, and
+    what did it find" is the first question asked when a morning briefing does
+    not arrive, and it is unanswerable afterwards if nobody wrote it down.
+    """
+    __tablename__ = "daily_job_runs"
+    job_key = Column(Text, primary_key=True)
+    last_run = Column(DateTime)
+    last_worker = Column(Text)
+    last_result = Column(Text)
+
+
+class TrainingModule(Base):
+    """A tutorial people must watch, and optionally a feature it gates.
+
+    ⚠️ `version` IS LOAD-BEARING. Bumping it invalidates every acknowledgement
+    of the previous version by construction — see `TrainingCompliance`.
+    """
+    __tablename__ = "training_modules"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    module_key = Column(Text, nullable=False, unique=True)
+    title = Column(Text, nullable=False)
+    description = Column(Text)
+    version = Column(Integer, nullable=False, server_default=text('1'))
+    required_roles = Column(Text)          # CSV, e.g. 'supervisor,store_keeper'
+    # The feature this module gates ('ocr_upload'), or NULL when it is purely
+    # informational. A missing module means an UNGATED feature, which is the
+    # right failure direction for a soft gate.
+    gates_feature = Column(Text)
+    active = Column(Integer, nullable=False, server_default=text('1'))
+    created_by = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+
+class TrainingAsset(Base):
+    """One video, in one language.
+
+    ⚠️ A URI, NOT A BLOB (operator ruling Q5.3). A three-language tutorial set
+    is plausibly 200-600 MB. In a `LargeBinary` column that lands in every
+    nightly `pg_dump` forever, cannot serve HTTP Range requests — so the viewer
+    cannot seek, and a training video you cannot scrub is one nobody re-watches
+    — and competes for the same shared buffers as the OLTP workload.
+
+    `language` is BCP-47: `ta`, `ar`, `en`, and `ta-Latn` for Tanglish (Tamil
+    written in Latin script, which is what people speak on site and what the
+    avatar videos are recorded in). A future language is a value, not a
+    migration.
+    """
+    __tablename__ = "training_assets"
+    __table_args__ = (
+        UniqueConstraint("module_id", "language", name="uq_training_asset_lang"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    module_id = Column(Integer, nullable=False)
+    language = Column(Text, nullable=False)
+    storage_uri = Column(Text, nullable=False)
+    captions_uri = Column(Text)
+    duration_s = Column(Integer)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+
+class TrainingCompliance(Base):
+    """Who has watched what, and at which version of it.
+
+    ⚠️ `module_version` IS PART OF THE UNIQUE KEY, and that is the whole point
+    of the table. Keyed on `(username, module_id)` alone, re-recording a
+    tutorial because the workflow changed would leave everybody certified
+    against a video they have never seen — worse than having no record at all,
+    because it looks like evidence. Bumping `TrainingModule.version`
+    invalidates every prior acknowledgement by construction, rather than by a
+    script somebody has to remember to run.
+
+    ⚠️ A DEFERRAL IS RECORDED, NOT PUNISHED. The operator ruled a SOFT gate
+    (Q5.1): a supervisor holding a filled form at 06:00 must never be unable to
+    file consumption because of a video. "Watch Later" writes `deferred_at` and
+    increments `deferrals`, which is what the HOD dashboard counts — the
+    control is visibility, not refusal.
+    """
+    __tablename__ = "training_compliance"
+    __table_args__ = (
+        UniqueConstraint("username", "module_id", "module_version",
+                         name="uq_training_compliance_user_module_version"),
+        Index("ix_training_compliance_user", "username"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(Text, nullable=False)
+    module_id = Column(Integer, nullable=False)
+    module_version = Column(Integer, nullable=False)
+    language = Column(Text)
+    watched_seconds = Column(Integer, nullable=False, server_default=text('0'))
+    completed_at = Column(DateTime)
+    acknowledged_at = Column(DateTime)
+    deferred_at = Column(DateTime)
+    deferrals = Column(Integer, nullable=False, server_default=text('0'))
+    updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
 
 class RateBuckets(Base):
