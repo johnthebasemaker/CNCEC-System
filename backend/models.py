@@ -2609,6 +2609,71 @@ class SystemAuditLog(Base):
     )
 
 
+class AiTrace(Base):
+    """One SPAN of one AI request (alembic f8a3c05d1b27, Phase 11 slice 11c).
+
+    ⚠️ WHAT THIS EXISTS FOR: WHEN THE ASSISTANT ANSWERS BADLY, NOBODY COULD
+    TELL WHETHER RETRIEVAL OR GENERATION WAS AT FAULT. `manual_index.Index`
+    already COMPUTED a BM25 score for every candidate chunk and then discarded
+    all of them, so a wrong answer and a right answer left identical evidence:
+    none. The 800-character head-truncation that hid the access matrix from
+    every non-admin role — and made the assistant tell HODs they could not open
+    the Manpower portal — was a retrieval failure that survived a whole phase
+    for exactly this reason.
+
+    ⚠️ POSTGRES, NOT A SAAS TRACER (ruling P11-1). A LangSmith span carries the
+    PROMPT, and our prompts contain manual chapters, the results of five live
+    SQL probes over the ERP, generated SQL, and OCR'd images of signed delivery
+    notes with employee names on them. Sending that to a third party is a
+    decision far above an observability upgrade. This table is already backed
+    up, already in the runbook, and sits next to `system_audit_log` and
+    `ai_jobs` — which is where an incident investigation starts anyway.
+
+    ⚠️ AND WHAT IT DELIBERATELY DOES NOT STORE. The QUESTION is kept (operator
+    ruling Q11, 2026-09-02 — the twenty most-asked questions are the most
+    valuable eval cases in the system and nothing was retaining them). The
+    ANSWER is not, and neither is retrieved chunk TEXT: `ai.retrieve` records
+    chapter numbers, headings, scores and character counts. Storing the passages
+    would duplicate the manual into a table with a laxer read path than the
+    manual itself has, which is a way of undoing rule 9 by accident.
+
+    One row per span rather than one per request, because the whole point is
+    that the stages are separately measurable. `trace_id` groups them and
+    `span` names the stage; a request that dies in the guard has one row and a
+    complete one has five.
+    """
+    __tablename__ = "ai_traces"
+    __table_args__ = (
+        # The console reads "the last N", newest first, optionally by lane.
+        Index("ix_ai_traces_created", "created_at"),
+        Index("ix_ai_traces_lane_created", "lane", "created_at"),
+        # Assembling one request's waterfall from its spans.
+        Index("ix_ai_traces_trace", "trace_id"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # A request's own id, shared by every span of it. Text, not UUID: the
+    # column is grouped and equality-matched, never generated in SQL.
+    trace_id = Column(Text, nullable=False)
+    # ai.request | ai.guard.input | ai.retrieve | ai.cache | ai.generate |
+    # ai.guard.output — see ai/trace.py, which owns the vocabulary.
+    span = Column(Text, nullable=False)
+    lane = Column(Text)                     # assistant | ocr_consumption | …
+    role = Column(Text)
+    username = Column(Text)
+    Site_ID = Column(Text)
+    started_at = Column(DateTime)
+    duration_ms = Column(Integer)
+    ok = Column(Integer, nullable=False, server_default=text('1'))
+    outcome = Column(Text)                  # short verb: ok | refused | error
+    # JSON object. Text rather than JSONB to match every other JSON column in
+    # this schema (`OCR_Raw_JSON`, `payload_json`, `result_json`) — the parity
+    # tooling and the SQLite bridge both assume Text, and one column with a
+    # different storage type would be a trap for whoever writes the next
+    # migration rather than a feature anybody asked for.
+    attrs_json = Column(Text)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+
 # ==========================================================================
 # SQL VIEWS — recreate as PostgreSQL views at migration (NOT ORM tables).
 # SME compat views alias sme_* tables (Canon rule 1); derived views compute

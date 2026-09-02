@@ -93,6 +93,8 @@ ROLE_MANUAL_RECIPES = {
             "20. Auditor (View-Only) Manual",
             "21. 2026-08 Feature Update — What Changed",
             "22. Quality, Safety, Employees & Procurement (QSEP)",
+            # Slice 11c: AI Traces is one of the auditor's own pages.
+            "25. Phase 11 — AI Traces",
         ],
     },
     "store_keeper": {

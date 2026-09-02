@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import json
 import os
 import shutil
 import subprocess
@@ -28,13 +29,15 @@ import uuid
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .auth import (get_current_user, require_level, revoke_all_sessions,
+from .ai import trace as _ai_trace
+from .auth import (get_current_user, require_level, require_roles,
+                   revoke_all_sessions,
                    site_scope)
 from .config import async_database_url
 from .db import get_session
@@ -529,6 +532,100 @@ async def logistics_oversight(session: AsyncSession = Depends(get_session)):
     return {"prs_by_state": prs, "pos_by_status": pos, "top_vendors": top_vendors,
             "dns_by_status": dns, "warehouse_load": wh_load,
             "force_closures_by_reason": closures, "vendor_returns_by_status": returns}
+
+
+# --- AI traces (Phase 11 slice 11c) ----------------------------------------------
+#
+# ⚠️ ADMIN + AUDITOR, AND NOTHING BELOW THAT. `ai_traces` rows carry the
+# QUESTION somebody typed (ruling Q11), so this is closer to the audit log than
+# to a dashboard — and it is read-only for both roles by construction, because
+# rule 7's method-level middleware refuses every mutating verb from an auditor
+# without anything here having to remember to.
+#
+# ⚠️ AND IT SHOWS CHAPTER NUMBERS, NEVER CHAPTER TEXT. The retrieval span holds
+# `{chapter, heading, score, rank, chars}`. Rendering the passages here would
+# put manual content behind a laxer read path than the manual itself has, which
+# is how rule 9's fence gets undone by a feature nobody thought was about
+# security. Everything diagnostic — which chapters were candidates, which won,
+# by how much, and whether the fallback fired — is answerable without the text.
+traces = APIRouter(prefix="/admin", tags=["admin console"],
+                   dependencies=[Depends(require_roles("admin", "auditor"))])
+
+
+@traces.get("/ai-traces", summary="Recent AI requests, newest first")
+async def ai_traces(limit: int = Query(50, ge=1, le=200),
+                    lane: Optional[str] = None,
+                    role: Optional[str] = None,
+                    outcome: Optional[str] = None,
+                    session: AsyncSession = Depends(get_session)):
+    """One row per REQUEST, with its child spans folded in.
+
+    The table stores one row per SPAN — that is what makes the stages
+    separately measurable — but a console reading spans would make a person
+    reassemble a request in their head. Grouping happens here.
+    """
+    t = _MD.tables["ai_traces"]
+    q = select(t).where(t.c["span"] == "ai.request")
+    if lane:
+        q = q.where(t.c["lane"] == lane)
+    if role:
+        q = q.where(t.c["role"] == role)
+    if outcome:
+        q = q.where(t.c["outcome"] == outcome)
+    heads = [dict(m) for m in (await session.execute(
+        q.order_by(t.c["id"].desc()).limit(limit))).mappings().all()]
+    if not heads:
+        return {"items": [], "stats": _ai_trace.stats()}
+
+    ids = [h["trace_id"] for h in heads]
+    kids = [dict(m) for m in (await session.execute(
+        select(t).where(t.c["trace_id"].in_(ids),
+                        t.c["span"] != "ai.request")
+        .order_by(t.c["id"]))).mappings().all()]
+    by_trace: dict[str, list[dict]] = {}
+    for k in kids:
+        by_trace.setdefault(k["trace_id"], []).append(k)
+
+    out = []
+    for h in heads:
+        spans = by_trace.get(h["trace_id"], [])
+        attrs = json.loads(h["attrs_json"] or "{}")
+        item = {
+            "trace_id": h["trace_id"], "lane": h["lane"], "role": h["role"],
+            "username": h["username"], "Site_ID": h["Site_ID"],
+            "created_at": h["created_at"], "duration_ms": h["duration_ms"],
+            "ok": bool(h["ok"]), "outcome": h["outcome"],
+            "question": attrs.get("question"),
+            "queued_ms": attrs.get("queued_ms"),
+            "spans": [{"span": s["span"], "duration_ms": s["duration_ms"],
+                       "ok": bool(s["ok"]), "outcome": s["outcome"],
+                       "attrs": json.loads(s["attrs_json"] or "{}")}
+                      for s in spans],
+        }
+        # Lift the two numbers a reader looks for first, so the grid can show
+        # them without opening a row: did retrieval find anything, and did it
+        # have to fall back to dumping the whole allowed manual.
+        for s in item["spans"]:
+            if s["span"] == "ai.retrieve":
+                item["top_score"] = s["attrs"].get("top_score")
+                item["fallback"] = bool(s["attrs"].get("fallback"))
+                item["candidates"] = s["attrs"].get("candidates")
+        out.append(item)
+    return {"items": out, "stats": _ai_trace.stats()}
+
+
+@traces.get("/ai-traces/{trace_id}", summary="Every span of one request")
+async def ai_trace_detail(trace_id: str,
+                          session: AsyncSession = Depends(get_session)):
+    t = _MD.tables["ai_traces"]
+    rows = [dict(m) for m in (await session.execute(
+        select(t).where(t.c["trace_id"] == trace_id)
+        .order_by(t.c["id"]))).mappings().all()]
+    if not rows:
+        raise HTTPException(404, "no such trace")
+    return {"trace_id": trace_id,
+            "spans": [{**r, "attrs": json.loads(r.pop("attrs_json") or "{}")}
+                      for r in rows]}
 
 
 # --- Cross-site requests (HOD raises → admin decides) -----------------------------

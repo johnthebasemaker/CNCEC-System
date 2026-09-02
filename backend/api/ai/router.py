@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import json
+import time as _perf
 from typing import Optional
 
 from fastapi import (APIRouter, Body, Depends, File, HTTPException,
@@ -39,6 +40,7 @@ from . import jobs as ai_jobs
 from . import manual_qa
 from . import ocr
 from . import pdf_extract
+from . import trace as ai_trace
 
 settings_t = _MD.tables["app_settings"]
 inventory_t = _MD.tables["inventory"]
@@ -87,38 +89,65 @@ def _sse(obj: dict) -> str:
 async def assistant(body: AskIn = Body(...),
                     user: dict = Depends(get_current_user)):
     role, username = user["role"], user["username"]
+    site_id = site_scope(user) or ""
 
     async def gen():
-        # Flags need their own session: the request-scoped one would be
-        # closed by the time this generator streams.
-        async with SessionLocal() as s:
-            flags = await _flags(s)
-        if not (flags["ai_enabled"] and flags["ai_assistant_enabled"]):
-            yield _sse({"error": "AI features are switched off in Settings.",
-                        "done": True})
-            return
-
-        # Greetings skip health + semaphore entirely (in-process fast path).
-        canned = manual_qa.greeting_reply(body.question)
-        if canned is not None:
-            yield _sse({"token": canned})
-            yield _sse({"done": True})
-            return
-
-        # Generation semaphore: emit "queued" only when actually waiting so
-        # the UI can say "waiting for a free AI slot…" instead of freezing.
+        # ⚠️ ONE TRACE ID PER TURN, MINTED BEFORE ANYTHING CAN GO WRONG, so a
+        # request that dies in the flag check is still a row that says so. A
+        # tracer that only records successful requests describes a system
+        # nobody is having trouble with.
+        tid = ai_trace.new_trace_id()
+        req = ai_trace.Span("ai.request", trace_id=tid, lane="assistant",
+                            role=role, username=username, site_id=site_id)
+        req.__enter__()
+        # The QUESTION is recorded, the ANSWER is not (ruling Q11, 2026-09-02):
+        # what people actually ask is the most valuable eval material in the
+        # system and nothing was retaining it. See trace.py for what is refused.
+        req.attrs(question=ai_trace.clip_question(body.question),
+                  question_chars=len(body.question or ""))
+        queued_ms = 0
         try:
-            await asyncio.wait_for(aic.GEN_SEMAPHORE.acquire(), timeout=0.05)
-        except (asyncio.TimeoutError, TimeoutError):
-            yield _sse({"status": "queued"})
-            await aic.GEN_SEMAPHORE.acquire()
-        try:
-            async for chunk in manual_qa.answer_manual_question(
-                    body.question, role, username):
-                yield _sse({"token": chunk})
-            yield _sse({"done": True})
+            # Flags need their own session: the request-scoped one would be
+            # closed by the time this generator streams.
+            async with SessionLocal() as s:
+                flags = await _flags(s)
+            if not (flags["ai_enabled"] and flags["ai_assistant_enabled"]):
+                req.outcome("disabled")
+                yield _sse({"error": "AI features are switched off in Settings.",
+                            "done": True})
+                return
+
+            # Greetings skip health + semaphore entirely (in-process fast path).
+            canned = manual_qa.greeting_reply(body.question)
+            if canned is not None:
+                req.outcome("greeting")
+                yield _sse({"token": canned})
+                yield _sse({"done": True})
+                return
+
+            # Generation semaphore: emit "queued" only when actually waiting so
+            # the UI can say "waiting for a free AI slot…" instead of freezing.
+            _q0 = _perf.perf_counter()
+            try:
+                await asyncio.wait_for(aic.GEN_SEMAPHORE.acquire(), timeout=0.05)
+            except (asyncio.TimeoutError, TimeoutError):
+                yield _sse({"status": "queued"})
+                await aic.GEN_SEMAPHORE.acquire()
+                # ⚠️ QUEUE WAIT IS MEASURED SEPARATELY FROM GENERATION. On a box
+                # that holds one warm model, "the assistant is slow" is often
+                # two people asking at once rather than a slow model, and the
+                # two have opposite fixes.
+                queued_ms = int((_perf.perf_counter() - _q0) * 1000)
+            try:
+                async for chunk in manual_qa.answer_manual_question(
+                        body.question, role, username, trace_id=tid):
+                    yield _sse({"token": chunk})
+                yield _sse({"done": True})
+            finally:
+                aic.GEN_SEMAPHORE.release()
         finally:
-            aic.GEN_SEMAPHORE.release()
+            req.attrs(queued_ms=queued_ms)
+            req.__exit__(None, None, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",

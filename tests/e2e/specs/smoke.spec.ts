@@ -17,6 +17,9 @@ const ROUTES: Record<Role, Check[]> = {
     { path: '/admin/users', marker: 'New user' },
     { path: '/admin/audit' },
     { path: '/admin/console' },
+    // Slice 11c. The panel is mounted twice — here as its own route (the one an
+    // AUDITOR can reach, since the Console is minLevel 4) and as a Console tab.
+    { path: '/admin/ai-traces', marker: /AI Traces/i },
     { path: '/reports' },
   ],
   hod: [

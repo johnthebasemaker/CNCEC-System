@@ -1351,8 +1351,11 @@ async def test_ai_layer():
     """Phase AI-0/AI-1: safety-gate + fuzzy ports (pure functions), role-gated
     manual retrieval, and the SSE assistant endpoint with a MOCKED Ollama
     client (tests never require a live model server)."""
+    import re as _re_mod
+
     import backend.api.ai.client as aic
     from backend.api.ai import fuzzy, manual_qa
+    from backend.api.ai import manual_qa as manual_qa_mod
     from backend.api.ai.safety import is_safe_select, scrub_sql
 
     # --- safety gate (PG-hardened port) ----------------------------------
@@ -1459,9 +1462,24 @@ async def test_ai_layer():
             check("assistant streams model chunks as SSE events in order",
                   r.text.index('"Go to "') < r.text.index('"Entry Log."')
                   and '"done": true' in r.text, r.text[:200])
+            # ⚠️ THE SECOND HALF OF THIS USED TO BE `"=== Section 4:" in system`,
+            # AND IT WAS COINCIDENTALLY TRUE. A §4 chunk happened to scrape into
+            # the sixth retrieval slot for this question; adding chapter 25 in
+            # slice 11c moved every score by about 0.3 % (15.576 → 15.629) and
+            # pushed it out. Nothing was broken — BM25's `idf` and `avg_len` are
+            # computed over the WHOLE corpus, so a new chapter perturbs the
+            # ranking for every role, including roles that may not see it.
+            #
+            # So the assertion now says what its own name says: the prompt
+            # contains ONLY chapters this role may see, and is not empty. That
+            # is strictly stronger than naming one chapter, and it does not fail
+            # every time somebody documents a feature.
+            _secs = {int(n) for n in
+                     _re_mod.findall(r"=== Section (\d+):", captured["system"])}
             check("role gate: the store keeper's PROMPT physically lacks the admin chapter",
-                  "=== Section 4:" in captured["system"]
-                  and "=== Section 7:" not in captured["system"], "")
+                  _secs and _secs <= manual_qa_mod.allowed_sections("store_keeper")
+                  and 7 not in _secs,
+                  f"sections in prompt: {sorted(_secs)}")
 
             # Feature flag: switch the assistant off → error event; restore.
             r = await ac.put("/admin/settings", headers=H(admin_t),
@@ -21019,6 +21037,249 @@ async def test_daily_efficiency():
     await _reset()
 
 
+async def test_ai_tracing():
+    """Suite CU — Phase 11 slice 11c: the retrieval telemetry, and its cost.
+
+    ⚠️ THE FINDING THIS SUITE EXISTS FOR. `manual_index.Index.score()` computed
+    a BM25 score for every candidate chunk on every question, `search()` sorted
+    by it, and every one of those numbers was discarded. So "the assistant
+    answered badly" could never be split into "retrieval fetched the wrong
+    passage" and "the model ignored the right one" — a good answer and a bad
+    answer left identical evidence, which is none.
+
+    That is not hypothetical. The 800-character head-truncation put §2's access
+    matrix — which starts ~1,900 characters in — into NO non-admin prompt, so
+    the assistant inferred that HODs could not open the Manpower portal. A
+    retrieval failure, diagnosed as a model failure, alive for a whole phase.
+
+    The second half of the suite is about the tracer's own cost. An
+    observability layer that can break, block or slow the request it describes
+    is worse than none, because it converts a diagnostic into an outage.
+    """
+    import json as _cujson
+
+    from .ai import manual_qa as _cumq
+    from .ai import trace as _cutr
+
+    # ── 1. the scores exist, and describe the SAME ranking the prompt used ──
+    idx = _cumq._index()
+    sk_allowed = _cumq.allowed_sections("store_keeper")
+    hits, tele = idx.search_scored("how do I issue stock to a supervisor",
+                                   allowed=sk_allowed)
+    check("CU-01 ⚠️ RETRIEVAL NOW REPORTS ITS SCORES. They were being computed "
+          "on every question and thrown away, which is why a wrong answer and "
+          "a right one were indistinguishable after the fact",
+          bool(tele.get("hits")) and all(
+              isinstance(h.get("score"), float) for h in tele["hits"]),
+          str(tele)[:200])
+    check("CU-02 …and `search()` DELEGATES to it rather than keeping a second "
+          "copy of the ranking. Two implementations is how a telemetry number "
+          "and the thing it claims to describe drift apart, and a trace that "
+          "reports a ranking the prompt did not use is worse than no trace",
+          [(c.chapter, c.heading) for c in
+           idx.search("how do I issue stock to a supervisor", allowed=sk_allowed)]
+          == [(c.chapter, c.heading) for c in hits],
+          "search() and search_scored() disagree")
+    check("CU-03 ⚠️ THE CANDIDATE COUNT IS THE FENCE, MEASURED — how many "
+          "chunks this role was allowed to be scored against at all. A policy "
+          "that silently widens shows up here as a number that moved, next to "
+          "the answers it changed",
+          tele["candidates"] > 0
+          and tele["candidates"] < len(idx.chunks)
+          and tele["allowed_chapters"] == sorted(sk_allowed),
+          f"{tele['candidates']} of {len(idx.chunks)}")
+    check("CU-04 every recorded hit belongs to a chapter the role may see. The "
+          "telemetry must not be able to disclose the existence of a chapter "
+          "the fence excluded — that would leak through the diagnostic what the "
+          "prompt correctly withheld",
+          all(h["chapter"] in sk_allowed for h in tele["hits"]),
+          str([h["chapter"] for h in tele["hits"]]))
+    admin_tele = idx.search_scored("how do I issue stock to a supervisor",
+                                   allowed=_cumq.allowed_sections("admin"))[1]
+    check("CU-05 an ADMIN is scored against strictly more candidates than a "
+          "store keeper for the same question — the fence is upstream of the "
+          "score (rule 9) and this is that property as a number",
+          admin_tele["candidates"] > tele["candidates"],
+          f"admin {admin_tele['candidates']} vs sk {tele['candidates']}")
+    check("CU-06 ⚠️ NO CHUNK TEXT IS EVER RECORDED. Chapter, heading, score, "
+          "rank and size answer every diagnostic question the passage would — "
+          "and storing passages would copy the manual into a table with a "
+          "laxer read path than the manual's own, undoing rule 9 by accident",
+          all(set(h) <= {"chapter", "heading", "score", "rank", "chars", "used"}
+              for h in tele["hits"]),
+          str(tele["hits"][:1]))
+
+    # ── 2. the FALLBACK is recorded — the quiet failure ─────────────────────
+    _, fb = _cumq.build_system_prompt_scored(
+        "store_keeper", "sk", "xyzzy plugh frobnicate quux")
+    check("CU-07 ⚠️ WHEN NOTHING SCORES, THE FALLBACK IS FLAGGED. The answer "
+          "still arrives — from a truncated dump of every allowed chapter "
+          "rather than the passage that answers the question, which is exactly "
+          "when a model confabulates. Unflagged, a systematic retrieval failure "
+          "reads as a model that has got worse",
+          fb.get("fallback") is True and fb.get("context_chars", 0) > 0,
+          str(fb)[:200])
+    _, good = _cumq.build_system_prompt_scored(
+        "store_keeper", "sk", "how do I issue stock")
+    check("CU-08 …and a question that DOES retrieve is not flagged as fallback "
+          "— a flag that is always on is not a signal",
+          good.get("fallback") is False, str(good)[:160])
+    check("CU-09 telemetry comes back even on the paths that returned nothing. "
+          "'nothing scored' and 'retrieval threw' are the two most interesting "
+          "outcomes and were previously indistinguishable from each other",
+          _cumq.retrieve_context_scored("store_keeper", "")[1].get("skipped")
+          == "no question",
+          str(_cumq.retrieve_context_scored("store_keeper", "")[1]))
+
+    # ── 3. the span vocabulary ──────────────────────────────────────────────
+    check("CU-10 the span names are a closed vocabulary. A typo creates a "
+          "category nobody queries — a row rather than a diagnostic",
+          set(_cutr.SPANS) == {"ai.request", "ai.guard.input", "ai.retrieve",
+                               "ai.cache", "ai.generate", "ai.guard.output"},
+          str(_cutr.SPANS))
+
+    # ── 4. ⚠️ the tracer must never cost the thing it measures ──────────────
+    await _cutr.flush()                       # start from a known-empty queue
+    _cutr.emit("ai.request", trace_id="cu-test-1", lane="assistant",
+               role="store_keeper", username="sk", duration_ms=12,
+               outcome="ok", attrs={"question": "how do I issue stock"})
+    n = await _cutr.flush()
+    check("CU-11 a span emitted from the request path is written by the DRAIN, "
+          "not by the request. A synchronous INSERT would put the tracer on "
+          "the critical path of the thing it observes — and under "
+          "`--workers 4`, four times over",
+          n == 1, f"flushed {n}")
+    async with SessionLocal() as s:
+        _tt = _MD.tables["ai_traces"]
+        got = (await s.execute(select(_tt).where(
+            _tt.c["trace_id"] == "cu-test-1"))).mappings().first()
+    check("CU-12 …and it lands with its attributes intact",
+          got is not None and got["span"] == "ai.request"
+          and _cujson.loads(got["attrs_json"])["question"] == "how do I issue stock",
+          str(dict(got) if got else None)[:200])
+
+    _before = _cutr.stats()["dropped"]
+    _q = _cutr._queue_get()
+    _cap = _q.maxsize if _q is not None else 0
+    for i in range(_cap + 25):
+        _cutr.emit("ai.request", trace_id=f"cu-flood-{i}")
+    _after = _cutr.stats()
+    check("CU-13 ⚠️ A FULL QUEUE DROPS SPANS RATHER THAN BLOCKING. A missing "
+          "diagnostic is a smaller loss than a request that stalls behind its "
+          "own instrumentation — and the drop is COUNTED, so a stopped drain "
+          "is visible rather than silent (the same reasoning that stopped a "
+          "skipped check counting as a pass)",
+          _after["dropped"] > _before and _after["queued"] <= _cap,
+          f"dropped {_before}→{_after['dropped']}, queued {_after['queued']}/{_cap}")
+    await _cutr.flush()
+
+    class _Boom:
+        def __repr__(self):
+            raise RuntimeError("unserialisable")
+
+    _cutr.emit("ai.request", trace_id="cu-test-2", attrs={"bad": _Boom()})
+    check("CU-14 ⚠️ NOTHING IN THE TRACER RAISES. An attribute that cannot be "
+          "serialised drops its attributes and keeps the span; an "
+          "observability layer that can break a request converts a diagnostic "
+          "into an outage",
+          True, "emit() raised")
+    await _cutr.flush()
+
+    # ── 5. the console read — grouped by request, and role-gated ────────────
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://svc") as ac:
+        _ip = {"X-Real-IP": "203.0.113.61"}
+
+        async def token(u, p):
+            r = await ac.post("/auth/login", json={"username": u, "password": p},
+                              headers=_ip)
+            return r.json().get("access_token")
+
+        def H(t):
+            return {"Authorization": f"Bearer {t}"}
+
+        adm = await token("admin", "admin2026")
+        r = await ac.get("/admin/ai-traces", headers=H(adm), params={"limit": 20})
+        check("CU-15 the console reads REQUESTS with their spans folded in. The "
+              "table stores one row per span — that is what makes the stages "
+              "separately measurable — but a console reading spans would make "
+              "a person reassemble a request in their head",
+              r.status_code == 200 and isinstance(r.json().get("items"), list)
+              and "stats" in r.json(), f"{r.status_code} {r.text[:160]}")
+        sk_tok = await token("worker", "floor2026")   # store_keeper @ CNCEC
+        r2 = await ac.get("/admin/ai-traces", headers=H(sk_tok))
+        check("CU-16 ⚠️ A STORE KEEPER CANNOT READ THE TRACES. Rows carry the "
+              "QUESTION somebody typed, which makes this closer to the audit "
+              "log than to a dashboard",
+              r2.status_code == 403, f"{r2.status_code}")
+        r3 = await ac.get("/admin/ai-traces/does-not-exist", headers=H(adm))
+        check("CU-17 an unknown trace id is 404, not an empty success — an "
+              "empty span list would read as 'this request did nothing'",
+              r3.status_code == 404, f"{r3.status_code}")
+
+        # ── 6. end to end: a real SSE turn produces the spans ───────────────
+        # ⚠️ THE PIECES ABOVE ARE UNIT-SHAPED, AND THE WIRING IS WHERE THIS
+        # KIND OF FEATURE DIES. A tracer whose parts all work and whose spans
+        # never reach the endpoint is indistinguishable from no tracer at all,
+        # and the console would simply look like nobody had asked anything.
+        from .ai import client as _cuaic
+        _cusaved = (_cuaic.health, _cuaic.list_models, _cuaic.stream)
+
+        async def _ok_health():
+            return True
+
+        async def _ok_models():
+            return [_cuaic.MODEL_CHAT]
+
+        async def _fake_stream(model, prompt, *, system=None, **kw):
+            for t in ("Open ", "Entry Log."):
+                yield t
+
+        try:
+            _cuaic.health, _cuaic.list_models, _cuaic.stream = (
+                _ok_health, _ok_models, _fake_stream)
+            await _cutr.flush()
+            rr = await ac.post("/ai/assistant", headers=H(sk_tok),
+                               json={"question": "how do I issue stock to a supervisor"})
+            check("CU-18 the SSE turn still answers normally with tracing on — "
+                  "the tracer must be invisible to the thing it measures",
+                  rr.status_code == 200 and '"done": true' in rr.text,
+                  rr.text[:160])
+            await _cutr.flush()
+            async with SessionLocal() as s:
+                _tt2 = _MD.tables["ai_traces"]
+                rows = [dict(m) for m in (await s.execute(
+                    select(_tt2).where(_tt2.c["lane"] == "assistant")
+                    .order_by(_tt2.c["id"].desc()).limit(10))).mappings().all()]
+            spans = {r["span"] for r in rows}
+            check("CU-19 …and it produced a request, a retrieval and a "
+                  "generation span. A tracer whose parts work but whose spans "
+                  "never reach the endpoint looks exactly like no tracer",
+                  {"ai.request", "ai.retrieve", "ai.generate"} <= spans,
+                  str(sorted(spans)))
+            ret = next((r for r in rows if r["span"] == "ai.retrieve"), None)
+            ratt = _cujson.loads(ret["attrs_json"]) if ret else {}
+            check("CU-20 ⚠️ AND THE RETRIEVAL SPAN CARRIES THE SCORES AND THE "
+                  "ALLOWED CHAPTER SET — the two numbers that make a bad answer "
+                  "diagnosable, computed on every question since the assistant "
+                  "shipped and discarded every time until now",
+                  bool(ratt.get("hits")) and ratt.get("candidates", 0) > 0
+                  and ratt.get("allowed_chapters")
+                  == sorted(_cumq.allowed_sections("store_keeper")),
+                  str(ratt)[:220])
+            gen = next((r for r in rows if r["span"] == "ai.generate"), None)
+            gatt = _cujson.loads(gen["attrs_json"]) if gen else {}
+            check("CU-21 ⚠️ THE GENERATION SPAN RECORDS THE ANSWER'S LENGTH AND "
+                  "NEVER THE ANSWER. How much was generated is a latency and "
+                  "truncation diagnostic; what was generated is content this "
+                  "table has no business holding",
+                  gatt.get("answer_chars") == len("Open Entry Log.")
+                  and not any("Entry Log" in str(v) for v in gatt.values()),
+                  str(gatt)[:200])
+        finally:
+            _cuaic.health, _cuaic.list_models, _cuaic.stream = _cusaved
+
+
 async def test_database_isolation():
     """Suite BW — the tests must not be able to reach the live database.
 
@@ -21512,6 +21773,10 @@ async def main() -> int:
           "valuation that refuses to price the unpriced at zero, and a gate "
           "that records instead of refusing")
     await test_slice_10b_ecosystem()
+    print("\n CU. Retrieval telemetry — the BM25 scores that were computed on "
+          "every question and thrown away, and the queue that must never cost "
+          "the request it is measuring")
+    await test_ai_tracing()
     print("\n BW. The suite's own isolation — 1,400+ checks commit through the "
           "real app, so WHICH database they reach is itself a gate")
     await test_database_isolation()

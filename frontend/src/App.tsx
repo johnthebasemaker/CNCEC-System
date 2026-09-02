@@ -53,6 +53,7 @@ const CrossSitePage = lazy(() => import('./pages/CrossSitePage'))
 const ManHoursPage = lazy(() => import('./pages/ManHoursPage'))
 const QcHodPage = lazy(() => import('./pages/QcHodPage'))
 const OcrImportPage = lazy(() => import('./pages/OcrImportPage'))
+const AiTracesPage = lazy(() => import('./pages/AiTracesPage'))
 const WbsPage = lazy(() => import('./pages/WbsPage'))
 const FeedbackPage = lazy(() => import('./pages/FeedbackPage'))
 const TrainingPage = lazy(() => import('./pages/TrainingPage'))
@@ -77,6 +78,7 @@ export default function App() {
         <Route path="entry/count" element={<StockCountPage />} />
         <Route path="entry/returnables" element={<ReturnablesPage />} />
         <Route path="entry/ocr" element={<OcrImportPage />} />
+        <Route path="admin/ai-traces" element={<AiTracesPage />} />
         <Route path="site/incoming" element={<IncomingDeliveriesPage />} />
         <Route path="supervisor" element={<SupervisorPage />} />
         <Route path="execution" element={<ExecutionPage />} />

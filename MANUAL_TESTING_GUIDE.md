@@ -3008,6 +3008,51 @@ it `discarded` rather than deleting the row.
 The daily loops previously fired in all four uvicorn workers. `dailyjob.claim`
 is what stops it; a regression here is silent and quadruples every alert.
 
+## 14x. AI Traces — proving why an answer was what it was (Phase 11 · 11c)
+
+| | |
+|---|---|
+| **Who** | Admin (Console → AI Traces) · Auditor (sidebar → AI Traces) |
+| **Where** | `/admin/ai-traces`, and the same panel as a Console tab |
+
+**TC-TRC-01** — ask the Hub Assistant something, then open AI Traces. The turn
+appears with its role, the question, a **Retrieval** column naming the manual
+sections it actually reached, and a total time.
+
+**TC-TRC-02** — ⚠️ **the Retrieval column is the point of the page.** Expand a
+row: `ai.retrieve` lists every chunk that was scored, with its chapter, its
+BM25 score and whether it made it into the prompt. Before this, those scores
+were computed on every question and thrown away — so "the assistant said
+something wrong" could not be separated from "the assistant was shown the wrong
+page", and those have opposite fixes.
+
+**TC-TRC-03** — ⚠️ **ask something the manual does not cover** (`"xyzzy plugh"`).
+The row must show a gold **fallback** tag. That means nothing scored and the
+model was handed a truncated dump of every chapter your role may see instead of
+the passage that answers the question — which is exactly when a model makes
+things up. Without the tag, a systematic retrieval failure reads as a model
+that has quietly got worse.
+
+**TC-TRC-04** — ⚠️ **no manual TEXT appears anywhere on this page**, only
+chapter numbers, headings and scores. Storing passages here would put manual
+content behind a looser lock than the manual itself has.
+
+**TC-TRC-05** — ask the same question as two different roles. The **candidate**
+count differs, because the role fence is applied before scoring (rule 9). This
+is that security property visible as a number.
+
+**TC-TRC-06** — a store keeper or supervisor requesting `/admin/ai-traces` gets
+403. Rows carry the question somebody typed, which makes this closer to the
+audit log than to a dashboard.
+
+**TC-TRC-07** — an **auditor** can open AI Traces from their own sidebar entry.
+They cannot open the Admin Console (it is admin-only), which is why the panel is
+mounted twice rather than living only in a tab.
+
+**TC-TRC-08** — if the header ever shows **"N span(s) dropped"**, the trace
+writer is behind or stopped. The list is incomplete; the assistant is fine.
+Spans are dropped rather than allowed to block a request.
+
 ## 15. Do's and Don'ts
 
 ### Do
