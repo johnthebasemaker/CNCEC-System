@@ -657,6 +657,72 @@ Canaries come from `tests/ai_eval/cases/*.yaml`, whose uniqueness
 set when the case files are absent, because the fence is the control and a smoke
 alarm should not take the building down when its battery is flat.
 
+### 7g. The gateway, and a cache key that is a security control
+
+*Phase 11 slice 11e, `ai/route.py` + `ai/answer_cache.py` (alembic
+`a1c9e64b3d70`), suite CV.*
+
+**`route.POLICIES` is one table, keyed by LANE**, holding model, `num_predict`,
+timeout, retry budget, cloud permission and cacheability. `jobs.NUM_PREDICT` is
+now DERIVED from it — two literal copies of "3072" is how a budget and the lane
+it belongs to drift apart, which is the bug §7a already describes.
+
+⚠️ **`num_ctx` is deliberately NOT in the policy table.** It is not a policy, it
+is a computation over the image *this* request carries, and it stays in
+`client.vision_num_ctx()` beside the measurements that justify it. Getting it
+wrong does not truncate — it aborts the runner and takes every queued job with
+it. This is also **the reason LiteLLM was rejected**: its Ollama adapter passes
+its own options dict, which would have handed that decision to a library default
+and re-opened `ggml_abort` silently. Portkey was rejected earlier and harder — a
+Node daemon *in the request path* is P10-1's objection to Redis, enlarged.
+
+⚠️ **Error CLASS drives behaviour, and the timeout case is the whole argument
+for hand-writing this.** `route.classify()` separates `RETRYABLE` (connect, 429,
+5xx — retry with **full-jitter** backoff, because four workers whose Ollama
+restarts together would otherwise herd) from `TIMEOUT` (the model was healthy
+and still generating) from `UNAVAILABLE` (the engine is gone). A timeout is
+**never retried and never falls back**: retrying starts a second multi-minute
+generation on a one-model box, and falling back would ship a page off the
+network because our own stopwatch expired.
+
+⚠️ **Slice 11e found that 11b's cloud fallback covered ONE of five vision
+lanes.** `ocr_consumption`, `ocr_delivery_note`, `ocr_purchase_doc` and
+`tool_identify` called `aic.generate(images=…)` directly and so never reached
+`client.vision_json`, where the cloud seam lives — only the Phase 9d execution
+form had ever used it. All five now route through `route.call_vision`.
+
+#### ⚠️ The answer cache key is a security control, not a performance detail
+
+`ai_answer_cache.key_for()` hashes **normalised question · role · manual content
+hash · prompt template hash**, and every factor is load-bearing:
+
+* **role** — rule 9's guarantee is that a role's CONTEXT differs. Two people can
+  type a byte-identical question and be entitled to different answers. A cache
+  keyed on the question alone serves an Admin's answer to a Store Keeper and
+  undoes the retrieval fence *from the side*, invisibly, because the wrong
+  answer is fluent and cites chapters that reader has never been shown;
+* **manual hash** — the manual gains a chapter almost every phase (§24, §25). An
+  entry cached against the previous edition describes a screen that has changed,
+  with no sign of being stale. Hashing the corpus is the only invalidation rule
+  nobody has to remember;
+* **prompt hash** — change the instructions and old answers stop matching rather
+  than lingering under new rules.
+
+**Only `assistant` is cacheable.** `/ai/query`, `/ai/nl-search`, `/ai/insights`
+and `/ai/eod-summary` answer from LIVE STOCK; a cached "you have 40 drums" is a
+wrong number wearing a timestamp. The lookup runs **after both guards**, so the
+cache can never be a way past a refusal, and **what is cached is the GUARDED
+text** — caching raw model output would replay a redaction-worthy answer
+unredacted one turn later.
+
+**Exact match, not semantic, and that order is deliberate** (rule 11: benchmark
+before you add). `nomic-embed-text` is already pulled, so stage 2 needs no new
+service — what is missing is evidence it earns its correctness risk. "What can a
+supervisor approve?" and "what can a supervisor NOT approve?" sit ~0.95 apart in
+embedding space and have opposite answers: a similarity threshold is a
+correctness knob dressed as a performance one. `answer_cache.stats()` publishes
+the hit rate, which is the number that decides whether to build it.
+
 ### 7a. ⚠️ The vision envelope — three numbers that are ONE decision
 
 Fixed 2026-09-01 after two production reports ("the Consumption Log fails

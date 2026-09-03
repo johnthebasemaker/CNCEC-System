@@ -35,6 +35,7 @@ from sqlalchemy import select, update
 from ..db import SessionLocal
 from ..services.ledger import _MD
 from . import client as aic
+from . import route as _route
 from . import fuzzy, ocr
 
 logger = logging.getLogger("gi.ai.jobs")
@@ -219,12 +220,20 @@ JOB_KINDS = ("ocr_consumption", "ocr_delivery_note", "tool_identify",
 # the whole page away, and these budgets are what stop it being needed. Both
 # halves matter: a budget alone still loses the tail of an unusually long sheet,
 # and salvage alone silently drops rows nobody knows are missing.
-NUM_PREDICT = {
-    "ocr_consumption": 3072,    # the 30-row daily log, with headroom
-    "ocr_delivery_note": 1536,
-    "ocr_purchase_doc": 2560,   # a PO line table plus its header block
-    "tool_identify": 384,       # a name and two alternatives
-}
+# ⚠️ SINCE SLICE 11e THESE ARE DERIVED, NOT DECLARED. The numbers live in
+# `route.POLICIES` — one owner for every per-lane budget — and this dict is a
+# read-through so the name, the suite pins and the reasoning above all keep
+# working. Two literal copies of "3072" is precisely how a budget and the lane
+# it belongs to drift apart, which is the bug this comment block describes.
+NUM_PREDICT = {k: v.num_predict for k, v in _route.POLICIES.items()
+               if v.vision and k != "ocr_consumption_form"}
+# ⚠️ NOT `route.DEFAULT_POLICY.num_predict`, which is 512 — the CHAT budget.
+# Binding it there silently halved the fallback for an unlisted VISION lane
+# from 1024 to 512, which is the same class of mistake as the one-budget-for-
+# four-lanes bug above: a number that looks like a sensible default until it
+# meets a page. Every lane is named in `route.POLICIES` now, so nothing reads
+# this; it stays, at its own value, so that an unlisted lane added in a hurry
+# gets a vision-sized budget rather than a chat-sized one.
 DEFAULT_NUM_PREDICT = 1024
 
 
@@ -335,6 +344,26 @@ async def run_job(job_id: int) -> None:
         img_tokens = ocr.estimate_image_tokens(
             base64.b64decode(image_b64)) if image_b64 else None
 
+        # ⚠️ THROUGH THE GATEWAY SINCE SLICE 11e, AND THAT FIXED A REAL GAP.
+        #
+        # These four lanes called `aic.generate(..., images=[...])` directly,
+        # which means they never reached `client.vision_json` — and
+        # `vision_json` is where the cloud seam lives. So the fallback added in
+        # slice 11b, described as covering "the vision lane", actually covered
+        # exactly ONE of the five: the Phase 9d execution form, which is the
+        # only caller that had ever used `vision_json`. The consumption sheet,
+        # the delivery note, the scanned PO and Smart Scan had no cloud path at
+        # all, and nothing said so.
+        #
+        # `route.call_vision` calls `vision_json`, which calls
+        # `vision_num_ctx` — the indirection is the point (ARCHITECTURE §7a):
+        # the gateway decides WHICH engine and HOW MANY TRIES; the client
+        # decides how large the context window must be for the image in hand.
+        #
+        # `temperature=0.1` is passed explicitly to preserve exactly what these
+        # lanes did before. `vision_json` defaults to 0.0 (the form lane's
+        # value); changing these to match would be a behavioural change to a
+        # working OCR path, and it does not belong in a routing commit.
         if kind == "tool_identify":
             # Smart Scan tier-2 (AI-4): catalogue-constrained when the
             # tool_catalogue has rows, freeform naming when it's empty.
@@ -342,33 +371,15 @@ async def run_job(job_id: int) -> None:
                 cat_t = _MD.tables["tool_catalogue"]
                 catalogue = [dict(m) for m in (await s.execute(select(
                     cat_t.c["class_name"], cat_t.c["display_name"]))).mappings()]
-            async with aic.GEN_SEMAPHORE:
-                raw = await aic.generate(
-                    aic.MODEL_VISION, "Identify the tool.",
-                    system=ocr.tool_prompt(catalogue), images=[image_b64],
-                    temperature=0.1,
-                    num_predict=NUM_PREDICT["tool_identify"],
-                    timeout_s=aic.VISION_TIMEOUT_S,
-                    num_ctx=aic.vision_num_ctx(
-                        NUM_PREDICT["tool_identify"], img_tokens))
-            result = ocr.parse_tool_reply(raw, catalogue)
+            out = await _route.call_vision(
+                kind, "Identify the tool.", system=ocr.tool_prompt(catalogue),
+                image_b64=image_b64, image_tokens=img_tokens, temperature=0.1)
+            result = ocr.parse_tool_reply(out.text, catalogue)
         else:
-            async with aic.GEN_SEMAPHORE:
-                # ⚠️ THE VISION BUDGET, NOT THE CHAT ONE. A full page of tabular
-                # handwriting runs for minutes; `GEN_TIMEOUT_S` is sized for a
-                # chat reply and killed every long read at 240 s mid-generation.
-                # Nothing waits on this call — the browser is polling ai_jobs —
-                # so the only cost of the longer ceiling is a row sitting at
-                # status='running'.
-                raw = await aic.generate(
-                    aic.MODEL_VISION, ocr.USER_PROMPTS[kind],
-                    system=ocr.SYSTEM_PROMPTS[kind], images=[image_b64],
-                    temperature=0.1,
-                    num_predict=NUM_PREDICT.get(kind, DEFAULT_NUM_PREDICT),
-                    timeout_s=aic.VISION_TIMEOUT_S,
-                    num_ctx=aic.vision_num_ctx(
-                        NUM_PREDICT.get(kind, DEFAULT_NUM_PREDICT), img_tokens))
-            parsed = ocr.parse_vision_reply(kind, raw)
+            out = await _route.call_vision(
+                kind, ocr.USER_PROMPTS[kind], system=ocr.SYSTEM_PROMPTS[kind],
+                image_b64=image_b64, image_tokens=img_tokens, temperature=0.1)
+            parsed = ocr.parse_vision_reply(kind, out.text)
 
         async with SessionLocal() as s:
             if kind != "tool_identify":
@@ -533,6 +544,13 @@ async def orphan_sweep_loop() -> None:
                     n = await _tr.sweep_retention()
                     if n:
                         logger.info("ai_traces retention removed %s span(s)", n)
+                    # Same claim, same reason: the answer cache's stale rows are
+                    # already unreachable (the manual/prompt hashes see to that),
+                    # so this only reclaims the space.
+                    from . import answer_cache as _ac
+                    m = await _ac.sweep()
+                    if m:
+                        logger.info("ai_answer_cache dropped %s stale answer(s)", m)
             except Exception as e:                          # noqa: BLE001
                 logger.debug("trace retention skipped: %s", e)
         except asyncio.CancelledError:

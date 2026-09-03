@@ -117,6 +117,7 @@ change behaviour a person will notice.
 | `GI_AI_VISION_PROVIDER` | `ollama` | `anthropic` sends **every** page to the cloud. This and the next row are deliberately **two switches, not one**: they are two different agreements about company data. |
 | `GI_AI_VISION_CLOUD_FALLBACK` | `0` | `1` keeps reads local and sends a page out **only when the local engine is dead** — never when it is merely slow. A read timeout means the model was healthy and still generating (a five-row form measured at 399 s), and uploading a page because our own stopwatch ran out would make a data-egress decision out of impatience. Every fallback is logged with the reason. |
 | `GI_AI_EXPECTED_<KIND>_S` | measured | What the upload card tells a user to expect for one lane, e.g. `GI_AI_EXPECTED_OCR_CONSUMPTION_S`. Defaults are timings from real pages on the dev Mac (95 / 215 / 400 s); the CPX42 is CPU-only and **should be re-measured before these are quoted to anyone**. |
+| `GI_AI_TRACE` / `GI_AI_TRACE_QUEUE` / `_RETENTION_DAYS` | `1` / `2000` / `30` | Request tracing (§7e). Spans go on a bounded per-worker queue and are DROPPED when it fills — never blocking a request. A non-zero `dropped` in the AI Traces header means the writer is behind, not that the assistant is unwell. |
 | `GI_REDIS_URL` | — | **Does not exist, deliberately.** Ruling P10-1: the shared limiters are Postgres-backed (`rate_buckets`). Do not add Redis without revisiting that ruling. |
 
 ⚠️ **Two settings are rows in `app_settings`, not environment variables**, and

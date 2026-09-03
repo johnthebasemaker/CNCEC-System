@@ -2674,6 +2674,56 @@ class AiTrace(Base):
     created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
 
+class AiAnswerCache(Base):
+    """A previously-given assistant answer, keyed so it cannot be given to the
+    wrong person (alembic `a1c9e64b3d70`, Phase 11 slice 11e).
+
+    ⚠️ THE KEY IS THE ENTIRE SECURITY OF THIS TABLE, AND OMITTING `role` WOULD
+    BE A FENCE BYPASS. Rule 9's whole guarantee is that a role's CONTEXT
+    differs: two people can type a byte-identical question and be entitled to
+    different answers, because they were shown different chapters. A cache
+    keyed on the question alone would serve an Admin's answer to a Store
+    Keeper — undoing, from the side, the boundary the retrieval fence enforces
+    so carefully from the front. `key_hash` therefore covers:
+
+        normalised question · role · manual content hash · prompt template
+        hash · answer schema version
+
+    ⚠️ AND THE MANUAL HASH IS NOT OPTIONAL EITHER. The manual gains a chapter
+    almost every phase; an answer cached against the previous one is a
+    confidently-worded description of a screen that has changed. Hashing the
+    corpus means a manual edit silently retires every entry, which is the only
+    invalidation rule nobody has to remember.
+
+    ⚠️ ONLY THE MANUAL ASSISTANT IS CACHED. `/ai/query`, `/ai/nl-search`,
+    `/ai/insights` and `/ai/eod-summary` answer from LIVE STOCK, and a cached
+    "you have 40 drums" is a wrong number wearing a timestamp. The lane is
+    recorded so that a future addition has to say so out loud.
+    """
+    __tablename__ = "ai_answer_cache"
+    __table_args__ = (
+        # The sweep and the console both read by age.
+        Index("ix_ai_answer_cache_created", "created_at"),
+        # "What is this role asking repeatedly" — the hit-rate question that
+        # decides whether a semantic cache is ever worth building (rule 11:
+        # measure before you add).
+        Index("ix_ai_answer_cache_role", "role", "created_at"),
+    )
+    key_hash = Column(Text, primary_key=True)
+    lane = Column(Text, nullable=False, server_default=text("'assistant'"))
+    role = Column(Text, nullable=False)
+    # Kept in the clear for the console and for eval mining (ruling Q11 already
+    # retains questions in `ai_traces`; this is the same data, deduplicated).
+    question_norm = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    model = Column(Text)
+    manual_hash = Column(Text, nullable=False)
+    prompt_hash = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+    last_hit_at = Column(DateTime)
+    hit_count = Column(Integer, nullable=False, server_default=text('0'))
+
+
 # ==========================================================================
 # SQL VIEWS — recreate as PostgreSQL views at migration (NOT ORM tables).
 # SME compat views alias sme_* tables (Canon rule 1); derived views compute

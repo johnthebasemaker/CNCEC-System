@@ -5831,3 +5831,23 @@ Answers now arrive in slightly larger pieces than before — roughly a clause at
 time rather than a word — because the text is being checked as it goes. They
 should still appear progressively; if an answer only ever arrives all at once at
 the end, that is worth reporting.
+
+## 25.6 Why a repeated question comes back instantly
+
+If you ask the assistant something it has already answered — for you, or for
+somebody else in your role — the answer comes back immediately instead of being
+typed out. Nothing was skipped: it is the same answer, produced the same way,
+and kept for the next person who asks.
+
+Three things about it are worth knowing:
+
+- **It is per role.** A Store Keeper and an HOD asking word-for-word the same
+  question do **not** share an answer, because they are answered from different
+  chapters of this manual. Each role's answers are kept separately.
+- **It is retired whenever this manual changes.** Every kept answer is tied to
+  the exact edition of the manual it came from, so a documentation update clears
+  them all. You will never be given an answer about a screen as it used to be.
+- **Only the manual assistant does this.** Anything that reports live stock —
+  the "chat with your data" card, the insights panel, the end-of-day summary —
+  always asks the database afresh. A remembered stock figure would be a wrong
+  number with a confident timestamp on it.

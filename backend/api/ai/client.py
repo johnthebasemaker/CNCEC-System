@@ -153,7 +153,8 @@ def provider_of(model_id: str) -> str:
 async def vision_json(prompt: str, *, system: str, image_b64: str,
                       num_predict: int = 1400,
                       timeout_s: float = VISION_TIMEOUT_S,
-                      image_tokens: Optional[int] = None) -> tuple[str, str]:
+                      image_tokens: Optional[int] = None,
+                      temperature: float = 0.0) -> tuple[str, str]:
     """One vision completion. Returns `(raw_text, model_id)`.
 
     The model id comes back with the text because it is stored on the entry:
@@ -167,7 +168,7 @@ async def vision_json(prompt: str, *, system: str, image_b64: str,
     try:
         async with GEN_SEMAPHORE:
             text = await generate(
-                MODEL_VISION, prompt, system=system, temperature=0.0,
+                MODEL_VISION, prompt, system=system, temperature=temperature,
                 num_predict=num_predict, images=[image_b64],
                 timeout_s=timeout_s,
                 num_ctx=vision_num_ctx(num_predict, image_tokens))
