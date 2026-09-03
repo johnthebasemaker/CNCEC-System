@@ -710,12 +710,28 @@ and both were found this way:**
    not have been there, and the race is silent by nature. It is now declared in
    `models.py` too. **When you add a constraint in a migration, add it to
    `models.py` in the same commit.**
-2. **`cutover_migrate.py` STAMPS alembic to head without running it**, so every
-   migration that backfilled *data* is skipped on a freshly cut-over database.
-   The schema is right; the corrections are not replayed. `testdb._apply_fixtures`
-   carries the two that the suite depends on (the `employees` site backfill,
-   the nine PPE-categorised SAPs) and names them. ⚠️ **This is an open item for
-   the Hetzner deployment, not just for tests** — see FUTURE.
+2. ✅ **CLOSED 2026-08-18, re-verified end-to-end 2026-09-05.**
+   `cutover_migrate.py` used to STAMP alembic to head without running it, so
+   every migration that backfilled *data* was skipped on a freshly cut-over
+   database — the schema right, the corrections missing. It now runs
+   `run_data_migrations()` after the stamp (a migration carrying DML exposes
+   `data_upgrade(conn)`; `upgrade()` calls the same function, so the two paths
+   cannot drift) and `verify_data_migration_contract()` REFUSES in pre-flight
+   when a migration forgets.
+
+   **Verified against a real cut, 2026-09-05:** 105 tables copied,
+   `alembic_version` stamped to `a1c9e64b3d70`, **13 data steps executed**, and
+   both Phase 11 tables (`ai_traces`, `ai_answer_cache`) present with all six
+   of their indexes on a `create_all`-built database — which is the half of
+   this rule that nearly shipped `ux_asset_transfer_open` missing.
+
+   ⚠️ **The contract verifier was widened on 2026-09-05** to catch DML that
+   carries no SQL string: `op.bulk_insert(t, rows)` and SQLAlchemy Core's
+   `conn.execute(t.insert()/update()/delete())`. Nothing in the tree uses those
+   forms today — all 17 DML sites are `op.execute("…")` — which is exactly why
+   it was widened before somebody writes the first one. Suite **BZ-12a** pins
+   every form, with pure DDL and a properly-declared migration as negative
+   controls.
 
 `GI_TEST_DB=off` runs in place, for debugging a failure that only reproduces
 against live data. It prints a warning. `GI_TEST_DB_REUSE=1` skips the ~1s
@@ -1991,15 +2007,18 @@ walked. They are **deployment** items, not test items.
    commit, or it only exists on databases that were migrated rather than
    created.**
 
-2. **OPEN — data.** `cutover_migrate.py` STAMPS `alembic_version` to head
-   without running the migrations, so every revision that backfilled *data* is
-   skipped on a freshly cut-over database. Known instance: alembic
+2. ✅ **CLOSED — data.** `cutover_migrate.py` used to STAMP `alembic_version`
+   to head without running the migrations, so every revision that backfilled
+   *data* was skipped on a freshly cut-over database. Known instance: alembic
    `d2f84b19e57c` set `employees."Site_ID"` for employee `30816`, and **a
    site-less employee is invisible to every supervisor request** (`create_smr`
-   tests `(site or '') != site_id`, which no site satisfies). On the live
-   database this is already applied — it will bite on the **next fresh cut**.
-   Before go-live, either replay the data-only migrations by hand or audit
-   `employees` for blank sites. `testdb._apply_fixtures` lists what the suite
+   tests `(site or '') != site_id`, which no site satisfies).
+
+   `run_data_migrations()` now replays every declared step after the stamp, and
+   the cutover ABORTS if one fails rather than leaving a correct schema over
+   uncorrected data. Verified on a real cut 2026-09-05: **13 data steps ran**,
+   including `d2f84b19e57c`. Nothing needs replaying by hand before go-live.
+   `testdb._apply_fixtures` lists what the suite
    depends on and is the closest thing to an inventory of it.
 
 ---

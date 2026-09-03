@@ -6311,6 +6311,10 @@ async def test_ai_phase2_upgrades():
     filters run hermetically with SVCM- fixtures."""
     from sqlalchemy import text as _sqt
 
+    import pathlib as _cwpath_am
+
+    import yaml as _yaml_am
+
     from .ai import handwritten as hw
 
     async def _scalar(sql: str, **params):
@@ -6401,6 +6405,70 @@ async def test_ai_phase2_upgrades():
           hw.flag_severity("INFO_DITTO_INFERRED") == "info"
           and hw.flag_marker("INFO_DITTO_INFERRED") == "[?]",
           hw.flag_severity("INFO_DITTO_INFERRED"))
+
+    # ── ⚠️ THE FIXTURE AND THE RESOLVER MUST AGREE (2026-09-05) ────────────
+    #
+    # `fixtures/ocr_ground_truth.yaml` now carries a human transcription of all
+    # 30 rows of the operator's real sheet, with each cell recorded TWICE:
+    # `x_raw` (what is on the paper — `<DITTO>` where a mark was drawn) and `x`
+    # (what a human reads by carrying the value down the column).
+    #
+    # Feeding the RAW column through `resolve_ditto` must reproduce the human's
+    # resolution exactly. That is the whole 11b bug expressed as an assertion:
+    # the model returned "" for those marks, the resolver carried nothing, and
+    # 19 of 30 tank numbers vanished between a correct read and the review grid.
+    # If the resolver ever drifts from how a person reads a ditto column, this
+    # fails — against a real document rather than a constructed one.
+    #
+    # SKIPPED, NOT PASSED, when the fixture is absent: `fixtures/ocr/` is
+    # gitignored (real signed paperwork) but the YAML is tracked, so this runs
+    # everywhere the repo is checked out. A missing file is still reported.
+    _gt = _cwpath_am.Path(__file__).resolve().parents[2] / "fixtures" / "ocr_ground_truth.yaml"
+    if not _gt.exists():
+        check("am: OCR ground truth present for the ditto round-trip", False,
+              f"{_gt} is missing — the round-trip could not be checked")
+    else:
+        _doc = next(d for d in _yaml_am.safe_load(_gt.read_text(encoding="utf-8"))
+                    ["documents"] if d["id"] == "consumption_paper")
+        _exp = _doc["expect"]
+        check("am: the ground truth is VERIFIED and complete — 30 rows, so "
+              "per-cell OCR accuracy is scoreable at all",
+              _exp.get("verified") is True and len(_exp["rows"]) == 30,
+              f"verified={_exp.get('verified')} rows={len(_exp.get('rows', []))}")
+
+        _field = {"name": "received_by", "tank": "tank_no",
+                  "product": "product_name_raw"}
+        _rows = [{"sno": str(r["row"]),
+                  "received_by": r["name_raw"],
+                  "tank_no": r["tank_raw"],
+                  "product_name_raw": r["product_raw"],
+                  "qty_raw": str(r["qty"])} for r in _exp["rows"]]
+        hw.resolve_ditto(_rows)
+        _bad = []
+        for _got, _want in zip(_rows, _exp["rows"]):
+            for _k, _f in _field.items():
+                if (_got.get(_f) or "") != (_want[_k] or ""):
+                    _bad.append(f"row {_want['row']} {_k}: "
+                                f"resolver={_got.get(_f)!r} human={_want[_k]!r}")
+        check("am: ⚠️ THE RESOLVER REPRODUCES THE HUMAN'S DITTO RESOLUTION ON "
+              "ALL 30 ROWS OF THE REAL SHEET. This is the 11b bug as an "
+              "assertion — the model returned '' for those marks, nothing was "
+              "carried down, and 19 of 30 tank numbers vanished between a "
+              "correct read and the review grid",
+              not _bad, "; ".join(_bad[:4]))
+        check("am: …and the sheet really is mostly dittos — 104 of 180 cells — "
+              "so this fixture exercises the path that was broken rather than "
+              "a tidy synthetic one",
+              sum(1 for r in _exp["rows"] for k, v in r.items()
+                  if k.endswith("_raw") and v == "<DITTO>") >= 100,
+              str(sum(1 for r in _exp["rows"] for k, v in r.items()
+                      if k.endswith("_raw") and v == "<DITTO>")))
+        check("am: the header carries the shift the crew WROTE, and the date "
+              "that used to be unparseable because of it",
+              _exp["header"]["shift"] == "Night"
+              and _exp["header"]["date_iso"] == "2026-08-25"
+              and hw.parse_form_date(_exp["header"]["date_text"], _today)[0]
+              == "2026-08-25", str(_exp["header"]))
 
     c1, n1 = hw.apply_corrections("Yloues blasting large")
     c2, _ = hw.apply_corrections("Mask")
@@ -14655,6 +14723,44 @@ async def test_execution_sub_activity_identity():
                 caught = _cm.verify_data_migration_contract(d)
             check("BZ-12 …and the guard actually catches one that does not",
                   len(caught) == 1 and "forgot.py" in caught[0], str(caught))
+
+            # ⚠️ DML DOES NOT ALWAYS ARRIVE AS A SQL STRING, AND THE GUARD USED
+            # TO SEE ONLY THE STRING FORM. `op.bulk_insert(t, rows)` and
+            # SQLAlchemy Core's `conn.execute(t.insert())` write rows while
+            # containing no INSERT/UPDATE/DELETE text at all. Nothing in the
+            # tree uses those forms today — all 17 DML sites are
+            # `op.execute("…")` — which is precisely why it was widened before
+            # somebody writes the first one: the failure is a production box
+            # with a correct schema over uncorrected data, and it is silent.
+            _forms = {
+                "raw_sql.py":  ('def upgrade():\n'
+                                '    op.execute("UPDATE employees SET x = 1")\n', True),
+                "bulk.py":     ('def upgrade():\n'
+                                '    op.bulk_insert(tbl, [{"a": 1}])\n', True),
+                "core_ins.py": ('def upgrade():\n'
+                                '    conn.execute(tbl.insert().values(a=1))\n', True),
+                "core_upd.py": ('def upgrade():\n'
+                                '    conn.execute(tbl.update().values(a=1))\n', True),
+                # ⚠️ THE TWO NEGATIVE CONTROLS. A verifier that flagged pure
+                # DDL would fail every schema-only migration — including the two
+                # Phase 11 added — and would be switched off within a week.
+                "ddl_only.py": ('def upgrade():\n    op.create_table("t")\n'
+                                '    op.create_index("i", "t", ["c"])\n', False),
+                "declared.py": ('def upgrade():\n'
+                                '    op.execute("UPDATE t SET x=1")\n\n'
+                                'def data_upgrade(conn):\n    pass\n', False),
+            }
+            with _tf.TemporaryDirectory() as d:
+                for _n, (_src, _) in _forms.items():
+                    open(os.path.join(d, _n), "w").write(_src)
+                _hits = {p.split(":")[0]
+                         for p in _cm.verify_data_migration_contract(d)}
+            _wrong = [n for n, (_, want) in _forms.items()
+                      if (n in _hits) is not want]
+            check("BZ-12a …for EVERY form DML can take — raw SQL, "
+                  "`op.bulk_insert`, and SQLAlchemy Core insert/update — while "
+                  "leaving pure DDL and a properly-declared migration alone",
+                  not _wrong, f"mis-classified: {_wrong}")
 
 
 def _sme_recipe_workbook(rows: list[tuple]) -> bytes:

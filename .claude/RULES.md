@@ -45,10 +45,16 @@ database and absent from every production one. `ux_asset_transfer_open` — the
 partial unique index that stops two sites claiming the same asset — existed only
 in Alembic, and that race is silent by nature.
 
-**Still open, and it matters for the Hetzner deployment:** cutover *stamps*
-Alembic to head without running it, so migrations that backfilled **data** are
-skipped on a fresh cut. `testdb._apply_fixtures` carries the two the suite
-depends on and names them.
+✅ **The companion gap is CLOSED** (2026-08-18, re-verified on a real cut
+2026-09-05: 105 tables, 13 data steps run, both Phase 11 tables present with all
+six indexes). Cutover stamps Alembic AND then replays every migration's
+`data_upgrade(conn)`; `verify_data_migration_contract()` refuses in pre-flight
+when a migration carries DML and declares no step.
+
+⚠️ **So the rule for you is: a migration that writes ROWS must expose
+`data_upgrade(conn)` and call it from `upgrade()`.** Both paths then run the
+same code and cannot drift. The verifier catches raw SQL, `op.bulk_insert` and
+SQLAlchemy Core insert/update — suite BZ-12a pins all four forms.
 
 ---
 
