@@ -64,20 +64,36 @@
 >
 > ### Still open after Phase 11
 >
-> * **The Hetzner deployment** — unchanged, still paused by decision. The
->   cutover's "stamps Alembic without running it" gap is still open (see
->   *FUTURE* in `PROJECT_HANDOVER.md`); Phase 11 added two migrations, so
->   re-read it before cutting over.
-> * **Tier 2's score is 64% against a 95% target** and is deliberately NOT
->   gated. The gap is a model-capability gap (an 8B model inventing UI), not a
->   retrieval one; the lever is a larger chat model.
+> * **The Hetzner deployment** — unchanged, still paused by decision, but the
+>   tooling is now VERIFIED rather than assumed. ✅ The cutover's "stamps
+>   Alembic without running it" gap is **closed** and was re-proved end-to-end
+>   on 2026-09-05 against a throwaway database: 105 tables copied, stamped to
+>   `a1c9e64b3d70`, **13 data steps executed**, and both Phase 11 tables present
+>   with all six of their indexes on a `create_all`-built box. Run
+>   `tools/migration/cutover_migrate.py --wipe` against a scratch database
+>   before the real cut and read the `[3] Post-load` block — it names every data
+>   step it ran.
+> * **Tier 2's score is 64% against a 95% target** — now written up as a
+>   **KNOWN MODEL CONSTRAINT** (`docs/PROJECT_STATUS.md` §1a,
+>   `docs/ARCHITECTURE.md` §7i), not a backlog item. Tier 1 is 147/147 with zero
+>   leaks, recall/precision are 1.000/0.994 and false refusal is 0%, so the gap
+>   is neither the fence nor retrieval: it is an 8B model inventing UI no
+>   chapter describes. Prompt work already bought +21 points and is past its
+>   point of diminishing return. **The trigger is a GPU upgrade** — re-run
+>   `bash bin/ai_eval_tier2.sh --record` on the new host and compare.
+>   ⚠️ Do not lower the target, add prompt text, or wire Tier 2 into CI.
 > * **The semantic cache is deliberately unbuilt.** `answer_cache.stats()`
 >   publishes the hit rate that would justify it, and
 >   `tests/ai_eval/cases/nearmiss.yaml` is the acceptance test it must pass.
 > * **`fixtures/ocr/` is gitignored** and holds the operator's three real
->   documents. The ground truth for the 30 handwritten rows is still
->   `verified: false` — see `pending_operator_review` in
->   `fixtures/ocr_ground_truth.yaml`.
+>   documents; `fixtures/ocr_ground_truth.yaml` IS tracked. ✅ All 30 handwritten
+>   rows are now transcribed and `verified: true`, so per-cell OCR accuracy is
+>   scoreable — and suite AM feeds the RAW column through `resolve_ditto` and
+>   asserts it reproduces the human's resolution on all 30 rows, which is the
+>   11b ditto bug expressed as an assertion against a real document. **Six cells
+>   are genuinely ambiguous** (three names, one tank number) and are commented
+>   inline; an operator who knows the crew should confirm them — correct them
+>   in the YAML, never by relaxing a scorer.
 >
 > *(Everything below this block predates Phase 11 and is still accurate about
 > what it describes.)*

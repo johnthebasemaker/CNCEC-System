@@ -133,40 +133,94 @@ documents:
         budget). Quantities and the date read correctly. Ditto cells came back as
         the empty string rather than a glyph — the defect fixed by spec R2a/R2b.
     expect:
-      # ⚠️ HEADER ONLY IS VERIFIED. The 30 handwritten rows have NOT been
-      # transcribed by a human, and this file will not pretend otherwise.
-      verified: false
+      # ⚠️ TRANSCRIBED BY A HUMAN READ OF THE IMAGE, 2026-09-05, at 2-6x zoom on
+      # every ambiguous cell. Previously `verified: false` with header-only
+      # coverage, which meant per-cell OCR accuracy could not be scored at all.
+      #
+      # ⚠️ EACH CELL CARRIES BOTH `x_raw` AND `x`. `x_raw` is WHAT IS ON THE
+      # PAPER — `<DITTO>` where the writer drew a ditto mark — and `x` is what a
+      # human reads by carrying the value down the column. They are separate
+      # fields because they measure different things: a model is scored on
+      # `_raw` (did it SEE the mark?) and the resolver on `x` (did it CARRY the
+      # value?), and the 11b bug lived exactly in the gap between them — the
+      # model returned "" for the marks, so the resolver had nothing to carry
+      # and 19/30 tank numbers vanished between a correct read and the grid.
+      #
+      # ⚠️ SIX CELLS ARE GENUINELY AMBIGUOUS and are commented inline with the
+      # alternative reading. They are recorded as a best guess rather than
+      # omitted, because a missing row scores as a miss and teaches nothing;
+      # but a scorer should treat a mismatch on a commented cell as a question
+      # about the transcription first and the model second.
+      verified: true
       header:
         verified: true
         date_text: '25/08/26 (Night)'
         date_iso: '2026-08-25'
         # The word the crew wrote. Reading it is not the inference P10-9
-        # forbids — it is the honest source P10-9 says older rows do not have.
+        # forbids — it is the honest source P10-9 says old rows lack.
         shift: Night
         row_count: 30
-      # What the SHAPE of a correct read must be, which is scoreable today
-      # without a per-cell transcription. These are the properties the 11b fix
-      # is actually about.
+      columns: [sno, name, tank_no, product_name, uom, qty, remarks]
+      # ⚠️ THE UOM COLUMN IS DITTOED FROM ROW 11 ONWARD AND THEREFORE RESOLVES
+      # TO "Nos" FOR GLOVES. That is what the paper says, and the ground truth
+      # records the paper — not what the reader wishes it said. Do not "correct"
+      # these to Pair: the fixture would then be scoring the model against an
+      # opinion instead of a document.
+      rows:
+        # ⚠️ row 1: the writer's script capital G renders like a Y throughout (see 'Gloves')
+        - {row: 1, name: "Sunil", name_raw: "Sunil", tank: "J091", tank_raw: "J091", product: "Green coated gloves", product_raw: "Green coated gloves", uom: "Pair", uom_raw: "Pair", qty: 1, remarks: "R/L", remarks_raw: "R/L"}
+        - {row: 2, name: "Sunil", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "Dust Mask", uom: "Nos", uom_raw: "Nos", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 3, name: "Ram", name_raw: "Ram", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 4, name: "Ram", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Green coated gloves", product_raw: "Green coated gloves", uom: "Pair", uom_raw: "Pair", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 5, name: "Vinoth", name_raw: "Vinoth", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "Dust Mask", uom: "Nos", uom_raw: "Nos", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 6, name: "Vinoth", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 7, name: "Vinoth", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Gloves Leather", product_raw: "Gloves Leather", uom: "Pair", uom_raw: "Pair", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 8, name: "Rajeesh", name_raw: "Rajeesh", tank: "J091", tank_raw: "<DITTO>", product: "Gloves Leather", product_raw: "<DITTO>", uom: "Pair", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 9, name: "Rajeesh", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "Dust Mask", uom: "Nos", uom_raw: "Nos", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 10, name: "Rajeesh", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        # ⚠️ row 11: 'Green' is struck through IN THE CELL and 'Leather Gloves' stands. The ROW is not cancelled - spec R3 is about a line through the whole row
+        - {row: 11, name: "Rajeesh", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "Leather Gloves", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 12, name: "Yaseen", name_raw: "Yaseen", tank: "J091", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 13, name: "Vikas", name_raw: "Vikas", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "Dust Mask", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        # ⚠️ row 14: name AMBIGUOUS: 'Gundey' / 'Gunday'. Same initial glyph as the G in 'Gloves'
+        - {row: 14, name: "Gundey", name_raw: "Gundey", tank: "J091", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 5, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 15, name: "Gundey", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "Leather Gloves", uom: "Nos", uom_raw: "<DITTO>", qty: 5, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 16, name: "Gundey", name_raw: "<DITTO>", tank: "J091", tank_raw: "<DITTO>", product: "Grinding Disc G36", product_raw: "Grinding Disc G36", uom: "Nos", uom_raw: "<DITTO>", qty: 2, remarks: "R/L", remarks_raw: "<DITTO>"}
+        # ⚠️ row 17: name AMBIGUOUS: 'Sonu' / 'Sohu'
+        - {row: 17, name: "Sonu", name_raw: "Sonu", tank: "J091", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "Leather Gloves", uom: "Nos", uom_raw: "<DITTO>", qty: 2, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 18, name: "Rajendra", name_raw: "Rajendra", tank: "J027", tank_raw: "J027", product: "Leather Gloves", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "Blast", remarks_raw: "Blast"}
+        - {row: 19, name: "Rajendra", name_raw: "<DITTO>", tank: "J027", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "Dust Mask", uom: "Nos", uom_raw: "<DITTO>", qty: 8, remarks: "Blast", remarks_raw: "<DITTO>"}
+        - {row: 20, name: "Rajendra", name_raw: "<DITTO>", tank: "J027", tank_raw: "<DITTO>", product: "Earplugs", product_raw: "Earplugs", uom: "Nos", uom_raw: "<DITTO>", qty: 8, remarks: "Blast", remarks_raw: "<DITTO>"}
+        - {row: 21, name: "Rajendra", name_raw: "<DITTO>", tank: "J027", tank_raw: "<DITTO>", product: "Broom Brush Black", product_raw: "Broom Brush Black", uom: "Nos", uom_raw: "<DITTO>", qty: 4, remarks: "Blast", remarks_raw: "<DITTO>"}
+        - {row: 22, name: "Rajendra", name_raw: "<DITTO>", tank: "J027", tank_raw: "<DITTO>", product: "Tyvek coverall", product_raw: "Tyvek coverall", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "Blast", remarks_raw: "<DITTO>"}
+        # ⚠️ row 23: tank AMBIGUOUS: reads J291; row 1's J091 has a round 0 where this has an angular 2
+        - {row: 23, name: "Pappu", name_raw: "Pappu", tank: "J291", tank_raw: "J291", product: "Leather Gloves", product_raw: "Leather Gloves", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "R/L"}
+        - {row: 24, name: "Akram", name_raw: "Akram", tank: "J291", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 5, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 25, name: "Akram", name_raw: "<DITTO>", tank: "J291", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "Dust Mask", uom: "Nos", uom_raw: "<DITTO>", qty: 5, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 26, name: "Vijay", name_raw: "Vijay", tank: "J291", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "Leather Gloves", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 27, name: "Krishna", name_raw: "Krishna", tank: "J291", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 28, name: "Krishna", name_raw: "<DITTO>", tank: "J291", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "Dust Mask", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        # ⚠️ row 29: name AMBIGUOUS: 'Indiyan' / 'Indiyang' - trailing flourish
+        - {row: 29, name: "Indiyan", name_raw: "Indiyan", tank: "J291", tank_raw: "<DITTO>", product: "Dust Mask", product_raw: "<DITTO>", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+        - {row: 30, name: "Indiyan", name_raw: "<DITTO>", tank: "J291", tank_raw: "<DITTO>", product: "Leather Gloves", product_raw: "Leather Gloves", uom: "Nos", uom_raw: "<DITTO>", qty: 1, remarks: "R/L", remarks_raw: "<DITTO>"}
+
+      # What the SHAPE of a correct read must be — scoreable independently of
+      # the per-cell transcription above, and the properties the 11b fix is
+      # actually about.
       structure:
         verified: true
-        # Every printed row is returned, in order, including ones left blank.
         rows_returned_min: 25
-        # Ditto-able columns that must be POPULATED after resolution — before
-        # the fix these came back blank on the counts below.
-        ditto_columns: [received_by, tank_no, product_name_raw, work_type]
+        ditto_columns: [received_by, tank_no, product_name, work_type]
         blank_before_fix:
           tank_no: 19
           received_by: 14
-          product_name_raw: 8
-        # After R2a/R2b every populated row must carry a name, a tank and a
-        # product — inherited or written — and every inherited one must say so.
+          product_name: 8
         after_fix:
           populated_rows_with_blank_ditto_column: 0
           inferred_cells_flagged: INFO_DITTO_INFERRED
-        # ⚠️ AND THE EMPTY TAIL MUST STAY EMPTY. The S.No. column is pre-printed
-        # on all 30 rows; if the inference ever counted that as evidence of a
-        # real row it would walk the last operator's name and material down the
-        # unused rows and invent issues to people who were not there.
+        # ⚠️ AND THE EMPTY TAIL MUST STAY EMPTY. Not applicable to THIS sheet —
+        # all 30 rows are written on — but the property is pinned in suite AM
+        # because the S.No column is pre-printed on every sheet.
         unwritten_rows_must_stay_blank: true
 
 # ⚠️ WHAT A HUMAN STILL HAS TO CONFIRM BEFORE IT CAN BE SCORED.
@@ -177,15 +231,19 @@ documents:
 # a runner must skip the per-cell comparison (and SAY that it skipped it — a
 # skip is not a pass; see legacy/bug_check.py's SkipCheck).
 pending_operator_review:
+  # ✅ CLOSED 2026-09-05 — the 30 rows are transcribed above and `verified` is
+  # true, so per-cell accuracy is now scoreable. What remains is a CONFIRMATION,
+  # not a transcription: six cells are genuinely ambiguous to a reader who does
+  # not know the crew, and they are commented inline in the rows.
   - document: consumption_paper
     needs: >-
-      A per-row transcription of the 30 handwritten rows — Name, Tank No.,
-      Product Name, UOM, QTY and Remarks as written on the paper, with the
-      ditto cells marked as dittos rather than resolved. The handwriting is
-      legible but several names are ambiguous (row 1 reads as "Sunil" or
-      "Sunit"; the UOM column reads variously as "Pair"/"Pavr"/"Pcs"), and a
-      transcription this file guessed would become the standard the model is
-      measured against.
+      An operator who knows the site to confirm six readings: the names on rows
+      14 ("Gundey"/"Gunday"), 17 ("Sonu"/"Sohu") and 29
+      ("Indiyan"/"Indiyang"), and the tank number on row 23 (read as J291,
+      where row 1's J091 has a round 0 in the position this has an angular 2).
+      Everything else was read at 2-6x zoom and is unambiguous. ⚠️ Correct them
+      HERE if wrong — do not relax a scorer to accommodate a bad
+      transcription.
   - document: delivery_note
     needs: >-
       A ruling on Q8 — whether a DN line may auto-resolve to a SAP code by

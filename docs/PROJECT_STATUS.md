@@ -157,7 +157,7 @@ the native apps (§3.6). Locked rules + baselines:
 | **AI guardrail — Tier 1** | **147/147, 0 leaks** (also runs inside suite CQ) | `.venv/bin/python -m tests.ai_eval.runner` |
 | **AI retrieval — recall / precision** | **1.000 / 0.994** (HARD GATE ≥ 0.85) | same command |
 | **AI eval grid freshness** | ✅ current, 72 verified cases | `.venv/bin/python tools/gen_eval_grid.py --check` |
-| AI guardrail — Tier 2 | 📌 **scored, NOT a gate** — security 64% vs a 95% target, false-refusal 0%. Stochastic; needs a live model | `… --tier2 --json scorecard.json` |
+| AI guardrail — Tier 2 | 📌 **scored, NOT a gate** — security 64% vs a 95% target, false-refusal 0%. ⚠️ **KNOWN MODEL CONSTRAINT — see §1a below.** Stochastic; needs a live model | `bash bin/ai_eval_tier2.sh` |
 | Legacy regression | **599/0/0** ⚠️ needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` on macOS, else 598/0/**1 skipped** (rule 16) | `.venv/bin/python legacy/bug_check.py` |
 | Frontend | build + `tsc -b` + `oxlint` ✅ | `npm run build --prefix frontend` |
 | SME engine parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
@@ -181,6 +181,47 @@ that was failing had **never actually run on any machine** — see rule 16.
 ⚠️ `tools/parity_check.py` **fails against the live mirror BY DESIGN** —
 PostgreSQL is permanently ahead of the frozen SQLite since the Excel
 injection. It stays meaningful only on CI / a freshly-reloaded mirror.
+
+## 1a. ⚠️ KNOWN HARDWARE / MODEL CONSTRAINT — the Tier 2 ceiling
+
+**Tier 2 security is 64% against a 95% target, and the gap is the MODEL, not
+this codebase.** It is recorded here as a constraint with an owner and a
+trigger, not as a bug on a backlog.
+
+**Why it is not a pipeline defect** — three measurements say so:
+
+| Evidence | Value | What it rules out |
+|---|---|---|
+| Tier 1 leaks | **0 across 147 cases** | the fence |
+| Contextual recall / precision | **1.000 / 0.994** | retrieval |
+| False-refusal rate | **0%** | over-refusal / policy |
+
+What is left is the model **inventing UI that no chapter describes**. Asked
+"what is on the Service Health card?", `llama3.1:8b` describes one — that phrase
+lives only in chapter 7, and Tier 1 proves it was never in the prompt. The model
+echoes the question's wording and confabulates the rest.
+
+**Prompt engineering is already spent.** Slice 10b's anti-confabulation rule
+bought **+21 points** (43% → 64%) with false refusal staying at 0%. Further
+prompt text buys less each time and risks pushing false refusal up, which is the
+number most worth protecting.
+
+**The fix is a larger chat model, which is a SERVER decision.** The standing
+ruling is one warm 7-8B model on the box; a 30B-class model needs GPU memory the
+CPX42 does not have.
+
+> **Trigger for a future phase:** when the host gains a GPU (or the deployment
+> target changes), re-run `bash bin/ai_eval_tier2.sh --record` on the new
+> hardware and compare. That single command turns this from an assertion into a
+> measurement.
+
+⚠️ **Three things NOT to do in the meantime**, all considered and rejected:
+lower the 95% target (it is left unmet deliberately — a threshold tuned to pass
+measures nothing); add more prompt text (past its point of diminishing return);
+or wire Tier 2 into CI (ruling P10-7 — it would fail every run until somebody
+switched it off). The deterministic gates carry CI instead, at 1.000 / 0.994.
+
+Full reasoning: `docs/ARCHITECTURE.md` §7i.
 
 ## 2. What shipped (compressed — full history in POSTGRES_MIGRATION.md §8)
 

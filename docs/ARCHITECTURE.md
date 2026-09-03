@@ -774,6 +774,55 @@ template and a scoring convention. A metric whose definition changes under a
 Tier 2 runs from `bin/ai_eval_tier2.sh` on the operator's box or the Hetzner
 host — never on GitHub's runners, which have no GPU and no Ollama.
 
+### 7i. ⚠️ KNOWN MODEL CONSTRAINT — the Tier 2 ceiling is `llama3.1:8b`
+
+*Measured 2026-09-03/05. Not a defect, not a backlog item: a hardware/model
+limit that no amount of prompt engineering will move.*
+
+**Tier 2 security sits at 64% against a 95% target, and the remaining gap is
+the model, not the pipeline.** Three numbers make that falsifiable rather than
+an opinion:
+
+* **Tier 1 is 147/147 with ZERO leaks**, so nothing forbidden ever reached the
+  model. The fence is intact.
+* **Contextual recall 1.000, precision 0.994.** The right passage is being
+  retrieved and ranked first.
+* **False refusal is 0%.** The assistant is not buying compliance by refusing
+  everything.
+
+So the failures are neither retrieval nor policy. They are the model
+**confabulating a UI that no chapter describes** — asked "what is on the Service
+Health card?", an 8B model describes one, because that phrase exists only in
+chapter 7 and Tier 1 proves it was never in the prompt. It echoes the question's
+own wording and invents the rest.
+
+⚠️ **Prompt engineering has already been spent here, and the ledger is
+public.** Slice 10b added an explicit anti-confabulation rule to
+`_SYSTEM_PROMPT_TMPL` ("if the CONTEXT does not name the thing being asked
+about, you do not know about it"). That bought **+21 points** — 43% → 64% — with
+false refusal staying at 0%. The next increment of prompt text buys
+progressively less and risks the other direction, and false refusal at 0% is
+the thing most worth protecting: a store keeper refused at 06:00 costs more than
+an imperfect refusal rate.
+
+**The lever is a larger chat model, and that is a SERVER decision.** The
+standing ruling is one warm 7-8B model on the box (2026-07-06); a 30B-class
+model needs GPU memory the CPX42 does not have. So this is deferred to a future
+phase that upgrades the host, and until then:
+
+* the threshold stays at **95%, deliberately unmet**. A threshold tuned down to
+  whatever today's model scores measures nothing — it is left where it is so it
+  reads as "here is the gap";
+* **Tier 2 never gates a build** (P10-7). It is trended against a recorded
+  baseline and opens a bug row on a >10-point drop;
+* **the deterministic gates carry CI instead** (§7h). They cover the half of the
+  problem that is ours to control, and they are at 1.000 / 0.994.
+
+⚠️ **Do not "fix" this by lowering the target, adding more prompt text, or
+wiring Tier 2 into CI.** All three have been considered; the first hides the
+gap, the second is past its point of diminishing return, and the third produces
+exactly the flaky gate P10-7 exists to prevent.
+
 ### 7a. ⚠️ The vision envelope — three numbers that are ONE decision
 
 Fixed 2026-09-01 after two production reports ("the Consumption Log fails

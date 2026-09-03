@@ -231,8 +231,22 @@ def verify_data_migration_contract(versions_dir: str | None = None) -> list[str]
     # NB: no trailing \b after the UPDATE arm — \w matches the table name's
     # first letter and \b would then demand a boundary mid-word, so the arm
     # could never fire. The table may also be quoted ("employees").
-    dml = re.compile(r'\b(?:INSERT\s+INTO|DELETE\s+FROM)\b|\bUPDATE\s+["\w]',
-                     re.I)
+    #
+    # ⚠️ AND DML DOES NOT ALWAYS ARRIVE AS A SQL STRING (widened 2026-09-05).
+    # `op.bulk_insert(table, rows)` and SQLAlchemy Core's
+    # `conn.execute(t.insert()/update()/delete())` write rows while containing
+    # no INSERT/UPDATE/DELETE text at all, so the original pattern could not
+    # see them. Nothing in the tree uses those forms TODAY — all 17 DML sites
+    # are `op.execute("…")` — which is exactly why this is worth widening now
+    # rather than after somebody writes the first one: the failure it produces
+    # is a production box with a correct schema over uncorrected data, and it
+    # is silent.
+    dml = re.compile(
+        r'\b(?:INSERT\s+INTO|DELETE\s+FROM)\b'
+        r'|\bUPDATE\s+["\w]'
+        r'|\bop\.bulk_insert\s*\('
+        r'|\.execute\s*\(\s*\w+\s*\.\s*(?:insert|update|delete)\s*\(',
+        re.I)
     problems = []
     for name in sorted(os.listdir(vdir)):
         if not name.endswith(".py"):
