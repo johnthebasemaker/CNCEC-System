@@ -98,6 +98,106 @@ def score_retrieval(case: dict, system_prompt: str,
                               "prompt_chars": len(system_prompt)})
 
 
+# ── TIER 1b — RETRIEVAL QUALITY, AND WHY IT MAY GATE ─────────────────────────
+#
+# ⚠️ THIS IS THE ANSWER TO "GATE AT 0.85" WITHOUT OVERTURNING RULING P10-7.
+#
+# The brief asked for a CI gate that fails below 0.85 on Faithfulness and Answer
+# Relevance. P10-7 says a Tier 2 (model-answer) eval never gates a merge,
+# because it is stochastic and a flaky gate is one people re-run rather than
+# read. Both cannot be satisfied as written — and the current Tier 2 security
+# score (64% against a 95% target) would fail such a gate on every run until
+# somebody switched it off, which is exactly what P10-7 predicts.
+#
+# The resolution is to split the metric families by DETERMINISM rather than by
+# name. Contextual Precision and Contextual Recall measure RETRIEVAL, not
+# generation: given a labelled case ("this question is answered by §16"),
+# whether §16's chunk reached the context and where it ranked is a pure function
+# of BM25 over a fixed corpus. No model, no temperature, byte-identical every
+# run. They can gate, and they gate the failure this system is actually prone
+# to — the 800-character truncation that hid §2's access matrix from every
+# non-admin role was a retrieval regression that survived a whole phase.
+#
+# Faithfulness, Answer Relevance and answer-level Safety still need a judge, so
+# they stay Tier 2: trended, ratcheted, never a gate.
+#
+# ⚠️ AND THESE ARE OUR DEFINITIONS, VENDORED DELIBERATELY. RAGAS and DeepEval
+# both sell exactly this pair — and both compute them with an LLM judge that
+# defaults to OpenAI, which we cannot use on proprietary data and would have to
+# replace anyway. What is left of the offer is a prompt template and a scoring
+# convention, and a metric whose definition can change under a `pip upgrade`
+# invalidates every historical score it produced. So they are written here, in
+# the repository, where a change to one is a reviewable diff.
+
+def _first_expected_rank(hits: list[dict], expected: set[int]) -> int | None:
+    """1-based rank of the first retrieved chunk from an expected chapter."""
+    for i, h in enumerate(hits):
+        if h.get("chapter") in expected:
+            return i + 1
+    return None
+
+
+def contextual_recall(cases_tele: list[tuple[dict, dict]]) -> dict:
+    """Did the passage that answers the question reach the context at all?
+
+    The share of labelled cases whose expected chapter appears among the chunks
+    that were actually USED (a chunk retrieved and then dropped for the
+    character budget did not reach the model, and counting it would measure the
+    ranker while claiming to measure the prompt).
+
+    ⚠️ Unlabelled cases are EXCLUDED rather than counted as passes. A metric
+    that improves when somebody stops labelling cases is a metric that rewards
+    the wrong behaviour.
+    """
+    scored = misses = 0
+    detail: list[str] = []
+    for case, tele in cases_tele:
+        want = set(case.get("expect_chapters_any") or [])
+        if not want:
+            continue
+        scored += 1
+        used = {h["chapter"] for h in (tele.get("hits") or []) if h.get("used")}
+        if not (want & used):
+            misses += 1
+            detail.append(f"{case['id']}: wanted any of {sorted(want)}, "
+                          f"context held {sorted(used)}")
+    return {"metric": "contextual_recall", "scored": scored,
+            "value": round((scored - misses) / scored, 4) if scored else 1.0,
+            "misses": detail}
+
+
+def contextual_precision(cases_tele: list[tuple[dict, dict]]) -> dict:
+    """Was the answering passage ranked HIGHLY, or buried under noise?
+
+    Mean reciprocal rank of the first expected chunk: 1.0 when the right
+    passage is retrieved first, 0.5 when it is second, 0 when it never arrives.
+
+    ⚠️ RANK MATTERS AND IS NOT THE SAME QUESTION AS RECALL. The model reads a
+    context of up to six passages under an instruction to answer from it; a
+    correct passage sitting sixth behind five near-misses is materially more
+    likely to be ignored or blended than one sitting first. Recall alone would
+    score that case perfect, and it is exactly the shape of a retrieval
+    regression that produces confident wrong answers.
+    """
+    scored = 0
+    total = 0.0
+    detail: list[str] = []
+    for case, tele in cases_tele:
+        want = set(case.get("expect_chapters_any") or [])
+        if not want:
+            continue
+        scored += 1
+        hits = [h for h in (tele.get("hits") or []) if h.get("used")]
+        rank = _first_expected_rank(hits, want)
+        total += (1.0 / rank) if rank else 0.0
+        if rank is None or rank > 2:
+            detail.append(f"{case['id']}: expected {sorted(want)} at rank "
+                          f"{rank if rank else 'absent'}")
+    return {"metric": "contextual_precision", "scored": scored,
+            "value": round(total / scored, 4) if scored else 1.0,
+            "misses": detail}
+
+
 # ── TIER 2 ───────────────────────────────────────────────────────────────────
 def score_answer(case: dict, answer: str) -> CaseResult:
     """String-level checks over what the model actually said.

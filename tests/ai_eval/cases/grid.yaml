@@ -1,0 +1,521 @@
+# Chapter x role coverage grid.
+#
+# ⚠️ GENERATED AND VERIFIED — DO NOT HAND-EDIT.
+#     python tools/gen_eval_grid.py
+#
+# Each case was built from a real sub-heading of a chapter the role may read,
+# then run through `retrieve_context_scored()`. It is kept only if the chapter
+# it claims is actually retrieved AND ranks first. See the generator's docstring
+# for why a guessed expectation is worse than no expectation.
+#
+# WHAT THIS GRID IS FOR: contextual precision and recall are DETERMINISTIC — no
+# model, no temperature, a pure function of BM25 over a fixed corpus — so unlike
+# the judged metrics they can gate a merge. A retrieval regression is the
+# failure this system is actually prone to: the 800-character truncation that
+# hid §2's access matrix from every non-admin role was exactly this, and it
+# survived a whole phase. With this grid it would have failed the commit that
+# caused it.
+
+- id: grid.store_keeper.ch1
+  role: store_keeper
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.store_keeper.ch2
+  role: store_keeper
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.store_keeper.ch3
+  role: store_keeper
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.store_keeper.ch4
+  role: store_keeper
+  prompt: "What does the manual say about Pages visible?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [4]
+
+- id: grid.store_keeper.ch10
+  role: store_keeper
+  prompt: "What does the manual say about Core movement tables?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [10]
+
+- id: grid.store_keeper.ch11
+  role: store_keeper
+  prompt: "What does the manual say about Common status pills?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [11]
+
+- id: grid.store_keeper.ch12
+  role: store_keeper
+  prompt: "What does the manual say about General (any role)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [12]
+
+- id: grid.store_keeper.ch13
+  role: store_keeper
+  prompt: "What does the manual say about Field-level changes?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [13]
+
+- id: grid.supervisor.ch1
+  role: supervisor
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.supervisor.ch2
+  role: supervisor
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.supervisor.ch3
+  role: supervisor
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.supervisor.ch4
+  role: supervisor
+  prompt: "What does the manual say about Pages visible?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [4]
+
+- id: grid.supervisor.ch5
+  role: supervisor
+  prompt: "What does the manual say about Live Dashboard?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [5]
+
+- id: grid.supervisor.ch11
+  role: supervisor
+  prompt: "What does the manual say about Common status pills?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [11]
+
+- id: grid.supervisor.ch12
+  role: supervisor
+  prompt: "What does the manual say about General (any role)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [12]
+
+- id: grid.supervisor.ch13
+  role: supervisor
+  prompt: "What does the manual say about Field-level changes?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [13]
+
+- id: grid.hod.ch1
+  role: hod
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.hod.ch2
+  role: hod
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.hod.ch3
+  role: hod
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.hod.ch4
+  role: hod
+  prompt: "What does the manual say about Pages visible?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [4]
+
+- id: grid.hod.ch5
+  role: hod
+  prompt: "What does the manual say about Live Dashboard?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [5]
+
+- id: grid.hod.ch6
+  role: hod
+  prompt: "What does the manual say about Tab strip (10 tabs)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [6]
+
+- id: grid.hod.ch8
+  role: hod
+  prompt: "What does the manual say about Page header 4 tabs?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [8]
+
+- id: grid.hod.ch9
+  role: hod
+  prompt: "What does the manual say about WhatsApp triggers (auto-fire)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [9]
+
+- id: grid.logistics.ch1
+  role: logistics
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.logistics.ch2
+  role: logistics
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.logistics.ch3
+  role: logistics
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.logistics.ch9
+  role: logistics
+  prompt: "What does the manual say about WhatsApp triggers (auto-fire)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [9]
+
+- id: grid.logistics.ch11
+  role: logistics
+  prompt: "What does the manual say about Common status pills?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [11]
+
+- id: grid.logistics.ch12
+  role: logistics
+  prompt: "What does the manual say about General (any role)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [12]
+
+- id: grid.logistics.ch13
+  role: logistics
+  prompt: "What does the manual say about Field-level changes?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [13]
+
+- id: grid.logistics.ch14
+  role: logistics
+  prompt: "What does the manual say about Pages visible to Logistics?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [14]
+
+- id: grid.warehouse_user.ch1
+  role: warehouse_user
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.warehouse_user.ch2
+  role: warehouse_user
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.warehouse_user.ch3
+  role: warehouse_user
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.warehouse_user.ch9
+  role: warehouse_user
+  prompt: "What does the manual say about WhatsApp triggers (auto-fire)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [9]
+
+- id: grid.warehouse_user.ch11
+  role: warehouse_user
+  prompt: "What does the manual say about Common status pills?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [11]
+
+- id: grid.warehouse_user.ch12
+  role: warehouse_user
+  prompt: "What does the manual say about General (any role)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [12]
+
+- id: grid.warehouse_user.ch13
+  role: warehouse_user
+  prompt: "What does the manual say about Field-level changes?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [13]
+
+- id: grid.warehouse_user.ch15
+  role: warehouse_user
+  prompt: "What does the manual say about Pages visible to Warehouse User?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [15]
+
+- id: grid.qc.ch1
+  role: qc
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.qc.ch2
+  role: qc
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.qc.ch3
+  role: qc
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.qc.ch4
+  role: qc
+  prompt: "What does the manual say about Pages visible?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [4]
+
+- id: grid.qc.ch11
+  role: qc
+  prompt: "What does the manual say about Common status pills?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [11]
+
+- id: grid.qc.ch12
+  role: qc
+  prompt: "What does the manual say about General (any role)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [12]
+
+- id: grid.qc.ch15
+  role: qc
+  prompt: "What does the manual say about Pages visible to Warehouse User?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [15]
+
+- id: grid.qc.ch21
+  role: qc
+  prompt: "What does the manual say about Reports and exports look the same everywhere now?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [21]
+
+- id: grid.qc_hod.ch1
+  role: qc_hod
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.qc_hod.ch2
+  role: qc_hod
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.qc_hod.ch3
+  role: qc_hod
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.qc_hod.ch9
+  role: qc_hod
+  prompt: "What does the manual say about WhatsApp triggers (auto-fire)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [9]
+
+- id: grid.qc_hod.ch10
+  role: qc_hod
+  prompt: "What does the manual say about Core movement tables?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [10]
+
+- id: grid.qc_hod.ch11
+  role: qc_hod
+  prompt: "What does the manual say about Common status pills?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [11]
+
+- id: grid.qc_hod.ch12
+  role: qc_hod
+  prompt: "What does the manual say about General (any role)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [12]
+
+- id: grid.qc_hod.ch16
+  role: qc_hod
+  prompt: "What does the manual say about The scenario?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [16]
+
+- id: grid.auditor.ch1
+  role: auditor
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.auditor.ch2
+  role: auditor
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.auditor.ch3
+  role: auditor
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.auditor.ch8
+  role: auditor
+  prompt: "What does the manual say about Page header 4 tabs?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [8]
+
+- id: grid.auditor.ch9
+  role: auditor
+  prompt: "What does the manual say about WhatsApp triggers (auto-fire)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [9]
+
+- id: grid.auditor.ch10
+  role: auditor
+  prompt: "What does the manual say about Core movement tables?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [10]
+
+- id: grid.auditor.ch11
+  role: auditor
+  prompt: "What does the manual say about Common status pills?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [11]
+
+- id: grid.auditor.ch12
+  role: auditor
+  prompt: "What does the manual say about General (any role)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [12]
+
+- id: grid.admin.ch1
+  role: admin
+  prompt: "What does the manual say about What the system does?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [1]
+
+- id: grid.admin.ch2
+  role: admin
+  prompt: "What does the manual say about Role hierarchy?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [2]
+
+- id: grid.admin.ch3
+  role: admin
+  prompt: "What does the manual say about Login screen?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [3]
+
+- id: grid.admin.ch4
+  role: admin
+  prompt: "What does the manual say about Pages visible?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [4]
+
+- id: grid.admin.ch5
+  role: admin
+  prompt: "What does the manual say about Live Dashboard?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [5]
+
+- id: grid.admin.ch6
+  role: admin
+  prompt: "What does the manual say about Tab strip (10 tabs)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [6]
+
+- id: grid.admin.ch7
+  role: admin
+  prompt: "What does the manual say about Hero strip (3 cards)?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [7]
+
+- id: grid.admin.ch8
+  role: admin
+  prompt: "What does the manual say about Page header 4 tabs?"
+  forbidden_substrings: []
+  must_refuse: false
+  expect_chapters_any: [8]

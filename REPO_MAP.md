@@ -70,3 +70,24 @@ off (users are being pointed at the React app):
 8. **Frontend tables import `Table` from `src/lib/smartTable.tsx`**, not from
    `'antd'` — that wrapper is what gives every grid sorting + filtering.
 9. Audit rows are never deleted (`system_audit_log`); tests use delta counts.
+
+---
+
+## Phase 11 additions (2026-09-05)
+
+| Path | What it is | Tracked? |
+|---|---|---|
+| `CLAUDE.md` · `.claude/RULES.md` | The four-line project card and the full locked-rule contract an agent reads | ✅ |
+| `bin/ci_preflight.sh` · `tools/harness_hygiene.py` | Harness hygiene gate — audits the TEST SUITES, not the app. Runs first in CI. | ✅ |
+| `bin/ai_eval_tier2.sh` | The scored half of the AI eval. Needs Ollama; never a gate (P10-7). | ✅ |
+| `tools/gen_eval_grid.py` | Regenerates `tests/ai_eval/cases/grid.yaml`. ⚠️ The grid is GENERATED — never hand-edit it. | ✅ |
+| `backend/api/ai/trace.py` | Request spans → `ai_traces` (P11-1: Postgres, not a hosted tracer) | ✅ |
+| `backend/api/ai/guard.py` · `guard_patterns.yaml` | Input/output boundaries. ⚠️ NOT the security boundary — rule 9 is (P11-4). | ✅ |
+| `backend/api/ai/route.py` | Lane policy table, retry classes, fallback policy | ✅ |
+| `backend/api/ai/answer_cache.py` | Exact-match answer cache. ⚠️ The key includes the ROLE (P11-7). | ✅ |
+| `frontend/src/pages/AiTracesPage.tsx` | The AI Traces panel, mounted as a Console tab AND its own route | ✅ |
+| `tests/ai_eval/cases/{grid,fence,jailbreak,nearmiss}.yaml` | The 147-case dataset | ✅ |
+| `tests/ai_eval/baseline.json` | Tier 2's recorded baseline. ⚠️ Only moved by `--record`. | ✅ |
+| **`fixtures/ocr_ground_truth.yaml`** | Expected values for the OCR fixtures — **tracked, because a score's yardstick must be reviewable in a diff** | ✅ |
+| **`fixtures/ocr/`** | The operator's three real documents (a delivery note naming a driver, a register with thirty employees' names) | ❌ **gitignored** |
+| **`Trail Files/`** | The operator's drop folder for the same documents | ❌ **gitignored** |

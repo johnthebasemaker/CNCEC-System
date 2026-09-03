@@ -3132,6 +3132,31 @@ is consulted after the guards, so it can never be a way around one.
 "chat with your data" card the same question twice after a receipt is posted;
 the number must change. Only the manual assistant caches.
 
+## 14aa. The AI evaluation gates (Phase 11 · 11f)
+
+Developer-facing. Nothing here is a screen; it is what CI refuses to merge.
+
+**TC-EVL-01** — `python -m tests.ai_eval.runner` passes with no model running.
+It reports Tier 1, the policy pin, and **contextual recall / precision** against
+an 0.85 floor. All of it is deterministic — run it twice, get identical numbers.
+
+**TC-EVL-02** — ⚠️ **make it fail.** Widen a role in `ai/manual_qa._ROLE_ALLOWED`
+(add chapter 7 to `store_keeper`) and re-run. The policy pin fails and canaries
+fire. Put it back; it passes. A gate that cannot be made to fail is decoration.
+
+**TC-EVL-03** — `python tools/gen_eval_grid.py --check` passes. Edit
+`USER_MANUAL.md` enough to move the retrieval ranking and it reports the grid as
+stale. Re-run the generator without `--check` and commit the result.
+
+**TC-EVL-04** — ⚠️ **Tier 2 must never fail the build.** `bash
+bin/ai_eval_tier2.sh` prints scores and, on a regression against
+`baseline.json`, opens a bug row — and still exits 0. If it ever exits non-zero
+on a Tier 2 score alone, that is a bug: ruling P10-7 says a stochastic metric
+does not gate.
+
+**TC-EVL-05** — with Ollama stopped, `bin/ai_eval_tier2.sh` skips cleanly and
+tells you the deterministic half still runs. It never fails for want of a model.
+
 ## 15. Do's and Don'ts
 
 ### Do

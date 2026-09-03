@@ -136,6 +136,37 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+      # ⚠️ THE AI EVAL GATE — DETERMINISTIC HALF ONLY (slice 11f).
+      #
+      # Tier 1 (what the model was SHOWN) and the two RETRIEVAL metrics gate
+      # this build. Contextual precision and recall are a pure function of BM25
+      # over a fixed corpus — no model, no temperature, byte-identical every
+      # run — so they can carry the 0.85 floor the brief asked for without
+      # producing the flaky gate ruling P10-7 warns about.
+      #
+      # Faithfulness, answer relevance and answer-level safety need a judge,
+      # are stochastic, and are NOT run here: GitHub's runners have no GPU and
+      # no Ollama. They run on a schedule against a recorded baseline and open
+      # a bug row when they regress (`--tier2 --ratchet --open-bug`).
+      #
+      # The grid is checked for staleness first: it is generated from the
+      # manual, and BM25's idf is corpus-wide, so a new chapter perturbs the
+      # ranking for every role. A stale grid would measure a manual that no
+      # longer exists.
+      - name: AI eval — grid freshness + Tier 1 + retrieval gates
+        run: |
+          python tools/gen_eval_grid.py --check
+          python -m tests.ai_eval.runner --json ai_scorecard.json
+
+      - name: Upload AI scorecard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-eval-scorecard
+          path: ai_scorecard.json
+          retention-days: 14
+          if-no-files-found: ignore
+
       # Data-layer migration to Postgres (tables + row parity + facade smoke).
       # Views + full Streamlit-on-PG behaviour are intentionally out of scope —
       # PG is the FastAPI foundation; Streamlit stays on SQLite. (pg_smoke.py is

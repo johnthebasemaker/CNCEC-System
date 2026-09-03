@@ -161,6 +161,45 @@ correct.**
 
 ---
 
+## Rule 16 — the harness is audited, and a SKIP is not a PASS
+
+*Locked 2026-09-02.*
+
+`bug_check.py` reports **`N passed, N failed, N skipped`**. A skip is a third
+status: counted, printed, listed in its own report section, and surfaced in CI
+as a `::warning::`. **Never fold one into the pass total.**
+
+It exists because `QR Badges` reported `2/2` for a round-trip assertion that had
+**never executed on any machine** — macOS raised `ImportError` (swallowed by
+`except ImportError: return`) and Linux raised `TypeError` from a
+process-wide `subprocess.Popen` stub that broke `ctypes.util.find_library`. Same
+absent library, opposite outcomes, and CI red for 30 consecutive runs while the
+run page blamed a passing WhatsApp test.
+
+* **`bash bin/ci_preflight.sh` runs FIRST**, in about a second. It audits the
+  TEST HARNESSES, not the app: process-wide stdlib monkeypatches, unrestored
+  module patches, one-exception dependency guards, silent no-ops, unrestored
+  sender mocks. Ten negative controls prove each rule still fires on its bug and
+  stays quiet on its fix.
+* ⚠️ **On macOS the QR check SKIPS** unless you
+  `export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`. With it: 599/0/0.
+
+---
+
+## The twelve Phase 11 AI rulings (P11-1 … P11-12)
+
+Full text in `PROJECT_HANDOVER.md` → *Phase 11 rulings, LOCKED*. The four an
+agent is most likely to undo:
+
+| | Do not |
+|---|---|
+| **P11-4** | Treat `ai/guard.py` as the security boundary. **Rule 9 is.** The danger is not that the guard is bypassed — it is that somebody simplifies the fence *because* the guard exists. |
+| **P11-7** | Drop `role` or the manual hash from the answer-cache key. Two roles are shown different chapters and are entitled to different answers; a question-only key serves one the other's, invisibly. |
+| **P11-9** | Widen cloud fallback past vision, or make a TIMEOUT fall back. A read timeout means the model was healthy and still generating — uploading a page because our stopwatch expired is egress out of impatience. |
+| **P11-10** | Move `num_ctx` into the routing policy or a gateway library. It is a computation over the image in hand; getting it wrong aborts the Ollama runner and kills every queued job. |
+
+---
+
 ## Rulings that look like oversights and are not
 
 Full list in `PROJECT_HANDOVER.md` → *Phase 10 rulings, LOCKED*. The four an
@@ -225,8 +264,15 @@ npm run test:nav --prefix frontend
 .venv/bin/python -m tests.ai_eval.runner --tier2 --json scorecard.json
 ```
 ```bash
-# Frozen Streamlit regression suite — self-rooted, 599 checks
-.venv/bin/python legacy/bug_check.py
+# AI eval — Tier 1 (147 cases) AND the deterministic retrieval gates (>= 0.85).
+# Needs no model. The grid is GENERATED; --check fails if the manual moved.
+.venv/bin/python -m tests.ai_eval.runner
+.venv/bin/python tools/gen_eval_grid.py --check
+```
+```bash
+# Frozen Streamlit regression suite — self-rooted, 599 checks.
+# ⚠️ On macOS the QR round-trip SKIPS without this (rule 16): 598/0/1 vs 599/0/0.
+DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python legacy/bug_check.py
 ```
 ```bash
 # Frontend build + typecheck

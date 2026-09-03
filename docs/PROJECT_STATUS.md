@@ -151,32 +151,82 @@ the native apps (§3.6). Locked rules + baselines:
 
 | Gate | Result | Command |
 |---|---|---|
-| Backend service tests | **2188/0** (suites A…CS, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
-| Playwright E2E | **125/125** (~55 s, own throwaway DB) | `cd tests/e2e && npm test` |
-| **AI guardrail — Tier 1** | **24/24, 0 leaks** (also runs inside suite CQ) | `.venv/bin/python -m tests.ai_eval.runner` |
+| **Harness hygiene (runs FIRST in CI)** | ✅ clean · 10 negative controls | `bash bin/ci_preflight.sh` |
+| Backend service tests | **2309/0** (suites A…CW, **own throwaway DB**) | `GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests` |
+| Playwright E2E | **128/128** (~50 s, own throwaway DB) | `cd tests/e2e && npm test` |
+| **AI guardrail — Tier 1** | **147/147, 0 leaks** (also runs inside suite CQ) | `.venv/bin/python -m tests.ai_eval.runner` |
+| **AI retrieval — recall / precision** | **1.000 / 0.994** (HARD GATE ≥ 0.85) | same command |
+| **AI eval grid freshness** | ✅ current, 72 verified cases | `.venv/bin/python tools/gen_eval_grid.py --check` |
 | AI guardrail — Tier 2 | 📌 **scored, NOT a gate** — security 64% vs a 95% target, false-refusal 0%. Stochastic; needs a live model | `… --tier2 --json scorecard.json` |
-| Legacy regression | **599/0** | `.venv/bin/python legacy/bug_check.py` |
+| Legacy regression | **599/0/0** ⚠️ needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` on macOS, else 598/0/**1 skipped** (rule 16) | `.venv/bin/python legacy/bug_check.py` |
 | Frontend | build + `tsc -b` + `oxlint` ✅ | `npm run build --prefix frontend` |
 | SME engine parity | **1,313 comparisons** | `npm run parity:sme --prefix frontend` |
 | SME UI math | **33/0** | `npm run test:ui-math --prefix frontend` |
-| Navigation route coverage | **50 routes, all claimed** | `npm run test:nav --prefix frontend` |
-| Alembic | single head **`e7f2a4c916b8`** (slice 10b: Shift + daily_job_runs + training) | see ARCHITECTURE §8 |
+| Navigation route coverage | **51 routes, all claimed** | `npm run test:nav --prefix frontend` |
+| Alembic | single head **`a1c9e64b3d70`** (11e: `ai_answer_cache`; 11c added `ai_traces` `f8a3c05d1b27`) | see ARCHITECTURE §8 |
 | Derived-view parity | **5/5** ⚠️ fresh cutover / CI only | `DATABASE_URL=… .venv/bin/python tools/parity_check.py` |
 | Release pipeline | desktop ✅ (dmg/exe/msi on v0.1.0–v1.0.1) · Android fixed (JDK 21) — next tag should attach the `.apk` | `git tag vX.Y.Z && git push origin vX.Y.Z` |
 
-⚠️ **`postgres-dual-ci.yml` has NEVER passed on the GitHub runner** (30/30
-failures since 2026-07-07, always at the `legacy/bug_check.py` step) while
-the same tree/deps/package-set pass 599/0 locally under every simulated CI
-condition — cause is Linux-runner-specific and unresolved. The workflow now
-re-emits the failing ❌ checks as public `::error::` annotations and uploads
-`bugcheck_ci.log` + `BUG_REPORT.md` as an artifact, so the FIRST push after
-2026-07-26 will name the exact failing checks on the run page.
+✅ **`postgres-dual-ci.yml`'s 30-run failure was diagnosed and fixed on
+2026-09-02** (Phase 11 slice 11a, now **rule 16**). It was never
+Linux-specific magic: `bug_check.py` replaced `subprocess.Popen` with a stub
+returning `None` for the whole run, which broke `ctypes.util.find_library` —
+and therefore `import pyzbar` — on Linux only, because macOS's `find_library`
+probes dyld and never shells out. The `::error::` shim compounded it by
+grepping stdout for `❌`, which matched `whatsapp_worker`'s ordinary
+terminal-failure log line and blamed a passing test for two months. Both are
+fixed; the shim now parses `BUG_REPORT.md`'s failure headings. ⚠️ And the check
+that was failing had **never actually run on any machine** — see rule 16.
 
 ⚠️ `tools/parity_check.py` **fails against the live mirror BY DESIGN** —
 PostgreSQL is permanently ahead of the frozen SQLite since the Excel
 injection. It stays meaningful only on CI / a freshly-reloaded mirror.
 
 ## 2. What shipped (compressed — full history in POSTGRES_MIGRATION.md §8)
+
+- **Phase 11 — Enterprise AI Engineering, Observability & Security Gateways
+  (2026-09-02 → 09-05).** Six slices, plan in `PROPOSED_PHASE11_PLAN.md`,
+  twelve `P11-x` rulings + **rule 16** in `PROJECT_HANDOVER.md`.
+  1. **11a — the CI fix.** Root-caused the 30-run dual-CI failure: a
+     process-wide `subprocess.Popen` stub broke `ctypes.util.find_library` on
+     Linux, and the `::error::` shim blamed a passing WhatsApp test for two
+     months. ⚠️ The check it was failing had **never run on any machine** — a
+     `except ImportError: return` reported a SKIP as a PASS. Added a **SKIP
+     status**, `bin/ci_preflight.sh` + `tools/harness_hygiene.py` (5 rules, 10
+     negative controls), `CLAUDE.md` + `.claude/RULES.md`.
+  2. **11b — the OCR upgrades.** Ran the operator's three real documents
+     through the live pipeline: all read CORRECTLY, and the printed form took
+     **399 s against a card promising "under a minute"** — the whole of "it
+     only loads and never gets results". Added a live elapsed counter, an
+     **Interrupted** state from the job heartbeat with retry, lane routing for
+     QR-less papers, the **`<DITTO>`** fix (the model returned `""` for ditto
+     cells, so 19/30 tank numbers, 14/30 names and 8/30 products were silently
+     dropped), the **`(Night)` shift** (which had been making the whole page
+     `CRIT_DATE_UNPARSEABLE`), and the two-switch cloud seam.
+  3. **11c — request tracing.** `ai_traces` (alembic `f8a3c05d1b27`), six
+     spans, and **retrieval telemetry**: BM25 scores that had been computed on
+     every question since the assistant shipped and thrown away. AI Traces page
+     for admin **and auditor** (mounted twice — the Console is `minLevel: 4`).
+  4. **11d — the guards.** `ai/guard.py` + `guard_patterns.yaml`: shape checks,
+     13 scored jailbreak patterns, a role-aware topic pre-flight, and an output
+     guard (formula defusal reusing `reports._RISKY`, PII redaction, runtime
+     canaries) over a **sliding buffer sized from the data** for SSE. Suite CT,
+     50 checks, 7 of them negative twins.
+  5. **11e — the gateway + cache.** `ai/route.py` lane policies (and
+     `jobs.NUM_PREDICT` derived from them); `ai_answer_cache` keyed on
+     **question · role · manual hash · prompt hash**. Found that 11b's cloud
+     fallback had covered **one of five** vision lanes.
+  6. **11f — the eval gates.** 147-case dataset (72 GENERATED + verified grid,
+     24 fence probes, 15 jailbreak, 12 near-miss); **Contextual Recall and
+     Precision gate CI at ≥ 0.85** (deterministic, so P10-7 is not overturned);
+     Tier 2 trended against a recorded baseline with a bug row on regression.
+
+  **Rejected, with reasons in each module's header:** Portkey (a Node daemon in
+  the request path), LangSmith (spans carry the prompt — manual chapters, live
+  SQL, OCR'd delivery notes), Guardrails-AI (its jailbreak validator downloads a
+  second resident transformer), LiteLLM (its Ollama adapter would have taken
+  over `num_ctx`), RAGAS/DeepEval (both judge with OpenAI by default; their
+  metric definitions were vendored instead).
 
 - **Parity + platform (…2026-07-12):** 10-slice parity build · Man-Hours ·
   AI-0…AI-5 (assistant, OCR lanes, NL→SQL with the `gi_ai_ro` second wall,

@@ -1,6 +1,17 @@
 # PROJECT HANDOVER — the authority on what is locked
 
-> **Updated 2026-08-13** by the workflow-polish and test-isolation pass.
+> **Updated 2026-09-05** by Phase 11 (Enterprise AI Engineering, Observability
+> & Security Gateways). Six slices, all merged: **11a** the CI fix + harness
+> auditor + `CLAUDE.md`; **11b** the OCR timer, the ditto fix and the cloud
+> seam; **11c** request tracing (`ai_traces`); **11d** the input/output guards;
+> **11e** the model gateway + answer cache; **11f** the eval gates.
+>
+> ⚠️ **New this phase and binding: twelve `P11-x` rulings (below) and RULE 16 —
+> the harness is audited, and a SKIP is not a PASS.** Rule 16 exists because a
+> check reported `2/2` for an assertion that had never executed on any machine,
+> and because one line of `bug_check.py` broke CI for 30 consecutive runs.
+>
+> *(Previously updated 2026-08-13 by the workflow-polish and test-isolation pass.)*
 > This file holds the LOCKED architecture rules, the baselines, and the
 > developer utilities. It is the authority; when anything else disagrees with
 > it, it wins.
@@ -86,6 +97,65 @@ that name in the code.
 | **P10-8** | **External WhatsApp is a DRAFT; internal email goes to Logistics only.** | A chase that leaves the company is read as the company's position, and an automated one naming the wrong PO is a commercial mistake nobody reviewed. Everything internal still sends automatically. |
 | **P10-9** | **`sme_execution_entry.Shift` is never inferred from the clock**, and NULL is skipped rather than assumed. | An entry is filed when somebody reaches a desk, not when the work happened; a night crew filing at 06:40 would be counted as day shift on a timestamp nobody looked at. Every pre-10b row is NULL and there is no honest backfill. |
 | **P10-10** | **`read_bucket_shared` is not a style variant of `check_bucket_shared`.** | The counting one INCREMENTS, so asking it "is this IP banned?" creates the ban it was asking about — the first invalid webhook signature answered 429 instead of 403 until suite `limits` caught it. A test and a tally are different verbs. |
+
+### Phase 11 rulings, LOCKED (2026-09-03/05)
+
+Numbered P11-x and referenced by that name in the code. Each was decided by the
+operator or forced by evidence, and each has a plausible "improvement" that
+would undo it.
+
+| # | Ruling | Why it is not an oversight |
+|---|---|---|
+| **P11-1** | **POSTGRES, NOT A HOSTED TRACER.** `ai_traces` replaces LangSmith. | A hosted span carries the PROMPT, and ours contain manual chapters, the results of `/ai/insights`' five live SQL probes, generated SQL, and OCR'd delivery notes with a driver's and thirty employees' names. Same argument as P10-1 chose Postgres over Redis, with more at stake. |
+| **P11-2** | **The trace stores the QUESTION and never the ANSWER or the chunk TEXT.** | The question is retained by operator ruling (Q11): what people actually ask is the best eval material in the system and nothing was keeping it. Storing passages would copy the manual into a table with a laxer read path than the manual's own — undoing rule 9 by accident. Chapter numbers, headings and scores answer every diagnostic question the text would. |
+| **P11-3** | **The tracer never raises and never blocks.** Spans go on a bounded per-worker queue; a full queue DROPS and COUNTS. | An observability layer that can break a request converts a diagnostic into an outage. A dropped span is a missing diagnostic; a blocked request is a missing answer. The count makes a stopped drain visible — the same reasoning that stopped a skipped check counting as a pass. |
+| **P11-4** | **`guard.py` is NOT the security boundary — rule 9 is.** | The failure to fear is not that the guard is bypassed; it is that people start trusting it INSTEAD of the fence, and then somebody simplifies the fence because the guard exists. Every function is either a refusal that would otherwise have been a slow confused answer, or a check on text that has already passed the fence. |
+| **P11-5** | **Guard patterns are SCORED, and every one has a NEGATIVE TWIN.** One pattern warns; a combination refuses. | "Ignore the damaged drum and issue the rest" is a sentence a store keeper types at 06:00. A guard that refuses it has taught one person the assistant is unreliable, which costs more than the injection the fence already made profitless. Prompt extraction is the single deliberate one-pattern refusal. |
+| **P11-6** | **No LLM judge in the request path.** | A second generation doubles the wait on one warm model, or cold-starts a second. And a stochastic judge that can REFUSE answers a question on Monday and denies it on Tuesday — P10-7's flaky-gate argument applied to production. The judge belongs in eval Tier 2. |
+| **P11-7** | ⚠️ **The answer-cache key includes the ROLE and the MANUAL HASH.** | Rule 9's guarantee is that a role's CONTEXT differs: two people can type a byte-identical question and be entitled to different answers. A cache keyed on the question alone serves an Admin's answer to a Store Keeper and undoes the fence from the side, invisibly. The manual hash retires every entry on any manual edit — the only invalidation rule nobody has to remember. |
+| **P11-8** | **Only the manual assistant is cached; exact match, not semantic.** | `/ai/query`, `/ai/nl-search`, `/ai/insights` and `/ai/eod-summary` answer from LIVE STOCK, where a cached "you have 40 drums" is a wrong number with a timestamp. And a similarity threshold is a CORRECTNESS knob dressed as a performance one: "what can a supervisor approve?" and "what can a supervisor NOT approve?" sit ~0.95 apart and have opposite answers. Rule 11 — benchmark first; `answer_cache.stats()` publishes the hit rate that would justify stage 2. |
+| **P11-9** | **Cloud fallback is VISION-ONLY, off by default, and needs TWO switches.** A TIMEOUT never falls back. | Ruling Q5. `GI_AI_VISION_PROVIDER=anthropic` says "read everything in the cloud"; `GI_AI_VISION_CLOUD_FALLBACK=1` says "only when the local engine is DEAD". They are two different agreements about company data. A read timeout means the model was healthy and still generating (399 s on a five-row form) — uploading a page because our own stopwatch ran out is a data-egress decision made out of impatience, for exactly the dense pages one would least want to send. |
+| **P11-10** | ⚠️ **`num_ctx` stays in `client.vision_num_ctx()` and is NOT a routing policy.** | This is why LiteLLM was rejected. It is a computation over the image THIS request carries; getting it wrong does not truncate, it ABORTS the Ollama runner (`ggml_abort`) and takes every queued job with it. A library's Ollama adapter passes its own options dict, which hands that decision to a default and re-opens the bug silently. Portkey was rejected harder: a Node daemon in the request path is P10-1's objection, enlarged. |
+| **P11-11** | **Eval gates are split by DETERMINISM, not by name.** Contextual Recall/Precision gate at ≥0.85; Faithfulness, Answer Relevance and Safety are trended and open a bug row. | The brief asked for an 0.85 CI gate; P10-7 forbids gating a stochastic metric. Retrieval metrics are a pure function of BM25 over a fixed corpus and can carry the floor honestly. The 800-character truncation that hid §2's access matrix from every non-admin role was a retrieval regression that survived a phase — this gate fails the commit that causes it. |
+| **P11-12** | **`tests/ai_eval/cases/grid.yaml` is GENERATED, never hand-edited**, and `baseline.json` is only moved by `--record`. | A hand-written expectation drifts into fiction: slice 11d asserted §2 would answer "how do I add a user" because its title sounds like it would (it contains none of that vocabulary). And BM25's `idf` is corpus-wide, so a new chapter perturbs every role's ranking. A self-updating baseline ratchets in whichever direction the model drifts, so a slow decline becomes the new normal and the alarm never fires. |
+
+### 16. THE HARNESS IS AUDITED, AND A SKIP IS NOT A PASS
+
+*Locked 2026-09-02 (Phase 11 slice 11a).*
+
+`postgres-dual-ci.yml` failed on 30 consecutive runner executions while
+`legacy/bug_check.py` passed 599/0 on macOS, and the run page blamed a WhatsApp
+retry test that was working perfectly. Three defects, and the third is the rule:
+
+1. **The annotation shim greped stdout for `❌`.** `run_check` prints that glyph
+   only under `--verbose`, which CI does not set — so the grep matched nothing
+   from the harness and everything from the APPLICATION log, where
+   `whatsapp_worker` legitimately prints it on its normal terminal-failure path.
+   It now parses `BUG_REPORT.md`'s `###` failure headings.
+2. **`subprocess.Popen = lambda *a, **kw: None`** for the whole run.
+   `ctypes.util.find_library` on Linux opens with
+   `with subprocess.Popen(['/sbin/ldconfig','-p']) as p:` — so `with None:`
+   raised `TypeError`, which `_findSoname_ldconfig`'s `except OSError` does not
+   catch, and `import pyzbar` died. On macOS `find_library` probes dyld and
+   never shells out, which is why every "simulated CI condition" passed: they
+   were all simulated on the Mac. The guard now blocks by BEHAVIOUR — argv[0] in
+   a set of GUI launchers gets a stand-in honouring the `Popen` contract;
+   everything else reaches the real one.
+3. ⚠️ **AND THE CHECK HAD NEVER RUN ANYWHERE.** Homebrew's libzbar is not on
+   dyld's search path, so macOS raised `ImportError`, the check's
+   `except ImportError: return` swallowed it, and the report said
+   `QR Badges 2/2` for an assertion that had never executed on any machine.
+
+**So: a SKIP is a third status — counted, printed, listed in its own report
+section, and surfaced in CI as a `::warning::`.** Never fold one into the pass
+total. `bin/ci_preflight.sh` + `tools/harness_hygiene.py` gate the class rather
+than the instance (process-wide stdlib monkeypatches, unrestored module
+patches, one-exception dependency guards, silent no-ops, unrestored sender
+mocks), run first in CI in about a second, and carry ten negative controls
+proving each rule still fires on its bug and stays quiet on its fix.
+
+⚠️ **On macOS the QR round-trip skips unless you
+`export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`** — with it, 599/0/0.
 
 ### 1. SME allocation is keyed on `(Material_Code, SAP_Code)` — never pool by code alone
 
