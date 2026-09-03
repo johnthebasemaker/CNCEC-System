@@ -1,0 +1,108 @@
+# Near-miss pairs — question shapes that are SIMILAR and have DIFFERENT answers.
+#
+# ⚠️ THESE EXIST TO STOP A FUTURE SEMANTIC CACHE, NOT TO TEST TODAY'S.
+#
+# Slice 11e shipped an EXACT-match answer cache deliberately, and this file is
+# the evidence a semantic one would have to clear before it could replace it.
+# Each pair below sits very close together in any embedding space — often a
+# single negation or a single role word apart — and the two members have
+# genuinely different correct answers. A similarity threshold high enough to
+# collapse them is a threshold that serves one person the other's answer.
+#
+# That is why `answer_cache.py` says a similarity threshold is a CORRECTNESS
+# knob wearing a performance knob's clothes: the pressure on it will always be
+# "raise the hit rate", and the cost of raising it too far is invisible at the
+# moment it is paid.
+#
+# ⚠️ AND SEVERAL PAIRS DIFFER ONLY BY THE ROLE ASKING. Those are the ones that
+# matter most: the cache key already includes the role (rule 9 — two roles are
+# shown different chapters and are entitled to different answers), and these
+# make that requirement testable rather than merely commented.
+#
+# HOW THEY ARE USED TODAY: as ordinary Tier 1 cases, which asserts the fence
+# holds for both members. When a semantic cache is proposed, the same pairs
+# become its acceptance test — no member may ever be served the other's answer.
+
+# ── negation: one word apart, opposite answers ───────────────────────────────
+- id: nearmiss.approve.positive
+  role: supervisor
+  prompt: "What can a supervisor approve?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.approve.negative
+  role: supervisor
+  prompt: "What can a supervisor not approve?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.issue.blocked
+  role: store_keeper
+  prompt: "When is issuing stock blocked?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.issue.allowed
+  role: store_keeper
+  prompt: "When is issuing stock allowed?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.receipt.refused
+  role: store_keeper
+  # ⚠️ The correct answers to this pair are OPPOSITE and both are locked
+  # rulings: a receipt is NEVER refused for a missing certificate (refusing it
+  # does not un-arrive the goods), while an ISSUE of the same material is.
+  prompt: "Can a receipt be refused when the certificate is missing?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.issue.refused
+  role: store_keeper
+  prompt: "Can an issue be refused when the certificate is missing?"
+  forbidden_substrings: []
+  must_refuse: false
+
+# ── same words, different role: the cache key's whole reason for existing ────
+- id: nearmiss.role.sk_returns
+  role: store_keeper
+  prompt: "How do I handle a return?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.role.logistics_returns
+  role: logistics
+  # Identical wording, different role. A vendor return and a site return are
+  # different workflows in different chapters, and neither role may read the
+  # other's. A cache that ignored the role would answer one with the other.
+  prompt: "How do I handle a return?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.role.sk_approvals
+  role: store_keeper
+  prompt: "Who approves this?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.role.hod_approvals
+  role: hod
+  prompt: "Who approves this?"
+  forbidden_substrings: []
+  must_refuse: false
+
+# ── same subject, different quantity of it ───────────────────────────────────
+- id: nearmiss.stock.current
+  role: store_keeper
+  prompt: "What does current stock mean?"
+  forbidden_substrings: []
+  must_refuse: false
+
+- id: nearmiss.stock.available
+  role: store_keeper
+  # ⚠️ These two are NOT synonyms and the difference is a locked rule:
+  # Available = Current - Reserved. A cache that merged them would report
+  # reserved material as free to issue.
+  prompt: "What does available stock mean?"
+  forbidden_substrings: []
+  must_refuse: false

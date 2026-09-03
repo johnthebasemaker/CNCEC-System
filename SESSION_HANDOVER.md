@@ -1,5 +1,89 @@
 # SESSION HANDOVER — read this first, then `PROJECT_HANDOVER.md`
 
+> ## 🆕 PHASE 11 SHIPPED (2026-09-02 → 09-05) — read this block, then §1 below
+>
+> Six slices, all merged to `main`. **Nothing is mid-flight.** Every gate is
+> green. The phase plan, with the tool-by-tool rejection reasoning, is
+> [`PROPOSED_PHASE11_PLAN.md`](PROPOSED_PHASE11_PLAN.md).
+>
+> | Slice | Branch | What it did |
+> |---|---|---|
+> | **11a** | `fix/ci-and-guardrails` | Fixed CI (red for 30 runs), added `bin/ci_preflight.sh` + `tools/harness_hygiene.py`, wrote `CLAUDE.md` + `.claude/RULES.md` |
+> | **11b** | `feat/phase11-ocr-upgrades` | OCR elapsed timer + interrupted state, the `<DITTO>` fix, the `(Night)` shift, the cloud seam |
+> | **11c** | `feat/phase11-ai-tracing` | `ai_traces` + retrieval telemetry + the AI Traces page |
+> | **11d** | `feat/phase11-guardrails` | `ai/guard.py` — input/output boundaries, suite CT |
+> | **11e** | `feat/phase11-gateway` | `ai/route.py` lane policies + `ai_answer_cache` |
+> | **11f** | `feat/phase11-evals` | 147-case dataset, deterministic gates at 0.85, Tier 2 ratchet |
+>
+> ### ⚠️ The four things that will bite you first
+>
+> **1. A SKIP IS NOT A PASS (new rule 16).** `bug_check.py` now reports
+> `N passed, N failed, N skipped`. On macOS the QR round-trip SKIPS unless you
+> `export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` — with it you get
+> **599/0/0**, without it **598/0/1**. Both are green; the skip is honest.
+> It had been counted as a pass since the check was written, for an assertion
+> that had never executed on any machine.
+>
+> **2. `bash bin/ci_preflight.sh` is the FIRST gate now**, and it audits the
+> TEST HARNESSES, not the app. If it fails, do not work around it — it is
+> finding the class of defect that made CI lie for two months.
+>
+> **3. The assistant now CACHES answers per role.** If a test asks a question
+> an earlier suite already asked, it gets the cached answer and the model is
+> never called. Two suites hit this during Phase 11. **Use a unique question
+> string in any new assistant test.**
+>
+> **4. `run_tier1()` returns a TUPLE** (`results, telemetry`) since 11f, and
+> `build_system_prompt_scored()` / `retrieve_context_scored()` are the scored
+> variants of the old functions. The old names still work and delegate.
+>
+> ### What to read for what
+>
+> | Topic | Read |
+> |---|---|
+> | The twelve `P11-x` rulings + rule 16 | `PROJECT_HANDOVER.md` → *Phase 11 rulings, LOCKED* |
+> | Tracing, guards, gateway, eval gates | `docs/ARCHITECTURE.md` §7e · §7f · §7g · §7h |
+> | Why Portkey/LangSmith/Guardrails-AI/RAGAS were all rejected | `PROPOSED_PHASE11_PLAN.md` §3–§6, and each module's header |
+> | What a USER sees | `USER_MANUAL.md` §25 |
+> | How to test it by hand | `MANUAL_TESTING_GUIDE.md` §14x · §14y · §14z · §14aa |
+> | The eval suite's own contract | `tests/ai_eval/README.md` |
+>
+> ### Gates, as of 2026-09-05
+>
+> ```
+> bash bin/ci_preflight.sh                                  ✅ 10 controls
+> GI_DOTENV=0 .venv/bin/python -m backend.api.service_tests  2309 / 0
+> .venv/bin/python -m tests.ai_eval.runner                   Tier 1 147/147 · recall 1.000 · precision 0.994
+> DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib \
+>   .venv/bin/python legacy/bug_check.py                     599 / 0 / 0
+> cd tests/e2e && npm test                                   128 / 128
+> npm run test:nav --prefix frontend                         51 routes
+> npm run parity:sme --prefix frontend                       1313 comparisons
+> alembic single head                                        a1c9e64b3d70
+> ```
+>
+> ### Still open after Phase 11
+>
+> * **The Hetzner deployment** — unchanged, still paused by decision. The
+>   cutover's "stamps Alembic without running it" gap is still open (see
+>   *FUTURE* in `PROJECT_HANDOVER.md`); Phase 11 added two migrations, so
+>   re-read it before cutting over.
+> * **Tier 2's score is 64% against a 95% target** and is deliberately NOT
+>   gated. The gap is a model-capability gap (an 8B model inventing UI), not a
+>   retrieval one; the lever is a larger chat model.
+> * **The semantic cache is deliberately unbuilt.** `answer_cache.stats()`
+>   publishes the hit rate that would justify it, and
+>   `tests/ai_eval/cases/nearmiss.yaml` is the acceptance test it must pass.
+> * **`fixtures/ocr/` is gitignored** and holds the operator's three real
+>   documents. The ground truth for the 30 handwritten rows is still
+>   `verified: false` — see `pending_operator_review` in
+>   `fixtures/ocr_ground_truth.yaml`.
+>
+> *(Everything below this block predates Phase 11 and is still accurate about
+> what it describes.)*
+>
+> ---
+
 > **Updated 2026-09-03** by the Phase 10 documentation sweep
 > (branch `chore/phase10-docs`). ⚠️ **Phases 9 and 10 have both shipped since
 > the 2026-08-13 body of this file was written** — everything below the next

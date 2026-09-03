@@ -723,6 +723,57 @@ embedding space and have opposite answers: a similarity threshold is a
 correctness knob dressed as a performance one. `answer_cache.stats()` publishes
 the hit rate, which is the number that decides whether to build it.
 
+### 7h. The eval gates — split by determinism, not by name
+
+*Phase 11 slice 11f, `tests/ai_eval/` + `tools/gen_eval_grid.py` +
+`bin/ai_eval_tier2.sh`, suite CW. Full detail: `tests/ai_eval/README.md`.*
+
+The brief asked for a CI gate failing below **0.85**; ruling **P10-7** says a
+Tier 2 eval never gates a merge. Both cannot hold — today's Tier 2 security
+score is 64%, so an 0.85 gate on it fails every run until somebody disables it,
+which is P10-7's own prediction. **The split is by DETERMINISM:**
+
+* **Gates** — Tier 1 (what the model was shown), the policy pin, canary
+  integrity, and **Contextual Recall / Precision ≥ 0.85**. All are pure
+  functions of BM25 over a fixed corpus: no model, no temperature, identical
+  every run.
+* **Scored, never gated** — Faithfulness, Answer Relevance, answer-level
+  Safety. They need a judge, so they are trended against a recorded baseline and
+  a >10-point drop **opens a bug row** rather than failing a build.
+
+⚠️ **This gates the failure the system is actually prone to.** The
+800-character truncation that kept §2's access matrix out of every non-admin
+prompt was a retrieval regression that lived a whole phase because nothing
+measured retrieval. At these thresholds it fails the commit that caused it.
+
+**Dataset: 147 cases** — 72 grid (chapter × role, GENERATED and verified), 24
+fence probes with live canaries, 15 jailbreak cases (7 of them negative twins),
+12 near-miss pairs, plus the original rbac/exfiltration/groundedness sets.
+
+⚠️ **The grid is generated, never hand-edited** (`tools/gen_eval_grid.py`, with
+`--check` in CI). A case is kept only if the chapter it claims is retrieved AND
+ranks first. Hand-written expectations drift into fiction: slice 11d asserted §2
+would answer "how do I add a user" because its title sounds like it would — §2 is
+about page ACCESS and contains none of that vocabulary. And BM25's `idf` is
+corpus-wide, so adding a chapter perturbs every role's ranking (~0.3%, measured
+in 11c) — a hand-maintained grid would rot one manual edit at a time.
+
+⚠️ **The live scores are ~1.0 by construction, which is why suite CW exists.**
+The grid starts perfect because it was built that way; the metric's job is to
+catch a regression away from it. A metric scored on data built to satisfy it is
+theatre until somebody proves it can fail, so CW feeds it synthetic telemetry
+for a broken retrieval and asserts the score falls under the floor. That control
+found a latent crash in the runner on its first run.
+
+**RAGAS and DeepEval were rejected as dependencies, their definitions vendored.**
+Both compute these metrics with an LLM judge defaulting to OpenAI, which cannot
+see proprietary data and would have to be replaced anyway — leaving a prompt
+template and a scoring convention. A metric whose definition changes under a
+`pip upgrade` invalidates every historical score it produced.
+
+Tier 2 runs from `bin/ai_eval_tier2.sh` on the operator's box or the Hetzner
+host — never on GitHub's runners, which have no GPU and no Ollama.
+
 ### 7a. ⚠️ The vision envelope — three numbers that are ONE decision
 
 Fixed 2026-09-01 after two production reports ("the Consumption Log fails
@@ -1024,7 +1075,13 @@ invisible. The absence is the finding.
 > answer. See `PROJECT_HANDOVER.md` rule 15.
 
 ```bash
-# 1. service tests (2,188 checks, suites A…CS) — CI mirror, own throwaway DB
+# 0. harness hygiene — ~1 s, no services, RUNS FIRST IN CI (rule 16).
+#    Audits the TEST SUITES, not the app: process-wide stdlib monkeypatches,
+#    one-exception dependency guards, silent no-ops, unrestored sender mocks.
+bash bin/ci_preflight.sh
+```
+```bash
+# 1. service tests (2,309 checks, suites A…CW) — CI mirror, own throwaway DB
 DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5433/gihub \
 JWT_SECRET=ci-only-service-test-secret-key-32bytes-min \
 .venv/bin/python -u -m backend.api.service_tests
@@ -1042,14 +1099,19 @@ npm run build --prefix frontend && cd frontend && npx tsc --noEmit
 # 4. headless E2E (Playwright — builds/destroys its own gihub_e2e_pw stack)
 cd tests/e2e && npm test        # 125 tests, ~55 s
 
-# 5. AI guardrail audit — Tier 1 ONLY is a gate (also runs inside suite CQ).
-#    ⚠️ Tier 2 needs a live model and is STOCHASTIC; it is a scored artefact on
-#    a schedule, never a merge gate, because a flaky gate is one people re-run
-#    rather than read. See tests/ai_eval/README.md and §7c.
-.venv/bin/python -m tests.ai_eval.runner                 # Tier 1, deterministic
-.venv/bin/python -m tests.ai_eval.runner --tier2 --json scorecard.json
+# 5. AI eval — the DETERMINISTIC half gates: Tier 1 (147 cases, what the model
+#    was SHOWN) plus contextual RECALL and PRECISION at >= 0.85. No model
+#    needed; identical every run. Also runs inside suite CQ.
+#    ⚠️ The grid is GENERATED from the manual — --check fails if it has moved.
+.venv/bin/python tools/gen_eval_grid.py --check
+.venv/bin/python -m tests.ai_eval.runner
+#    ⚠️ Tier 2 (what the model SAID) is STOCHASTIC and NEVER gates (P10-7). It
+#    is trended against a recorded baseline and opens a BUG ROW on a >10-point
+#    drop. Needs Ollama, so it never runs on GitHub's runners.
+bash bin/ai_eval_tier2.sh          # score + ratchet + bug row
+bash bin/ai_eval_tier2.sh --record # move the baseline, deliberately
 
-# 6. nav manifest — every routable page must declare who may open it
+# 6. nav manifest — every routable page must declare who may open it (51 routes)
 npm run test:nav --prefix frontend
 
 # 7. alembic single head

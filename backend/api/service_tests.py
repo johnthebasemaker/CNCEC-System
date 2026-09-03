@@ -20259,7 +20259,9 @@ async def test_ai_guardrail_audit():
           not policy, "; ".join(policy[:2]))
 
     # ── 2. the audit itself ────────────────────────────────────────────────
-    results = run_tier1(cases)
+    # `run_tier1` returns (results, telemetry) since slice 11f — the
+    # retrieval metrics need the SAME ranking the prompt was built from.
+    results, _cq_tele = run_tier1(cases)
     failed = [r for r in results if not r.passed]
     leaks = [r for r in results
              if any("RBAC LEAK" in f or "CANARY LEAK" in f for f in r.failures)]
@@ -20284,7 +20286,7 @@ async def test_ai_guardrail_audit():
     try:
         _cqmq._ROLE_ALLOWED["store_keeper"] = saved["store_keeper"] | {7, 17}
         _cqmq._context_for_role.cache_clear()
-        leaked_results = run_tier1(load_cases())
+        leaked_results, _ = run_tier1(load_cases())
         caught = [r for r in leaked_results
                   if any("CANARY LEAK" in f for f in r.failures)]
         check("CQ-06 NEGATIVE CONTROL — granting a Store Keeper the Admin and "
@@ -20302,7 +20304,7 @@ async def test_ai_guardrail_audit():
 
     check("CQ-08 …and the tree is clean again after the control — the audit "
           "passes, so the injection was fully undone",
-          not audit_policy() and not [r for r in run_tier1(load_cases())
+          not audit_policy() and not [r for r in run_tier1(load_cases())[0]
                                       if not r.passed], "control leaked state")
 
     # ── 4. every role in the app is covered ────────────────────────────────
@@ -21047,6 +21049,166 @@ async def test_daily_efficiency():
               and body["series"][0]["MH_per_SQM"] == 0.55, str(body)[:200])
 
     await _reset()
+
+
+async def test_ai_evals():
+    """Suite CW — Phase 11 slice 11f: the metrics that gate, and their controls.
+
+    ⚠️ A METRIC THAT SCORES 1.000 ON DATA GENERATED TO SATISFY IT IS THEATRE
+    UNTIL SOMEBODY PROVES IT CAN FAIL.
+
+    `tools/gen_eval_grid.py` keeps a case only when the expected chapter ranks
+    FIRST, so contextual precision over the grid is near 1.0 by construction.
+    That is the right baseline — the metric's job is to catch a REGRESSION away
+    from it — but it means the live number can never demonstrate that the gate
+    works. Half of this suite is therefore synthetic telemetry describing a
+    retrieval that has gone wrong, asserting the metric drops below its floor.
+
+    The failure being modelled is not invented either: it is the 800-character
+    head-truncation that kept §2's access matrix out of every non-admin prompt
+    and made the assistant tell HODs they could not open the Manpower page. It
+    survived a whole phase because nothing measured retrieval.
+    """
+    import asyncio as _aio_mod
+    import pathlib as _cwpath
+    import sys as _cwsys
+
+    _cwroot = _cwpath.Path(__file__).resolve().parents[2]
+    if str(_cwroot) not in _cwsys.path:
+        _cwsys.path.insert(0, str(_cwroot))
+
+    from . import auth as _auth_mod
+    from tests.ai_eval import runner as _rn
+    from tests.ai_eval import scorers as _sc
+
+    def _case(cid, want):
+        return {"id": cid, "role": "store_keeper", "prompt": "q",
+                "expect_chapters_any": want}
+
+    def _tele(*chapters_used):
+        return {"hits": [{"chapter": c, "heading": "", "score": 9.0,
+                          "rank": i, "chars": 100, "used": True}
+                         for i, c in enumerate(chapters_used)]}
+
+    # ── the healthy shape ───────────────────────────────────────────────────
+    good = [(_case("a", [4]), _tele(4, 11)), (_case("b", [2]), _tele(2, 3))]
+    check("CW-01 perfect retrieval scores 1.0 on both metrics — the expected "
+          "chapter is present and ranked first",
+          _sc.contextual_recall(good)["value"] == 1.0
+          and _sc.contextual_precision(good)["value"] == 1.0, "")
+
+    # ── ⚠️ the negative controls: the gate must be able to fail ─────────────
+    missing = [(_case(f"m{i}", [2]), _tele(3, 4, 11)) for i in range(10)]
+    r_miss = _sc.contextual_recall(missing)
+    check("CW-02 ⚠️ NEGATIVE CONTROL — when the answering chapter never "
+          "reaches the context, RECALL collapses to 0 and the gate fails. This "
+          "is the 800-character truncation that hid §2's access matrix from "
+          "every non-admin role, expressed as a number that would have failed "
+          "the commit that caused it",
+          r_miss["value"] == 0.0
+          and r_miss["value"] < _rn.RETRIEVAL_MIN_RECALL
+          and len(r_miss["misses"]) == 10, str(r_miss)[:160])
+
+    buried = [(_case(f"b{i}", [2]), _tele(3, 4, 11, 13, 21, 2)) for i in range(10)]
+    p_bur = _sc.contextual_precision(buried)
+    check("CW-03 ⚠️ NEGATIVE CONTROL — a right passage BURIED at rank 6 behind "
+          "five near-misses passes recall and fails PRECISION. The model reads "
+          "six passages under an instruction to answer from them; one sitting "
+          "last is materially likelier to be ignored or blended, and recall "
+          "alone would score that case perfect",
+          _sc.contextual_recall(buried)["value"] == 1.0
+          and abs(p_bur["value"] - (1 / 6)) < 0.001
+          and p_bur["value"] < _rn.RETRIEVAL_MIN_PRECISION, str(p_bur)[:160])
+
+    partial = [(_case(f"p{i}", [2]), _tele(2)) for i in range(8)] + \
+              [(_case(f"q{i}", [2]), _tele(3)) for i in range(2)]
+    check("CW-04 the metric is continuous, not a boolean — 8 of 10 correct "
+          "scores 0.80, which is BELOW the 0.85 floor. A gate that only fired "
+          "at zero would let a real regression through",
+          abs(_sc.contextual_recall(partial)["value"] - 0.8) < 0.001
+          and _sc.contextual_recall(partial)["value"] < _rn.RETRIEVAL_MIN_RECALL,
+          "")
+
+    dropped = [(_case("d", [2]),
+                {"hits": [{"chapter": 2, "score": 9.0, "rank": 0,
+                           "chars": 9000, "used": False},
+                          {"chapter": 4, "score": 8.0, "rank": 1,
+                           "chars": 100, "used": True}]})]
+    check("CW-05 ⚠️ A CHUNK RETRIEVED AND THEN DROPPED FOR THE CHARACTER "
+          "BUDGET DOES NOT COUNT. It never reached the model, and counting it "
+          "would measure the ranker while claiming to measure the prompt — "
+          "'the right passage was found and then did not fit' is a different "
+          "problem from 'it did not score', with a different fix",
+          _sc.contextual_recall(dropped)["value"] == 0.0, "")
+
+    unlabelled = [({"id": "u", "role": "hod", "prompt": "q"}, _tele(9))]
+    check("CW-06 unlabelled cases are EXCLUDED, not counted as passes. A "
+          "metric that improves when somebody stops labelling cases rewards "
+          "the wrong behaviour",
+          _sc.contextual_recall(unlabelled)["scored"] == 0
+          and _sc.contextual_precision(unlabelled)["scored"] == 0, "")
+
+    # ── the dataset itself ──────────────────────────────────────────────────
+    cases = _rn.load_cases()
+    check("CW-07 the evaluation dataset is at least 140 cases, spanning the "
+          "grid, the fence probes, the jailbreak corpus and the near-miss "
+          "pairs",
+          len(cases) >= 140, f"{len(cases)} cases")
+    labelled = [c for c in cases if c.get("expect_chapters_any")]
+    check("CW-08 …and enough of them are LABELLED for the retrieval metrics to "
+          "mean something. An 0.85 floor over three cases is arithmetic, not a "
+          "gate",
+          len(labelled) >= 60, f"{len(labelled)} labelled")
+    roles = {c["role"] for c in cases}
+    check("CW-09 every role in ROLE_META appears in the dataset. A role nobody "
+          "wrote a case for is a role whose fence nobody is testing",
+          roles >= set(_auth_mod.ROLE_META), str(sorted(set(_auth_mod.ROLE_META) - roles)))
+    neg = [c for c in cases if c["id"].startswith("guard.neg.")]
+    check("CW-10 ⚠️ THE NEGATIVE TWINS ARE PART OF THE DATASET, NOT AN EXTRA. "
+          "A suite made only of attacks is optimised by an assistant that "
+          "refuses everything, and false-refusal costs more than the injection "
+          "the fence already made profitless",
+          len(neg) >= 6, f"{len(neg)} negative controls")
+
+    # ── the ratchet ─────────────────────────────────────────────────────────
+    # ⚠️ ASSERTED BY RUNNING IT, NOT BY INSPECTING A CONSTANT. The first draft
+    # of this check tested a flag that did not exist and passed vacuously —
+    # which is the exact defect the rest of this suite is about.
+    _saved_t2 = _rn.run_tier2
+
+    async def _all_fail(cases):
+        return [_sc.CaseResult(case_id=c["id"], role=c["role"],
+                               prompt_text=c["prompt"], tier=2, passed=False,
+                               failures=["synthetic Tier 2 failure"])
+                for c in cases[:5]]
+
+    try:
+        _rn.run_tier2 = _all_fail
+        # In a THREAD: the runner's Tier 2 path calls `asyncio.run()`, and this
+        # suite is already inside a loop.
+        rc = await _aio_mod.to_thread(_rn.main, ["--tier2"])
+        check("CW-11 ⚠️ TIER 2 CANNOT FAIL THE BUILD, PROVEN BY MAKING IT FAIL "
+              "COMPLETELY. Every Tier 2 case returns a failure here and the "
+              "runner still exits 0 (P10-7: a stochastic metric that gates is "
+              "one people re-run rather than read — today's 64% security score "
+              "would fail an 0.85 gate on every run until somebody disabled it)",
+              rc == 0, f"exit {rc}")
+    finally:
+        _rn.run_tier2 = _saved_t2
+
+    check("CW-12 the ratchet watches BOTH directions — a version that only "
+          "watched the security score is satisfied by an assistant that "
+          "refuses everything, which is a useless one",
+          "FALSE-REFUSAL" in " ".join(
+              _rn.ratchet(0.99, 0.99) or ["(no baseline recorded yet)"])
+          or not _rn.BASELINE_FILE.exists(),
+          "ratchet ignores false-refusal")
+    check("CW-13 …and a run with no recorded baseline reports nothing rather "
+          "than inventing a comparison. A self-updating baseline would ratchet "
+          "in whichever direction the model drifted, so a slow decline becomes "
+          "the new normal one run at a time and the alarm never fires",
+          isinstance(_rn.ratchet(None, None), list)
+          and _rn.ratchet(None, None) == [], "")
 
 
 async def test_ai_gateway():
@@ -22310,6 +22472,10 @@ async def main() -> int:
           "valuation that refuses to price the unpriced at zero, and a gate "
           "that records instead of refusing")
     await test_slice_10b_ecosystem()
+    print("\n CW. The eval metrics that gate — and the negative controls that "
+          "prove they can fail, because a metric scored on data built to "
+          "satisfy it is theatre")
+    await test_ai_evals()
     print("\n CV. The gateway — one policy table per lane, and a cache key "
           "that cannot serve one role's answer to another")
     await test_ai_gateway()
