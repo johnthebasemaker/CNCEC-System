@@ -223,6 +223,52 @@ switched it off). The deterministic gates carry CI instead, at 1.000 / 0.994.
 
 Full reasoning: `docs/ARCHITECTURE.md` §7i.
 
+## 1b. ⚠️ OPEN DECISION — `service_tests` cannot run on CI, and rule 15 says it can
+
+**Rule 15 states that the test database is rebuilt from `gi_database.db` and
+that "that file is in git and is itself a gate, so every machine and CI start
+from identical rows".** The file has been gitignored since **2026-07-26**
+(commit `a09da0b`, "security(secrets): untrack tracked SQLite databases"), so
+that guarantee has been false for six weeks and **`backend/api/service_tests.py`
+has only ever passed on the operator's laptop.**
+
+It was invisible because `legacy/bug_check.py` failed first on all 30 recorded
+CI runs. Fixing that in Phase 11a did not break anything — it advanced the job
+far enough to reach what was already broken.
+
+**What the suite needs that CI does not have:** four login accounts with known
+passwords, five SAP codes, employee `30001`, seven `GI-*` material codes, and
+enough SME scopes for the man-hours scorecard and auto-draft to be meaningful.
+`tools/make_ci_fixture_db.py` supplies the unambiguous ones and takes the suite
+from ~30 failures to 6.
+
+⚠️ **Reconstructing the rest synthetically was tried and abandoned on evidence.**
+Inventing the seven material codes and a second SME scope took it from 6
+failures to **16** — the invented rows changed what assertions like
+"2 matched / 1 unmatched" and "auto-draft save → 2 estimates" mean. Every
+guessed row is a guess about INTENT, and a suite that tests guesses is worse
+than one honestly skipped.
+
+**Meanwhile:** the step emits a `::warning::` naming this decision and does not
+fail the build (rule 16 — a skip that says so, not a silent pass; a permanently
+red build is one everybody learns to ignore). It runs for real the moment a
+snapshot is present, with no second edit.
+
+### The decision — two options, both yours
+
+| | What it costs | What it buys |
+|---|---|---|
+| **(a) Commit a SANITISED snapshot** — real structure and rows, names/phones/vendors scrubbed | A data-disclosure judgement: it would still carry stock quantities, the project structure and the site names | Restores rule 15's actual intent — every machine and CI start from identical rows, and the suite runs everywhere |
+| **(b) Accept it as a LOCAL / self-hosted gate** — remove it from the GitHub workflow and run it where the data lives | CI never runs 2,300 checks; a regression is caught at the desk rather than on the PR | No data leaves the machine; honest about what the runner can prove |
+
+⚠️ **Whichever you choose, rule 15's sentence must be corrected** — it currently
+promises a property the repository does not have, and a rule that is
+provably false is worse than a rule that is merely strict.
+
+The two steps this workflow is actually named for — `dual_ci` and
+`parity_check` — are **fixed and verified** against the generated fixture on a
+real PostgreSQL 16.
+
 ## 2. What shipped (compressed — full history in POSTGRES_MIGRATION.md §8)
 
 - **Phase 11 — Enterprise AI Engineering, Observability & Security Gateways
