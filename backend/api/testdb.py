@@ -32,9 +32,17 @@ ISOLATED
 
 REPRODUCIBLE
     The test database is rebuilt from `gi_database.db` by the same production
-    cutover script the Playwright harness uses. That file is in git and is
-    itself a locked gate (`shasum -a 256`), so every machine and CI start from
-    identical rows.
+    cutover script the Playwright harness uses. ⚠️ That file is NOT in git —
+    it was untracked on 2026-07-26 (commit a09da0b) because it holds real
+    employee names and stock, so this suite only runs where a snapshot exists.
+    CI generates a fixture instead (tools/make_ci_fixture_db.py), which is
+    enough for dual_ci/parity_check but NOT for this suite; see
+    docs/PROJECT_STATUS.md 1b.
+
+    The sentence that used to stand here claimed the file was in git and
+    "itself a gate, so every machine and CI start from identical rows". That
+    was the intent and never the fact, and a promise the repository cannot keep
+    is worse than an admitted limitation.
 
     This half is not a nicety. Before it, the suite had quietly come to depend
     on rows that existed only on the operator's box — a database wipe on
@@ -67,7 +75,14 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CUTOVER = _ROOT / "tools" / "migration" / "cutover_migrate.py"
-_SOURCE_DB = _ROOT / "gi_database.db"
+# ⚠️ HONOURS `GI_DB_FILE`, and must, because this path is only used to say
+# "the source is missing" BEFORE shelling out to cutover_migrate — if the
+# two disagree about which file is the source, this check guards a file
+# nobody reads and the real failure arrives later and less clearly. CI has
+# no `gi_database.db` at all (gitignored); it points this at a generated
+# fixture. See tools/make_ci_fixture_db.py.
+_SOURCE_DB = Path(os.environ.get("GI_DB_FILE")
+                  or (_ROOT / "gi_database.db"))
 
 DEFAULT_TEST_DB = "gihub_svctest"
 

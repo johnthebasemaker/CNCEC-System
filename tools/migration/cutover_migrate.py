@@ -414,8 +414,17 @@ def _num_eq(a, b, tol: float = 1e-6) -> bool:
 # --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 2)[1])
-    ap.add_argument("--source", default=os.path.join(_ROOT, "gi_database.db"),
-                    help="legacy SQLite file (default: repo gi_database.db)")
+    # ⚠️ `GI_DB_FILE` FIRST, like `tools/dual_ci.py` and `tools/parity_check.py`
+    # already did. This script was the odd one out, and the inconsistency had
+    # teeth: CI has no `gi_database.db` (it is gitignored — see
+    # `tools/make_ci_fixture_db.py`), so the two siblings could be pointed at a
+    # fixture and this one could not, which silently broke the service-test
+    # step that shells out to it.
+    ap.add_argument("--source",
+                    default=os.environ.get("GI_DB_FILE")
+                    or os.path.join(_ROOT, "gi_database.db"),
+                    help="legacy SQLite file (default: $GI_DB_FILE, else repo "
+                         "gi_database.db)")
     ap.add_argument("--target", default=os.environ.get("DATABASE_URL", ""),
                     help="target SQLAlchemy URL (default: $DATABASE_URL)")
     ap.add_argument("--wipe", action="store_true",

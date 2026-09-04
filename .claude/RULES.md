@@ -36,6 +36,14 @@ clean up after themselves and it does not help: a run that fails early, is
 interrupted, or dies on an uncaught exception skips its own `finally`, and those
 are the runs a developer does most.
 
+⚠️ **AND ONE THING RULE 15 SAYS IS NOT TRUE.** It claims the test database is
+rebuilt from `gi_database.db` and that "that file is in git … so every machine
+and CI start from identical rows". The file is **gitignored** (commit `a09da0b`,
+2026-07-26 — it holds real employee names and stock), so `service_tests` has
+only ever passed on the operator's laptop. `tools/make_ci_fixture_db.py`
+generates what CI needs for `dual_ci` and `parity_check`; the suite's remaining
+master-data dependency is an open decision — `docs/PROJECT_STATUS.md` §1b.
+
 ### ⚠️ Rule 15's second half, which is easy to miss
 
 **A constraint added in an Alembic migration must be added to `models.py` in the

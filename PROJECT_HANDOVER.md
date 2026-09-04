@@ -692,8 +692,19 @@ than a silent write to production data. Suite **BW** asserts all of it,
 including the refusal.
 
 **The test database is rebuilt from `gi_database.db` by the production cutover
-script**, which is the second half of the point. That file is in git and is
-itself a gate, so every machine and CI start from identical rows. Before this,
+script**, which is the second half of the point.
+
+⚠️ **CORRECTION, 2026-09-04 — this paragraph used to claim "that file is in git
+and is itself a gate, so every machine and CI start from identical rows". IT IS
+NOT IN GIT.** Commit `a09da0b` (2026-07-26, "security(secrets): untrack tracked
+SQLite databases") removed it deliberately — it holds real employee names, stock
+and vendors — and `.gitignore:13` keeps it out. So that guarantee has been false
+since then, and **`service_tests` has only ever passed on the operator's
+laptop**. It was invisible because `legacy/bug_check.py` failed first on all 30
+recorded CI runs; fixing that in Phase 11a merely advanced the job far enough to
+reach it. `tools/make_ci_fixture_db.py` generates a fixture that satisfies
+`dual_ci` and `parity_check`; the suite's remaining master-data dependency is an
+OPEN DECISION written up in `docs/PROJECT_STATUS.md` §1b. Before this,
 the suite had quietly come to depend on data that existed only on the
 operator's box: the 2026-08-13 database wipe turned 1474/0 into a hard
 `IndexError` on the FIRST suite, because employee `30001` had been sitting in
