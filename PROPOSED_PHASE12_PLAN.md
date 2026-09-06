@@ -1,7 +1,10 @@
 # PROPOSED PHASE 12 PLAN — Automated Role-Based Video Tutorials
 
-> **Status: PROPOSAL + A WORKING PROTOTYPE.** No application code is changed.
-> Branch `chore/phase12-prototype`, written 2026-09-06 against `main` @ `2e95f9d`,
+> **Status: APPROVED. Q1–Q5 and Q11 answered by the operator 2026-09-06 and
+> now LOCKED (§9). Slice 12a is built.** No application code is
+> changed.
+> Branch `chore/phase12-prototype` → `feat/phase12-tutorial-dataset` →
+> `feat/phase12-recorder`, written 2026-09-06 against `main` @ `2e95f9d`,
 > after reading `PROJECT_HANDOVER.md`, `SESSION_HANDOVER.md`, `.claude/RULES.md`,
 > `docs/ARCHITECTURE.md`, `REPO_MAP.md`, `USER_MANUAL.md` (§ index),
 > `tests/e2e/**`, `backend/api/training.py` and the slice-10b migration.
@@ -520,8 +523,8 @@ before it is safe to publish.
 
 | Slice | Branch | Contents | Blocking? |
 |---|---|---|---|
-| **12a** | `feat/phase12-tutorial-dataset` | **`tools/make_tutorial_db.py`** — a synthetic dataset: fictional employees, fictional materials, plausible stock, the SME tier fixture. Modelled on `tools/make_ci_fixture_db.py`. Plus a `--dataset` switch on the recorder and a manifest field. | ⚠️ **YES. Nothing publishes before this.** |
-| **12b** | `feat/phase12-recorder` | Harden the prototype: manifest (P12-5), **WebVTT captions** into the existing `captions_uri`, freeze-pad language cuts (§6.1), a `make`-style batch runner, `--dry-run`. | — |
+| **12a** ✅ | `feat/phase12-tutorial-dataset` | **`tools/make_tutorial_db.py`** — 306 items across the eleven real categories, 90 receipts, 140 consumption rows, 90 dated lots, 14 invented employees on a reserved badge block, the fourteen real lining systems, and the rule-1c tier fixture. Deterministic (pinned `ANCHOR`). Plus `--dataset {tutorial,e2e}` on the recorder, its own database and its own two ports. | ⚠️ **WAS BLOCKING — DONE.** |
+| **12b** | `feat/phase12-recorder` | `scripts/` → `tools/` (Q11). Manifest (P12-5) with `script_sha256` + git SHA + dataset version. **WebVTT** into the existing `captions_uri`. **Freeze-padding** in the composite. A batch runner with `--dry-run`. The **rule-14 route lint**. | — |
 | **12c** | `feat/phase12-scripts` | The catalogue: one YAML per role × process. **The largest slice and it is writing, not coding** — the source is `USER_MANUAL.md`, which is already role-fenced by rule 9's allowlists. | — |
 | **12d** | `feat/phase12-heygen` | Live HeyGen: submit, poll, download, retry, the credit budget, and a real 200 against the unverified path. **Needs a key.** | Needs Q7 + a key |
 | **12e** | `feat/phase12-publish` | Publishing: object storage, `POST /training/assets`, the version-bump policy (Q4), and a **human review step** — §5.1 is the argument for it. | Needs Q3, Q4 |
@@ -556,25 +559,47 @@ before it is safe to publish.
 
 ## 9. Clarifying questions
 
-**Blocking are marked ⛔.** Everything else can proceed under a stated
-assumption.
+### 9.1 ⛔ ANSWERED AND LOCKED (operator, 2026-09-06)
 
-| # | Question | My recommendation if you would rather not decide |
+These are decisions now, not questions. Each is implemented on the branch named
+beside it.
+
+| # | Question | **Locked answer** | Where it landed |
+|---|---|---|---|
+| **Q1** | Synthetic dataset — invent everything, or keep the real structure? | **Keep the real STRUCTURE** (categories, lining systems, roles, UOMs, work types, equipment types, locations); **invent every employee name, material description, SAP code, quantity, price, date and vendor.** | `tools/make_tutorial_db.py`, and the docstring states the split explicitly so a later edit cannot blur it |
+| **Q2** | Catalogue granularity | **~60 short per-process clips, 60–120 s each.** | Slice 12c; the batch runner in 12b is built for many small scripts rather than nine long ones |
+| **Q3** | Where the MP4s live | **`docs/tutorials/out/` locally for now**; object storage at the Hetzner cutover. | Gitignored (§3.1). `storage_uri` stays a local path until the cut |
+| **Q4** | What a re-render does to compliance | **A cosmetic UI re-render does NOT bump `training_modules.version`.** Bump only when the narration or the demonstrated process changes — **keyed on the script's SHA-256.** | The manifest carries `script_sha256`; the dataset was made **deterministic** (a pinned `ANCHOR` date) so the same script cannot produce different numbers on screen |
+| **Q5** | Languages at launch | **English first for the whole catalogue.** Tanglish and the rest follow. | Freeze-padding (§6.1) is built anyway, so adding a language later is an ffmpeg pass, not a re-record |
+| **Q11** | `scripts/` vs `tools/` | **Move to `tools/generate_tutorial.py` and `tools/tutorials/`.** | Slice 12b, `git mv`; `REPO_MAP.md` rule 1 no longer widened |
+
+⚠️ **Q4 had a consequence nobody asked about, and it is the reason the dataset
+is pinned.** Keying the version bump on the script's hash only works if
+everything *else* is stable. A dataset generated from `date.today()` would move
+every number on screen daily while the script's SHA-256 said nothing had
+changed — so the compliance record would point at a video nobody has seen,
+which is precisely the failure P10-6 exists to prevent. `make_tutorial_db.py`
+therefore computes every date from a pinned `ANCHOR` constant that is bumped by
+hand alongside `DATASET_VERSION`. **The dataset ages on purpose**, because
+ageing is a versioned decision somebody makes and drift is one nobody notices.
+
+### 9.2 Still open — not blocking 12a or 12b
+
+| # | Question | My recommendation |
 |---|---|---|
-| **Q1** ⛔ | **The synthetic dataset.** Do you want `make_tutorial_db.py` to invent everything, or to take the real *structure* (categories, lining systems, work types) with invented names and quantities? | Real structure, invented names and numbers. A tutorial showing categories that do not exist teaches nothing. |
-| **Q2** ⛔ | **Catalogue granularity.** One tutorial per role (9, long), one per process (~60, short), or one per role plus short per-process clips? | ~60 short ones, 60–120 s each. `training_compliance` is per module, so short modules mean a granular record and a re-render that invalidates one topic rather than a role's entire certification. |
-| **Q3** ⛔ | **Where do the MP4s live?** They are too big and too volatile for git, and the Hetzner box is still unprovisioned. | Object storage (Hetzner Storage Box or S3-compatible), signed URLs, `storage_uri` pointing at it. Until then, `docs/tutorials/out/` locally and nothing published. |
-| **Q4** ⛔ | **What does a re-render do to compliance?** P10-6 says bumping `version` invalidates every acknowledgement. Does a re-render for a *cosmetic* UI change bump it? | **No.** Bump only when the narration or the demonstrated process changes — keyed on the script's SHA-256, which the manifest already carries. A cosmetic re-encode that un-certifies 40 people is a self-inflicted audit finding. |
-| **Q5** ⛔ | **Languages at launch.** All four (`en`, `ta`, `ta-Latn`, `ar`), or English first? | English first for the whole catalogue, then Tanglish. It is the language the schema comment says people actually speak on site, and translating 60 scripts is a separate procurement. |
-| **Q6** | **Who writes the narration?** Extracted from `USER_MANUAL.md`, or written fresh? | Extracted and then edited for the ear. The manual is already role-fenced and already the AI corpus; writing fresh creates a fourth thing to keep in step with it. |
-| **Q7** | **Does narration text leaving the network need your sign-off?** It is reviewed prose about how the UI works — no data, no names — but it is still egress to a US SaaS. | Yes, once, in writing, on the same footing as ruling P11-9's two switches for vision. And note §3.4: **the pipeline works with zero egress** if the answer is no. |
-| **Q8** | **Avatar and voice.** A stock HeyGen avatar, or a likeness of a real GI person? | Stock. A likeness is a consent question, a leaver question, and a re-record question every time that person leaves. |
-| **Q9** | **Should the batch runner be a `bin/` script** (like `dev.sh`, `power.sh`, `backup_db.sh`) or stay under `scripts/`? | See Q11 — same answer either way. |
-| **Q10** | **Should the recorder get its own database name** (`gihub_tutorial_pw`) so it cannot collide with the E2E gate at all? | Yes, in 12a — it is nearly free once the dataset builder exists, and it converts a documented hazard into an impossible one. |
-| **Q11** | ⚠️ **`scripts/` is a new top-level directory, and `REPO_MAP.md` rule 1 says new-stack work touches only `backend/`, `frontend/`, `deploy/`, `tests/e2e/`, `tests/ai_eval/`, `docs/`.** I built it at the path you named and added a `REPO_MAP.md` entry in the same commit, but the house convention for ops tooling is `tools/`. Move it? | **Move it to `tools/generate_tutorial.py` + `tools/tutorials/`** before 12b, while there is nothing referencing it. `tools/` is explicitly *"bridge + ops"* and this is ops. |
-| **Q12** | **Should tutorials cover the LEGACY Streamlit app at all?** | No. It is feature-frozen and being switched off; a tutorial is a reason to keep using it. |
-| **Q13** | **Screen size.** Recorded at 1536×864 upscaled to 1080p, tuned for a desktop viewer. Do site users watch on phones? | If phones, add a 9:16 cut in 12b — it is a second composite pass over the same screencast, not a second recording. |
-| **Q14** | **Does the OCR module (`ocr_workflow_v1`, the one row already seeded) get priority?** It is the only module that currently *gates* a feature, and its player says "not published yet" today. | Yes — make it tutorial #1 in 12c. It is the only one where the absence is already visible to users. |
+| **Q6** | Who writes the narration — extracted from `USER_MANUAL.md`, or fresh? | Extracted and then edited for the ear. The manual is already role-fenced and already the AI corpus; fresh prose creates a fourth thing to keep in step with it. |
+| **Q7** | Does narration text leaving the network need written sign-off? | Yes, once, on the same footing as P11-9's two switches for vision. **Blocking 12d only.** And note §3.4: the pipeline works with zero egress if the answer is no. |
+| **Q8** | Stock HeyGen avatar, or a likeness of a real GI person? | Stock. A likeness is a consent question, a leaver question, and a re-record every time that person leaves. |
+| **Q12** | Do tutorials cover the LEGACY Streamlit app? | No. It is feature-frozen and being switched off; a tutorial is a reason to keep using it. |
+| **Q13** | Do site users watch on phones? | If yes, add a 9:16 cut — a second composite pass over the same screencast, not a second recording. |
+| **Q14** | Does `ocr_workflow_v1` get priority in the catalogue? | Yes — it is the only module that currently *gates* a feature, and its player says "not published yet" today. |
+
+### 9.3 Answered by building it
+
+| # | Question | Answer |
+|---|---|---|
+| **Q9** | `bin/` or `scripts/` for the batch runner? | Neither — `tools/`, per Q11. `bin/` is for the three long-lived operator scripts (`dev.sh`, `power.sh`, `backup_db.sh`), and this is not one. |
+| **Q10** | Its own database name so it cannot collide with the E2E gate? | **Done in 12a, and it cost four environment variables.** `tests/e2e/harness/env.ts` already reads `E2E_DB`, `E2E_API_PORT`, `E2E_WEB_PORT` and (through `cutover_migrate`) `GI_DB_FILE` from the environment, so the recorder sets all four and runs on `gihub_tutorial_pw` at :8011/:5184. **No file under `tests/e2e/` was edited**, and a documented hazard became an impossible one. |
 
 ---
 
