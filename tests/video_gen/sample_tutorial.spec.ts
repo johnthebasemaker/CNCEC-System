@@ -4,7 +4,7 @@
  * One tutorial, recorded end to end: a Store Keeper signs in to the isolated
  * E2E stack, opens the Hub Assistant, asks it a question, and reads the answer.
  * The output is a `.webm` plus a `beats.json` naming the millisecond each step
- * completed; `scripts/generate_tutorial.py` composites the two into an MP4.
+ * completed; `tools/generate_tutorial.py` composites the two into an MP4.
  *
  * ⚠️ THIS IS NOT A TEST AND MUST NEVER BECOME A GATE. It asserts only enough to
  * fail loudly on a recording that would be silently wrong — a panel that never
@@ -12,14 +12,14 @@
  * tutorial to re-render, not a red build. It is excluded from
  * `tests/e2e/playwright.config.ts` by living under its own config.
  *
- * Run: `.venv/bin/python scripts/generate_tutorial.py`
+ * Run: `.venv/bin/python tools/generate_tutorial.py`
  */
 import { test, expect } from '@playwright/test'
 import * as path from 'node:path'
 import { type Role, storageStatePath } from '../e2e/harness/env'
 import {
   Beats, RENDER, VIDEO, glideClick, installTutorialChrome, loadShotList,
-  newRecordingContext, outDir, scriptAssistant,
+  newRecordingContext, outDir, scriptAssistant, trackNavigation,
 } from './harness/record'
 
 const shot = loadShotList()
@@ -37,6 +37,7 @@ test(`record ${shot.tutorial_id}`, async ({ browser }) => {
   await installTutorialChrome(context, shot)
   const beats = new Beats()
   const page = await context.newPage()
+  trackNavigation(page, beats)
   await scriptAssistant(page, shot)
 
   // ── 1. the dashboard ─────────────────────────────────────────────────────

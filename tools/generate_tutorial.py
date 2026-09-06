@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/generate_tutorial.py — PHASE 12 PROTOTYPE ORCHESTRATOR.
+tools/generate_tutorial.py — PHASE 12 TUTORIAL ORCHESTRATOR.
 
 Turns one tracked YAML script into one finished tutorial MP4:
 
@@ -43,10 +43,10 @@ fonts, brand colours, and no filtergraph escaping for text a human wrote.
 
 Usage
 -----
-    .venv/bin/python scripts/generate_tutorial.py
-    .venv/bin/python scripts/generate_tutorial.py --script scripts/tutorials/x.yaml
-    .venv/bin/python scripts/generate_tutorial.py --skip-record   # re-composite
-    .venv/bin/python scripts/generate_tutorial.py --reuse-stack   # batch mode
+    .venv/bin/python tools/generate_tutorial.py                 # one tutorial
+    .venv/bin/python tools/generate_tutorial.py --all           # the catalogue
+    .venv/bin/python tools/generate_tutorial.py --all --dry-run # the plan only
+    .venv/bin/python tools/generate_tutorial.py --skip-record   # re-composite
 
 ⚠️ Do not run this while `cd tests/e2e && npm test` is running. Both own
 `gihub_e2e_pw`, :8010 and :5183, and the loser fails looking like a flaky spec.
@@ -54,6 +54,8 @@ Usage
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import hashlib
 import json
 import os
 import pathlib
@@ -69,7 +71,10 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 E2E = ROOT / "tests" / "e2e"
 RECORDER = ROOT / "tests" / "video_gen"
-DEFAULT_SCRIPT = ROOT / "scripts" / "tutorials" / "store_keeper_hub_assistant.yaml"
+SCRIPT_DIR = ROOT / "tools" / "tutorials"
+DEFAULT_SCRIPT = SCRIPT_DIR / "store_keeper_hub_assistant.yaml"
+NAV_DUMP = ROOT / "frontend" / "scripts" / "nav_access_dump.mjs"
+AUTH_PY = ROOT / "backend" / "api" / "auth.py"
 DEFAULT_OUT = ROOT / "docs" / "tutorials" / "out"
 MAKE_DATASET = ROOT / "tools" / "make_tutorial_db.py"
 TUTORIAL_DB = ROOT / "tutorial_fixture.db"
@@ -90,6 +95,12 @@ DATASET_ENV = {
     # against it is a diagnostic, never a deliverable — see `_dataset_env`.
     "e2e": {},
 }
+
+# ⚠️ Bumped when the COMPOSITE changes in a way that makes an existing render
+# stale. The batch runner re-renders anything whose manifest carries an older
+# one — which is how a pipeline fix reaches sixty videos without a person
+# remembering which of them it touched.
+PIPELINE_VERSION = 2
 
 FPS = 30
 CANVAS = (1920, 1080)
@@ -145,6 +156,105 @@ def hms(seconds: float) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 0b. provenance
+# ══════════════════════════════════════════════════════════════════════════
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def git_state() -> dict:
+    """The commit a render was made from, and whether the tree was clean."""
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+                             capture_output=True, text=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip())
+        return {"sha": sha, "dirty": dirty}
+    except Exception:  # noqa: BLE001 — a render outside a checkout still works
+        return {"sha": None, "dirty": None}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 0c. the rule-14 route lint
+# ══════════════════════════════════════════════════════════════════════════
+def role_levels() -> dict[str, int]:
+    """
+    Read the seniority ladder from `auth.ROLE_META` — the ONE place it is
+    defined. Restating it here would make a third copy of a number that already
+    disagrees with people's intuitions (rule 14: `minLevel` is a ladder and the
+    roles are not one).
+    """
+    src = AUTH_PY.read_text(encoding="utf-8")
+    block = src.split("ROLE_META = {", 1)[1].split("}\n", 1)[0]
+    return {m[1]: int(m[2]) for m in
+            re.finditer(r'"(\w+)":\s*\{"label":[^,]+,\s*"level":\s*(\d+)\}', block)}
+
+
+def nav_access() -> dict:
+    """Ask the frontend manifest which roles may open which routes."""
+    out = subprocess.run(
+        ["node", str(NAV_DUMP), json.dumps(role_levels())],
+        cwd=ROOT / "frontend", check=True, capture_output=True, text=True).stdout
+    return json.loads(out)
+
+
+def route_lint(doc: dict, access: dict) -> list[str]:
+    """
+    Refuse a script that declares a route its role cannot open.
+
+    ⚠️ AN UNRESOLVED ROUTE IS REPORTED, NEVER PASSED. `/records/*` and
+    `/master/*` are built by `.map()` in the manifest and the dumper cannot
+    resolve them; saying "fine" about a route nobody checked is rule 16's
+    mistake in a new place, so they come back as UNKNOWN and the ground-truth
+    check at record time is what settles them.
+    """
+    problems: list[str] = []
+    if not access.get("sane"):
+        return ["nav_access_dump found almost nothing — the manifest has moved, "
+                "and this lint would have passed for the wrong reason"]
+    role = doc["hub_role"]
+    known = access["routes"]
+    publics = access["publics"]
+    for route in doc.get("routes") or []:
+        if any(route.startswith(pfx) for pfx in publics):
+            continue
+        if route not in known:
+            problems.append(
+                f"UNKNOWN  {route} — the nav manifest builds this group with "
+                f".map() and the dumper cannot resolve it "
+                f"({len(access['unresolved'])} such group(s)). Reported, never "
+                f"passed; the record-time check settles it")
+        elif role not in known[route]:
+            problems.append(f"REFUSED  {route} — {role} may not open it "
+                            f"(allowed: {', '.join(known[route]) or 'nobody'})")
+    return problems
+
+
+def check_visited(doc: dict, beats: dict) -> list[str]:
+    """
+    The ORACLE. `canAccessPath` fails closed by redirecting, so a role that
+    walks into a forbidden page lands somewhere the script never declared.
+    """
+    declared = set(doc.get("routes") or [])
+    visited = [v for v in beats.get("visited", []) if v not in ("", "about:blank")]
+    stray = [v for v in dict.fromkeys(visited) if v not in declared]
+    if not stray:
+        return []
+    return [f"the browser landed on {v!r}, which the script does not declare — "
+            f"either add it to `routes:` or the app refused a page "
+            f"{doc['hub_role']} may not open" for v in stray]
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 1. the script
 # ══════════════════════════════════════════════════════════════════════════
 REQUIRED = ("tutorial_id", "title", "role", "hub_role", "language",
@@ -182,6 +292,7 @@ def shot_list(doc: dict, holds: dict[str, int], think_ms: int) -> dict:
         # module docstring: the first run of this pipeline overran every one of
         # six beats by 2.3-5.2 s because the holds were guesses.
         "holds": holds,
+        "routes": list(doc.get("routes") or ["/"]),
         "mask": list(red.get("mask") or []),
         "replace": dict(red.get("replace") or {}),
     }
@@ -449,7 +560,7 @@ def holds_from(clips: list[dict]) -> dict[str, int]:
     return {c["beat"]: int((c["dur"] + BREATH_S) * 1000) for c in clips}
 
 
-def place_narration(clips: list[dict], beats: list[dict], total_s: float,
+def place_narration(clips: list[dict], times: dict[str, float], total_s: float,
                     work: pathlib.Path) -> tuple[pathlib.Path, list[dict]]:
     """
     PASS B's other half — lay the rendered lines onto the MEASURED beat times.
@@ -459,14 +570,13 @@ def place_narration(clips: list[dict], beats: list[dict], total_s: float,
     browser, and a UI change that makes a step slower shows up here as a gap
     rather than as narration talking over the next screen.
     """
-    at = {b["id"]: b["t_ms"] / 1000.0 for b in beats}
     placed = []
     for c in clips:
-        if c["beat"] not in at:
+        if c["beat"] not in times:
             print(f"  ⚠️  narration beat {c['beat']!r} was never stamped by the "
                   f"recording — skipped")
             continue
-        placed.append({**c, "start": at[c["beat"]]})
+        placed.append({**c, "start": times[c["beat"]]})
 
     print("\n  beat            starts     window     narration   verdict")
     print("  " + "─" * 62)
@@ -644,12 +754,86 @@ def caption_png(text: str, x0: int, wrap: int, dest: pathlib.Path) -> pathlib.Pa
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 5b. freeze-padding and captions
+# ══════════════════════════════════════════════════════════════════════════
+def plan_padding(clips: list[dict], beats: list[dict],
+                 total_s: float) -> tuple[list[dict], list[float], float]:
+    """
+    Work out how much of each beat's final frame has to be HELD for its
+    narration to finish, and where every beat then starts.
+
+    ⚠️ WHY THIS EXISTS WHEN PASS A ALREADY PREVENTS OVERRUNS. Pass A cuts the
+    UI to the narration at RECORD time, so a fresh render needs no padding at
+    all and this is a no-op. It earns its place in the three cases where the
+    audio and the screencast were not made together:
+
+      · a LANGUAGE CUT — §6.1 of the plan. One screencast, four languages, and
+        Tamil does not take as long as English. Every beat already ends on a
+        static hold, so extending it duplicates identical frames and is
+        invisible. This is what makes "record once, cut N times" possible, and
+        it is only possible because `beats.json` gives the segment boundaries.
+      · `--skip-record` after a script edit that made a line longer.
+      · any residual drift between the measured audio and the real browser.
+
+    Returns (segments, new beat start times, new total). A segment is
+    `{start, end, pad}` in the ORIGINAL timeline; the lead-in before the first
+    beat is segment zero and is never padded.
+    """
+    at = [b["t_ms"] / 1000.0 for b in beats]
+    bounds = [0.0] + at + [total_s]
+    segs: list[dict] = []
+    for i in range(len(bounds) - 1):
+        start, end = bounds[i], bounds[i + 1]
+        pad = 0.0
+        if i > 0:                       # segment i covers beat i-1
+            need = clips[i - 1]["dur"] + BREATH_S if i - 1 < len(clips) else 0.0
+            pad = max(0.0, need - (end - start))
+        segs.append({"start": start, "end": end, "pad": round(pad, 3)})
+
+    new_at: list[float] = []
+    t = 0.0
+    for i, seg in enumerate(segs):
+        if i:
+            new_at.append(round(t, 3))
+        t += (seg["end"] - seg["start"]) + seg["pad"]
+    return segs, new_at, round(t, 3)
+
+
+def _vtt_time(seconds: float) -> str:
+    ms = int(round(seconds * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    sec, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
+
+
+def write_vtt(placed: list[dict], total_s: float, dest: pathlib.Path) -> pathlib.Path:
+    """
+    WebVTT from the MEASURED beat times.
+
+    ⚠️ `training_assets.captions_uri` has been a column since slice 10b and has
+    never been filled, because the videos did not exist. It costs nothing here:
+    the cue times are the beat times the compositor already uses, so the
+    captions cannot disagree with the burned-in ones or with the voice.
+    """
+    lines = ["WEBVTT", ""]
+    for i, c in enumerate(placed):
+        end = placed[i + 1]["start"] if i + 1 < len(placed) else total_s
+        lines += [f"{i + 1}",
+                  f"{_vtt_time(c['start'])} --> {_vtt_time(max(c['start'] + 0.6, end - 0.15))}",
+                  c["text"], ""]
+    dest.write_text("\n".join(lines), encoding="utf-8")
+    return dest
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 6. composite
 # ══════════════════════════════════════════════════════════════════════════
 def composite(screencast: pathlib.Path, avatar: pathlib.Path, alpha: bool,
               mask: pathlib.Path, watermark: pathlib.Path,
               captions: list[tuple[pathlib.Path, float, float]],
-              corner: str, total_s: float, dest: pathlib.Path) -> None:
+              corner: str, segments: list[dict], total_s: float,
+              dest: pathlib.Path) -> None:
     """
     One graph, two entry points for the avatar:
 
@@ -665,9 +849,26 @@ def composite(screencast: pathlib.Path, avatar: pathlib.Path, alpha: bool,
     for png, _, _ in captions:
         args += ["-i", str(png)]
 
-    chain = [
-        f"[0:v]scale={CANVAS[0]}:{CANVAS[1]}:flags=lanczos,fps={FPS},format=rgba[bg]",
-    ]
+    # The screencast, optionally freeze-padded per beat, then scaled once. The
+    # padding is done INSIDE this graph rather than as an intermediate file:
+    # a separate pass would mean two generation losses for a hold that is, by
+    # construction, the same frame repeated.
+    pads = sum(sg["pad"] for sg in segments)
+    if pads < 0.05:
+        chain = [f"[0:v]scale={CANVAS[0]}:{CANVAS[1]}:flags=lanczos,"
+                 f"fps={FPS},format=rgba[bg]"]
+    else:
+        n = len(segments)
+        chain = [f"[0:v]split={n}" + "".join(f"[q{i}]" for i in range(n))]
+        for i, sg in enumerate(segments):
+            tail = (f",tpad=stop_mode=clone:stop_duration={sg['pad']:.3f}"
+                    if sg["pad"] > 0.001 else "")
+            chain.append(f"[q{i}]trim=start={sg['start']:.3f}:end={sg['end']:.3f},"
+                         f"setpts=PTS-STARTPTS{tail}[t{i}]")
+        chain.append("".join(f"[t{i}]" for i in range(n))
+                     + f"concat=n={n}:v=1:a=0,"
+                       f"scale={CANVAS[0]}:{CANVAS[1]}:flags=lanczos,"
+                       f"fps={FPS},format=rgba[bg]")
     if alpha:
         chain.append(f"[1:v]scale={AVATAR_PX}:{AVATAR_PX},format=rgba[av]")
     else:
@@ -703,48 +904,129 @@ def composite(screencast: pathlib.Path, avatar: pathlib.Path, alpha: bool,
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 6b. the manifest (P12-5)
+# ══════════════════════════════════════════════════════════════════════════
+def write_manifest(doc: dict, script_path: pathlib.Path, payload: dict,
+                   dataset: str, beats: dict, placed: list[dict],
+                   video: pathlib.Path, captions: pathlib.Path,
+                   total_s: float, alpha: bool, live: bool,
+                   dest: pathlib.Path) -> pathlib.Path:
+    """
+    ⚠️ `script_sha256` IS THE FIELD THIS FILE EXISTS FOR. Ruling Q4 says a
+    module's `training_modules.version` is bumped when the NARRATION or the
+    demonstrated process changes and NOT for a cosmetic re-render — so
+    something has to be able to answer "did the script change?" a year later
+    without re-deriving it from a script that has since changed again. That is
+    this number, and the batch runner uses the same one to decide what to
+    re-render.
+
+    Everything else is the same instinct as `ai_traces` (P11-1): a render that
+    somebody has to explain later should not need archaeology. A file rather
+    than a table for now — P11-3's lesson is that observability must never be
+    able to break the thing it observes, and a batch job has no home in the
+    database yet.
+    """
+    manifest = {
+        "pipeline_version": PIPELINE_VERSION,
+        "generated_at": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "tutorial_id": doc["tutorial_id"],
+        "title": doc["title"],
+        "role": doc["role"],
+        "hub_role": doc["hub_role"],
+        "language": doc["language"],
+        "training_module_key": doc.get("training_module_key"),
+        # ── the Q4 key ──────────────────────────────────────────────────────
+        "script_path": str(script_path.relative_to(ROOT)),
+        "script_sha256": sha256_file(script_path),
+        "narration_sha256": sha256_text(
+            "\n".join(" ".join(l["say"].split()) for l in doc["narration"])),
+        # ── what crossed the boundary, and what did not ────────────────────
+        "heygen": {
+            "called": live,
+            "endpoint": HEYGEN_URL,
+            "payload_sha256": sha256_text(
+                json.dumps(payload, sort_keys=True, ensure_ascii=False)),
+            "lines_sent": len(doc["narration"]),
+            "reason": "sent" if live else "no HEYGEN_API_KEY and no --live",
+        },
+        "dataset": {
+            "name": dataset,
+            "version": dataset_version(),
+            "synthetic": dataset == "tutorial",
+        },
+        "git": git_state(),
+        "routes": {
+            "declared": list(doc.get("routes") or []),
+            "visited": beats.get("visited", []),
+        },
+        "video": {
+            "path": str(video.relative_to(ROOT)),
+            "duration_s": round(total_s, 3),
+            "width": CANVAS[0], "height": CANVAS[1], "fps": FPS,
+            "bytes": video.stat().st_size,
+            "sha256": sha256_file(video),
+            "avatar_alpha": alpha,
+        },
+        "captions": {"path": str(captions.relative_to(ROOT)), "format": "WebVTT"},
+        "beats": [{"id": c["beat"], "start_s": round(c["start"], 3),
+                   "narration_s": round(c["dur"], 3), "text": c["text"]}
+                  for c in placed],
+    }
+    dest.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+    return dest
+
+
+def read_manifest(out: pathlib.Path, tutorial_id: str) -> dict | None:
+    path = out / f"{tutorial_id}.manifest.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a corrupt manifest means "re-render"
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 7. main
 # ══════════════════════════════════════════════════════════════════════════
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--script", type=pathlib.Path, default=DEFAULT_SCRIPT)
-    ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
-    ap.add_argument("--skip-record", action="store_true",
-                    help="re-composite from the last screencast (no browser)")
-    ap.add_argument("--reuse-stack", action="store_true",
-                    help="attach to an already-running gihub_e2e_pw stack")
-    ap.add_argument("--dataset", choices=("tutorial", "e2e"), default="tutorial",
-                    help="tutorial = the synthetic dataset (P12-0, the only one "
-                         "a published video may use); e2e = the gate's clone of "
-                         "the REAL database, diagnostic only")
-    ap.add_argument("--voice", default=None, help="macOS `say` voice for the mock VO")
-    ap.add_argument("--live", action="store_true",
-                    help="actually call HeyGen (needs HEYGEN_API_KEY; UNVERIFIED)")
-    a = ap.parse_args()
-
-    doc = load_script(a.script)
+def render(a, script_path: pathlib.Path, access: dict) -> int:
+    """Render ONE tutorial. Returns a process exit code."""
+    doc = load_script(script_path)
     work = a.out / doc["tutorial_id"]
     work.mkdir(parents=True, exist_ok=True)
     print(f"\n═══ {doc['title']} · {doc['hub_role']} · {doc['language']} ═══")
-    print(f"    script  {a.script.relative_to(ROOT)}")
+    print(f"    script  {script_path.relative_to(ROOT)}")
     print(f"    work    {work.relative_to(ROOT)}")
     print(f"    dataset {a.dataset} (v{dataset_version()})")
 
-    # ── 1. the boundary, FIRST ───────────────────────────────────────────
-    # Before a browser opens, before a frame exists. Nothing downstream can
-    # widen what crosses, because nothing downstream has been built yet.
-    print("\n[1/5] HeyGen payload — the only thing that would leave this machine")
+    # ── 1. rule 14, before a browser exists ──────────────────────────────
+    print("\n[1/6] rule-14 route lint")
+    problems = route_lint(doc, access)
+    for line in problems:
+        print(f"      {line}")
+    if any(x.startswith("REFUSED") or x.startswith("nav_access") for x in problems):
+        print("\n🛑 REFUSED (rule 14) — a tutorial must never show a page its "
+              "role cannot open.")
+        return 3
+    if not problems:
+        print(f"      ✅ {len(doc.get('routes') or [])} declared route(s) are all "
+              f"open to {doc['hub_role']}")
+
+    # ── 2. the egress boundary ───────────────────────────────────────────
+    print("\n[2/6] HeyGen payload — the only thing that would leave this machine")
     payload, allowed = heygen_payload(doc)
     try:
         assert_text_only(payload, allowed)
     except EgressRefused as e:
-        sys.exit(f"\n🛑 EGRESS REFUSED (P12-1)\n   {e}")
+        print(f"\n🛑 EGRESS REFUSED (P12-1)\n   {e}")
+        return 4
     print(f"      ✅ egress guard: every free-text field traces to a reviewed "
-          f"line in {a.script.name} ({len(allowed)} whitelisted strings)")
-    print(f"      ── the exact JSON that would be POSTed to {HEYGEN_URL} ──")
-    for ln in json.dumps(payload, indent=2, ensure_ascii=False).splitlines():
-        print("      " + ln)
+          f"line in {script_path.name} ({len(allowed)} whitelisted strings)")
+    if not a.quiet:
+        print(f"      ── the exact JSON that would be POSTed to {HEYGEN_URL} ──")
+        for ln in json.dumps(payload, indent=2, ensure_ascii=False).splitlines():
+            print("      " + ln)
 
     key = os.environ.get("HEYGEN_API_KEY", "").strip()
     if a.live and not key:
@@ -758,51 +1040,65 @@ def main() -> int:
     print("\n      ⛔ NOT SENT — no HEYGEN_API_KEY and no --live. "
           "Synthesising the avatar locally instead.")
 
-    # ── 2. PASS A: narration, measured ───────────────────────────────────
-    print("\n[2/5] pass A — rendering the narration so the UI can be cut to it")
+    # ── 3. PASS A: narration, measured ───────────────────────────────────
+    print("\n[3/6] pass A — rendering the narration so the UI can be cut to it")
     clips = synthesize(doc, work, a.voice)
     holds = holds_from(clips)
     spoken = sum(c["dur"] for c in clips)
     print(f"      {len(clips)} lines, {spoken:.1f}s of speech "
           f"({'measured' if clips[0]['wav'] else 'ESTIMATED — no `say` here'})")
-    for c in clips:
-        print(f"        {c['beat']:<16} {c['dur']:5.2f}s → hold "
-              f"{holds[c['beat']] / 1000:5.2f}s")
-
-    # The assistant's "Thinking…" pause is not a cosmetic delay — it is the
-    # window its own narration line has to play in, so it is DERIVED from the
-    # audio rather than guessed in the YAML.
     think_ms = max(int(doc.get("assistant_think_ms", 1400)),
                    holds.get("thinking", 0))
     shot = shot_list(doc, holds, think_ms)
 
-    # ── 3. PASS B: the screencast ────────────────────────────────────────
+    # ── 4. PASS B: the screencast ────────────────────────────────────────
     if a.skip_record:
         beats = json.loads((work / "beats.json").read_text(encoding="utf-8"))
         screencast = pathlib.Path(beats["video"])
-        print(f"\n[3/5] --skip-record: reusing {screencast.name}")
+        print(f"\n[4/6] --skip-record: reusing {screencast.name}")
     else:
         db = DATASET_ENV.get(a.dataset, {})
-        print(f"\n[3/5] pass B — recording against "
+        print(f"\n[4/6] pass B — recording against "
               f"{db.get('E2E_DB', 'gihub_e2e_pw')} on "
               f":{db.get('E2E_API_PORT', '8010')}/:{db.get('E2E_WEB_PORT', '5183')}")
         screencast, beats = record(shot, work, a.reuse_stack,
                                    _dataset_env(a.dataset))
 
-    total_s = probe_seconds(screencast)
+    raw_total = probe_seconds(screencast)
     last_beat = max(b["t_ms"] for b in beats["beats"]) / 1000.0
-    print(f"      {screencast.name}: {hms(total_s)}, "
+    print(f"      {screencast.name}: {hms(raw_total)}, "
           f"{len(beats['beats'])} beats, last at {last_beat:.2f}s")
-    if last_beat > total_s + 0.5:
-        # The alignment assumption, asserted rather than trusted. A beat past
-        # the end of the video means t0 and the recording start disagree, and
-        # every narration line is then misplaced by the same amount.
-        sys.exit(f"FATAL: last beat {last_beat:.2f}s is past the video's "
-                 f"{total_s:.2f}s — beat t0 and the recording start disagree")
+    if last_beat > raw_total + 0.5:
+        # Asserted rather than trusted: a beat past the end of the video means
+        # t0 and the recording start disagree, and every narration line is then
+        # misplaced by the same amount.
+        print(f"FATAL: last beat {last_beat:.2f}s is past the video's "
+              f"{raw_total:.2f}s — beat t0 and the recording start disagree")
+        return 5
 
-    # ── 4. avatar + overlays ─────────────────────────────────────────────
-    print("\n[4/5] placing the narration and building the stand-in avatar")
-    narration, placed = place_narration(clips, beats["beats"], total_s, work)
+    # ── 4b. the rule-14 ORACLE ───────────────────────────────────────────
+    strays = check_visited(doc, beats)
+    if strays:
+        print("\n🛑 REFUSED (rule 14, ground truth)")
+        for line in strays:
+            print(f"   {line}")
+        return 3
+    print(f"      ✅ visited {len(dict.fromkeys(beats.get('visited', [])))} "
+          f"path(s), all declared")
+
+    # ── 5. freeze-padding, narration, avatar, overlays ───────────────────
+    print("\n[5/6] placing the narration and building the stand-in avatar")
+    segments, new_at, total_s = plan_padding(clips, beats["beats"], raw_total)
+    pad_total = sum(sg["pad"] for sg in segments)
+    if pad_total >= 0.05:
+        print(f"      freeze-padding {pad_total:.2f}s across "
+              f"{sum(1 for sg in segments if sg['pad'] > 0.001)} beat(s) — "
+              f"{hms(raw_total)} → {hms(total_s)}")
+    else:
+        print("      no freeze-padding needed (pass A already cut the UI to "
+              "the narration)")
+    times = {b["id"]: t for b, t in zip(beats["beats"], new_at)}
+    narration, placed = place_narration(clips, times, total_s, work)
     avatar, alpha = build_avatar_clip(doc, narration, total_s, work)
     print(f"      avatar: {avatar.name} "
           f"({'VP9 with alpha' if alpha else 'opaque H.264 + alphamerge mask'})")
@@ -813,8 +1109,8 @@ def main() -> int:
     wm = watermark_png(doc, live, ov / "watermark.png")
     corner = (doc.get("avatar") or {}).get("corner", "bottom-left")
     if corner not in CORNERS:
-        sys.exit(f"FATAL: avatar.corner must be one of {', '.join(CORNERS)}")
-    # Captions start clear of the avatar when it shares the bottom edge.
+        print(f"FATAL: avatar.corner must be one of {', '.join(CORNERS)}")
+        return 6
     cap_x = 56 + AVATAR_PX + 40 if corner == "bottom-left" else 64
     cap_wrap = 52 if corner == "bottom-left" else 64
     captions: list[tuple[pathlib.Path, float, float]] = []
@@ -825,23 +1121,163 @@ def main() -> int:
     print(f"      {len(captions)} beat-aligned captions + 1 watermark, avatar "
           f"{corner} (Pillow — this ffmpeg has no drawtext)")
 
-    # ── 5. composite ─────────────────────────────────────────────────────
-    print("\n[5/5] compositing")
+    # ── 6. composite, captions file, manifest ────────────────────────────
+    print("\n[6/6] compositing")
     final = a.out / f"{doc['tutorial_id']}.mp4"
     t0 = time.time()
     composite(screencast, avatar, alpha, mask, wm, captions, corner,
-              total_s, final)
+              segments, total_s, final)
+    vtt = write_vtt(placed, total_s, a.out / f"{doc['tutorial_id']}.vtt")
+    manifest = write_manifest(doc, script_path, payload, a.dataset, beats,
+                              placed, final, vtt, total_s, alpha, live,
+                              a.out / f"{doc['tutorial_id']}.manifest.json")
+
     print(f"\n✅ {final.relative_to(ROOT)}")
     print(f"   {hms(probe_seconds(final))} · {final.stat().st_size / 1e6:.1f} MB · "
           f"{CANVAS[0]}x{CANVAS[1]} · encoded in {time.time() - t0:.1f}s")
-
+    print(f"   {vtt.relative_to(ROOT)} · {manifest.relative_to(ROOT)}")
+    print(f"   script_sha256 {sha256_file(script_path)[:16]}…  (ruling Q4: the "
+          f"version bumps when THIS changes)")
     print("\n   To publish it into the training hub Phase 10 already built:")
     print(f"     POST /training/assets  {{\"module_key\": "
           f"\"{doc.get('training_module_key', '?')}\", \"language\": "
           f"\"{doc['language']}\", \"storage_uri\": \"<object-store URL>\", "
-          f"\"duration_s\": {int(total_s)}}}")
-    print("   (admin-only; the player says \"not published yet\" until a row exists)\n")
+          f"\"captions_uri\": \"<…>.vtt\", \"duration_s\": {int(total_s)}}}")
+    print("   (admin-only; the player says \"not published yet\" until a row "
+          "exists)\n")
     return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 8. the batch runner
+# ══════════════════════════════════════════════════════════════════════════
+def why_render(doc: dict, script_path: pathlib.Path, out: pathlib.Path,
+               force: bool, stale: bool) -> str | None:
+    """
+    Make-style: say WHY a tutorial needs rendering, or None to skip it.
+
+    ⚠️ A UI CHANGE IS NOT A REASON, AND THAT IS RULING Q4. Re-rendering because
+    a commit landed would, under a naive publish step, bump every module's
+    version and un-certify the whole workforce for a CSS tweak. So the default
+    triggers are the script's own hash, the dataset version and the pipeline
+    version — all three of which mean the OUTPUT would genuinely differ.
+    A tutorial recorded from an older commit is reported as `stale` and
+    re-rendered only when asked, because "the footage is a bit old" and "the
+    video is wrong" are different problems with different costs.
+    """
+    m = read_manifest(out, doc["tutorial_id"])
+    if force:
+        return "forced"
+    if m is None:
+        return "no manifest"
+    if not (out / f"{doc['tutorial_id']}.mp4").exists():
+        return "video missing"
+    if m.get("script_sha256") != sha256_file(script_path):
+        return "script changed"
+    if m.get("pipeline_version") != PIPELINE_VERSION:
+        return f"pipeline {m.get('pipeline_version')} → {PIPELINE_VERSION}"
+    if (m.get("dataset") or {}).get("version") != dataset_version():
+        return "dataset changed"
+    if stale and (m.get("git") or {}).get("sha") != git_state()["sha"]:
+        return "stale (recorded from an older commit)"
+    return None
+
+
+def batch(a, access: dict) -> int:
+    scripts = sorted(SCRIPT_DIR.glob("*.yaml"))
+    if not scripts:
+        print(f"no tutorial scripts in {SCRIPT_DIR.relative_to(ROOT)}")
+        return 0
+    print(f"\n═══ BATCH — {len(scripts)} script(s) in "
+          f"{SCRIPT_DIR.relative_to(ROOT)} ═══\n")
+
+    plan: list[tuple[pathlib.Path, dict, str]] = []
+    blocked = 0
+    for sp in scripts:
+        try:
+            doc = load_script(sp)
+        except SystemExit as e:
+            print(f"  ❌ {sp.name}: {e}")
+            blocked += 1
+            continue
+        problems = route_lint(doc, access)
+        refused = [x for x in problems if x.startswith("REFUSED")]
+        reason = why_render(doc, sp, a.out, a.force, a.stale)
+        mark = "RENDER" if reason else "skip  "
+        if refused:
+            mark, blocked = "REFUSE", blocked + 1
+        print(f"  {mark}  {sp.name:<44} {reason or 'up to date'}")
+        for x in problems:
+            print(f"          ⚠️  {x}")
+        if reason and not refused:
+            plan.append((sp, doc, reason))
+
+    print(f"\n  {len(plan)} to render · {len(scripts) - len(plan) - blocked} "
+          f"up to date · {blocked} blocked")
+    if a.dry_run:
+        # ⚠️ A DRY RUN TOUCHES NOTHING: no dataset build, no browser, no HeyGen,
+        # no ffmpeg. It is the thing somebody runs before a long batch, and one
+        # that quietly rebuilt a fixture would not be that thing.
+        print("  --dry-run: nothing was recorded, built, sent or encoded.\n")
+        return 1 if blocked else 0
+
+    failed = 0
+    for sp, _doc, _reason in plan:
+        rc = render(a, sp, access)
+        if rc:
+            failed += 1
+            print(f"  ❌ {sp.name} failed with exit {rc}")
+        # Every render after the first reuses the stack it raised.
+        a.reuse_stack = True
+    print(f"\n═══ BATCH DONE — {len(plan) - failed} rendered, {failed} failed, "
+          f"{blocked} blocked ═══\n")
+    return 1 if (failed or blocked) else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--script", type=pathlib.Path, default=DEFAULT_SCRIPT)
+    ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
+    ap.add_argument("--all", action="store_true",
+                    help=f"batch: every *.yaml in {SCRIPT_DIR.name}/")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --all: print the plan and touch nothing")
+    ap.add_argument("--force", action="store_true",
+                    help="with --all: re-render everything")
+    ap.add_argument("--stale", action="store_true",
+                    help="with --all: also re-render anything recorded from an "
+                         "older commit")
+    ap.add_argument("--skip-record", action="store_true",
+                    help="re-composite from the last screencast (no browser)")
+    ap.add_argument("--reuse-stack", action="store_true",
+                    help="attach to an already-running stack")
+    ap.add_argument("--dataset", choices=("tutorial", "e2e"), default="tutorial",
+                    help="tutorial = the synthetic dataset (P12-0, the only one "
+                         "a published video may use); e2e = the gate's clone of "
+                         "the REAL database, diagnostic only")
+    ap.add_argument("--voice", default=None, help="macOS `say` voice for the mock VO")
+    ap.add_argument("--quiet", action="store_true",
+                    help="do not print the full HeyGen payload")
+    ap.add_argument("--live", action="store_true",
+                    help="actually call HeyGen (needs HEYGEN_API_KEY; UNVERIFIED)")
+    a = ap.parse_args()
+
+    a.out.mkdir(parents=True, exist_ok=True)
+    access = nav_access()
+    if a.all:
+        return batch(a, access)
+    if a.dry_run:
+        doc = load_script(a.script)
+        problems = route_lint(doc, access)
+        reason = why_render(doc, a.script, a.out, a.force, a.stale)
+        print(f"  {'RENDER' if reason else 'skip  '}  {a.script.name}  "
+              f"{reason or 'up to date'}")
+        for x in problems:
+            print(f"          ⚠️  {x}")
+        print("  --dry-run: nothing was recorded, built, sent or encoded.\n")
+        return 1 if any(x.startswith("REFUSED") for x in problems) else 0
+    return render(a, a.script, access)
 
 
 if __name__ == "__main__":

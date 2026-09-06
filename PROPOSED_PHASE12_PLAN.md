@@ -1,7 +1,7 @@
 # PROPOSED PHASE 12 PLAN — Automated Role-Based Video Tutorials
 
 > **Status: APPROVED. Q1–Q5 and Q11 answered by the operator 2026-09-06 and
-> now LOCKED (§9). Slice 12a is built.** No application code is
+> now LOCKED (§9). Slices 12a and 12b are built.** No application code is
 > changed.
 > Branch `chore/phase12-prototype` → `feat/phase12-tutorial-dataset` →
 > `feat/phase12-recorder`, written 2026-09-06 against `main` @ `2e95f9d`,
@@ -145,7 +145,7 @@ generating: the user gets an answer in under a second *and* the exact frame.
 
 ### 2.3 What "batch" means concretely
 
-A make-style job over `scripts/tutorials/*.yaml`:
+A make-style job over `tools/tutorials/*.yaml`:
 
 * skips a tutorial whose script hash, dataset id and UI fingerprint are all
   unchanged since its manifest (§6.2);
@@ -398,8 +398,10 @@ Branch `chore/phase12-prototype`. Nothing under `backend/`, `frontend/` or
 
 | File | Lines | Job |
 |---|---|---|
-| `scripts/generate_tutorial.py` | ~590 | The orchestrator: guard → payload → pass A → pass B → composite |
-| `scripts/tutorials/store_keeper_hub_assistant.yaml` | ~100 | **The entire HeyGen payload.** Narration, on-screen answer, redaction rules, avatar placement |
+| `tools/generate_tutorial.py` | ~900 | The orchestrator: rule-14 lint → egress guard → payload → pass A → pass B → freeze-pad → composite → WebVTT → manifest, plus the batch runner |
+| `tools/make_tutorial_db.py` | ~470 | The synthetic dataset (P12-0) |
+| `frontend/scripts/nav_access_dump.mjs` | ~175 | Which roles may open which route — the pre-flight half of the rule-14 lint |
+| `tools/tutorials/store_keeper_hub_assistant.yaml` | ~100 | **The entire HeyGen payload.** Narration, on-screen answer, redaction rules, avatar placement |
 | `tests/video_gen/sample_tutorial.spec.ts` | ~110 | The recording. Six beats |
 | `tests/video_gen/harness/record.ts` | ~270 | Beats, synthetic cursor, redaction hook, scripted AI lane, recording context |
 | `tests/video_gen/playwright.config.ts` · `stack.ts` | ~90 | Its own config; reuses the E2E lifecycle, honours `GI_VIDEO_REUSE_STACK` |
@@ -478,6 +480,15 @@ Without `beats.json` this would be impossible and the answer would be four
 recordings. With it, the browser runs **once per tutorial, not once per
 language** — a 4× saving on the most expensive stage.
 
+✅ **Built and measured in 12b.** The padding is applied inside the composite
+filtergraph (`split` → `trim` → `tpad=stop_mode=clone` → `concat`) rather than
+as an intermediate file, so a hold costs no second generation loss. Exercised by
+lengthening one narration line and re-compositing the SAME screencast:
+**8.86 s padded into one beat, 47.72 s → 56.58 s, worst overrun +0.00 s, no
+re-recording.** The frozen region was checked numerically rather than by eye —
+mean per-channel frame difference inside the pad **0.12/255** (pure H.264
+requantisation noise) against **1.5/255** across the freeze boundary.
+
 ### 6.2 ⚠️ The avatar is cached by narration hash — a UI change costs zero credits
 
 The avatar clip is a pure function of `(say text, avatar_id, voice_id,
@@ -524,7 +535,7 @@ before it is safe to publish.
 | Slice | Branch | Contents | Blocking? |
 |---|---|---|---|
 | **12a** ✅ | `feat/phase12-tutorial-dataset` | **`tools/make_tutorial_db.py`** — 306 items across the eleven real categories, 90 receipts, 140 consumption rows, 90 dated lots, 14 invented employees on a reserved badge block, the fourteen real lining systems, and the rule-1c tier fixture. Deterministic (pinned `ANCHOR`). Plus `--dataset {tutorial,e2e}` on the recorder, its own database and its own two ports. | ⚠️ **WAS BLOCKING — DONE.** |
-| **12b** | `feat/phase12-recorder` | `scripts/` → `tools/` (Q11). Manifest (P12-5) with `script_sha256` + git SHA + dataset version. **WebVTT** into the existing `captions_uri`. **Freeze-padding** in the composite. A batch runner with `--dry-run`. The **rule-14 route lint**. | — |
+| **12b** ✅ | `feat/phase12-recorder` | `scripts/` → `tools/` (Q11). Manifest (P12-5) with `script_sha256` + git SHA + dataset version. **WebVTT** into the existing `captions_uri`. **Freeze-padding** in the composite. A batch runner with `--dry-run`. The **rule-14 route lint**. | — |
 | **12c** | `feat/phase12-scripts` | The catalogue: one YAML per role × process. **The largest slice and it is writing, not coding** — the source is `USER_MANUAL.md`, which is already role-fenced by rule 9's allowlists. | — |
 | **12d** | `feat/phase12-heygen` | Live HeyGen: submit, poll, download, retry, the credit budget, and a real 200 against the unverified path. **Needs a key.** | Needs Q7 + a key |
 | **12e** | `feat/phase12-publish` | Publishing: object storage, `POST /training/assets`, the version-bump policy (Q4), and a **human review step** — §5.1 is the argument for it. | Needs Q3, Q4 |

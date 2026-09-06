@@ -12,7 +12,7 @@
  * recording logs in exactly the way the gate does — into the throwaway
  * `gihub_e2e_pw`, never a live database (rule 15).
  *
- * Run it through `scripts/generate_tutorial.py`; the raw invocation is
+ * Run it through `tools/generate_tutorial.py`; the raw invocation is
  *   cd tests/e2e && npx playwright test -c ../video_gen/playwright.config.ts
  */
 import { defineConfig, devices } from '@playwright/test'

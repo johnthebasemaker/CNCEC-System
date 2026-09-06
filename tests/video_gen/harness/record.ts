@@ -34,7 +34,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 // ── the shot list ──────────────────────────────────────────────────────────
-// Python owns the YAML (scripts/tutorials/*.yaml) and writes this JSON; the
+// Python owns the YAML (tools/tutorials/*.yaml) and writes this JSON; the
 // spec only ever reads it. One parser, in the language that already has one.
 export interface ShotList {
   tutorial_id: string
@@ -48,13 +48,17 @@ export interface ShotList {
   assistant_think_ms: number
   /**
    * ⚠️ PER-BEAT HOLD TIMES, IN MILLISECONDS, MEASURED FROM THE RENDERED
-   * NARRATION (pass A in `scripts/generate_tutorial.py`). A Playwright-driven
+   * NARRATION (pass A in `tools/generate_tutorial.py`). A Playwright-driven
    * UI is far faster than a person explaining it: recorded with guessed
    * pauses, this tutorial overran all six of its beats and fitted 40.2 s of
    * speech into 19.6 s of video. The recorder therefore does not choose how
    * long to dwell on a step — the audio does.
    */
   holds: Record<string, number>
+  /** Routes the script DECLARES it visits. The rule-14 lint checks these
+   *  against the role's access before a browser starts; the recorder then
+   *  checks reality against them (see `trackNavigation`). */
+  routes: string[]
   /** Redaction: CSS selectors blurred, and literal → replacement text. */
   mask: string[]
   replace: Record<string, string>
@@ -73,6 +77,7 @@ const DEFAULT_SHOTLIST: ShotList = {
     + 'Day commit.',
   assistant_think_ms: 1400,
   holds: {},
+  routes: ['/'],
   mask: [],
   replace: {},
 }
@@ -96,6 +101,8 @@ export interface Beat { id: string; note: string; t_ms: number }
 export class Beats {
   private readonly t0 = Date.now()
   private readonly beats: Beat[] = []
+  /** Every path the browser actually landed on, in order, de-duplicated. */
+  readonly visited: string[] = []
 
   /** Stamp the CURRENT moment. Call it when the step is visibly finished. */
   mark(id: string, note = ''): void {
@@ -116,7 +123,8 @@ export class Beats {
 
   write(file: string, extra: Record<string, unknown>): void {
     fs.writeFileSync(file, JSON.stringify(
-      { recorded_at: new Date(this.t0).toISOString(), beats: this.beats, ...extra },
+      { recorded_at: new Date(this.t0).toISOString(), beats: this.beats,
+        visited: this.visited, ...extra },
       null, 2,
     ))
   }
@@ -224,6 +232,27 @@ export async function installTutorialChrome(
     if (document.body) boot()
     else addEventListener('DOMContentLoaded', boot)
   }, { mask: shot.mask, replace: shot.replace })
+}
+
+/**
+ * Record every path the main frame lands on — the GROUND TRUTH half of the
+ * rule-14 lint.
+ *
+ * WARNING: the static lint in `frontend/scripts/nav_access_dump.mjs` is a MODEL
+ * of `canAccessPath`, and a second implementation of an access decision is
+ * exactly what this repository distrusts. This is the oracle it is checked
+ * against: `canAccessPath` fails closed by REDIRECTING, so a role walking into
+ * a page it may not open lands somewhere it never declared, and the
+ * orchestrator refuses the render. No model can drift past that.
+ */
+export function trackNavigation(page: Page, beats: Beats): void {
+  page.on('framenavigated', (frame) => {
+    if (frame !== page.mainFrame()) return
+    try {
+      const p = new URL(frame.url()).pathname.replace(/\/+$/, '') || '/'
+      if (beats.visited[beats.visited.length - 1] !== p) beats.visited.push(p)
+    } catch { /* about:blank and friends */ }
+  })
 }
 
 /** Move the pointer along a path instead of teleporting to the target. */
