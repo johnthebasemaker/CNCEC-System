@@ -71,6 +71,25 @@ E2E = ROOT / "tests" / "e2e"
 RECORDER = ROOT / "tests" / "video_gen"
 DEFAULT_SCRIPT = ROOT / "scripts" / "tutorials" / "store_keeper_hub_assistant.yaml"
 DEFAULT_OUT = ROOT / "docs" / "tutorials" / "out"
+MAKE_DATASET = ROOT / "tools" / "make_tutorial_db.py"
+TUTORIAL_DB = ROOT / "tutorial_fixture.db"
+
+# ⚠️ ITS OWN DATABASE AND ITS OWN TWO PORTS, not the gate's `gihub_e2e_pw` on
+# :8010/:5183. `tests/e2e/harness/env.ts` reads all four from the environment,
+# so this needs no edit to the suite — and it turns "do not record while the E2E
+# gate is running" from a documented hazard into an impossible one. Answers the
+# plan's open question Q10.
+DATASET_ENV = {
+    "tutorial": {
+        "GI_DB_FILE": str(TUTORIAL_DB),
+        "E2E_DB": "gihub_tutorial_pw",
+        "E2E_API_PORT": "8011",
+        "E2E_WEB_PORT": "5184",
+    },
+    # The gate's own stack, loaded from the REAL gi_database.db. Recording
+    # against it is a diagnostic, never a deliverable — see `_dataset_env`.
+    "e2e": {},
+}
 
 FPS = 30
 CANVAS = (1920, 1080)
@@ -171,6 +190,42 @@ def shot_list(doc: dict, holds: dict[str, int], think_ms: int) -> dict:
 # ══════════════════════════════════════════════════════════════════════════
 # 2. record — Playwright against the isolated E2E stack (rule 15)
 # ══════════════════════════════════════════════════════════════════════════
+def _dataset_env(dataset: str) -> dict[str, str]:
+    """
+    Build (or refresh) the dataset the recording runs against, and return the
+    environment overrides that point the E2E stack at it.
+
+    ⚠️ `--dataset e2e` IS NOT A SUPPORTED WAY TO MAKE A VIDEO. It records
+    against the gate's clone of the real `gi_database.db` — real employee
+    names, real material descriptions, real SAP codes, real quantities — and
+    ruling P12-0 says a tutorial is recorded against synthetic data or it is not
+    published. It stays reachable because it is genuinely useful for debugging
+    the recorder against the shapes the gate uses, and because removing it would
+    make somebody re-invent it worse. It is loud, and it stamps the manifest.
+    """
+    if dataset == "e2e":
+        print("\n  " + "!" * 72)
+        print("  ⚠️  --dataset e2e: recording against the REAL gi_database.db "
+              "clone.")
+        print("      The output carries live employee names and live stock. "
+              "It is a")
+        print("      DIAGNOSTIC ONLY and must not be published (ruling P12-0).")
+        print("  " + "!" * 72)
+        return {}
+
+    print(f"      building the synthetic dataset → {TUTORIAL_DB.name}")
+    run([sys.executable, str(MAKE_DATASET), "--out", str(TUTORIAL_DB)])
+    return dict(DATASET_ENV["tutorial"])
+
+
+def dataset_version() -> int:
+    """Read `DATASET_VERSION` without importing the legacy package."""
+    for line in MAKE_DATASET.read_text(encoding="utf-8").splitlines():
+        if line.startswith("DATASET_VERSION"):
+            return int(line.split("=")[1].strip())
+    return 0
+
+
 def ensure_node_modules() -> None:
     """
     Point the recorder at the E2E suite's `node_modules` instead of installing
@@ -188,13 +243,14 @@ def ensure_node_modules() -> None:
     print(f"[record] linked {link.relative_to(ROOT)} → {target.relative_to(ROOT)}")
 
 
-def record(shot: dict, work: pathlib.Path, reuse_stack: bool) -> tuple[pathlib.Path, dict]:
+def record(shot: dict, work: pathlib.Path, reuse_stack: bool,
+           dataset_env: dict[str, str]) -> tuple[pathlib.Path, dict]:
     ensure_node_modules()
     work.mkdir(parents=True, exist_ok=True)
     shot_path = work / "shotlist.json"
     shot_path.write_text(json.dumps(shot, indent=2), encoding="utf-8")
 
-    env = {**os.environ,
+    env = {**os.environ, **dataset_env,
            "GI_TUTORIAL_SHOTLIST": str(shot_path),
            "GI_TUTORIAL_OUT": str(work)}
     if reuse_stack:
@@ -658,6 +714,10 @@ def main() -> int:
                     help="re-composite from the last screencast (no browser)")
     ap.add_argument("--reuse-stack", action="store_true",
                     help="attach to an already-running gihub_e2e_pw stack")
+    ap.add_argument("--dataset", choices=("tutorial", "e2e"), default="tutorial",
+                    help="tutorial = the synthetic dataset (P12-0, the only one "
+                         "a published video may use); e2e = the gate's clone of "
+                         "the REAL database, diagnostic only")
     ap.add_argument("--voice", default=None, help="macOS `say` voice for the mock VO")
     ap.add_argument("--live", action="store_true",
                     help="actually call HeyGen (needs HEYGEN_API_KEY; UNVERIFIED)")
@@ -667,8 +727,9 @@ def main() -> int:
     work = a.out / doc["tutorial_id"]
     work.mkdir(parents=True, exist_ok=True)
     print(f"\n═══ {doc['title']} · {doc['hub_role']} · {doc['language']} ═══")
-    print(f"    script {a.script.relative_to(ROOT)}")
-    print(f"    work   {work.relative_to(ROOT)}")
+    print(f"    script  {a.script.relative_to(ROOT)}")
+    print(f"    work    {work.relative_to(ROOT)}")
+    print(f"    dataset {a.dataset} (v{dataset_version()})")
 
     # ── 1. the boundary, FIRST ───────────────────────────────────────────
     # Before a browser opens, before a frame exists. Nothing downstream can
@@ -721,9 +782,12 @@ def main() -> int:
         screencast = pathlib.Path(beats["video"])
         print(f"\n[3/5] --skip-record: reusing {screencast.name}")
     else:
-        print("\n[3/5] pass B — recording against the isolated stack "
-              "(gihub_e2e_pw, :8010/:5183)")
-        screencast, beats = record(shot, work, a.reuse_stack)
+        db = DATASET_ENV.get(a.dataset, {})
+        print(f"\n[3/5] pass B — recording against "
+              f"{db.get('E2E_DB', 'gihub_e2e_pw')} on "
+              f":{db.get('E2E_API_PORT', '8010')}/:{db.get('E2E_WEB_PORT', '5183')}")
+        screencast, beats = record(shot, work, a.reuse_stack,
+                                   _dataset_env(a.dataset))
 
     total_s = probe_seconds(screencast)
     last_beat = max(b["t_ms"] for b in beats["beats"]) / 1000.0
