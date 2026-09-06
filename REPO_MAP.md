@@ -25,6 +25,8 @@ off (users are being pointed at the React app):
 | `deploy/` | New stack deploy | `docker-compose.prod.yml`, `Dockerfile.api`/`Dockerfile.web`, nginx, certbot, backup + v2 pipeline scripts — see `docs/DEPLOY.md` |
 | `tests/e2e/` | New stack | Playwright suite (**125**) — global-setup loads its throwaway DB via `tools/migration/cutover_migrate.py` |
 | `tests/ai_eval/` | New stack | The adversarial RAG audit (Phase 10 Track 4). **Tier 1 is a hard gate** and also runs inside service-test suite CQ; **Tier 2 is a scored artefact, never a gate** — it needs a live model and is stochastic. `cases/*.yaml` are the adversarial prompts; `cases/policy.yaml` pins each role's chapter allowlist as data, so widening one is a signed diff rather than a change nobody saw |
+| `tests/video_gen/` | New stack | **Phase 12 tutorial recorder — NOT A GATE.** Its own Playwright config, deliberately outside `tests/e2e/playwright.config.ts` so `npm test` cannot pick it up. Reuses the E2E suite's `global-setup`/`global-teardown`, `setup/auth.setup.ts`, `harness/env.ts` and (by symlink) its `node_modules`, so a recording runs against the throwaway `gihub_e2e_pw` on :8010/:5183 and never a live database (**rule 15 / P12-4**). ⚠️ Do not run it while `cd tests/e2e && npm test` is running — same DB, same two ports |
+| `scripts/` | New stack ops | **⚠️ NEW TOP-LEVEL DIRECTORY, and rule 1 below did not previously allow one.** `generate_tutorial.py` (the Phase 12 orchestrator) + `tutorials/*.yaml` (the tracked narration scripts, which are **the entire HeyGen payload** — ruling P12-1). Created at the path the phase brief named; whether it stays here or moves under `tools/` (the house home for ops tooling) is **open question Q11** in [`PROPOSED_PHASE12_PLAN.md`](PROPOSED_PHASE12_PLAN.md) §9. Renders go to gitignored `docs/tutorials/out/` and are **never committed** — until the synthetic dataset of slice 12a exists, every recording is made against the E2E clone of the real `gi_database.db` |
 | `tools/` | Bridge + ops | `dual_ci.py` (mirror reload; imports `legacy/database.py` by design), `migrate_sqlite_to_postgres.py` (core copier), `parity_check.py` (SQLite-views ↔ PG-SQL oracle — ⚠️ fails vs the LIVE mirror by design since the Excel injection), `pg_smoke.py`, `migration/cutover_migrate.py` + `migration/README.md` (**the production cutover runbook**), **`pg_excel_sync.py`** (⭐ the preferred sync since 2026-07-27: ONE atomic transaction across all five kinds, Postgres-native `ON CONFLICT` upserts, dry-run by default, PG-only guards — imports `bulk_import.py`'s planners so mapping is never duplicated, and **must never import Pandas**), **`excel_sync.py`** (the older per-kind chain; header-name-driven, `--kinds`, `--sme-reseed`) + **`excel_sync_reconcile.py`** (post-sync ledger reconciliation), **`export_docs_pdf.py`** (manual/SOP → `docs/export/` PDFs). The bridge pieces retire once the legacy app is switched off; the Excel-sync + PDF tools are permanent ops |
 | `data-archive/` | Archive | Root-level artifacts moved at Phase B: seed xlsx files, sample PO pdf, `IMG_2397.JPG`, `gi_database.*.bak`, `PyWhatKit_DB.txt`, `demo_seed.db` |
 | `gi_database.db` | **Shared bridge — root by design** | The legacy SQLite system of record AND the source for `tools/dual_ci.py` / `parity_check.py` / the final production `cutover_migrate.py` load. Deliberately NOT moved (and never staged — it is live, constantly-modified data) |
@@ -42,7 +44,10 @@ off (users are being pointed at the React app):
 ## Rules of engagement (the short version)
 
 1. New-stack work touches **only** `backend/`, `frontend/`, `deploy/`,
-   `tests/e2e/`, `tests/ai_eval/`, `docs/`.
+   `tests/e2e/`, `tests/ai_eval/`, `tests/video_gen/`, `docs/` — and, pending
+   question Q11, `scripts/`. ⚠️ The last two were added by the Phase 12
+   prototype (2026-09-06); `scripts/` is the one that widens this contract
+   rather than extending it, and the plan proposes folding it into `tools/`.
 2. Never edit `legacy/**` for new-stack work; the legacy gate
    (`legacy/bug_check.py` 599/0) must stay green after every change until the
    Streamlit instance is switched off.

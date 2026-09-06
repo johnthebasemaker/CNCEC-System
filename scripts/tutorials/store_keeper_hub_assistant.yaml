@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GI Hub — role tutorial script.  Store Keeper · Hub Assistant.
+#
+# ⚠️ THIS FILE IS THE ENTIRE HEYGEN PAYLOAD (ruling P12-1).
+#
+# `scripts/generate_tutorial.py` builds the avatar request from the `narration`
+# block BELOW AND FROM NOTHING ELSE, and `assert_text_only()` refuses to send a
+# payload carrying any string that is not a `say:` line in this file. No frame,
+# no screenshot, no database row and no API response ever crosses the boundary.
+#
+# The practical consequence: what the avatar says is REVIEWED IN A DIFF, by a
+# person, before it can leave the network. That is the same shape as rule 9 —
+# the fence runs BEFORE the thing it protects, not after.
+# ─────────────────────────────────────────────────────────────────────────────
+
+tutorial_id: store_keeper_hub_assistant
+title: Asking the Hub Assistant
+subtitle: Store Keeper · 1 of 9 roles
+
+# `role` is the Playwright storage-state key (tests/e2e/harness/env.ts USERS);
+# `hub_role` is the auth.ROLE_META key the training registry files it under.
+role: sk
+hub_role: store_keeper
+language: en                    # BCP-47, matching training.LANGUAGES
+
+# Where this lands once it is published: POST /training/assets on this module.
+training_module_key: hub_assistant_v1
+
+# HeyGen avatar/voice. Placeholders until the operator picks them in the
+# HeyGen console — the mock prints them in the payload exactly as sent.
+avatar:
+  avatar_id: PLACEHOLDER_AVATAR_ID
+  voice_id: PLACEHOLDER_VOICE_ID
+  background: transparent       # so ffmpeg can key it over the screencast
+  ratio: "1:1"                  # a talking-head PiP, not a full frame
+  # ⚠️ Per tutorial, not per house style. The avatar must never cover the
+  # control being demonstrated — the Hub Assistant panel opens bottom RIGHT,
+  # so this one sits bottom left. One of: bottom-left, bottom-right,
+  # top-left, top-right.
+  corner: bottom-left
+
+# ── what the assistant is scripted to say ON SCREEN ─────────────────────────
+# Reviewed here rather than sampled from the model at render time. See P12-3
+# in the plan: an 8B model answers the same question differently every render,
+# and a tutorial is the one artefact that cannot be allowed to drift.
+assistant_question: How do I stage a return?
+assistant_think_ms: 1400
+assistant_answer: |-
+  Open Entry → Returnables and pick the material you are sending back.
+
+  Enter the quantity and the reason, then Submit. The return is staged, not
+  committed: it appears on your Head of Department's approval queue, and it
+  only reaches the permanent ledger once they sign the End of Day commit.
+
+# ── redaction (second line of defence; the dataset is the first) ────────────
+# The E2E database is loaded from the real gi_database.db, so it carries real
+# employee names and real stock. Until a synthetic tutorial dataset exists
+# (plan §3.2), every recording masks the panels that can show either.
+redaction:
+  # CSS selectors blurred in the page, before the frame is ever captured.
+  # Every data row on the dashboard is real: `PLASTIC BUCKET 10 L`, real SAP
+  # codes, real per-category counts. None of it is what this tutorial teaches,
+  # so none of it needs to be legible in a file people forward.
+  mask:
+    - .ant-table-tbody
+  # Literal → replacement, applied to text nodes on every mutation. `worker` is
+  # the seeded Store Keeper's real username and it is printed in the header on
+  # every frame.
+  replace:
+    worker: demo.user
+
+# ── the narration ───────────────────────────────────────────────────────────
+# One entry per beat id stamped by tests/video_gen/sample_tutorial.spec.ts.
+# The compositor places each line at the MEASURED time of its beat, so a UI
+# change that makes a step slower moves the narration with it.
+narration:
+  - beat: title
+    say: >-
+      This is the GI Hub, signed in as a Store Keeper. Everything you can see
+      here is scoped to your site — and so is everything the assistant will
+      tell you.
+  - beat: open_assistant
+    say: >-
+      The Hub Assistant sits on every page, bottom right. Open it whenever you
+      are unsure what a screen expects from you.
+  - beat: question
+    say: >-
+      Ask it in your own words. You do not need to know which chapter of the
+      manual the answer lives in.
+  - beat: thinking
+    say: >-
+      The question is answered by a model running on the company's own server.
+      Nothing you type here leaves the network.
+  - beat: answer
+    say: >-
+      The answer comes from the Store Keeper chapters of the user manual, and
+      only those. Ask about a screen your role cannot open and it will say so
+      rather than guess.
+  - beat: close
+    say: >-
+      Close it and carry on. Next in this series: receiving stock against a
+      delivery note.
