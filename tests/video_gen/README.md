@@ -1,11 +1,18 @@
 # `tests/video_gen/` — the tutorial recorder (Phase 12 prototype)
 
 Records a role tutorial as a screencast plus a `beats.json` timeline.
-`scripts/generate_tutorial.py` is the only thing that should invoke it.
+`tools/generate_tutorial.py` is the only thing that should invoke it.
 
 ```bash
-.venv/bin/python scripts/generate_tutorial.py
+.venv/bin/python tools/generate_tutorial.py            # one tutorial
+.venv/bin/python tools/generate_tutorial.py --all      # the whole catalogue
+.venv/bin/python tools/generate_tutorial.py --all --dry-run
 ```
+
+⚠️ It records against the **synthetic** dataset by default
+(`tools/make_tutorial_db.py`, ruling P12-0) on its own database
+`gihub_tutorial_pw` at :8011/:5184 — not the gate's `gihub_e2e_pw` at
+:8010/:5183, and not the real `gi_database.db`.
 
 ## What this is not
 
@@ -24,11 +31,18 @@ wrong — a panel that never opened, an answer that never rendered.
 | `harness/env.ts` | Ports, users, storage-state paths — one source. |
 | `node_modules` | Symlinked by the orchestrator. Same Playwright build as the gate, so a recording cannot be made in a different browser than the one the suite tests with. No second 300 MB install. |
 
-## ⚠️ Do not run this and the E2E suite at once
+## Running beside the E2E suite
 
-They own the same database and the same two ports. The loser fails looking like
-a flaky spec. `--reuse-stack` (`GI_VIDEO_REUSE_STACK=1`) exists for batches:
-raise the stack once, record many, tear down once.
+Safe since slice 12a: the recorder sets `E2E_DB`, `E2E_API_PORT`,
+`E2E_WEB_PORT` and `GI_DB_FILE` in the environment `tests/e2e/harness/env.ts`
+already reads from, so it builds `gihub_tutorial_pw` on :8011/:5184 and never
+touches the gate's database or ports. `--reuse-stack`
+(`GI_VIDEO_REUSE_STACK=1`) still exists for batches — raise the stack once,
+record many, tear down once — and the batch runner sets it automatically after
+the first render.
+
+⚠️ `--dataset e2e` opts back into the gate's stack and the REAL data. It is a
+diagnostic; nothing recorded that way may be published.
 
 ## Files
 
@@ -38,6 +52,17 @@ raise the stack once, record many, tear down once.
 | `stack.ts` / `stack-teardown.ts` | Wrap the E2E lifecycle; honour `GI_VIDEO_REUSE_STACK`. |
 | `harness/record.ts` | Beats, the synthetic cursor, the redaction hook, the scripted AI lane, the recording context. |
 | `sample_tutorial.spec.ts` | The one tutorial the prototype ships: Store Keeper → Hub Assistant. |
+
+## The rule-14 lint has two halves, and the second one is the oracle
+
+`frontend/scripts/nav_access_dump.mjs` is a MODEL of `canAccessPath`, used as a
+fast pre-flight so `--dry-run` can refuse a bad script before a browser starts.
+A second implementation of an access decision is exactly what this repository
+distrusts — so `trackNavigation` records every path the browser actually landed
+on, and the orchestrator refuses any render that visited a path the script did
+not declare. `canAccessPath` fails closed by REDIRECTING, so a role walking
+into a forbidden page lands somewhere undeclared and the run stops. No model
+can drift past that.
 
 ## Three things in `harness/record.ts` that are load-bearing
 

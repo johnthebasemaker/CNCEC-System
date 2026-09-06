@@ -3,7 +3,7 @@
 #
 # ⚠️ THIS FILE IS THE ENTIRE HEYGEN PAYLOAD (ruling P12-1).
 #
-# `scripts/generate_tutorial.py` builds the avatar request from the `narration`
+# `tools/generate_tutorial.py` builds the avatar request from the `narration`
 # block BELOW AND FROM NOTHING ELSE, and `assert_text_only()` refuses to send a
 # payload carrying any string that is not a `say:` line in this file. No frame,
 # no screenshot, no database row and no API response ever crosses the boundary.
@@ -38,6 +38,16 @@ avatar:
   # so this one sits bottom left. One of: bottom-left, bottom-right,
   # top-left, top-right.
   corner: bottom-left
+
+# ── every route this tutorial visits (rule 14) ──────────────────────────────
+# ⚠️ CHECKED TWICE. Before a browser starts, `nav_access_dump.mjs` says whether
+# `hub_role` may open each of these — a tutorial that walks into a page its role
+# cannot open teaches a lie, because the app fails closed and redirects. After
+# the recording, the orchestrator checks the paths the browser ACTUALLY landed
+# on against this list, which catches both an undeclared navigation and a
+# redirect the static model got wrong.
+routes:
+  - /
 
 # ── what the assistant is scripted to say ON SCREEN ─────────────────────────
 # Reviewed here rather than sampled from the model at render time. See P12-3

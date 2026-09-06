@@ -1,4 +1,4 @@
-# Symlink to tests/e2e/node_modules, created by scripts/generate_tutorial.py so
+# Symlink to tests/e2e/node_modules, created by tools/generate_tutorial.py so
 # the recorder runs on the SAME Playwright build as the gate without a second
 # 300 MB install. Never committed.
 node_modules
